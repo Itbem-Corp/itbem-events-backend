@@ -48,6 +48,7 @@ jobs:
             cd /opt/itbem-events-backend
             git pull origin ${{ github.event.inputs.branch || github.ref_name }}
             docker stop itbem-events-backend || true && docker rm itbem-events-backend || true
+            docker rmi itbem-events-backend || true
             docker build -t itbem-events-backend .
 
             docker run -d --name itbem-events-backend \
