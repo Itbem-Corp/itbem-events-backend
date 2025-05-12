@@ -23,6 +23,13 @@ jobs:
         with:
           ref: ${{ github.event.inputs.branch || github.ref_name }}
 
+      - name: Validate SSH target
+        run: |
+          if [ -z "${{ secrets.EC2_USER }}" ] || [ -z "${{ secrets.EC2_HOST }}" ]; then
+            echo "❌ EC2_USER or EC2_HOST is missing"
+            exit 1
+          fi
+
       - name: Setup SSH access to EC2
         run: |
           mkdir -p ~/.ssh
