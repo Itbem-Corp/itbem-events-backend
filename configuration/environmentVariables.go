@@ -32,6 +32,10 @@ func LoadConfig() *models.Config {
 		envName := fieldToEnvVar(field.Name)
 		envValue, exists := os.LookupEnv(envName)
 
+		if exists && strings.ToLower(envValue) == "none" {
+			envValue = ""
+		}
+
 		if !exists && field.Tag.Get("required") == "true" {
 			log.Fatalf("Missing required environment variable: %s", envName)
 		}

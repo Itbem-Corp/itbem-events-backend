@@ -8,6 +8,7 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    environment: production
 
     steps:
       - name: Checkout code
@@ -22,7 +23,7 @@ jobs:
 
       - name: Deploy backend
         run: |
-          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'EOF'
+          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << EOF
             cd /opt/itbem-events-backend
             git pull origin main
             docker stop itbem-events-backend || true && docker rm itbem-events-backend || true
@@ -30,7 +31,22 @@ jobs:
 
             docker run -d --name itbem-events-backend \
               --restart always \
-              -p 8080:8080 \
-              ${{ secrets.DOCKER_ENV_VARS }} \
+              -p ${{ secrets.BACKEND_PORT }}:${{ secrets.BACKEND_PORT }} \
+              -e PORT=${{ secrets.BACKEND_PORT }} \
+              -e AWS_REGION='${{ secrets.BACKEND_AWS_REGION }}' \
+              -e COGNITO_USER_POOL_ID='${{ secrets.BACKEND_COGNITO_USER_POOL_ID }}' \
+              -e COGNITO_CLIENT_ID='${{ secrets.BACKEND_COGNITO_CLIENT_ID }}' \
+              -e COGNITO_CLIENT_SECRET='${{ secrets.BACKEND_COGNITO_CLIENT_SECRET }}' \
+              -e DB_HOST='${{ secrets.BACKEND_DB_HOST }}' \
+              -e DB_USER='${{ secrets.BACKEND_DB_USER }}' \
+              -e DB_PASSWORD='${{ secrets.BACKEND_DB_PASSWORD }}' \
+              -e DB_NAME='${{ secrets.BACKEND_DB_NAME }}' \
+              -e DB_PORT='${{ secrets.BACKEND_DB_PORT }}' \
+              -e DB_TIMEZONE='${{ secrets.BACKEND_DB_TIMEZONE }}' \
+              -e REDIS_HOST='${{ secrets.BACKEND_REDIS_HOST }}' \
+              -e REDIS_PASSWORD='${{ secrets.BACKEND_REDIS_PASSWORD }}' \
+              -e REDIS_DB='${{ secrets.BACKEND_REDIS_DB }}' \
+              -e GOOGLE_CLIENT_ID='${{ secrets.BACKEND_GOOGLE_CLIENT_ID }}' \
+              -e GOOGLE_CLIENT_SECRET='${{ secrets.BACKEND_GOOGLE_CLIENT_SECRET }}' \
               itbem-events-backend
           EOF
