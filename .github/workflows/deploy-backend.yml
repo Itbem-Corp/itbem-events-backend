@@ -56,6 +56,7 @@ jobs:
               -p ${{ secrets.BACKEND_PORT }}:${{ secrets.BACKEND_PORT }} \
               -e PORT=${{ secrets.BACKEND_PORT }} \
               -e AWS_REGION='${{ secrets.BACKEND_AWS_REGION }}' \
+              -e ENV='${{ secrets.ENV }}' \
               -e COGNITO_USER_POOL_ID='${{ secrets.BACKEND_COGNITO_USER_POOL_ID }}' \
               -e COGNITO_CLIENT_ID='${{ secrets.BACKEND_COGNITO_CLIENT_ID }}' \
               -e COGNITO_CLIENT_SECRET='${{ secrets.BACKEND_COGNITO_CLIENT_SECRET }}' \
