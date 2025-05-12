@@ -1,0 +1,36 @@
+name: Deploy Backend to EC2
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup SSH access to EC2
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy backend
+        run: |
+          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'EOF'
+            cd /opt/itbem-events-backend
+            git pull origin main
+            docker stop itbem-events-backend || true && docker rm itbem-events-backend || true
+            docker build -t itbem-events-backend .
+
+            docker run -d --name itbem-events-backend \
+              --restart always \
+              -p 8080:8080 \
+              ${{ secrets.DOCKER_ENV_VARS }} \
+              itbem-events-backend
+          EOF
