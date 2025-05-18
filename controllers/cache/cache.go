@@ -2,7 +2,7 @@ package cache
 
 import (
 	"context"
-	"events-stocks/services/redisService"
+	"events-stocks/repositories/redisrepository"
 	"github.com/labstack/echo/v4"
 	"net/http"
 )
@@ -13,7 +13,7 @@ func FlushKey(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Key is required"})
 	}
 
-	err := redisService.DeleteKey(context.Background(), key)
+	err := redisrepository.DeleteKey(context.Background(), key)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to delete key"})
 	}
@@ -22,7 +22,7 @@ func FlushKey(c echo.Context) error {
 }
 
 func FlushAll(c echo.Context) error {
-	err := redisService.FlushAll(context.Background())
+	err := redisrepository.FlushAll(context.Background())
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to flush Redis"})
 	}

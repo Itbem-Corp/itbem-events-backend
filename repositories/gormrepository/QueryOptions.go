@@ -1,4 +1,4 @@
-package gormService
+package gormrepository
 
 type QueryOptions struct {
 	Filters  map[string]interface{}
@@ -6,4 +6,5 @@ type QueryOptions struct {
 	Offset   int
 	OrderBy  string
 	OrderDir string // "asc" o "desc"
+	Preload  []string
 }

@@ -1,4 +1,4 @@
-package gormService
+package gormrepository
 
 import (
 	"errors"
@@ -97,21 +97,24 @@ func DeleteByFilters[T any](filters map[string]interface{}) error {
 func GetList[T any](list *[]T, opts QueryOptions) error {
 	query := configuration.DB.Model(list)
 
-	// Aplicar filtros
+	// Preload relaciones
+	if len(opts.Preload) > 0 {
+		for _, preload := range opts.Preload {
+			query = query.Preload(preload)
+		}
+	}
+
+	// Filtros, orden, paginación...
 	if opts.Filters != nil {
 		query = query.Where(opts.Filters)
 	}
-
-	// Ordenamiento
 	if opts.OrderBy != "" {
-		direction := "ASC"
+		dir := "ASC"
 		if opts.OrderDir != "" {
-			direction = opts.OrderDir
+			dir = opts.OrderDir
 		}
-		query = query.Order(opts.OrderBy + " " + direction)
+		query = query.Order(opts.OrderBy + " " + dir)
 	}
-
-	// Paginación
 	if opts.Limit > 0 {
 		query = query.Limit(opts.Limit)
 	}

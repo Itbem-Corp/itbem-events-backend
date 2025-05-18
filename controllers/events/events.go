@@ -3,7 +3,7 @@ package events
 import (
 	"encoding/json"
 	"events-stocks/models"
-	eventService "events-stocks/services/eventsService"
+	eventService "events-stocks/repositories/eventsrepository"
 	"events-stocks/utils" // Importa tu helper de respuesta
 	"github.com/gofrs/uuid"
 	"github.com/labstack/echo/v4"

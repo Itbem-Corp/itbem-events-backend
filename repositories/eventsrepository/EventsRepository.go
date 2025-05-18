@@ -1,10 +1,10 @@
-package eventService
+package eventsrepository
 
 import (
 	"context"
 	"events-stocks/models"
-	"events-stocks/services/gormService"
-	"events-stocks/services/redisService"
+	"events-stocks/repositories/gormrepository"
+	"events-stocks/repositories/redisrepository"
 	"github.com/gofrs/uuid"
 )
 
@@ -12,18 +12,18 @@ const RedisServiceEventsKey = "events"
 
 func GetEventByID(id uuid.UUID) (*models.Event, error) {
 	var event models.Event
-	err := gormService.GetByID(&event, id)
+	err := gormrepository.GetByID(&event, id)
 	return &event, err
 }
 
 func CreateEvent(event *models.Event) error {
-	err := gormService.Insert(event)
+	err := gormrepository.Insert(event)
 	if err != nil {
 		return ValidateError(err)
 	}
 
 	pattern := "*" + RedisServiceEventsKey + "*"
-	if delErr := redisService.DeleteKeysByPattern(context.Background(), pattern); delErr != nil {
+	if delErr := redisrepository.DeleteKeysByPattern(context.Background(), pattern); delErr != nil {
 		return delErr
 	}
 
@@ -31,10 +31,10 @@ func CreateEvent(event *models.Event) error {
 }
 
 func UpdateEvent(event *models.Event) error {
-	err := gormService.Update(event, event.ID)
+	err := gormrepository.Update(event, event.ID)
 	if err == nil {
 		pattern := "*" + RedisServiceEventsKey + "*"
-		if delErr := redisService.DeleteKeysByPattern(context.Background(), pattern); delErr != nil {
+		if delErr := redisrepository.DeleteKeysByPattern(context.Background(), pattern); delErr != nil {
 			return delErr
 		}
 	}
@@ -42,10 +42,10 @@ func UpdateEvent(event *models.Event) error {
 }
 
 func DeleteEvent(id uuid.UUID) error {
-	err := gormService.Delete(id, &models.Event{})
+	err := gormrepository.Delete(id, &models.Event{})
 	if err == nil {
 		pattern := "*" + RedisServiceEventsKey + "*"
-		if delErr := redisService.DeleteKeysByPattern(context.Background(), pattern); delErr != nil {
+		if delErr := redisrepository.DeleteKeysByPattern(context.Background(), pattern); delErr != nil {
 			return delErr
 		}
 	}
@@ -60,7 +60,7 @@ func ListEvents(page int, pageSize int, name string) ([]models.Event, error) {
 		filters["name"] = name
 	}
 
-	opts := gormService.QueryOptions{
+	opts := gormrepository.QueryOptions{
 		Filters:  filters,
 		OrderBy:  "id",
 		OrderDir: "desc",
@@ -71,6 +71,6 @@ func ListEvents(page int, pageSize int, name string) ([]models.Event, error) {
 		opts.Offset = (page - 1) * pageSize
 	}
 
-	err := gormService.GetList(&events, opts)
+	err := gormrepository.GetList(&events, opts)
 	return events, err
 }

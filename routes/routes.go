@@ -3,6 +3,7 @@ package routes
 import (
 	"events-stocks/controllers/cache"
 	"events-stocks/controllers/events"
+	"events-stocks/controllers/resources"
 	"events-stocks/middleware/redis"
 	"events-stocks/middleware/token"
 	"events-stocks/models"
@@ -13,6 +14,11 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	e.GET("/health", events.GetEvents)
 
 	api := e.Group("/api")
+	api.GET("/resources/:id", resources.GetResource)
+	api.GET("/resources/section/:id", resources.ListResourcesBySection)
+	api.POST("/resources", resources.CreateResource)
+	api.PUT("/resources/:id", resources.UpdateResourceMetadata)
+	api.DELETE("/resources/:id", resources.DeleteResource)
 	// Aquí podrías añadir middlewares si lo necesitas, por ejemplo, autenticación
 	api.Use(token.Autenticacion(cfg))
 	api.Use(redisMiddleware.RetrieveCache)

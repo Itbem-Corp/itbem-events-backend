@@ -9,9 +9,16 @@ RUN go mod download
 COPY . ./
 RUN go build -o main ./server.go
 
+# ────────────────────────────────
 FROM debian:bookworm-slim
 
+# Instala dependencias necesarias para bimg/libvips
+RUN apt-get update && apt-get install -y \
+    libvips libvips-dev curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
+
 COPY --from=builder /app/main .
 COPY bin/sh/entrypoint.sh .
 

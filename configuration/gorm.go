@@ -2,6 +2,7 @@ package configuration
 
 import (
 	"events-stocks/models"
+	"events-stocks/seeds"
 	"fmt"
 	"log"
 
@@ -12,6 +13,38 @@ import (
 
 // DB es la instancia global de GORM
 var DB *gorm.DB
+
+type ModelSeed struct {
+	Model    interface{}
+	SeedFunc func(*gorm.DB) // nil si no hay seed
+}
+
+var modelsWithoutSeed = []interface{}{
+	&models.Event{},
+	&models.Invitation{},
+	&models.Moment{},
+	&models.EventConfig{},
+	&models.DesignTemplate{},
+	&models.Color{},
+	&models.ColorPalette{},
+	&models.ColorPalettePattern{},
+	&models.Font{},
+	&models.FontSet{},
+	&models.FontSetPattern{},
+	&models.Guest{},
+	&models.Resource{},
+	&models.EventSection{},
+	&models.InvitationLog{},
+	&models.InvitationAccessToken{},
+	&models.EventAnalytics{},
+}
+
+var modelSeedList = []ModelSeed{
+	{Model: &models.EventType{}, SeedFunc: seeds.SeedEventType},
+	{Model: &models.MomentType{}, SeedFunc: seeds.SeedMomentType},
+	{Model: &models.GuestStatus{}, SeedFunc: seeds.SeedGuestStatus},
+	{Model: &models.ResourceType{}, SeedFunc: seeds.SeedResourceTypes},
+}
 
 // InicializarPostgreSQL inicializa la conexión con PostgreSQL usando GORM
 func InicializarPostgreSQL(cfg *models.Config) {
@@ -46,14 +79,34 @@ func InicializarPostgreSQL(cfg *models.Config) {
 	log.Println("Conectado a PostgreSQL con GORM")
 }
 
-func MigrarModelos() {
-	err := DB.AutoMigrate(
-		&models.Event{},
-		// Agrega más modelos aquí
-	)
-	if err != nil {
-		log.Fatalf("Error al migrar modelos: %v", err)
+func GetAllModels() []interface{} {
+	models := make([]interface{}, 0, len(modelSeedList)+len(modelsWithoutSeed))
+
+	for _, s := range modelSeedList {
+		models = append(models, s.Model)
 	}
 
+	models = append(models, modelsWithoutSeed...)
+	return models
+}
+
+func MigrarModelos() {
+	if err := DB.AutoMigrate(GetAllModels()...); err != nil {
+		log.Fatalf("Error al migrar modelos: %v", err)
+	}
 	log.Println("Migración completada")
+}
+
+func SeedBaseData() {
+	for _, item := range modelSeedList {
+		if item.SeedFunc != nil && isModelEmpty(DB, item.Model) {
+			item.SeedFunc(DB)
+		}
+	}
+}
+
+func isModelEmpty(db *gorm.DB, model interface{}) bool {
+	var count int64
+	db.Model(model).Count(&count)
+	return count == 0
 }

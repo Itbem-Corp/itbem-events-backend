@@ -1,4 +1,4 @@
-package eventService
+package eventsrepository
 
 import (
 	"errors"

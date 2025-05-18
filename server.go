@@ -25,6 +25,12 @@ func main() {
 	// Ejecutar migraciones automáticas
 	configuration.MigrarModelos()
 
+	// Ejecutar Seeds Automaticos
+	configuration.SeedBaseData()
+
+	// Ejecutar Cloud Services AWS
+	configuration.GetS3Client(cfg)
+
 	// Crear instancia de Echo
 	e := echo.New()
 

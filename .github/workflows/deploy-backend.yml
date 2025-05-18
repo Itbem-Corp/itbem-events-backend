@@ -60,6 +60,9 @@ jobs:
               -e COGNITO_USER_POOL_ID='${{ secrets.BACKEND_COGNITO_USER_POOL_ID }}' \
               -e COGNITO_CLIENT_ID='${{ secrets.BACKEND_COGNITO_CLIENT_ID }}' \
               -e COGNITO_CLIENT_SECRET='${{ secrets.BACKEND_COGNITO_CLIENT_SECRET }}' \
+              -e AWS_BUCKET_NAME='${{ secrets.AWS_BUCKET_NAME }}' \
+              -e S3_CLIENT_ID='${{ secrets.S3_CLIENT_ID }}' \
+              -e S3_CLIENT_SECRET='${{ secrets.S3_CLIENT_SECRET }}' \
               -e DB_HOST='${{ secrets.BACKEND_DB_HOST }}' \
               -e DB_USER='${{ secrets.BACKEND_DB_USER }}' \
               -e DB_PASSWORD='${{ secrets.BACKEND_DB_PASSWORD }}' \

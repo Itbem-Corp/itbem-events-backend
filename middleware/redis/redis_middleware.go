@@ -2,12 +2,20 @@ package redisMiddleware
 
 import (
 	"context"
-	cacheLoader "events-stocks/services/cacheLoaderService"
-	"events-stocks/services/redisService"
+	"events-stocks/configuration/constants"
+	cacheLoader "events-stocks/repositories/cacheloaderrepository"
+	"events-stocks/repositories/redisrepository"
 	"github.com/labstack/echo/v4"
 	"strings"
 	"time"
 )
+
+var cacheTTLs = map[string]time.Duration{
+	"events":        constants.ShortTimeTTL,
+	"fontsets":      constants.LargeTimeTTL,
+	"colorpalettes": constants.MediumTimeTTL,
+	"resourcetypes": constants.XLongTimeTTL,
+}
 
 func RetrieveCache(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c echo.Context) error {
@@ -33,7 +41,7 @@ func RetrieveCache(next echo.HandlerFunc) echo.HandlerFunc {
 		redisKey := keyParam + ":" + resource
 
 		// Buscar en Redis
-		data, err := redisService.GetKey(ctx, redisKey)
+		data, err := redisrepository.GetKey(ctx, redisKey)
 		if err != nil {
 			loaderFunc, exists := cacheLoader.GetLoader(redisKey)
 			if !exists {
@@ -45,7 +53,12 @@ func RetrieveCache(next echo.HandlerFunc) echo.HandlerFunc {
 				return next(c)
 			}
 
-			_ = redisService.SaveKey(ctx, redisKey, data, 600*time.Second)
+			ttl := cacheTTLs[resource] // resource ya lo defines antes de armar la clave
+			if ttl == 0 {
+				ttl = constants.ShortTimeTTL // default en caso de que no esté mapeado
+			}
+			_ = redisrepository.SaveKey(ctx, redisKey, data, ttl)
+
 		}
 
 		// Guardar en el contexto con la misma clave

@@ -6,6 +6,9 @@ type Config struct {
 	CognitoUserPoolId   string `required:"true"`
 	CognitoClientId     string `required:"true"`
 	CognitoClientSecret string `required:"true"`
+	S3ClientId          string `required:"true"`
+	S3ClientSecret      string `required:"true"`
+	AWSBucketName       string `required:"true"`
 
 	// Base de datos
 	DbHost     string `required:"true"`
