@@ -1,48 +1,37 @@
-# ────────────────────────────────
-# Etapa de compilación
-# ────────────────────────────────
-FROM golang:1.23 AS builder
+# ---------- Etapa de compilación ----------
+FROM debian:bookworm-slim AS build-env
+
+# Instala Go 1.24.3 manualmente + libvips y pkg-config
+RUN apt-get update && apt-get install -y \
+    curl ca-certificates tar libvips libvips-dev pkg-config && \
+    curl -LO https://go.dev/dl/go1.24.3.linux-amd64.tar.gz && \
+    tar -C /usr/local -xzf go1.24.3.linux-amd64.tar.gz && \
+    ln -s /usr/local/go/bin/go /usr/bin/go
+
+ENV PATH="/usr/local/go/bin:$PATH"
 
 WORKDIR /app
 
-# Instalar dependencias necesarias para compilar bimg con libvips
-RUN apt-get update && apt-get install -y \
-    libvips libvips-dev pkg-config
-
-# Módulos de Go
-COPY go.mod ./
-COPY go.sum ./
+COPY go.mod go.sum ./
 RUN go mod download
 
-# Código fuente
 COPY . ./
-
-# Compilar el binario
 RUN go build -o main ./server.go
 
-# ────────────────────────────────
-# Etapa de ejecución
-# ────────────────────────────────
+# ---------- Etapa de ejecución ----------
 FROM debian:bookworm-slim
 
-# Instalar solo lo necesario para ejecutar libvips (sin headers de desarrollo)
+# Solo las libs necesarias para tiempo de ejecución
 RUN apt-get update && apt-get install -y \
     libvips curl ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copiar binario compilado
-COPY --from=builder /app/main .
+COPY --from=build-env /app/main ./
+COPY bin/sh/entrypoint.sh ./
 
-# Entrypoint script
-COPY bin/sh/entrypoint.sh .
-
-# Permisos de ejecución
 RUN chmod +x /app/entrypoint.sh
 
-# Ejecutar como user no-root (ID 1000)
 USER 1000
-
-# Entrypoint
 ENTRYPOINT ["/bin/sh", "/app/entrypoint.sh"]
