@@ -16,7 +16,10 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . ./
-RUN go build -o main ./server.go
+
+# Compila con salida visible y límite de memoria
+ENV GOMEMLIMIT=256MiB
+RUN go build -v -o main ./server.go | tee /dev/stderr
 
 # ---------- Etapa de ejecución ----------
 FROM debian:bookworm-slim
