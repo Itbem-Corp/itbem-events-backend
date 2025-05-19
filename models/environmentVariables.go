@@ -8,7 +8,7 @@ type Config struct {
 	CognitoClientSecret string `required:"true"`
 	S3ClientId          string `required:"true"`
 	S3ClientSecret      string `required:"true"`
-	AWSBucketName       string `required:"true"`
+	AwsBucketName       string `required:"true"`
 
 	// Base de datos
 	DbHost     string `required:"true"`

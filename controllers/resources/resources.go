@@ -1,6 +1,7 @@
 package resources
 
 import (
+	"events-stocks/models"
 	Resources "events-stocks/services/resources" // Asegúrate que apunte a tu service
 	"events-stocks/utils"
 	"github.com/gofrs/uuid"
@@ -9,8 +10,11 @@ import (
 	"strings"
 )
 
-// Instancia del servicio (esto puedes inyectarlo si usas DI)
-var resourceSvc = Resources.NewResourceService("your-bucket", "aws", "resources")
+var resourceSvc *Resources.ResourceService
+
+func InitResourceController(c *models.Config) {
+	resourceSvc = Resources.NewResourceService(c)
+}
 
 // GET /resources/:id
 func GetResource(c echo.Context) error {

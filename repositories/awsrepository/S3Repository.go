@@ -10,7 +10,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	s3Types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 	"io"
 )
@@ -22,6 +21,7 @@ func Init(_ *models.Config) {
 }
 
 func UploadToS3(ctx context.Context, content []byte, key, contentType, bucket string) (string, error) {
+	s3Client := configuration.GetS3Client(nil)
 	uploader := manager.NewUploader(s3Client)
 
 	_, err := uploader.Upload(ctx, &s3.PutObjectInput{
@@ -29,7 +29,6 @@ func UploadToS3(ctx context.Context, content []byte, key, contentType, bucket st
 		Key:         aws.String(key),
 		Body:        bytes.NewReader(content),
 		ContentType: aws.String(contentType),
-		ACL:         s3Types.ObjectCannedACLPublicRead,
 	})
 	if err != nil {
 		return "", err
@@ -43,6 +42,7 @@ func GetS3URL(bucket, key string) string {
 }
 
 func CheckS3ObjectExists(ctx context.Context, key, bucket string) (bool, error) {
+	s3Client := configuration.GetS3Client(nil)
 	_, err := s3Client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
@@ -59,6 +59,7 @@ func CheckS3ObjectExists(ctx context.Context, key, bucket string) (bool, error) 
 }
 
 func DeleteS3Object(ctx context.Context, key, bucket string) error {
+	s3Client := configuration.GetS3Client(nil)
 	_, err := s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
@@ -68,6 +69,7 @@ func DeleteS3Object(ctx context.Context, key, bucket string) error {
 
 func ListS3ObjectsWithPrefix(ctx context.Context, prefix, bucket string) ([]string, error) {
 	var keys []string
+	s3Client := configuration.GetS3Client(nil)
 
 	paginator := s3.NewListObjectsV2Paginator(s3Client, &s3.ListObjectsV2Input{
 		Bucket: aws.String(bucket),
@@ -88,6 +90,7 @@ func ListS3ObjectsWithPrefix(ctx context.Context, prefix, bucket string) ([]stri
 }
 
 func GetS3Object(ctx context.Context, key, bucket string) (io.ReadCloser, error) {
+	s3Client := configuration.GetS3Client(nil)
 	resp, err := s3Client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),

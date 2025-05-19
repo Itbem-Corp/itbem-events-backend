@@ -16,7 +16,7 @@ func InitAwsServices(cfg *models.Config) {
 func initS3(cfg *models.Config) {
 	awsCfg, err := config.LoadDefaultConfig(context.TODO(),
 		config.WithRegion(cfg.AwsRegion),
-		config.WithCredentialsProvider(aws.NewCredentialsCache(
+		config.WithCredentialsProvider(aws.CredentialsProvider(
 			credentials.NewStaticCredentialsProvider(cfg.S3ClientId, cfg.S3ClientSecret, ""),
 		)),
 	)

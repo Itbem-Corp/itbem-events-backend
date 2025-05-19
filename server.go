@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"events-stocks/configuration"
+	"events-stocks/controllers/resources"
 	"events-stocks/middleware/token"
 	"events-stocks/routes"
 	"github.com/labstack/echo/v4"
@@ -29,7 +30,7 @@ func main() {
 	configuration.SeedBaseData()
 
 	// Ejecutar Cloud Services AWS
-	configuration.GetS3Client(cfg)
+	configuration.InitAwsServices(cfg)
 
 	// Crear instancia de Echo
 	e := echo.New()
@@ -39,7 +40,7 @@ func main() {
 	e.Use(middleware.Recover())
 	e.Use(middleware.CORS())
 	e.Use(token.Autenticacion(cfg))
-
+	resources.InitResourceController(cfg)
 	// Configurar rutas
 	routes.ConfigurarRutas(e, cfg)
 

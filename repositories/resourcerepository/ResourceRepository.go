@@ -26,6 +26,7 @@ func GetResourceByID(id uuid.UUID) (*models.Resource, error) {
 
 func ListResourcesBySection(sectionID uuid.UUID) ([]models.Resource, error) {
 	var resources []models.Resource
+
 	filters := map[string]interface{}{
 		"event_section_id": sectionID,
 	}

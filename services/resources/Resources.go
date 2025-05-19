@@ -58,11 +58,11 @@ type ResourceService struct {
 	Optimizer  *ImageOptimizerService
 }
 
-func NewResourceService(bucket, provider, path string) *ResourceService {
+func NewResourceService(c *models.Config) *ResourceService {
 	return &ResourceService{
-		Bucket:     bucket,
-		Provider:   provider,
-		UploadPath: path,
+		Bucket:     c.AwsBucketName,
+		Provider:   "aws",
+		UploadPath: "events",
 		Optimizer:  NewImageOptimizerService(),
 	}
 }
