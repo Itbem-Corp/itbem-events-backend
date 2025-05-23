@@ -5,10 +5,9 @@ import (
 	"events-stocks/models"
 	"events-stocks/repositories/gormrepository"
 	"events-stocks/repositories/redisrepository"
+	"events-stocks/utils"
 	"github.com/gofrs/uuid"
 )
-
-const RedisServiceEventsKey = "events"
 
 func GetEventByID(id uuid.UUID) (*models.Event, error) {
 	var event models.Event
@@ -22,7 +21,7 @@ func CreateEvent(event *models.Event) error {
 		return ValidateError(err)
 	}
 
-	pattern := "*" + RedisServiceEventsKey + "*"
+	pattern := "*" + utils.RedisServiceEventsKey + "*"
 	if delErr := redisrepository.DeleteKeysByPattern(context.Background(), pattern); delErr != nil {
 		return delErr
 	}
@@ -33,7 +32,7 @@ func CreateEvent(event *models.Event) error {
 func UpdateEvent(event *models.Event) error {
 	err := gormrepository.Update(event, event.ID)
 	if err == nil {
-		pattern := "*" + RedisServiceEventsKey + "*"
+		pattern := "*" + utils.RedisServiceEventsKey + "*"
 		if delErr := redisrepository.DeleteKeysByPattern(context.Background(), pattern); delErr != nil {
 			return delErr
 		}
@@ -44,7 +43,7 @@ func UpdateEvent(event *models.Event) error {
 func DeleteEvent(id uuid.UUID) error {
 	err := gormrepository.Delete(id, &models.Event{})
 	if err == nil {
-		pattern := "*" + RedisServiceEventsKey + "*"
+		pattern := "*" + utils.RedisServiceEventsKey + "*"
 		if delErr := redisrepository.DeleteKeysByPattern(context.Background(), pattern); delErr != nil {
 			return delErr
 		}

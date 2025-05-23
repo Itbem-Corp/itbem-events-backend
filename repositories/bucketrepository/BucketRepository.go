@@ -14,6 +14,18 @@ import (
 
 const defaultUploadDir = "uploads"
 
+func GetPresignedFileURL(filename string, folder string, bucket string, provider string, minutes int) (string, error) {
+	ctx := context.Background()
+	objectKey := fmt.Sprintf("%s/%s", folder, filename)
+
+	switch strings.ToLower(provider) {
+	case "aws":
+		return awsrepository.GeneratePresignedURL(ctx, objectKey, bucket, minutes)
+	default:
+		return "", fmt.Errorf("unsupported provider: %s", provider)
+	}
+}
+
 // UploadFile uploads a multipart file to the selected cloud provider
 func UploadFile(file multipart.File, fileHeader *multipart.FileHeader, folder string, bucket string, provider string) (string, error) {
 	ctx := context.Background()
@@ -126,5 +138,18 @@ func GetFileStream(filename string, folder string, bucket string, provider strin
 		return awsrepository.GetS3Object(ctx, objectKey, bucket)
 	default:
 		return nil, fmt.Errorf("unsupported provider: %s", provider)
+	}
+}
+
+func UploadRawBytesSimple(content []byte, filename, contentType, folder, bucket, provider string) error {
+	ctx := context.Background()
+	objectKey := fmt.Sprintf("%s/%s", folder, filename)
+
+	switch strings.ToLower(provider) {
+	case "aws":
+		_, err := awsrepository.UploadToS3(ctx, content, objectKey, contentType, bucket)
+		return err
+	default:
+		return fmt.Errorf("unsupported provider: %s", provider)
 	}
 }

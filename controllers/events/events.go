@@ -4,18 +4,16 @@ import (
 	"encoding/json"
 	"events-stocks/models"
 	eventService "events-stocks/repositories/eventsrepository"
-	"events-stocks/utils" // Importa tu helper de respuesta
+	"events-stocks/utils"
 	"github.com/gofrs/uuid"
 	"github.com/labstack/echo/v4"
 	"net/http"
 )
 
-const RedisServiceEventsKey = "events"
-
 // GET /events/:key
 func GetEvents(c echo.Context) error {
 	keyParam := c.Param("key")
-	redisKey := keyParam + ":" + RedisServiceEventsKey
+	redisKey := keyParam + ":" + utils.RedisServiceEventsKey
 
 	dataStr, ok := c.Get(redisKey).(string)
 	if !ok {

@@ -52,3 +52,7 @@ func ListFonts(page int, pageSize int, name string) ([]models.Font, error) {
 	err := gormrepository.GetList(&fonts, opts)
 	return fonts, err
 }
+
+func CreateMultipleFonts(fonts []models.Font) error {
+	return gormrepository.InsertManyBatch(fonts, 10)
+}

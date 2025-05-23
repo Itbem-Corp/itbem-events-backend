@@ -28,7 +28,7 @@ func DeleteFontPattern(id uuid.UUID) error {
 	return gormrepository.Delete(id, &models.FontSetPattern{})
 }
 
-func ListFontPatterns(fontSetID uuid.UUID) ([]models.FontSetPattern, error) {
+func ListFontPatterns(fontSetID *uuid.UUID) ([]models.FontSetPattern, error) {
 	var patterns []models.FontSetPattern
 	filters := map[string]interface{}{
 		"font_set_id": fontSetID,

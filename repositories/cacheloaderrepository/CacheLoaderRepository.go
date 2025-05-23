@@ -1,69 +1,171 @@
 package cacheloaderrepository
 
 import (
-	"encoding/json"
+	"context"
+	"events-stocks/configuration"
+	"events-stocks/configuration/constants"
+	"events-stocks/dtos"
+	"events-stocks/repositories/bucketrepository"
 	"events-stocks/repositories/colorrepository"
 	"events-stocks/repositories/eventsrepository"
 	"events-stocks/repositories/fontrepository"
+	"events-stocks/repositories/redisrepository"
 	"events-stocks/repositories/resourcerepository"
+	"events-stocks/utils"
+	"fmt"
+	"github.com/gofrs/uuid"
 	"strings"
+	"time"
 )
 
-func GetLoader(key string) (func() (string, error), bool) {
-	if strings.HasPrefix(key, "all:") {
-		resource := strings.TrimPrefix(key, "all:")
-
-		switch resource {
-		case "events":
+func GetLoader(resource string, key string) (func() (string, error), bool) {
+	switch resource {
+	case "events":
+		if key == "all" {
 			return ListAllEvents, true
-		case "fontsets":
-			return ListFontSets, true
-		case "colorpalettes":
-			return ListColorPalettes, true
-		case "resourcetypes":
-			return ListResourceTypes, true
 		}
+	case "fontsets":
+		if key == "all" {
+			return ListFontSets, true
+		}
+	case "colorpalettes":
+		if key == "all" {
+			return ListColorPalettes, true
+		}
+	case "resourcetypes":
+		if key == "all" {
+			return ListResourceTypesRaw, true
+		}
+	case "resources":
+		return func() (string, error) {
+			id, _ := uuid.FromString(key)
+			return ListResourcesBySectionIdRaw(&id)
+		}, true
 	}
 
-	// Static fallback loaders (opcional si usas claves directas sin prefijo)
-	loaderMap := map[string]func() (string, error){
-		"events":        ListAllEvents,
-		"fontsets":      ListFontSets,
-		"colorpalettes": ListColorPalettes,
-		"resourcetypes": ListResourceTypes,
+	return nil, false
+}
+
+func CacheOrLoad(resource string, key string, ttl time.Duration, loader func() (string, error)) (string, error) {
+	ctx := context.Background()
+	redisKey := key + ":" + resource
+
+	// Revisa si existe en cache
+	data, err := redisrepository.GetKey(ctx, redisKey)
+	if err == nil && data != "" {
+		return data, nil
 	}
 
-	loaderFunc, exists := loaderMap[key]
-	return loaderFunc, exists
+	// Ejecuta el loader
+	data, err = loader()
+	if err != nil {
+		return "", err
+	}
+	// Guarda en cache
+	_ = redisrepository.SaveKey(ctx, redisKey, data, ttl)
+
+	return data, nil
+}
+
+func CacheOrLoadAuto(resource string, key string) (string, error) {
+	loaderFunc, exists := GetLoader(resource, key)
+	if !exists {
+		return "", fmt.Errorf("no loader found for %s:%s", resource, key)
+	}
+
+	ttl := utils.CacheTTLs[resource]
+	if ttl == 0 {
+		ttl = time.Minute * 5 // fallback TTL
+	}
+
+	return CacheOrLoad(resource, key, ttl, loaderFunc)
 }
 
 func ListAllEvents() (string, error) {
 	data, err := eventsrepository.ListEvents(1, 0, "")
-	return marshalData(data, err)
+	return utils.MarshallData(data, err)
 }
 
 func ListFontSets() (string, error) {
 	data, err := fontrepository.ListFontSets(1, 0, "")
-	return marshalData(data, err)
+	return utils.MarshallData(data, err)
 }
 
 func ListColorPalettes() (string, error) {
 	data, err := colorrepository.ListColorPalettes()
-	return marshalData(data, err)
+	return utils.MarshallData(data, err)
 }
 
-func ListResourceTypes() (string, error) {
-	data, err := resourcerepository.ListResourceTypes()
-	return marshalData(data, err)
+func ListResourceTypesRaw() (string, error) {
+	data, err := resourcerepository.ListResourceTypesRaw()
+	return utils.MarshallData(data, err)
 }
 
-func marshalData(data any, err error) (string, error) {
+func ListResourcesBySectionIdRaw(id *uuid.UUID) (string, error) {
+	data, err := GetResourcesBySectionID(id, "", "", "")
+	return utils.MarshallData(data, err)
+}
+
+func GetResourcesBySectionID(sectionID *uuid.UUID, uploadPath string, bucket string, provider string) ([]dtos.ResourceResponse, error) {
+	resources, err := resourcerepository.ListResourcesBySection(sectionID)
 	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("failed to list resources: %w", err)
 	}
-	bytes, err := json.Marshal(data)
-	if err != nil {
-		return "", err
+
+	if provider == "" {
+		provider = constants.DefaultCloudProvider
 	}
-	return string(bytes), nil
+
+	if bucket == "" {
+		env := configuration.LoadConfig()
+		bucket = env.AwsBucketName
+	}
+
+	if uploadPath == "" {
+		uploadPath = constants.EventsBucketFolder
+	}
+
+	var result []dtos.ResourceResponse
+
+	for _, r := range resources {
+		if strings.TrimSpace(r.Path) == "" {
+			continue
+		}
+
+		parts := strings.Split(r.Path, "/")
+		filename := parts[len(parts)-1]
+
+		exists, _, err := bucketrepository.FileExists(filename, uploadPath, bucket, provider)
+		if err != nil || !exists {
+			continue
+		}
+
+		viewURL, err := bucketrepository.GetPresignedFileURL(filename, uploadPath, bucket, provider, 60)
+		if err != nil {
+			continue
+		}
+
+		var sectionID uuid.UUID
+		if r.EventSectionID != nil {
+			sectionID = *r.EventSectionID
+		}
+
+		var position int
+		if r.Position != nil {
+			position = *r.Position
+		}
+
+		result = append(result, dtos.ResourceResponse{
+			ID:             r.ID,
+			EventSectionID: sectionID,
+			ResourceTypeID: r.ResourceTypeID,
+			AltText:        r.AltText,
+			Title:          r.Title,
+			Position:       position,
+			ViewURL:        viewURL,
+			CreatedAt:      r.CreatedAt,
+		})
+	}
+
+	return result, nil
 }

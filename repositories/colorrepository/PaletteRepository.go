@@ -5,10 +5,9 @@ import (
 	"events-stocks/models"
 	"events-stocks/repositories/gormrepository"
 	"events-stocks/repositories/redisrepository"
+	"events-stocks/utils"
 	"github.com/gofrs/uuid"
 )
-
-const RedisPaletteServiceKey = "paletteColors"
 
 func GetColorPaletteByID(id uuid.UUID) (*models.ColorPalette, error) {
 	var colorPalette models.ColorPalette
@@ -22,7 +21,7 @@ func CreatePalette(palette *models.ColorPalette) error {
 		return ValidateError(err)
 	}
 
-	pattern := "*" + RedisPaletteServiceKey + "*"
+	pattern := "*" + utils.RedisPaletteServiceKey + "*"
 	if delErr := redisrepository.DeleteKeysByPattern(context.Background(), pattern); delErr != nil {
 		return delErr
 	}
@@ -33,7 +32,7 @@ func CreatePalette(palette *models.ColorPalette) error {
 func UpdatePalette(palette *models.ColorPalette) error {
 	err := gormrepository.Update(palette, palette.ID)
 	if err == nil {
-		pattern := "*" + RedisPaletteServiceKey + "*"
+		pattern := "*" + utils.RedisPaletteServiceKey + "*"
 		if delErr := redisrepository.DeleteKeysByPattern(context.Background(), pattern); delErr != nil {
 			return delErr
 		}
@@ -44,7 +43,7 @@ func UpdatePalette(palette *models.ColorPalette) error {
 func DeletePalette(id uuid.UUID) error {
 	err := gormrepository.Delete(id, &models.ColorPalette{})
 	if err == nil {
-		pattern := "*" + RedisPaletteServiceKey + "*"
+		pattern := "*" + utils.RedisPaletteServiceKey + "*"
 		if delErr := redisrepository.DeleteKeysByPattern(context.Background(), pattern); delErr != nil {
 			return delErr
 		}

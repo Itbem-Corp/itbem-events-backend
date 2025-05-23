@@ -5,10 +5,9 @@ import (
 	"events-stocks/models"
 	"events-stocks/repositories/gormrepository"
 	"events-stocks/repositories/redisrepository"
+	"events-stocks/utils"
 	"github.com/gofrs/uuid"
 )
-
-const redisFontSetKey = "fontSets"
 
 func GetFontSetByID(id uuid.UUID) (*models.FontSet, error) {
 	var fontSet models.FontSet
@@ -21,7 +20,7 @@ func CreateFontSet(fontSet *models.FontSet) error {
 	if err != nil {
 		return ValidateError(err)
 	}
-	pattern := "*" + redisFontSetKey + "*"
+	pattern := "*" + utils.RedisFontSetKey + "*"
 	if delErr := redisrepository.DeleteKeysByPattern(context.Background(), pattern); delErr != nil {
 		return delErr
 	}
@@ -31,7 +30,7 @@ func CreateFontSet(fontSet *models.FontSet) error {
 func UpdateFontSet(fontSet *models.FontSet) error {
 	err := gormrepository.Update(fontSet, fontSet.ID)
 	if err == nil {
-		pattern := "*" + redisFontSetKey + "*"
+		pattern := "*" + utils.RedisFontSetKey + "*"
 		if delErr := redisrepository.DeleteKeysByPattern(context.Background(), pattern); delErr != nil {
 			return delErr
 		}
@@ -42,7 +41,7 @@ func UpdateFontSet(fontSet *models.FontSet) error {
 func DeleteFontSet(id uuid.UUID) error {
 	err := gormrepository.Delete(id, &models.FontSet{})
 	if err == nil {
-		pattern := "*" + redisFontSetKey + "*"
+		pattern := "*" + utils.RedisFontSetKey + "*"
 		if delErr := redisrepository.DeleteKeysByPattern(context.Background(), pattern); delErr != nil {
 			return delErr
 		}

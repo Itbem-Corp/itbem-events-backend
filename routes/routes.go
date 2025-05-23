@@ -3,6 +3,7 @@ package routes
 import (
 	"events-stocks/controllers/cache"
 	"events-stocks/controllers/events"
+	"events-stocks/controllers/fonts"
 	"events-stocks/controllers/resources"
 	"events-stocks/middleware/redis"
 	"events-stocks/middleware/token"
@@ -14,11 +15,6 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	e.GET("/health", events.GetEvents)
 
 	api := e.Group("/api")
-	api.GET("/resources/:id", resources.GetResource)
-	api.GET("/resources/section/:id", resources.ListResourcesBySection)
-	api.POST("/resources", resources.CreateResource)
-	api.PUT("/resources/:id", resources.UpdateResourceMetadata)
-	api.DELETE("/resources/:id", resources.DeleteResource)
 	// Aquí podrías añadir middlewares si lo necesitas, por ejemplo, autenticación
 	api.Use(token.Autenticacion(cfg))
 	api.Use(redisMiddleware.RetrieveCache)
@@ -33,4 +29,17 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	api.POST("/events", events.CreateEvent)
 	api.PUT("/events/:id", events.UpdateEvent)
 	api.DELETE("/events/:id", events.DeleteEvent)
+
+	// Resources
+	api.GET("/resources/:id", resources.GetResource)
+	api.GET("/resources/section/:key", resources.GetResourcesBySectionID)
+	api.POST("/resources", resources.CreateResource)
+	api.POST("/resources/multiple", resources.UploadMultipleResources)
+	api.PUT("/resources/:id/content", resources.UpdateFileContent)
+	api.PUT("/resources/:id/replace", resources.ReplaceFile)
+	api.DELETE("/resources/:id", resources.DeleteResource)
+
+	//Fonts
+	api.POST("/fonts/upload", fonts.UploadFonts)
+
 }

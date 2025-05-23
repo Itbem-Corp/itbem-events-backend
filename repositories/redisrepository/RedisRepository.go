@@ -43,3 +43,14 @@ func DeleteKeysByPattern(ctx context.Context, pattern string) error {
 	}
 	return iter.Err()
 }
+
+func Invalidate(resource string, key string) error {
+	ctx := context.Background()
+	redisKey := key + ":" + resource
+	return DeleteKey(ctx, redisKey)
+}
+
+func InvalidateByPattern(pattern string) error {
+	ctx := context.Background()
+	return DeleteKeysByPattern(ctx, pattern)
+}

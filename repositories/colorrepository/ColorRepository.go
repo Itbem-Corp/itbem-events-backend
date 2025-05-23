@@ -34,3 +34,7 @@ func ListColors() ([]models.Color, error) {
 	})
 	return colors, err
 }
+
+func CreateMultipleColors(colors []models.Color) error {
+	return gormrepository.InsertManyBatch(colors, 10)
+}

@@ -1,10 +1,15 @@
 package services
 
 import (
+	"events-stocks/configuration/constants"
+	"events-stocks/dtos"
 	"events-stocks/models"
 	"events-stocks/repositories/bucketrepository"
+	"events-stocks/repositories/cacheloaderrepository"
+	"events-stocks/repositories/redisrepository"
 	"events-stocks/repositories/resourcerepository"
 	services "events-stocks/services/validations"
+	"events-stocks/utils"
 	"fmt"
 	"github.com/gofrs/uuid"
 	"io"
@@ -61,32 +66,44 @@ type ResourceService struct {
 func NewResourceService(c *models.Config) *ResourceService {
 	return &ResourceService{
 		Bucket:     c.AwsBucketName,
-		Provider:   "aws",
-		UploadPath: "events",
+		Provider:   constants.DefaultCloudProvider,
+		UploadPath: constants.EventsBucketFolder,
 		Optimizer:  NewImageOptimizerService(),
 	}
 }
 
-func (rs *ResourceService) GetResourceByID(id uuid.UUID) (*models.Resource, error) {
+func (rs *ResourceService) GetResourceByID(id uuid.UUID) (*models.Resource, string, error) {
 	resource, err := resourcerepository.GetResourceByID(id)
 	if err != nil {
-		return nil, fmt.Errorf("resource not found: %w", err)
+		return nil, "", fmt.Errorf("resource not found: %w", err)
 	}
 
-	// Extraer filename del URL (simplemente el path final)
-	parts := strings.Split(resource.URL, "/")
+	// Asegúrate de que resource.Path exista
+	if strings.TrimSpace(resource.Path) == "" {
+		return nil, "", fmt.Errorf("resource has no path assigned")
+	}
+
+	parts := strings.Split(resource.Path, "/")
 	filename := parts[len(parts)-1]
 
-	// Validar si el archivo existe en el bucket
 	exists, _, err := bucketrepository.FileExists(filename, rs.UploadPath, rs.Bucket, rs.Provider)
 	if err != nil {
-		return nil, fmt.Errorf("failed to verify file existence: %w", err)
+		return nil, "", fmt.Errorf("failed to verify file existence: %w", err)
 	}
 	if !exists {
-		return nil, fmt.Errorf("file associated with resource not found in bucket")
+		return nil, "", fmt.Errorf("file associated with resource not found in bucket")
 	}
 
-	return resource, nil
+	viewURL, err := bucketrepository.GetPresignedFileURL(filename, rs.UploadPath, rs.Bucket, rs.Provider, 60)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to generate presigned URL: %w", err)
+	}
+
+	return resource, viewURL, nil
+}
+
+func (rs *ResourceService) GetResourcesBySectionID(sectionID uuid.UUID) ([]dtos.ResourceResponse, error) {
+	return cacheloaderrepository.GetResourcesBySectionID(&sectionID, rs.UploadPath, rs.Bucket, rs.Provider)
 }
 
 func (rs *ResourceService) FileExists(filename string) (bool, string, error) {
@@ -117,7 +134,7 @@ func (rs *ResourceService) DeleteResource(id uuid.UUID) error {
 	}
 
 	// 📦 Eliminar archivo del bucket
-	parts := strings.Split(resource.URL, "/")
+	parts := strings.Split(resource.Path, "/")
 	filename := parts[len(parts)-1]
 
 	if err := rs.DeleteFileIfExists(filename); err != nil {
@@ -125,7 +142,7 @@ func (rs *ResourceService) DeleteResource(id uuid.UUID) error {
 	}
 
 	// 🗑️ Eliminar registro en DB
-	if err := resourcerepository.DeleteResource(id); err != nil {
+	if err := DeleteResource(id, resource.EventSectionID); err != nil {
 		return fmt.Errorf("failed to delete resource from DB: %w", err)
 	}
 
@@ -133,8 +150,8 @@ func (rs *ResourceService) DeleteResource(id uuid.UUID) error {
 	resources, err := resourcerepository.ListResourcesBySection(resource.EventSectionID)
 	if err == nil {
 		for i, r := range resources {
-			r.Position = i
-			_ = resourcerepository.UpdateResource(&r)
+			r.Position = utils.PtrInt(i)
+			_ = UpdateResource(&r)
 		}
 	}
 
@@ -142,7 +159,7 @@ func (rs *ResourceService) DeleteResource(id uuid.UUID) error {
 }
 
 func (rs *ResourceService) UpdateResource(resource *models.Resource) error {
-	return resourcerepository.UpdateResource(resource)
+	return UpdateResource(resource)
 }
 
 func (rs *ResourceService) UpdateFileContent(
@@ -150,22 +167,20 @@ func (rs *ResourceService) UpdateFileContent(
 	filename string,
 	header *multipart.FileHeader,
 ) (string, error) {
-	// ✅ Valida, optimiza y renombra automáticamente
 	optimized, newFilename, contentType, err := rs.sanitizeAndOptimizeUpload(file, header, filename)
 	if err != nil {
 		return "", err
 	}
 
-	// 🔁 Actualiza en bucket con el contenido optimizado
-	url, err := bucketrepository.UpdateFile(optimized, newFilename, contentType, rs.UploadPath, rs.Bucket, rs.Provider)
+	_, err = bucketrepository.UpdateFile(optimized, newFilename, contentType, rs.UploadPath, rs.Bucket, rs.Provider)
 	if err != nil {
 		return "", fmt.Errorf("failed to update file: %w", err)
 	}
 
-	return url, nil
+	return fmt.Sprintf("%s/%s", rs.UploadPath, newFilename), nil
 }
 
-func (rs *ResourceService) ListResourcesBySection(sectionID uuid.UUID) ([]models.Resource, error) {
+func (rs *ResourceService) ListResourcesBySection(sectionID *uuid.UUID) ([]models.Resource, error) {
 	return resourcerepository.ListResourcesBySection(sectionID)
 }
 
@@ -174,34 +189,30 @@ func (rs *ResourceService) ReplaceFile(
 	file multipart.File,
 	header *multipart.FileHeader,
 ) (string, error) {
-	// ✅ Elimina el archivo anterior si existe
 	if err := rs.DeleteFileIfExists(oldFilename); err != nil {
 		return "", fmt.Errorf("failed to delete existing file: %w", err)
 	}
 
-	// ✅ Valida, optimiza y renombra basado en el nombre viejo
 	optimized, newFilename, contentType, err := rs.sanitizeAndOptimizeUpload(file, header, oldFilename)
 	if err != nil {
 		return "", err
 	}
 
-	// ✅ Sube el nuevo archivo optimizado
-	url, err := bucketrepository.UploadRawBytes(optimized, newFilename, contentType, rs.UploadPath, rs.Bucket, rs.Provider)
+	err = bucketrepository.UploadRawBytesSimple(optimized, newFilename, contentType, rs.UploadPath, rs.Bucket, rs.Provider)
 	if err != nil {
 		return "", fmt.Errorf("failed to upload replacement: %w", err)
 	}
 
-	return url, nil
+	return fmt.Sprintf("%s/%s", rs.UploadPath, newFilename), nil
 }
 
 func (rs *ResourceService) UploadAndCreateResource(
 	file multipart.File,
 	header *multipart.FileHeader,
-	sectionID uuid.UUID,
+	sectionID *uuid.UUID,
 	resourceTypeID uuid.UUID,
 	altText, title string,
 ) (*models.Resource, error) {
-	// 🧮 Calcular posición automáticamente
 	existing, err := resourcerepository.ListResourcesBySection(sectionID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get existing resources: %w", err)
@@ -209,34 +220,31 @@ func (rs *ResourceService) UploadAndCreateResource(
 
 	position := 0
 	for _, r := range existing {
-		if r.Position >= position {
-			position = r.Position + 1
+		if r.Position != nil && *r.Position >= position {
+			position = *r.Position + 1
 		}
 	}
 
-	// ⏬ Validación, optimización y renombrado en un solo paso
 	optimized, filename, contentType, err := rs.sanitizeAndOptimizeUpload(file, header, "")
 	if err != nil {
-		return nil, err // ya viene como ValidationError si aplica
+		return nil, err
 	}
 
-	// ⬆️ Subida al bucket
-	url, err := bucketrepository.UploadRawBytes(optimized, filename, contentType, rs.UploadPath, rs.Bucket, rs.Provider)
+	err = bucketrepository.UploadRawBytesSimple(optimized, filename, contentType, rs.UploadPath, rs.Bucket, rs.Provider)
 	if err != nil {
 		return nil, fmt.Errorf("failed to upload resource: %w", err)
 	}
 
-	// 🧱 Registro en base de datos
 	resource := &models.Resource{
 		EventSectionID: sectionID,
 		ResourceTypeID: resourceTypeID,
-		URL:            url,
+		Path:           fmt.Sprintf("%s/%s", rs.UploadPath, filename),
 		AltText:        altText,
 		Title:          title,
-		Position:       position,
+		Position:       utils.PtrInt(position),
 	}
 
-	if err := resourcerepository.CreateResource(resource); err != nil {
+	if err := CreateResource(resource); err != nil {
 		return nil, fmt.Errorf("failed to create resource in DB: %w", err)
 	}
 
@@ -245,10 +253,9 @@ func (rs *ResourceService) UploadAndCreateResource(
 
 func (rs *ResourceService) UploadMultipleResources(
 	files []*multipart.FileHeader,
-	sectionID uuid.UUID,
+	sectionID *uuid.UUID,
 	resourceTypeID uuid.UUID,
 ) ([]*models.Resource, error) {
-
 	var uploaded []*models.Resource
 
 	for i, header := range files {
@@ -258,32 +265,93 @@ func (rs *ResourceService) UploadMultipleResources(
 		}
 		defer file.Close()
 
-		// Nombre forzado por índice para mantener orden (puedes personalizarlo)
 		forcedFilename := fmt.Sprintf("resource-%s-%d%s", sectionID.String(), i+1, header.Filename)
 
-		// ⏬ Validación, optimización, renombrado
 		content, finalName, finalType, err := rs.sanitizeAndOptimizeUpload(file, header, forcedFilename)
 		if err != nil {
 			return nil, fmt.Errorf("failed to process file %d: %w", i+1, err)
 		}
 
-		// ⬆️ Sube al bucket
-		url, err := bucketrepository.UploadRawBytes(content, finalName, finalType, rs.UploadPath, rs.Bucket, rs.Provider)
+		err = bucketrepository.UploadRawBytesSimple(content, finalName, finalType, rs.UploadPath, rs.Bucket, rs.Provider)
 		if err != nil {
 			return nil, fmt.Errorf("upload failed for file %d: %w", i+1, err)
 		}
 
-		// 🧱 Crea en base de datos
 		resource := &models.Resource{
 			EventSectionID: sectionID,
 			ResourceTypeID: resourceTypeID,
-			URL:            url,
-			AltText:        "", // puedes pasarlo como slice si quieres en un futuro
-			Title:          "",
-			Position:       i,
+			Path:           fmt.Sprintf("%s/%s", rs.UploadPath, finalName),
+			AltText:        "",
+			Title:          finalName,
+			Position:       utils.PtrInt(i),
 		}
 
-		if err := resourcerepository.CreateResource(resource); err != nil {
+		if err := CreateResource(resource); err != nil {
+			return nil, fmt.Errorf("failed to save resource for file %d: %w", i+1, err)
+		}
+
+		uploaded = append(uploaded, resource)
+	}
+
+	return uploaded, nil
+}
+
+func (rs *ResourceService) UploadBaseResources(
+	files []*multipart.FileHeader,
+	subfolder string,
+	resourceTypeName string,
+) ([]*models.Resource, error) {
+	// 1. Obtener resourceTypeID por nombre
+	resourceTypes, err := ListResourceTypes()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load resource types: %w", err)
+	}
+
+	var resourceTypeID uuid.UUID
+	for _, rt := range resourceTypes {
+		if strings.EqualFold(rt.Code, resourceTypeName) {
+			resourceTypeID = rt.ID
+			break
+		}
+	}
+	if resourceTypeID == uuid.Nil {
+		return nil, fmt.Errorf("resource type '%s' not found", resourceTypeName)
+	}
+
+	// 2. Iniciar uploads
+	var uploaded []*models.Resource
+	for i, header := range files {
+		file, err := header.Open()
+		if err != nil {
+			return nil, fmt.Errorf("error opening file %d: %w", i+1, err)
+		}
+		defer file.Close()
+
+		// Nombre forzado si se requiere
+		forcedFilename := fmt.Sprintf("base-%s-%d%s", resourceTypeName, i+1, header.Filename)
+
+		// 3. Sanitizar y optimizar
+		content, finalName, finalType, err := rs.sanitizeAndOptimizeUpload(file, header, forcedFilename)
+		if err != nil {
+			return nil, fmt.Errorf("failed to process file %d: %w", i+1, err)
+		}
+
+		// 4. Upload en subfolder
+		finalPath := fmt.Sprintf("%s/%s", subfolder, finalName)
+		err = bucketrepository.UploadRawBytesSimple(content, finalName, finalType, subfolder, rs.Bucket, rs.Provider)
+		if err != nil {
+			return nil, fmt.Errorf("upload failed for file %d: %w", i+1, err)
+		}
+
+		// 5. Crear modelo sin section
+		resource := &models.Resource{
+			ResourceTypeID: resourceTypeID,
+			Path:           finalPath,
+			AltText:        "",
+			Title:          finalName,
+		}
+
+		if err := CreateResource(resource); err != nil {
 			return nil, fmt.Errorf("failed to save resource for file %d: %w", i+1, err)
 		}
 
@@ -334,6 +402,34 @@ func (rs *ResourceService) sanitizeAndOptimizeUpload(
 
 	finalName = updateFilenameExtension(baseName, newContentType)
 	return optimized, finalName, newContentType, nil
+}
+
+func UpdateResource(resource *models.Resource) error {
+	err := resourcerepository.UpdateResource(resource)
+	if err != nil {
+		return err
+	}
+
+	// Invalidar cache de esa sección
+	return redisrepository.Invalidate("resources", resource.EventSectionID.String())
+}
+
+func CreateResource(resource *models.Resource) error {
+	err := resourcerepository.CreateResource(resource)
+	if err != nil {
+		return err
+	}
+
+	return redisrepository.Invalidate("resources", resource.EventSectionID.String())
+}
+
+func DeleteResource(resourceID uuid.UUID, sectionID *uuid.UUID) error {
+	err := resourcerepository.DeleteResource(resourceID)
+	if err != nil {
+		return err
+	}
+
+	return redisrepository.Invalidate("resources", sectionID.String())
 }
 
 func guessMimeType(ext string) string {

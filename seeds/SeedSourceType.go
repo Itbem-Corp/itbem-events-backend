@@ -14,10 +14,11 @@ func SeedResourceTypes(db *gorm.DB) {
 		Code  string
 		Label string
 	}{
-		{"image", "Imagen"},
+		{"image", "Image"},
 		{"video", "Video"},
 		{"audio", "Audio"},
-		{"file", "Archivo"},
+		{"file", "File"},
+		{"font", "Font"},
 	}
 
 	for _, item := range items {

@@ -20,11 +20,11 @@ func DeleteResource(id uuid.UUID) error {
 
 func GetResourceByID(id uuid.UUID) (*models.Resource, error) {
 	var resource models.Resource
-	err := gormrepository.GetByID(&resource, id, "ResourceType", "EventSection")
+	err := gormrepository.GetByID(&resource, id, "ResourceType")
 	return &resource, err
 }
 
-func ListResourcesBySection(sectionID uuid.UUID) ([]models.Resource, error) {
+func ListResourcesBySection(sectionID *uuid.UUID) ([]models.Resource, error) {
 	var resources []models.Resource
 
 	filters := map[string]interface{}{

@@ -12,6 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
 	"io"
+	"time"
 )
 
 var s3Client *s3.Client
@@ -99,4 +100,25 @@ func GetS3Object(ctx context.Context, key, bucket string) (io.ReadCloser, error)
 		return nil, err
 	}
 	return resp.Body, nil
+}
+
+func GeneratePresignedURL(ctx context.Context, key, bucket string, expiresInMinutes int) (string, error) {
+	s3Client := configuration.GetS3Client(nil)
+
+	// Crea el input
+	input := &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	}
+
+	presignClient := s3.NewPresignClient(s3Client)
+
+	resp, err := presignClient.PresignGetObject(ctx, input, func(opts *s3.PresignOptions) {
+		opts.Expires = time.Duration(expiresInMinutes) * time.Minute
+	})
+	if err != nil {
+		return "", err
+	}
+
+	return resp.URL, nil
 }
