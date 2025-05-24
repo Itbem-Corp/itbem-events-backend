@@ -38,7 +38,22 @@ func main() {
 	// Middlewares básicos
 	e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
-	e.Use(middleware.CORS())
+	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
+		AllowOrigins: []string{
+			"https://eventiapp.com.mx",
+			"https://www.eventiapp.com.mx",
+			"https://api.eventiapp.com.mx",
+			"http://localhost:4321",
+			"*",
+		},
+		AllowMethods: []string{
+			echo.GET, echo.POST, echo.PUT, echo.DELETE, echo.OPTIONS,
+		},
+		AllowHeaders: []string{
+			echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, echo.HeaderAuthorization,
+		},
+		AllowCredentials: true,
+	}))
 	e.Use(token.Autenticacion(cfg))
 	resources.InitResourceController(cfg)
 	// Configurar rutas
