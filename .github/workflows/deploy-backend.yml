@@ -72,6 +72,7 @@ jobs:
               -e REDIS_HOST='${{ secrets.BACKEND_REDIS_HOST }}' \
               -e REDIS_PASSWORD='${{ secrets.BACKEND_REDIS_PASSWORD }}' \
               -e REDIS_DB='${{ secrets.BACKEND_REDIS_DB }}' \
+              -e REDIS_TLS='${{ secrets.BACKEND_REDIS_TLS }}' \
               -e GOOGLE_CLIENT_ID='${{ secrets.BACKEND_GOOGLE_CLIENT_ID }}' \
               -e GOOGLE_CLIENT_SECRET='${{ secrets.BACKEND_GOOGLE_CLIENT_SECRET }}' \
               itbem-events-backend

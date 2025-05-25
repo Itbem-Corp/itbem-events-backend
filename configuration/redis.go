@@ -16,12 +16,18 @@ var RedisClient *redis.Client
 func InicializarRedis(cfg *models.Config) {
 	redisDb, _ := strconv.Atoi(cfg.RedisDb)
 
-	RedisClient = redis.NewClient(&redis.Options{
-		Addr:      cfg.RedisHost,     // ← ahora toma del cfg
-		Password:  cfg.RedisPassword, // ← ahora toma del cfg
-		DB:        redisDb,
-		TLSConfig: &tls.Config{},
-	})
+	options := &redis.Options{
+		Addr:     cfg.RedisHost,
+		Password: cfg.RedisPassword,
+		DB:       redisDb,
+	}
+
+	// Habilita TLS solo si lo defines en tu configuración
+	if cfg.RedisTls == "true" {
+		options.TLSConfig = &tls.Config{}
+	}
+
+	RedisClient = redis.NewClient(options)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

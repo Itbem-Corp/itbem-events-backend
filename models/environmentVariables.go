@@ -22,6 +22,7 @@ type Config struct {
 	RedisHost     string `required:"true"`
 	RedisPassword string `required:"true"`
 	RedisDb       string `required:"true"`
+	RedisTls      string `required:"true"`
 
 	// Google OAuth
 	GoogleClientId     string `required:"true"`
