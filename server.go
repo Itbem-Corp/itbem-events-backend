@@ -39,7 +39,12 @@ func main() {
 	e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
 	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
-		AllowOrigins: []string{"*"},
+		AllowOrigins: []string{
+			"https://eventiapp.com.mx",
+			"https://www.eventiapp.com.mx",
+			"https://api.eventiapp.com.mx",
+			"http://localhost:4321",
+		},
 		AllowMethods: []string{
 			echo.GET, echo.POST, echo.PUT, echo.DELETE, echo.OPTIONS,
 		},
