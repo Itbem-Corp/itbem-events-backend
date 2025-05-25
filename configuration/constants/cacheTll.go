@@ -6,7 +6,7 @@ import "time"
 const (
 	ShortTimeTTL       = 1 * time.Hour   // Para datos que cambian constantemente
 	MediumTimeTTL      = 8 * time.Hour   // Uso general
-	MediumLargeTimeTTL = 48 * time.Hour  // Poco cambio
+	MediumLargeTimeTTL = 12 * time.Hour  // Poco cambio
 	LargeTimeTTL       = 24 * time.Hour  // Datos semiestáticos
 	LongTimeTTL        = 48 * time.Hour  // Poco cambio
 	XLongTimeTTL       = 96 * time.Hour  // Muy estáticos
