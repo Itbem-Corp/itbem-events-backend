@@ -140,7 +140,7 @@ func GetResourcesBySectionID(sectionID *uuid.UUID, uploadPath string, bucket str
 			continue
 		}
 
-		viewURL, err := bucketrepository.GetPresignedFileURL(filename, uploadPath, bucket, provider, 60)
+		viewURL, err := bucketrepository.GetPresignedFileURL(filename, uploadPath, bucket, provider, 720)
 		if err != nil {
 			continue
 		}
