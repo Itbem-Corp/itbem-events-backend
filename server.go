@@ -51,7 +51,7 @@ func main() {
 		AllowHeaders: []string{
 			echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, echo.HeaderAuthorization,
 		},
-		AllowCredentials: true,
+		AllowCredentials: false,
 	}))
 	e.Use(token.Autenticacion(cfg))
 	resources.InitResourceController(cfg)
