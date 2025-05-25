@@ -18,7 +18,7 @@ var CacheTTLs = map[string]time.Duration{
 	RedisFontSetKey:        constants.LargeTimeTTL,
 	RedisPaletteServiceKey: constants.MediumTimeTTL,
 	RedisResourceTypeKey:   constants.XLongTimeTTL,
-	RedisResourcesKey:      constants.ShortTimeTTL,
+	RedisResourcesKey:      constants.MediumLargeTimeTTL,
 	RedisColorsServiceKey:  constants.XXLongTimeTTL,
 	RedisFontsKey:          constants.XXLongTimeTTL,
 }

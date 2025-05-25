@@ -94,7 +94,7 @@ func (rs *ResourceService) GetResourceByID(id uuid.UUID) (*models.Resource, stri
 		return nil, "", fmt.Errorf("file associated with resource not found in bucket")
 	}
 
-	viewURL, err := bucketrepository.GetPresignedFileURL(filename, rs.UploadPath, rs.Bucket, rs.Provider, 60)
+	viewURL, err := bucketrepository.GetPresignedFileURL(filename, rs.UploadPath, rs.Bucket, rs.Provider, 720)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to generate presigned URL: %w", err)
 	}
