@@ -20,12 +20,19 @@ func GetEvents(c echo.Context) error {
 		return utils.Success(c, http.StatusOK, "No data loaded", nil)
 	}
 
-	var eventos []models.Event
-	if err := json.Unmarshal([]byte(dataStr), &eventos); err != nil {
-		return utils.Error(c, http.StatusInternalServerError, "Error parsing data", err.Error())
+	if keyParam == "all" {
+		var events []models.Event
+		if err := json.Unmarshal([]byte(dataStr), &events); err != nil {
+			return utils.Error(c, http.StatusInternalServerError, "Error parsing data", err.Error())
+		}
+		return utils.Success(c, http.StatusOK, "Events loaded", events)
 	}
 
-	return utils.Success(c, http.StatusOK, "Events loaded", eventos)
+	var event []models.Event
+	if err := json.Unmarshal([]byte(dataStr), &event); err != nil {
+		return utils.Error(c, http.StatusInternalServerError, "Error parsing data", err.Error())
+	}
+	return utils.Success(c, http.StatusOK, "Event loaded", event)
 }
 
 // POST /events

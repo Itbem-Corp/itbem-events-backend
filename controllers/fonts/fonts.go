@@ -2,7 +2,7 @@ package fonts
 
 import (
 	"events-stocks/configuration"
-	"events-stocks/services/fonts" // <-- adapta al import real si es diferente
+	"events-stocks/services/fonts"
 	services "events-stocks/services/resources"
 	"events-stocks/utils"
 	"github.com/labstack/echo/v4"

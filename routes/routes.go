@@ -4,6 +4,8 @@ import (
 	"events-stocks/controllers/cache"
 	"events-stocks/controllers/events"
 	"events-stocks/controllers/fonts"
+	"events-stocks/controllers/guests"
+	"events-stocks/controllers/invitations"
 	"events-stocks/controllers/resources"
 	"events-stocks/middleware/redis"
 	"events-stocks/middleware/token"
@@ -41,5 +43,19 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 
 	//Fonts
 	api.POST("/fonts/upload", fonts.UploadFonts)
+
+	//Guests
+	api.GET("/guests/:key", guests.GetGuests)
+	api.POST("/guests", guests.CreateGuest)
+	api.PUT("/guests/:id", guests.UpdateGuest)
+	api.DELETE("/guests/:id", guests.DeleteGuest)
+	api.POST("/guests/batch", guests.CreateGuests)
+
+	// Invitations
+	api.GET("/invitations", invitations.GetInvitationByToken)
+	api.GET("/invitations/byToken/:token", invitations.GetInvitationByToken)
+
+	// RSVP confirm
+	e.POST("/api/invitations/rsvp", invitations.ConfirmRSVP)
 
 }

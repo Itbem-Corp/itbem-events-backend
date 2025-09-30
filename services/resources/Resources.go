@@ -325,13 +325,13 @@ func (rs *ResourceService) UploadBaseResources(
 		if err != nil {
 			return nil, fmt.Errorf("error opening file %d: %w", i+1, err)
 		}
-		defer file.Close()
 
 		// Nombre forzado si se requiere
 		forcedFilename := fmt.Sprintf("base-%s-%d%s", resourceTypeName, i+1, header.Filename)
 
 		// 3. Sanitizar y optimizar
 		content, finalName, finalType, err := rs.sanitizeAndOptimizeUpload(file, header, forcedFilename)
+		file.Close()
 		if err != nil {
 			return nil, fmt.Errorf("failed to process file %d: %w", i+1, err)
 		}

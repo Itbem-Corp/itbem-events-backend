@@ -9,10 +9,13 @@ import (
 	"github.com/gofrs/uuid"
 )
 
-func GetEventByID(id uuid.UUID) (*models.Event, error) {
+func GetEventByID(id uuid.UUID) (string, error) {
 	var event models.Event
 	err := gormrepository.GetByID(&event, id)
-	return &event, err
+	if err != nil {
+		return "", err
+	}
+	return utils.MarshallData([]*models.Event{&event}, nil)
 }
 
 func CreateEvent(event *models.Event) error {

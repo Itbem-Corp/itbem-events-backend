@@ -3,8 +3,13 @@ package gormrepository
 import (
 	"errors"
 	"events-stocks/configuration"
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
+
+func DB() *gorm.DB {
+	return configuration.DB
+}
 
 // Insert agrega un solo registro
 func Insert[T any](model *T) error {
@@ -23,6 +28,29 @@ func InsertManyBatch[T any](models []T, batchSize int) error {
 
 func FirstOrCreate[T any](model *T, conditions map[string]interface{}) error {
 	return configuration.DB.Where(conditions).FirstOrCreate(model).Error
+}
+
+// GetFirst obtiene el primer registro que cumpla con los filtros
+func GetFirst[T any](model *T, opts QueryOptions) error {
+	query := configuration.DB.Model(model)
+
+	if len(opts.Preload) > 0 {
+		for _, preload := range opts.Preload {
+			query = query.Preload(preload)
+		}
+	}
+	if opts.Filters != nil {
+		query = query.Where(opts.Filters)
+	}
+	if opts.OrderBy != "" {
+		dir := "ASC"
+		if opts.OrderDir != "" {
+			dir = opts.OrderDir
+		}
+		query = query.Order(opts.OrderBy + " " + dir)
+	}
+
+	return query.First(model).Error
 }
 
 // InsertIfNotExists inserta un registro solo si no existe (basado en columnas únicas)

@@ -5,10 +5,12 @@ import (
 	"events-stocks/configuration"
 	"events-stocks/configuration/constants"
 	"events-stocks/dtos"
+	"events-stocks/models"
 	"events-stocks/repositories/bucketrepository"
 	"events-stocks/repositories/colorrepository"
 	"events-stocks/repositories/eventsrepository"
 	"events-stocks/repositories/fontrepository"
+	"events-stocks/repositories/guestrepository"
 	"events-stocks/repositories/redisrepository"
 	"events-stocks/repositories/resourcerepository"
 	"events-stocks/utils"
@@ -23,6 +25,13 @@ func GetLoader(resource string, key string) (func() (string, error), bool) {
 	case "events":
 		if key == "all" {
 			return ListAllEvents, true
+		} else {
+			return func() (string, error) {
+				if id, err := uuid.FromString(key); err == nil {
+					return GetEventByID(id, err)
+				}
+				return "", fmt.Errorf("invalid UUID for event key: %s", key)
+			}, true
 		}
 	case "fontsets":
 		if key == "all" {
@@ -41,6 +50,25 @@ func GetLoader(resource string, key string) (func() (string, error), bool) {
 			id, _ := uuid.FromString(key)
 			return ListResourcesBySectionIdRaw(&id)
 		}, true
+	case "guests":
+		if strings.HasPrefix(key, "all:") {
+			eventIDStr := strings.TrimPrefix(key, "all:")
+			if id, err := uuid.FromString(eventIDStr); err == nil {
+				return func() (string, error) {
+					return ListGuestsByEventID(id)
+				}, true
+			}
+			return nil, false
+		} else {
+			// Guest por ID
+			return func() (string, error) {
+				if id, err := uuid.FromString(key); err == nil {
+					return GetGuestByID(id)
+				}
+				return "", fmt.Errorf("invalid UUID for guest: %s", key)
+			}, true
+		}
+
 	}
 
 	return nil, false
@@ -84,6 +112,30 @@ func CacheOrLoadAuto(resource string, key string) (string, error) {
 func ListAllEvents() (string, error) {
 	data, err := eventsrepository.ListEvents(1, 0, "")
 	return utils.MarshallData(data, err)
+}
+
+func ListGuestsByEventID(eventID uuid.UUID) (string, error) {
+	guests, err := guestrepository.ListGuestsByEventID(eventID)
+	if err != nil {
+		return "", err
+	}
+	return utils.MarshallData(guests, nil)
+}
+
+func GetGuestByID(id uuid.UUID) (string, error) {
+	guest, err := guestrepository.GetGuestByID(id)
+	if err != nil {
+		return "", err
+	}
+	return utils.MarshallData([]*models.Guest{guest}, nil)
+}
+
+func GetEventByID(id uuid.UUID, error error) (string, error) {
+	event, err := eventsrepository.GetEventByID(id)
+	if err != nil {
+		return "", err
+	}
+	return event, nil
 }
 
 func ListFontSets() (string, error) {

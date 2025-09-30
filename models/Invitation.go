@@ -15,6 +15,7 @@ type Invitation struct {
 	InvitationEmailSent     bool
 	InvitationWhatsAppSent  bool
 	InvitationSent          bool // derivado de los anteriores
+	MaxGuests               int  `json:"max_guests"`
 	MomentEmailRequested    bool
 	MomentWhatsAppRequested bool
 	MomentRequestSent       bool // derivado

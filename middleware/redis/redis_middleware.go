@@ -9,6 +9,7 @@ import (
 func RetrieveCache(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		key := c.Param("key")
+		subkey := c.Param("subkey")
 		path := c.Path()
 
 		parts := strings.Split(strings.Trim(path, "/"), "/")
@@ -24,13 +25,19 @@ func RetrieveCache(next echo.HandlerFunc) echo.HandlerFunc {
 			}
 		}
 
-		if resource == "" || key == "" {
+		// Si hay subkey, lo concatenamos
+		cacheKey := key
+		if subkey != "" {
+			cacheKey = key + ":" + subkey
+		}
+
+		if resource == "" || cacheKey == "" {
 			return next(c)
 		}
 
-		data, err := cacheLoader.CacheOrLoadAuto(resource, key)
+		data, err := cacheLoader.CacheOrLoadAuto(resource, cacheKey)
 		if err == nil {
-			c.Set(key+":"+resource, data)
+			c.Set(cacheKey+":"+resource, data)
 		}
 
 		return next(c)

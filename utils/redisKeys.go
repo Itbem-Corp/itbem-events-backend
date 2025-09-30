@@ -12,13 +12,21 @@ const RedisFontsKey = "fonts"
 const RedisFontSetKey = "fontsets"
 const RedisResourceTypeKey = "resourcetypes"
 const RedisResourcesKey = "resources"
+const RedisGuestsKey = "Guests"
+const RedisGuestStatussKey = "GuestStatus"
+const RedisInvitationsKey = "Invitations"
+const RedisInvitationTokensKey = "InvitationTokens"
 
 var CacheTTLs = map[string]time.Duration{
-	RedisServiceEventsKey:  constants.ShortTimeTTL,
-	RedisFontSetKey:        constants.LargeTimeTTL,
-	RedisPaletteServiceKey: constants.MediumTimeTTL,
-	RedisResourceTypeKey:   constants.XLongTimeTTL,
-	RedisResourcesKey:      constants.MediumLargeTimeTTL,
-	RedisColorsServiceKey:  constants.XXLongTimeTTL,
-	RedisFontsKey:          constants.XXLongTimeTTL,
+	RedisServiceEventsKey:    constants.ShortTimeTTL,
+	RedisFontSetKey:          constants.LargeTimeTTL,
+	RedisPaletteServiceKey:   constants.MediumTimeTTL,
+	RedisResourceTypeKey:     constants.XLongTimeTTL,
+	RedisResourcesKey:        constants.MediumLargeTimeTTL,
+	RedisColorsServiceKey:    constants.XXLongTimeTTL,
+	RedisFontsKey:            constants.XXLongTimeTTL,
+	RedisGuestsKey:           constants.MediumTimeTTL,
+	RedisGuestStatussKey:     constants.XLongTimeTTL,
+	RedisInvitationsKey:      constants.MediumLargeTimeTTL,
+	RedisInvitationTokensKey: constants.XXLongTimeTTL,
 }
