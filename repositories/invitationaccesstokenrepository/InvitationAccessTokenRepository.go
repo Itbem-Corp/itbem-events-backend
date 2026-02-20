@@ -6,7 +6,6 @@ import (
 	"events-stocks/repositories/gormrepository"
 	"github.com/gofrs/uuid"
 	"math/rand"
-	"time"
 )
 
 const rsvpCharset = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -57,7 +56,6 @@ func GeneratePrettyToken(eventID uuid.UUID, length int) (string, error) {
 }
 
 func GenerateRSVPCode(length int) string {
-	rand.Seed(time.Now().UnixNano())
 	code := make([]byte, length)
 	for i := range code {
 		code[i] = rsvpCharset[rand.Intn(len(rsvpCharset))]
@@ -96,4 +94,19 @@ func ListInvitationAccessTokens() ([]models.InvitationAccessToken, error) {
 	var list []models.InvitationAccessToken
 	err := gormrepository.GetList(&list, gormrepository.QueryOptions{})
 	return list, err
+}
+
+// AccessTokenRepo implements ports.AccessTokenRepository.
+type AccessTokenRepo struct{}
+
+func NewAccessTokenRepo() *AccessTokenRepo { return &AccessTokenRepo{} }
+
+func (r *AccessTokenRepo) GetByToken(token string) (*models.InvitationAccessToken, error) {
+	return GetByToken(token)
+}
+func (r *AccessTokenRepo) GetByPrettyToken(code string) (*models.InvitationAccessToken, error) {
+	return GetByPrettyToken(code)
+}
+func (r *AccessTokenRepo) GeneratePrettyToken(eventID uuid.UUID, length int) (string, error) {
+	return GeneratePrettyToken(eventID, length)
 }

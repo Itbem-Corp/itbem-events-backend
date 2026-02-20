@@ -29,3 +29,15 @@ func ListEventConfigs() ([]models.EventConfig, error) {
     err := gormrepository.GetList(&list, gormrepository.QueryOptions{})
     return list, err
 }
+
+// EventConfigRepo implements ports.EventConfigRepository.
+type EventConfigRepo struct{}
+
+func NewEventConfigRepo() *EventConfigRepo { return &EventConfigRepo{} }
+
+func (r *EventConfigRepo) CreateEventConfig(m *models.EventConfig) error  { return CreateEventConfig(m) }
+func (r *EventConfigRepo) UpdateEventConfig(m *models.EventConfig) error  { return UpdateEventConfig(m) }
+func (r *EventConfigRepo) DeleteEventConfig(id uuid.UUID) error            { return DeleteEventConfig(id) }
+func (r *EventConfigRepo) GetEventConfigByID(id uuid.UUID) (*models.EventConfig, error) {
+    return GetEventConfigByID(id)
+}

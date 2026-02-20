@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"events-stocks/repositories/redisrepository"
+	"events-stocks/utils"
 	"github.com/labstack/echo/v4"
 	"net/http"
 )
@@ -10,21 +11,19 @@ import (
 func FlushKey(c echo.Context) error {
 	key := c.Param("key")
 	if key == "" {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Key is required"})
+		return utils.Error(c, http.StatusBadRequest, "Key is required", "")
 	}
 
-	err := redisrepository.DeleteKey(context.Background(), key)
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to delete key"})
+	if err := redisrepository.DeleteKey(context.Background(), key); err != nil {
+		return utils.Error(c, http.StatusInternalServerError, "Failed to delete cache key", err.Error())
 	}
 
-	return c.JSON(http.StatusOK, map[string]string{"message": "Cache key deleted", "key": key})
+	return utils.Success(c, http.StatusOK, "Cache key deleted", map[string]string{"key": key})
 }
 
 func FlushAll(c echo.Context) error {
-	err := redisrepository.FlushAll(context.Background())
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to flush Redis"})
+	if err := redisrepository.FlushAll(context.Background()); err != nil {
+		return utils.Error(c, http.StatusInternalServerError, "Failed to flush cache", err.Error())
 	}
-	return c.JSON(http.StatusOK, map[string]string{"message": "Redis cache flushed completely"})
+	return utils.Success(c, http.StatusOK, "Cache flushed successfully", nil)
 }

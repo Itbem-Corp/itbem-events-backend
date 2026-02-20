@@ -28,20 +28,15 @@ func DeleteInvitation(id uuid.UUID) error {
 	return gormrepository.Delete(id, &models.Invitation{})
 }
 
-func GetGuestByInvitationID(invitationID uuid.UUID) (*models.Guest, error) {
-	var guest models.Guest
-	err := configuration.DB.
-		Preload("GuestStatus").
-		Preload("Event").
-		Preload("Event.EventType").
-		Preload("Event.EventConfig").
-		Where("invitation_id = ?", invitationID).
-		First(&guest).Error
-
+// GetInvitationByIDLite loads only the base Invitation record without preloads.
+// Use this when you only need scalar fields (e.g. MaxGuests in ConfirmRSVP).
+func GetInvitationByIDLite(id uuid.UUID) (*models.Invitation, error) {
+	var model models.Invitation
+	err := configuration.DB.Where("id = ?", id).First(&model).Error
 	if err != nil {
 		return nil, err
 	}
-	return &guest, nil
+	return &model, nil
 }
 
 func GetInvitationByID(id uuid.UUID) (*models.Invitation, error) {
@@ -74,3 +69,19 @@ func ListInvitations() ([]models.Invitation, error) {
 		Find(&list).Error
 	return list, err
 }
+
+// InvitationRepo implements ports.InvitationRepository.
+type InvitationRepo struct{}
+
+func NewInvitationRepo() *InvitationRepo { return &InvitationRepo{} }
+
+func (r *InvitationRepo) CreateInvitation(m *models.Invitation) error  { return CreateInvitation(m) }
+func (r *InvitationRepo) UpdateInvitation(m *models.Invitation) error  { return UpdateInvitation(m) }
+func (r *InvitationRepo) DeleteInvitation(id uuid.UUID) error           { return DeleteInvitation(id) }
+func (r *InvitationRepo) GetInvitationByID(id uuid.UUID) (*models.Invitation, error) {
+	return GetInvitationByID(id)
+}
+func (r *InvitationRepo) GetInvitationByIDLite(id uuid.UUID) (*models.Invitation, error) {
+	return GetInvitationByIDLite(id)
+}
+func (r *InvitationRepo) ListInvitations() ([]models.Invitation, error) { return ListInvitations() }

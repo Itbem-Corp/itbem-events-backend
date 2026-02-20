@@ -8,7 +8,7 @@ import (
 
 type Font struct {
 	ID         uuid.UUID `gorm:"type:uuid;default:uuid_generate_v4();primaryKey"`
-	ResourceID uuid.UUID
+	ResourceID uuid.UUID `gorm:"type:uuid;index"`
 	Resource   Resource
 	Name       string // Ej: "Playfair Display"
 	IsSerif    bool   // Para clasificarlas (útil en UI)

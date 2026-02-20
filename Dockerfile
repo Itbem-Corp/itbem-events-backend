@@ -34,5 +34,12 @@ COPY bin/sh/entrypoint.sh ./
 
 RUN chmod +x /app/entrypoint.sh
 
-# USER 1000  # Coméntalo si el usuario no existe
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD curl -sf http://localhost:8080/health || exit 1
+
+RUN useradd -u 1000 -m appuser
+USER appuser
+
 ENTRYPOINT ["/bin/sh", "/app/entrypoint.sh"]

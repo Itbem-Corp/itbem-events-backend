@@ -187,11 +187,8 @@ func GetResourcesBySectionID(sectionID *uuid.UUID, uploadPath string, bucket str
 		parts := strings.Split(r.Path, "/")
 		filename := parts[len(parts)-1]
 
-		exists, _, err := bucketrepository.FileExists(filename, uploadPath, bucket, provider)
-		if err != nil || !exists {
-			continue
-		}
-
+		// Path no vacío indica que el archivo fue subido correctamente.
+		// Omitimos FileExists (S3 HeadObject) para evitar N+1 API calls.
 		viewURL, err := bucketrepository.GetPresignedFileURL(filename, uploadPath, bucket, provider, 720)
 		if err != nil {
 			continue

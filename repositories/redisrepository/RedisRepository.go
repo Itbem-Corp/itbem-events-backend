@@ -54,3 +54,24 @@ func InvalidateByPattern(pattern string) error {
 	ctx := context.Background()
 	return DeleteKeysByPattern(ctx, pattern)
 }
+
+// RedisRepo implements ports.CacheRepository using the global Redis client.
+type RedisRepo struct{}
+
+func NewRedisRepo() *RedisRepo { return &RedisRepo{} }
+
+func (r *RedisRepo) Invalidate(resource string, key string) error {
+	return Invalidate(resource, key)
+}
+
+func (r *RedisRepo) DeleteKeysByPattern(ctx context.Context, pattern string) error {
+	return DeleteKeysByPattern(ctx, pattern)
+}
+
+func (r *RedisRepo) GetKey(ctx context.Context, key string) (string, error) {
+	return GetKey(ctx, key)
+}
+
+func (r *RedisRepo) SaveKey(ctx context.Context, key string, value string, ttl time.Duration) error {
+	return SaveKey(ctx, key, value, ttl)
+}

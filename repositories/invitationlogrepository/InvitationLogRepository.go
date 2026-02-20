@@ -33,3 +33,15 @@ func ListInvitationLogs() ([]models.InvitationLog, error) {
 	err := gormrepository.GetList(&list, gormrepository.QueryOptions{})
 	return list, err
 }
+
+// InvitationLogRepo implements ports.InvitationLogRepository.
+type InvitationLogRepo struct{}
+
+func NewInvitationLogRepo() *InvitationLogRepo { return &InvitationLogRepo{} }
+
+func (r *InvitationLogRepo) CreateInvitationLog(m *models.InvitationLog) error {
+	return CreateInvitationLog(m)
+}
+func (r *InvitationLogRepo) CreateManyInvitationLogs(logs []models.InvitationLog) error {
+	return CreateManyInvitationLogs(logs)
+}

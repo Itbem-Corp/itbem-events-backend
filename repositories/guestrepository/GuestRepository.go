@@ -156,3 +156,30 @@ func CreateGuests(models []models.Guest) error {
 	}
 	return nil
 }
+
+// ListAttendeesByEventID returns guests for an event ordered by display order.
+// Only public-safe fields are returned (first_name, last_name, nickname, role, order).
+func ListAttendeesByEventID(eventID uuid.UUID) ([]models.Guest, error) {
+	var list []models.Guest
+	err := configuration.DB.
+		Select("first_name", "last_name", "nickname", "role", "\"order\"").
+		Where("event_id = ? AND deleted_at IS NULL", eventID).
+		Order("\"order\" ASC").
+		Find(&list).Error
+	return list, err
+}
+
+// GuestRepo implements ports.GuestRepository for DI.
+type GuestRepo struct{}
+
+func NewGuestRepo() *GuestRepo { return &GuestRepo{} }
+
+func (r *GuestRepo) CreateGuest(m *models.Guest) error            { return CreateGuest(m) }
+func (r *GuestRepo) UpdateGuest(m *models.Guest) error            { return UpdateGuest(m) }
+func (r *GuestRepo) DeleteGuest(id uuid.UUID) error               { return DeleteGuest(id) }
+func (r *GuestRepo) GetGuestByID(id uuid.UUID) (*models.Guest, error) { return GetGuestByID(id) }
+func (r *GuestRepo) GetGuestByInvitationID(id uuid.UUID) (*models.Guest, error) {
+	return GetGuestByInvitationID(id)
+}
+func (r *GuestRepo) CreateGuests(guests []models.Guest) error { return CreateGuests(guests) }
+func (r *GuestRepo) GetPendingStatusID() uuid.UUID            { return GetPendingStatusID() }

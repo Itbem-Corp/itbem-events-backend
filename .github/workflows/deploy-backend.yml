@@ -13,13 +13,36 @@ on:
         default: 'main'
 
 jobs:
+  validate:
+    name: Build & test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch || github.ref_name }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.3'
+          cache: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test ./... -timeout 60s
+
   deploy:
+    name: Deploy to EC2
+    needs: validate
     runs-on: ubuntu-latest
     environment: production
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.branch || github.ref_name }}
 
@@ -60,6 +83,7 @@ jobs:
               -e COGNITO_USER_POOL_ID='${{ secrets.BACKEND_COGNITO_USER_POOL_ID }}' \
               -e COGNITO_CLIENT_ID='${{ secrets.BACKEND_COGNITO_CLIENT_ID }}' \
               -e COGNITO_CLIENT_SECRET='${{ secrets.BACKEND_COGNITO_CLIENT_SECRET }}' \
+              -e COGNITO_AWS_REGION='${{ secrets.BACKEND_COGNITO_AWS_REGION }}' \
               -e AWS_BUCKET_NAME='${{ secrets.AWS_BUCKET_NAME }}' \
               -e S3_CLIENT_ID='${{ secrets.S3_CLIENT_ID }}' \
               -e S3_CLIENT_SECRET='${{ secrets.S3_CLIENT_SECRET }}' \

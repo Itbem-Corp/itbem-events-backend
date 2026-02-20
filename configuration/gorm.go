@@ -4,7 +4,9 @@ import (
 	"events-stocks/models"
 	"events-stocks/seeds"
 	"fmt"
-	"log"
+	"log/slog"
+	"os"
+	"time"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -37,6 +39,9 @@ var modelsWithoutSeed = []interface{}{
 	&models.InvitationLog{},
 	&models.InvitationAccessToken{},
 	&models.EventAnalytics{},
+	&models.User{},
+	&models.EventMember{},
+	&models.ClientMember{},
 }
 
 var modelSeedList = []ModelSeed{
@@ -44,6 +49,9 @@ var modelSeedList = []ModelSeed{
 	{Model: &models.MomentType{}, SeedFunc: seeds.SeedMomentType},
 	{Model: &models.GuestStatus{}, SeedFunc: seeds.SeedGuestStatus},
 	{Model: &models.ResourceType{}, SeedFunc: seeds.SeedResourceTypes},
+	{Model: &models.ClientType{}, SeedFunc: seeds.SeedClientTypes},
+	{Model: &models.ClientRole{}, SeedFunc: seeds.SeedClientRoles},
+	{Model: &models.Client{}, SeedFunc: seeds.SeedClientEventiAppSeed},
 }
 
 // InicializarPostgreSQL inicializa la conexión con PostgreSQL usando GORM
@@ -64,19 +72,26 @@ func InicializarPostgreSQL(cfg *models.Config) {
 		Logger: logger.Default.LogMode(logger.Info),
 	})
 	if err != nil {
-		log.Fatalf("Error al conectar con PostgreSQL (gorm.Open): %v", err)
+		slog.Error("postgresql open failed", "error", err)
+		os.Exit(1)
 	}
 
 	sqlDB, err := DB.DB()
 	if err != nil {
-		log.Fatalf("Error al obtener instancia *sql.DB desde GORM: %v", err)
+		slog.Error("postgresql sql.DB failed", "error", err)
+		os.Exit(1)
 	}
 
 	if err := sqlDB.Ping(); err != nil {
-		log.Fatalf("Error al hacer ping a PostgreSQL: %v", err)
+		slog.Error("postgresql ping failed", "error", err)
+		os.Exit(1)
 	}
 
-	log.Println("Conectado a PostgreSQL con GORM")
+	sqlDB.SetMaxOpenConns(50)
+	sqlDB.SetMaxIdleConns(15)
+	sqlDB.SetConnMaxLifetime(5 * time.Minute)
+
+	slog.Info("postgresql connected")
 }
 
 func GetAllModels() []interface{} {
@@ -92,9 +107,10 @@ func GetAllModels() []interface{} {
 
 func MigrarModelos() {
 	if err := DB.AutoMigrate(GetAllModels()...); err != nil {
-		log.Fatalf("Error al migrar modelos: %v", err)
+		slog.Error("model migration failed", "error", err)
+		os.Exit(1)
 	}
-	log.Println("Migración completada")
+	slog.Info("models migrated")
 }
 
 func SeedBaseData() {
@@ -103,6 +119,8 @@ func SeedBaseData() {
 			item.SeedFunc(DB)
 		}
 	}
+	// SDUI: always run — idempotent, only updates sections with empty component_type
+	seeds.SeedEventSectionSDUI(DB)
 }
 
 func isModelEmpty(db *gorm.DB, model interface{}) bool {

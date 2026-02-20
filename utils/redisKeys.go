@@ -12,10 +12,10 @@ const RedisFontsKey = "fonts"
 const RedisFontSetKey = "fontsets"
 const RedisResourceTypeKey = "resourcetypes"
 const RedisResourcesKey = "resources"
-const RedisGuestsKey = "Guests"
-const RedisGuestStatussKey = "GuestStatus"
-const RedisInvitationsKey = "Invitations"
-const RedisInvitationTokensKey = "InvitationTokens"
+const RedisGuestsKey = "guests"
+const RedisGuestStatussKey = "gueststatus"
+const RedisInvitationsKey = "invitations"
+const RedisInvitationTokensKey = "invitationtokens"
 
 var CacheTTLs = map[string]time.Duration{
 	RedisServiceEventsKey:    constants.ShortTimeTTL,

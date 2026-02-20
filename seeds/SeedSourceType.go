@@ -1,7 +1,7 @@
 package seeds
 
 import (
-	"log"
+	"log/slog"
 	"time"
 
 	"events-stocks/models"
@@ -32,7 +32,7 @@ func SeedResourceTypes(db *gorm.DB) {
 				UpdatedAt: time.Now(),
 			}
 			if err := db.Create(&entry).Error; err != nil {
-				log.Printf("Error seeding ResourceType '%s': %v", item.Code, err)
+				slog.Error("error seeding resource type", "code", item.Code, "error", err)
 			}
 		}
 	}

@@ -9,9 +9,9 @@ import (
 type Moment struct {
 	ID           uuid.UUID  `gorm:"type:uuid;default:uuid_generate_v4();primaryKey"`
 	InvitationID uuid.UUID  `gorm:"type:uuid;index"`
-	Invitation   Invitation `gorm:"foreignKey:InvitationID"`
+	Invitation   Invitation `gorm:"foreignKey:InvitationID" validate:"-"`
 	MomentTypeID uuid.UUID  `gorm:"type:uuid;index"`
-	MomentType   MomentType `gorm:"foreignKey:MomentTypeID"`
+	MomentType   MomentType `gorm:"foreignKey:MomentTypeID" validate:"-"`
 	GuestID      *uuid.UUID
 	Guest        *Guest `gorm:"foreignKey:GuestID"`
 	Title        string

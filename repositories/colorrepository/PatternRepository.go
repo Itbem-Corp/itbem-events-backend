@@ -26,6 +26,15 @@ func DeletePattern(id uuid.UUID) error {
 	return gormrepository.Delete(id, &models.ColorPalettePattern{})
 }
 
+func ListAllPatterns() ([]models.ColorPalettePattern, error) {
+	var patterns []models.ColorPalettePattern
+	err := gormrepository.GetList(&patterns, gormrepository.QueryOptions{
+		Preload: []string{"Color"},
+		OrderBy: "order",
+	})
+	return patterns, err
+}
+
 func ListPatternsByPalette(paletteID uuid.UUID) ([]models.ColorPalettePattern, error) {
 	var patterns []models.ColorPalettePattern
 	err := gormrepository.GetList(&patterns, gormrepository.QueryOptions{

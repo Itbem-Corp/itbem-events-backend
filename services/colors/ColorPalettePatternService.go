@@ -22,7 +22,7 @@ func ListColorPalettePatterns() ([]models.ColorPalettePattern, error) {
 		}
 	}
 
-	data, err := colorrepository.ListPatternsByPalette()
+	data, err := colorrepository.ListAllPatterns()
 	if err != nil {
 		return nil, err
 	}

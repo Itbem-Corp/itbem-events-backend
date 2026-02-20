@@ -25,7 +25,6 @@ func RetrieveCache(next echo.HandlerFunc) echo.HandlerFunc {
 			}
 		}
 
-		// Si hay subkey, lo concatenamos
 		cacheKey := key
 		if subkey != "" {
 			cacheKey = key + ":" + subkey

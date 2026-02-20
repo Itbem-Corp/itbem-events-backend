@@ -9,13 +9,13 @@ import (
 type Guest struct {
 	ID              uuid.UUID      `gorm:"type:uuid;default:uuid_generate_v4();primaryKey" json:"id"`
 	EventID         uuid.UUID      `gorm:"type:uuid;index" json:"event_id"`
-	Event           Event          `gorm:"foreignKey:EventID" json:"-"`
+	Event           Event          `gorm:"foreignKey:EventID" json:"-" validate:"-"`
 	InvitationID    *uuid.UUID     `gorm:"type:uuid;index" json:"invitation_id,omitempty"`
 	Invitation      *Invitation    `gorm:"foreignKey:InvitationID" json:"-"`
-	FirstName       string         `json:"first_name"`
+	FirstName       string         `json:"first_name" validate:"required"`
 	LastName        string         `json:"last_name"`
 	Nickname        string         `json:"nickname"`
-	Email           string         `json:"email"`
+	Email           string         `json:"email" validate:"omitempty,email"`
 	Phone           string         `json:"phone"`
 	ShowContactInfo bool           `json:"show_contact_info"`
 	Role            string         `json:"role"` // Ej: "Graduado", "Novia"
@@ -27,8 +27,8 @@ type Guest struct {
 	Image3URL       string         `json:"image3_url"`
 	Headline        string         `json:"headline"`  // Encabezado personalizado
 	Signature       string         `json:"signature"` // Firma visual o textual
-	GuestStatusID   uuid.UUID      `gorm:"type:uuid" json:"guest_status_id"`
-	GuestStatus     GuestStatus    `gorm:"foreignKey:GuestStatusID" json:"-"`
+	GuestStatusID   uuid.UUID      `gorm:"type:uuid;index" json:"guest_status_id"`
+	GuestStatus     GuestStatus    `gorm:"foreignKey:GuestStatusID" json:"-" validate:"-"`
 	IsHost          bool           `json:"is_host"`
 	MaxGuests       int            `gorm:"-" json:"max_guests,omitempty"`
 	CreatedAt       time.Time      `json:"created_at"`

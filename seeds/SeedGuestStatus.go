@@ -1,7 +1,7 @@
 package seeds
 
 import (
-	"log"
+	"log/slog"
 	"time"
 
 	"events-stocks/models"
@@ -34,7 +34,7 @@ func SeedGuestStatus(db *gorm.DB) {
 				UpdatedAt: time.Now(),
 			}
 			if err := db.Create(&entry).Error; err != nil {
-				log.Printf("Error seeding GuestStatus '%s': %v", s.Code, err)
+				slog.Error("error seeding guest status", "code", s.Code, "error", err)
 			}
 		}
 	}

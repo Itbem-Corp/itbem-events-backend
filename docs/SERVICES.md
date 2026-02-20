@@ -1,0 +1,151 @@
+# Services Index
+
+> Update this file whenever you add, modify, or remove services.
+> For code patterns, see `docs/TEMPLATES.md`.
+
+## Service Layer Purpose
+
+- Business logic and orchestration
+- Coordinate between repositories
+- Cache invalidation after mutations
+- Input validation (business rules)
+
+## Available Services
+
+### Events Domain (`services/events/`)
+
+| File | Purpose |
+|------|---------|
+| `EventService.go` | CRUD + business rules for events |
+| `EventTypeService.go` | Catalog CRUD for event types |
+| `EventConfigService.go` | Per-event configuration management |
+| `EventSectionService.go` | Event section ordering and management |
+| `EventAnalyticsService.go` | Analytics tracking and aggregation |
+
+### Guests Domain (`services/guests/`)
+
+| File | Purpose |
+|------|---------|
+| `GuestService.go` | CRUD + bulk operations for guests |
+| `GuestStatusService.go` | Catalog CRUD for guest statuses |
+
+### Invitations Domain (`services/invitations/`)
+
+| File | Purpose |
+|------|---------|
+| `InvitationService.go` | Send/track invitations, RSVP logic |
+| `InvitationLogService.go` | Log status change events |
+| `InvitationAccessTokenService.go` | Generate/validate public access tokens |
+
+### Clients Domain (`services/clients/`)
+
+| File | Purpose |
+|------|---------|
+| `clientService.go` | Multi-tenant client CRUD, hierarchy |
+
+### Client Roles/Types (`services/clientroles/`, `services/clienttypes/`)
+
+| File | Purpose |
+|------|---------|
+| `clientRoleService.go` | Role catalog lookup |
+| `clientTypeService.go` | Client type catalog lookup |
+
+### Users Domain (`services/users/`)
+
+| File | Purpose |
+|------|---------|
+| `UserService.go` | User profile, Cognito sync, avatar |
+| `AdminUserService.go` | Admin user management (list, activate, deactivate) |
+
+### Resources Domain (`services/resources/`)
+
+| File | Purpose |
+|------|---------|
+| `Resources.go` | Core resource CRUD + S3 upload |
+| `ResourceTypes.go` | Resource type catalog |
+| `ImageOptimizer.go` | libvips image compression pipeline |
+| `ResourcesUsers.go` | User-specific resource operations (avatar) |
+| `ResourcesClients.go` | Client-specific resource operations (logo) |
+
+### Design/Themes Domain
+
+| File | Purpose |
+|------|---------|
+| `services/templates/DesignTemplateService.go` | Design template CRUD |
+| `services/moments/MomentService.go` | Event moment CRUD |
+| `services/moments/MomentTypeService.go` | Moment type catalog |
+
+### Colors Domain (`services/colors/`)
+
+| File | Purpose |
+|------|---------|
+| `ColorService.go` | Color CRUD |
+| `ColorPaletteService.go` | Palette CRUD |
+| `ColorPalettePatternService.go` | Palette-color assignment |
+
+### Fonts Domain (`services/fonts/`)
+
+| File | Purpose |
+|------|---------|
+| `FontService.go` | Font CRUD |
+| `FontSetService.go` | Font set CRUD |
+| `FontSetPatternService.go` | FontSet-font assignment |
+
+### Cross-Cutting
+
+| File | Purpose |
+|------|---------|
+| `services/validations/Validations.go` | Shared validation helpers |
+
+## Cache Pattern (All Mutation Services)
+
+```go
+// After CREATE / UPDATE / DELETE:
+return redisrepository.Invalidate("resourceType", "all")
+```
+
+### Per-User Cache (`ClientService.GetMyClients`)
+
+`GetMyClients` uses a per-user Redis key instead of a global key:
+- Key: `{userID}:myclients`
+- TTL: `constants.ShortTimeTTL` (1 hour)
+- Invalidated on: `CreateClient`, `AddUserToClient`, `RemoveClientMember`, `UpdateClientDetails`
+- Pattern-deleted (`*:myclients`) on: `DeleteClient` (affects all users)
+
+```go
+func (s *ClientService) invalidateMyClients(userID uuid.UUID) {
+    _ = s.cache.Invalidate("myclients", userID.String())
+}
+func (s *ClientService) invalidateAllMyClients() {
+    _ = s.cache.DeleteKeysByPattern(ctx, "*:myclients")
+}
+```
+
+## Injectable Struct Pattern (All Services)
+
+Every service has an injectable struct with a constructor. The structs are used in production via `server.go` and in tests via mock injection.
+
+> **Singleton delegation pattern**: Every service package exposes `var _svc *XxxService` + `SetDefaultXxx(svc *XxxService)`. The package-level functions (`CreateEvent()`, `DeleteMoment()`, etc.) delegate to this singleton. `server.go` calls all `SetDefaultXxx` functions immediately after the controller `Init` calls. This makes cross-domain calls like `users.SyncUser()` from the clients controller use the fully-injected DI instance instead of raw repo packages.
+
+| Service | Constructor | Interface Dependencies |
+|---------|-------------|----------------------|
+| `EventService` | `NewEventService(repo, cache)` | `ports.EventsRepository`, `ports.CacheRepository` |
+| `EventConfigService` | `NewEventConfigService(repo, cache)` | `ports.EventConfigRepository`, `ports.CacheRepository` |
+| `EventSectionService` | `NewEventSectionService(repo, cache)` | `ports.EventSectionRepository`, `ports.CacheRepository` |
+| `GuestService` | `NewGuestService(repo, tokenRepo, cache, tx)` | `ports.GuestRepository`, `ports.AccessTokenRepository`, `ports.CacheRepository`, `ports.Transactor` |
+| `InvitationService` | `NewInvitationService(repo, guestRepo, tokenRepo, logRepo, cache)` | 5 interfaces |
+| `MomentService` | `NewMomentService(repo, cache)` | `ports.MomentRepository`, `ports.CacheRepository` |
+| `UserService` | `NewUserService(userRepo, authRepo, cfg)` | `ports.UserRepository`, `ports.AuthProviderRepository`, `*models.Config` |
+| `AdminUserService` | `NewAdminUserService(userRepo, clientRepo, authRepo)` | `ports.UserRepository`, `ports.ClientRepository`, `ports.AuthProviderRepository` |
+
+> **`AdminUserService.ListAllUsers(page, pageSize int)`** — accepts pagination params. Returns a `PaginatedResult` struct with `data`, `total`, `page`, `page_size`, `total_pages`. Page defaults to 1, page_size defaults to 50, max 200. Paginates in-memory after fetching all users from the repo.|
+| `ClientService` | `NewClientService(clientRepo, roleRepo, typeRepo, rs, cache, tx)` | `ports.ClientRepository`, `ports.ClientRoleRepository`, `ports.ClientTypeRepository`, `*ResourceService`, `ports.CacheRepository`, `ports.Transactor` |
+
+All interfaces are defined in `services/ports/ports.go`.
+
+## File Location Pattern
+
+```
+services/<domain>/<Domain>Service.go
+services/ports/ports.go    ← all repository interfaces
+```

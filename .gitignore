@@ -1,1 +1,7 @@
 .env
+
+# Claude Code — personal settings (no subir al repo)
+.claude/settings.local.json
+
+# Windows NTFS alternate data streams
+*.Zone.Identifier

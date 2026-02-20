@@ -1,7 +1,7 @@
 package seeds
 
 import (
-	"log"
+	"log/slog"
 	"time"
 
 	"events-stocks/models"
@@ -22,7 +22,7 @@ func SeedEventType(db *gorm.DB) {
 				UpdatedAt: time.Now(),
 			}
 			if err := db.Create(&entry).Error; err != nil {
-				log.Printf("Error seeding EventType '%s': %v", name, err)
+				slog.Error("error seeding event type", "name", name, "error", err)
 			}
 		}
 	}

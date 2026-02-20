@@ -1,19 +1,20 @@
 package fonts
 
 import (
-	"events-stocks/configuration"
-	"events-stocks/services/fonts"
+	"events-stocks/models"
+	fontsSvc "events-stocks/services/fonts"
 	services "events-stocks/services/resources"
 	"events-stocks/utils"
 	"github.com/labstack/echo/v4"
 	"net/http"
 )
 
-var (
-	cfg      = configuration.LoadConfig()
-	resource = services.NewResourceService(cfg)
-	fontSvc  = fonts.NewFontService(resource)
-)
+var fontSvc *fontsSvc.FontService
+
+func InitFontsController(cfg *models.Config) {
+	resource := services.NewResourceService(cfg)
+	fontSvc = fontsSvc.NewFontService(resource)
+}
 
 func UploadFonts(c echo.Context) error {
 	form, err := c.MultipartForm()

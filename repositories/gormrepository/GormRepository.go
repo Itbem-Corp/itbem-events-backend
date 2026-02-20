@@ -98,6 +98,19 @@ func UpdateFields[T any](model *T, fields map[string]interface{}) error {
 	return configuration.DB.Model(model).Updates(fields).Error
 }
 
+func UpdateFieldsByID[T any](id interface{}, fields map[string]interface{}, model *T) error {
+	result := configuration.DB.
+		Model(model).
+		Where("id = ?", id).
+		Updates(fields)
+
+	if result.RowsAffected == 0 {
+		return errors.New("record not found")
+	}
+
+	return result.Error
+}
+
 func UpdateMany[T any](models []T, fields []string) error {
 	tx := configuration.DB
 	for _, m := range models {
@@ -161,4 +174,13 @@ func Exists[T any](model *T, field string, value interface{}) (bool, error) {
 		return false, err
 	}
 	return count > 0, nil
+}
+
+// GormTransactor implements ports.Transactor using the global GORM DB.
+type GormTransactor struct{}
+
+func NewGormTransactor() *GormTransactor { return &GormTransactor{} }
+
+func (t *GormTransactor) Transaction(fn func(tx *gorm.DB) error) error {
+	return configuration.DB.Transaction(fn)
 }

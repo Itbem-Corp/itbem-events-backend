@@ -1,13 +1,11 @@
 package colors
 
 import (
-	"context"
 	"encoding/json"
 	"events-stocks/models"
 	"events-stocks/repositories/cacheloaderrepository"
 	"events-stocks/repositories/colorrepository"
 	"events-stocks/repositories/redisrepository"
-	"events-stocks/repositories/resourcerepository"
 	"events-stocks/utils"
 	"fmt"
 	"github.com/gofrs/uuid"

@@ -1,8 +1,12 @@
 package models
 
 type Config struct {
+	// Server
+	Port string `required:"false"`
+
 	// AWS
 	AwsRegion           string `required:"true"`
+	CognitoAwsRegion    string `required:"true"`
 	CognitoUserPoolId   string `required:"true"`
 	CognitoClientId     string `required:"true"`
 	CognitoClientSecret string `required:"true"`
@@ -27,4 +31,7 @@ type Config struct {
 	// Google OAuth
 	GoogleClientId     string `required:"true"`
 	GoogleClientSecret string `required:"true"`
+
+	// CORS — comma-separated extra origins (e.g. local dev: http://localhost:4321,http://localhost:3000)
+	CorsAllowOrigins string `required:"false"`
 }

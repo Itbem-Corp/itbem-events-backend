@@ -12,10 +12,10 @@ type DesignTemplate struct {
 	Identifier        string `gorm:"uniqueIndex"` // Ej: "classic-elegant", "dark-romantic"
 	Description       string
 	PreviewURL        string
-	ColorPaletteID    uuid.UUID
+	ColorPaletteID    uuid.UUID    `gorm:"type:uuid;index"`
 	ColorPalette      ColorPalette `gorm:"foreignKey:ColorPaletteID"`
-	FontSetID         uuid.UUID
-	FontSet           FontSet `gorm:"foreignKey:FontSetID"`
+	FontSetID         uuid.UUID    `gorm:"type:uuid;index"`
+	FontSet           FontSet      `gorm:"foreignKey:FontSetID"`
 	AnimationsEnabled bool
 	HasDarkMode       bool
 	Category          string // Ej: "romantic", "minimal", "luxury"

@@ -538,3 +538,60 @@ func updateFilenameExtension(filename, newContentType string) string {
 
 	return filename + ext
 }
+
+func GetPresignedURL(path string, bucket string, provider string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+
+	parts := strings.Split(path, "/")
+	if len(parts) < 2 {
+		return "", fmt.Errorf("invalid path format: %s", path)
+	}
+
+	filename := parts[len(parts)-1]
+	folder := strings.Join(parts[:len(parts)-1], "/")
+
+	return bucketrepository.GetPresignedFileURL(filename, folder, bucket, provider, 720)
+}
+
+// DeleteObjectByPath elimina cualquier archivo del bucket basándose en su path completo.
+// Útil para limpiar logos, archivos de recursos, o cualquier otro objeto.
+// DeleteObjectByPath elimina cualquier archivo del bucket basándose en su path completo.
+func (rs *ResourceService) DeleteObjectByPath(fullPath string) error {
+	if fullPath == "" {
+		return nil
+	}
+
+	// El path viene como "clients/UUID/logo/nombre.webp"
+	// Lo descomponemos para el bucketrepository
+	parts := strings.Split(fullPath, "/")
+	if len(parts) < 1 {
+		return fmt.Errorf("invalid path for deletion: %s", fullPath)
+	}
+
+	filename := parts[len(parts)-1]
+
+	// Unimos el resto para obtener el folder
+	folder := ""
+	if len(parts) > 1 {
+		folder = strings.Join(parts[:len(parts)-1], "/")
+	}
+
+	// 1. Verificar existencia antes de borrar
+	exists, _, err := bucketrepository.FileExists(filename, folder, rs.Bucket, rs.Provider)
+	if err != nil {
+		return fmt.Errorf("error verifying file: %w", err)
+	}
+
+	if !exists {
+		return nil
+	}
+
+	// 2. Borrado físico en S3/Cloud
+	if err := bucketrepository.DeleteFile(filename, folder, rs.Bucket, rs.Provider); err != nil {
+		return fmt.Errorf("failed to remove object from bucket: %w", err)
+	}
+
+	return nil
+}

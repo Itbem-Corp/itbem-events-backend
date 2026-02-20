@@ -4,56 +4,81 @@ import (
 	"context"
 	"encoding/json"
 	"events-stocks/models"
-	"events-stocks/repositories/eventsrepository"
-	"events-stocks/repositories/redisrepository"
+	"events-stocks/services/ports"
 	"events-stocks/utils"
 	"github.com/gofrs/uuid"
 )
 
-func ListEvents() ([]models.Event, error) {
+// _eventSvc is the package-level singleton set by server.go.
+var _eventSvc *EventService
+
+// SetDefaultEventService wires the package-level functions to the DI instance.
+func SetDefaultEventService(svc *EventService) { _eventSvc = svc }
+
+func ListEvents() ([]models.Event, error)              { return _eventSvc.ListEvents() }
+func GetEventByID(id uuid.UUID) (*models.Event, error) { return _eventSvc.GetEventByID(id) }
+func CreateEvent(obj *models.Event) error              { return _eventSvc.CreateEvent(obj) }
+func UpdateEvent(obj *models.Event) error              { return _eventSvc.UpdateEvent(obj) }
+func DeleteEvent(id uuid.UUID) error                   { return _eventSvc.DeleteEvent(id) }
+
+// EventService is the injectable, struct-based events service.
+type EventService struct {
+	repo  ports.EventsRepository
+	cache ports.CacheRepository
+}
+
+func NewEventService(repo ports.EventsRepository, cache ports.CacheRepository) *EventService {
+	return &EventService{repo: repo, cache: cache}
+}
+
+func (s *EventService) ListEvents() ([]models.Event, error) {
 	cacheKey := "all:events"
 	ctx := context.Background()
-
-	cached, err := redisrepository.GetKey(ctx, cacheKey)
+	cached, err := s.cache.GetKey(ctx, cacheKey)
 	if err == nil && cached != "" {
 		var result []models.Event
 		if err := json.Unmarshal([]byte(cached), &result); err == nil {
 			return result, nil
 		}
 	}
-
-	data, err := eventsrepository.ListEvents(1, 0, "")
+	data, err := s.repo.ListEvents(1, 0, "")
 	if err != nil {
 		return nil, err
 	}
-
 	jsonStr, _ := json.Marshal(data)
-	_ = redisrepository.SaveKey(ctx, cacheKey, string(jsonStr), utils.CacheTTLs["events"])
-
+	_ = s.cache.SaveKey(ctx, cacheKey, string(jsonStr), utils.CacheTTLs["events"])
 	return data, nil
 }
 
-func GetEventByID(id uuid.UUID) (*models.Event, error) {
-	return eventsrepository.GetEventByID(id)
+func (s *EventService) GetEventByID(id uuid.UUID) (*models.Event, error) {
+	jsonStr, err := s.repo.GetEventByID(id)
+	if err != nil {
+		return nil, err
+	}
+	var event models.Event
+	if err := json.Unmarshal([]byte(jsonStr), &event); err != nil {
+		return nil, err
+	}
+	return &event, nil
 }
 
-func CreateEvent(obj *models.Event) error {
-	if err := eventsrepository.CreateEvent(obj); err != nil {
+func (s *EventService) CreateEvent(obj *models.Event) error {
+	if err := s.repo.CreateEvent(obj); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("events", "all")
+	return s.cache.Invalidate("events", "all")
 }
 
-func UpdateEvent(obj *models.Event) error {
-	if err := eventsrepository.UpdateEvent(obj); err != nil {
+func (s *EventService) UpdateEvent(obj *models.Event) error {
+	if err := s.repo.UpdateEvent(obj); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("events", "all")
+	return s.cache.Invalidate("events", "all")
 }
 
-func DeleteEvent(id uuid.UUID) error {
-	if err := eventsrepository.DeleteEvent(id); err != nil {
+func (s *EventService) DeleteEvent(id uuid.UUID) error {
+	if err := s.repo.DeleteEvent(id); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("events", "all")
+	return s.cache.Invalidate("events", "all")
 }

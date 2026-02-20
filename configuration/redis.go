@@ -4,7 +4,8 @@ import (
 	"context"
 	"crypto/tls"
 	"events-stocks/models"
-	"log"
+	"log/slog"
+	"os"
 	"strconv"
 	"time"
 
@@ -34,8 +35,9 @@ func InicializarRedis(cfg *models.Config) {
 
 	_, err := RedisClient.Ping(ctx).Result()
 	if err != nil {
-		log.Fatalf("Error al conectar con Redis: %v", err)
+		slog.Error("redis connection failed", "error", err)
+		os.Exit(1)
 	}
 
-	log.Println("Conectado a Redis")
+	slog.Info("redis connected")
 }

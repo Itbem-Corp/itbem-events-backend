@@ -1,0 +1,26 @@
+linters:
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - ineffassign
+    - revive
+    - gosimple
+    - unused
+
+linters-settings:
+  revive:
+    rules:
+      - name: exported
+        disabled: true
+      - name: var-naming
+        disabled: false
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters: [errcheck]
+    - path: seeds/
+      linters: [revive]
+  max-issues-per-linter: 20
+  max-same-issues: 5

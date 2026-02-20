@@ -7,29 +7,30 @@ import (
 )
 
 type Event struct {
-	ID               uuid.UUID `gorm:"type:uuid;default:uuid_generate_v4();primaryKey"`
-	Name             string    `gorm:"uniqueIndex"`
-	Identifier       string    `gorm:"uniqueIndex"`
-	Description      string
-	CoverImageURL    string
-	CoverImageURL2   string
-	CustomDomain     string
-	Address          string
-	SecondAddress    string
-	EventDateTime    time.Time
-	Timezone         string
-	Language         string
-	EventTypeID      uuid.UUID
-	EventType        EventType   `gorm:"foreignKey:EventTypeID"`
-	EventConfig      EventConfig `gorm:"foreignKey:ID;references:ID"`
-	OrganizerName    string
-	OrganizerEmail   string
-	OrganizerPhone   string
-	MaxGuests        *int
-	AllowGuestAccess bool
-	SlugLocked       bool
-	IsActive         bool
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
-	DeletedAt        gorm.DeletedAt `gorm:"index"`
+	ID               uuid.UUID      `gorm:"type:uuid;default:uuid_generate_v4();primaryKey" json:"id"`
+	Name             string         `gorm:"uniqueIndex" json:"name" validate:"required"`
+	Identifier       string         `gorm:"uniqueIndex" json:"identifier" validate:"required"`
+	Description      string         `json:"description"`
+	CoverImageURL    string         `json:"cover_image_url"`
+	CoverImageURL2   string         `json:"cover_image_url2"`
+	CustomDomain     string         `json:"custom_domain"`
+	Address          string         `json:"address"`
+	SecondAddress    string         `json:"second_address"`
+	MusicUrl         string         `json:"music_url"`     // SDUI: URL del audio para MusicWidget (opcional)
+	EventDateTime    time.Time      `json:"event_date_time"`
+	Timezone         string         `json:"timezone"`
+	Language         string         `json:"language"`
+	EventTypeID      uuid.UUID      `gorm:"type:uuid;index" json:"event_type_id"`
+	EventType        EventType      `gorm:"foreignKey:EventTypeID" json:"event_type,omitempty" validate:"-"`
+	EventConfig      EventConfig    `gorm:"foreignKey:ID;references:ID" json:"event_config,omitempty" validate:"-"`
+	OrganizerName    string         `json:"organizer_name"`
+	OrganizerEmail   string         `json:"organizer_email" validate:"omitempty,email"`
+	OrganizerPhone   string         `json:"organizer_phone"`
+	MaxGuests        *int           `json:"max_guests"`
+	AllowGuestAccess bool           `json:"allow_guest_access"`
+	SlugLocked       bool           `json:"slug_locked"`
+	IsActive         bool           `json:"is_active"`
+	CreatedAt        time.Time      `json:"created_at"`
+	UpdatedAt        time.Time      `json:"updated_at"`
+	DeletedAt        gorm.DeletedAt `gorm:"index" json:"-"`
 }

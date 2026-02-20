@@ -76,3 +76,26 @@ func ListEvents(page int, pageSize int, name string) ([]models.Event, error) {
 	err := gormrepository.GetList(&events, opts)
 	return events, err
 }
+
+// EventsRepo implements ports.EventsRepository.
+type EventsRepo struct{}
+
+func NewEventsRepo() *EventsRepo { return &EventsRepo{} }
+
+func (r *EventsRepo) CreateEvent(event *models.Event) error           { return CreateEvent(event) }
+func (r *EventsRepo) UpdateEvent(event *models.Event) error           { return UpdateEvent(event) }
+func (r *EventsRepo) DeleteEvent(id uuid.UUID) error                  { return DeleteEvent(id) }
+func (r *EventsRepo) ListEvents(page, pageSize int, name string) ([]models.Event, error) {
+	return ListEvents(page, pageSize, name)
+}
+func (r *EventsRepo) GetEventByID(id uuid.UUID) (string, error) { return GetEventByID(id) }
+
+// GetEventByIDRaw returns a bare Event record by ID without any preloads.
+func GetEventByIDRaw(id uuid.UUID) (*models.Event, error) {
+	var event models.Event
+	err := gormrepository.GetByID(&event, id)
+	if err != nil {
+		return nil, err
+	}
+	return &event, nil
+}

@@ -3,7 +3,7 @@ package configuration
 import (
 	"context"
 	"github.com/joho/godotenv"
-	"log"
+	"log/slog"
 	"os"
 	"reflect"
 	"strings"
@@ -13,14 +13,12 @@ import (
 
 func LoadConfig() *models.Config {
 	wd, _ := os.Getwd()
-	log.Printf("Current working directory: %s", wd)
+	slog.Info("loading config", "cwd", wd)
 
 	if os.Getenv("ENV") == "" {
 		if err := godotenv.Load("./.env"); err != nil {
-			log.Println("No se pudo cargar el archivo .env o no existe")
+			slog.Warn(".env file not found or could not be loaded")
 		}
-	} else {
-
 	}
 
 	cfg := &models.Config{}
@@ -37,7 +35,8 @@ func LoadConfig() *models.Config {
 		}
 
 		if !exists && field.Tag.Get("required") == "true" {
-			log.Fatalf("Missing required environment variable: %s", envName)
+			slog.Error("missing required environment variable", "name", envName)
+			os.Exit(1)
 		}
 
 		v.Field(i).SetString(envValue)
@@ -48,14 +47,20 @@ func LoadConfig() *models.Config {
 
 // Convierte CamelCase -> UPPER_SNAKE_CASE (ej. CognitoClientID -> COGNITO_CLIENT_ID)
 func fieldToEnvVar(fieldName string) string {
-	var env string
-	for i, c := range fieldName {
-		if i > 0 && c >= 'A' && c <= 'Z' {
-			env += "_"
+	var env strings.Builder
+	for i, r := range fieldName {
+		// Si es mayúscula y no es el primer carácter
+		if i > 0 && r >= 'A' && r <= 'Z' {
+			// Solo añade "_" si el carácter anterior era minúscula
+			// Esto evita separar A_W_S
+			prev := fieldName[i-1]
+			if !(prev >= 'A' && prev <= 'Z') {
+				env.WriteRune('_')
+			}
 		}
-		env += string(c)
+		env.WriteRune(r)
 	}
-	return strings.ToUpper(env)
+	return strings.ToUpper(env.String())
 }
 
 // Context key
@@ -70,7 +75,8 @@ func WithConfig(ctx context.Context, cfg *models.Config) context.Context {
 func FromContext(ctx context.Context) *models.Config {
 	cfg, ok := ctx.Value(configKey).(*models.Config)
 	if !ok {
-		panic("Config not found in context")
+		slog.Warn("config not found in context")
+		return nil
 	}
 	return cfg
 }
