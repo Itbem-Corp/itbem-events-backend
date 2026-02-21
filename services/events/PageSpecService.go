@@ -48,16 +48,27 @@ func getPageSpec(deps pageSpecDeps, token string) (*dtos.PageSpec, error) {
 		return nil, fmt.Errorf("failed to load sections: %w", err)
 	}
 
-	// 5. Build meta
+	// 5. Build contact only if event has organizer data
+	var contact *dtos.PageSpecContact
+	if event.OrganizerName != "" || event.OrganizerPhone != "" || event.OrganizerEmail != "" {
+		contact = &dtos.PageSpecContact{
+			Name:  event.OrganizerName,
+			Phone: event.OrganizerPhone,
+			Email: event.OrganizerEmail,
+		}
+	}
+
+	// 6. Build meta
 	meta := dtos.PageSpecMeta{
 		PageTitle: event.Name,
+		Contact:   contact,
 	}
 	if event.MusicUrl != "" {
 		musicUrl := event.MusicUrl
 		meta.MusicUrl = &musicUrl
 	}
 
-	// 6. Build sections
+	// 7. Build sections
 	specSections := make([]dtos.PageSpecSection, 0, len(sections))
 	for _, s := range sections {
 		config := json.RawMessage(s.Config)
