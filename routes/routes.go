@@ -133,6 +133,7 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	// ── Event Config (1:1 con Event, mismo ID) ─
 	protected.GET("/events/:id/config", eventconfig.GetEventConfig)
 	protected.PUT("/events/:id/config", eventconfig.UpdateEventConfig)
+	protected.GET("/events/:id/analytics", events.GetEventAnalytics)
 
 	// ── Event Sections ────────────────────────
 	protected.GET("/events/:id/sections", eventsection.ListSectionsByEvent)
