@@ -85,3 +85,15 @@ func (r *InvitationRepo) GetInvitationByIDLite(id uuid.UUID) (*models.Invitation
 	return GetInvitationByIDLite(id)
 }
 func (r *InvitationRepo) ListInvitations() ([]models.Invitation, error) { return ListInvitations() }
+
+func ListInvitationsByEventID(eventID uuid.UUID) ([]models.Invitation, error) {
+	var list []models.Invitation
+	err := configuration.DB.
+		Where("invitations.event_id = ?", eventID).
+		Find(&list).Error
+	return list, err
+}
+
+func (r *InvitationRepo) ListByEventID(eventID uuid.UUID) ([]models.Invitation, error) {
+	return ListInvitationsByEventID(eventID)
+}

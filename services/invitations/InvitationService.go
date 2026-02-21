@@ -35,6 +35,9 @@ func ListInvitations() ([]models.Invitation, error)   { return _invitationSvc.Li
 func CreateInvitation(obj *models.Invitation) error   { return _invitationSvc.CreateInvitation(obj) }
 func UpdateInvitation(obj *models.Invitation) error   { return _invitationSvc.UpdateInvitation(obj) }
 func DeleteInvitation(id uuid.UUID) error             { return _invitationSvc.DeleteInvitation(id) }
+func ListInvitationsByEventID(eventID uuid.UUID) ([]models.Invitation, error) {
+	return _invitationSvc.ListInvitationsByEventID(eventID)
+}
 
 // InvitationService is the injectable, struct-based invitation service.
 type InvitationService struct {
@@ -177,4 +180,8 @@ func (s *InvitationService) DeleteInvitation(id uuid.UUID) error {
 		return err
 	}
 	return s.cache.Invalidate("invitations", "all")
+}
+
+func (s *InvitationService) ListInvitationsByEventID(eventID uuid.UUID) ([]models.Invitation, error) {
+	return s.repo.ListByEventID(eventID)
 }

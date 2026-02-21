@@ -68,6 +68,7 @@ type InvitationRepository interface {
 	GetInvitationByID(id uuid.UUID) (*models.Invitation, error)
 	GetInvitationByIDLite(id uuid.UUID) (*models.Invitation, error)
 	ListInvitations() ([]models.Invitation, error)
+	ListByEventID(eventID uuid.UUID) ([]models.Invitation, error)
 }
 
 // AccessTokenRepository is the data access contract for InvitationAccessToken records.
