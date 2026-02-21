@@ -251,6 +251,27 @@ func (rs *ResourceService) UploadAndCreateResource(
 	return resource, nil
 }
 
+
+// UploadToMomentsFolder uploads a guest moment photo to S3 and returns the storage path.
+// Does NOT create a Resource record — the path is stored in Moment.ContentURL.
+func (rs *ResourceService) UploadToMomentsFolder(
+	file multipart.File,
+	header *multipart.FileHeader,
+) (string, error) {
+	optimized, filename, contentType, err := rs.sanitizeAndOptimizeUpload(file, header, "")
+	if err != nil {
+		return "", err
+	}
+
+	momentsPath := "moments"
+	err = bucketrepository.UploadRawBytesSimple(optimized, filename, contentType, momentsPath, rs.Bucket, rs.Provider)
+	if err != nil {
+		return "", fmt.Errorf("failed to upload moment: %w", err)
+	}
+
+	return fmt.Sprintf("%s/%s", momentsPath, filename), nil
+}
+
 func (rs *ResourceService) UploadMultipleResources(
 	files []*multipart.FileHeader,
 	sectionID *uuid.UUID,
