@@ -88,6 +88,12 @@ func CreatePublicMoment(c echo.Context) error {
 		return utils.Error(c, http.StatusInternalServerError, "Error loading event", err.Error())
 	}
 
+	// Verify token belongs to this event (prevent cross-event injection)
+	var inv models.Invitation
+	if err := configuration.DB.Where("id = ? AND event_id = ?", token.InvitationID, event.ID).First(&inv).Error; err != nil {
+		return utils.Error(c, http.StatusUnauthorized, "Token does not belong to this event", "")
+	}
+
 	file, header, err := c.Request().FormFile("file")
 	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Missing file", err.Error())

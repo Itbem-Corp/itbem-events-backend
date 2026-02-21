@@ -11,7 +11,7 @@ type Moment struct {
 	EventID      *uuid.UUID `gorm:"type:uuid;index" json:"event_id,omitempty"`
 	InvitationID uuid.UUID  `gorm:"type:uuid;index"`
 	Invitation   Invitation `gorm:"foreignKey:InvitationID" validate:"-"`
-	MomentTypeID uuid.UUID  `gorm:"type:uuid;index"`
+	MomentTypeID *uuid.UUID `gorm:"type:uuid;index"`
 	MomentType   MomentType `gorm:"foreignKey:MomentTypeID" validate:"-"`
 	GuestID      *uuid.UUID
 	Guest        *Guest `gorm:"foreignKey:GuestID"`
