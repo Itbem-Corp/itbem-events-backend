@@ -63,6 +63,9 @@ func (m *mockInvitationRepo) ListInvitations() ([]models.Invitation, error) {
 	}
 	return nil, nil
 }
+func (m *mockInvitationRepo) ListByEventID(eventID uuid.UUID) ([]models.Invitation, error) {
+	return []models.Invitation{}, nil
+}
 
 // Verify mockInvitationRepo satisfies the interface at compile time.
 var _ ports.InvitationRepository = (*mockInvitationRepo)(nil)
