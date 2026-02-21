@@ -11,7 +11,7 @@ import (
 )
 
 func ListEventAnalyticss() ([]models.EventAnalytics, error) {
-	cacheKey := "all:events"
+	cacheKey := "all:event_analytics"
 	ctx := context.Background()
 
 	cached, err := redisrepository.GetKey(ctx, cacheKey)
@@ -41,19 +41,24 @@ func CreateEventAnalytics(obj *models.EventAnalytics) error {
 	if err := eventanalyticsrepository.CreateEventAnalytics(obj); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("events", "all")
+	return redisrepository.Invalidate("event_analytics", "all")
 }
 
 func UpdateEventAnalytics(obj *models.EventAnalytics) error {
 	if err := eventanalyticsrepository.UpdateEventAnalytics(obj); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("events", "all")
+	return redisrepository.Invalidate("event_analytics", "all")
 }
 
 func DeleteEventAnalytics(id uuid.UUID) error {
 	if err := eventanalyticsrepository.DeleteEventAnalytics(id); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("events", "all")
+	return redisrepository.Invalidate("event_analytics", "all")
+}
+
+// GetEventAnalyticsByEventID fetches the analytics record for a given event.
+func GetEventAnalyticsByEventID(eventID uuid.UUID) (*models.EventAnalytics, error) {
+	return eventanalyticsrepository.GetEventAnalyticsByEventID(eventID)
 }
