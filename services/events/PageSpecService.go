@@ -60,8 +60,10 @@ func getPageSpec(deps pageSpecDeps, token string) (*dtos.PageSpec, error) {
 
 	// 6. Build meta
 	meta := dtos.PageSpecMeta{
-		PageTitle: event.Name,
-		Contact:   contact,
+		PageTitle:  event.Name,
+		Contact:    contact,
+		EventID:    event.ID.String(),
+		Identifier: event.Identifier,
 	}
 	if event.MusicUrl != "" {
 		musicUrl := event.MusicUrl

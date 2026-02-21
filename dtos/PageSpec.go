@@ -12,9 +12,11 @@ type PageSpecContact struct {
 
 // PageSpecMeta holds event-level metadata for the SDUI page spec.
 type PageSpecMeta struct {
-	PageTitle string           `json:"pageTitle"`
-	MusicUrl  *string          `json:"musicUrl,omitempty"`
-	Contact   *PageSpecContact `json:"contact,omitempty"`
+	PageTitle  string           `json:"pageTitle"`
+	MusicUrl   *string          `json:"musicUrl,omitempty"`
+	Contact    *PageSpecContact `json:"contact,omitempty"`
+	EventID    string           `json:"eventId,omitempty"`
+	Identifier string           `json:"identifier,omitempty"`
 }
 
 // PageSpecSection describes one section of the page in SDUI format.
