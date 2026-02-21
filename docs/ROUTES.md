@@ -39,6 +39,7 @@
 - `POST /api/events` → `events.CreateEvent`
 - `PUT /api/events/:id` → `events.UpdateEvent`
 - `DELETE /api/events/:id` → `events.DeleteEvent`
+- `GET /api/events/:id/analytics` → `events.GetEventAnalytics` — GetEventAnalytics — returns EventAnalytics for the event
 
 ### Event Config (1:1 with Event, same ID)
 - `GET /api/events/:id/config` → `eventconfig.GetEventConfig`
