@@ -104,6 +104,12 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	public.GET("/events/section/:sectionId/attendees", guests.GetAttendees) // SDUI: Graduados por sección
 	public.GET("/events/:key", events.GetEvents)
 
+	// Public moments
+	public.GET("/events/:identifier/moments", moments.ListPublicMoments)
+	momentsUploadGroup := public.Group("/events/:identifier/moments")
+	momentsUploadGroup.Use(sensitiveRateLimiter())
+	momentsUploadGroup.POST("", moments.CreatePublicMoment)
+
 	// Resources
 	public.GET("/resources/:id", resources.GetResource)
 	public.GET("/resources/section/:key", resources.GetResourcesBySectionID)

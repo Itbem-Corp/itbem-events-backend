@@ -178,6 +178,7 @@ func main() {
 	guestsController.InitGuestsController(guestSvc)
 	invitationsController.InitInvitationsController(invitationSvc)
 	momentsController.InitMomentsController(momentSvc)
+	momentsController.InitPublicMomentsController(accessTokenRepo, resourceSvc)
 	usersController.InitUsersController(userSvc, adminSvc)
 	clientsController.InitClientsController(clientSvc)
 
