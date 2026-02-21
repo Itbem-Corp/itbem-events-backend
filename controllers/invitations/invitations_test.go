@@ -17,6 +17,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func newEchoCtx(method, path, body string) (echo.Context, *httptest.ResponseRecorder) {
@@ -313,5 +314,87 @@ func TestListByEvent_PopulatedResult_Returns200(t *testing.T) {
 	c.SetParamNames("id")
 	c.SetParamValues(eventID.String())
 	require.NoError(t, ListByEvent(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// ── ResendInvitation tests ─────────────────────────────────────────────────────
+
+func TestResendInvitation_InvalidUUID_Returns400(t *testing.T) {
+	orig := invitationSvc
+	invitationSvc = nil
+	defer func() { invitationSvc = orig }()
+
+	c, rec := newEchoCtx(http.MethodPost, "/invitations/not-a-uuid/resend", "")
+	c.SetParamNames("id")
+	c.SetParamValues("not-a-uuid")
+	require.NoError(t, ResendInvitation(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestResendInvitation_NotFound_Returns404(t *testing.T) {
+	repo := &mockInvRepo{
+		GetInvitationByIDLiteFunc: func(id uuid.UUID) (*models.Invitation, error) {
+			return nil, gorm.ErrRecordNotFound
+		},
+	}
+	svc := invitationsService.NewInvitationService(
+		repo, &mockGuestRepo{}, &mockTokenRepo{}, &mockLogRepo{}, &mockCacheRepo{},
+	)
+	orig := invitationSvc
+	invitationSvc = svc
+	defer func() { invitationSvc = orig }()
+
+	invID := uuid.Must(uuid.NewV4())
+	c, rec := newEchoCtx(http.MethodPost, "/invitations/"+invID.String()+"/resend", "")
+	c.SetParamNames("id")
+	c.SetParamValues(invID.String())
+	require.NoError(t, ResendInvitation(c))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestResendInvitation_ServiceError_Returns500(t *testing.T) {
+	repo := &mockInvRepo{
+		GetInvitationByIDLiteFunc: func(id uuid.UUID) (*models.Invitation, error) {
+			return nil, errors.New("db connection error")
+		},
+	}
+	svc := invitationsService.NewInvitationService(
+		repo, &mockGuestRepo{}, &mockTokenRepo{}, &mockLogRepo{}, &mockCacheRepo{},
+	)
+	orig := invitationSvc
+	invitationSvc = svc
+	defer func() { invitationSvc = orig }()
+
+	invID := uuid.Must(uuid.NewV4())
+	c, rec := newEchoCtx(http.MethodPost, "/invitations/"+invID.String()+"/resend", "")
+	c.SetParamNames("id")
+	c.SetParamValues(invID.String())
+	require.NoError(t, ResendInvitation(c))
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+func TestResendInvitation_Success_Returns200(t *testing.T) {
+	invID := uuid.Must(uuid.NewV4())
+	repo := &mockInvRepo{
+		GetInvitationByIDLiteFunc: func(id uuid.UUID) (*models.Invitation, error) {
+			return &models.Invitation{
+				ID:             id,
+				EnableWhatsApp: true,
+				EnableEmail:    false,
+				InvitationSent: false,
+			}, nil
+		},
+	}
+	svc := invitationsService.NewInvitationService(
+		repo, &mockGuestRepo{}, &mockTokenRepo{}, &mockLogRepo{}, &mockCacheRepo{},
+	)
+	orig := invitationSvc
+	invitationSvc = svc
+	defer func() { invitationSvc = orig }()
+
+	c, rec := newEchoCtx(http.MethodPost, "/invitations/"+invID.String()+"/resend", "")
+	c.SetParamNames("id")
+	c.SetParamValues(invID.String())
+	require.NoError(t, ResendInvitation(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
 }

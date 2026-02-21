@@ -135,6 +135,7 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	protected.PUT("/events/:id/config", eventconfig.UpdateEventConfig)
 	protected.GET("/events/:id/analytics", events.GetEventAnalytics)
 	protected.GET("/events/:id/invitations", invitations.ListByEvent)
+	protected.POST("/invitations/:id/resend", invitations.ResendInvitation)
 
 	// ── Event Sections ────────────────────────
 	protected.GET("/events/:id/sections", eventsection.ListSectionsByEvent)

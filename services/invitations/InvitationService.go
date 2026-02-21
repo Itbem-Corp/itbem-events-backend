@@ -38,6 +38,9 @@ func DeleteInvitation(id uuid.UUID) error             { return _invitationSvc.De
 func ListInvitationsByEventID(eventID uuid.UUID) ([]models.Invitation, error) {
 	return _invitationSvc.ListInvitationsByEventID(eventID)
 }
+func ResendInvitation(invitationID uuid.UUID) error {
+	return _invitationSvc.ResendInvitation(invitationID)
+}
 
 // InvitationService is the injectable, struct-based invitation service.
 type InvitationService struct {
@@ -184,4 +187,51 @@ func (s *InvitationService) DeleteInvitation(id uuid.UUID) error {
 
 func (s *InvitationService) ListInvitationsByEventID(eventID uuid.UUID) ([]models.Invitation, error) {
 	return s.repo.ListByEventID(eventID)
+}
+
+// ResendInvitation logs the re-send action and marks the invitation as sent.
+// Actual message delivery (WhatsApp/email API) is handled client-side.
+func (s *InvitationService) ResendInvitation(invitationID uuid.UUID) error {
+	inv, err := s.repo.GetInvitationByIDLite(invitationID)
+	if err != nil {
+		return err
+	}
+
+	now := time.Now()
+	var logs []models.InvitationLog
+
+	if inv.EnableWhatsApp {
+		logs = append(logs, models.InvitationLog{
+			InvitationID: invitationID,
+			Channel:      "whatsapp",
+			Action:       "resent",
+			Status:       "success",
+			Timestamp:    now,
+		})
+	}
+	if inv.EnableEmail {
+		logs = append(logs, models.InvitationLog{
+			InvitationID: invitationID,
+			Channel:      "email",
+			Action:       "resent",
+			Status:       "success",
+			Timestamp:    now,
+		})
+	}
+	if len(logs) == 0 {
+		logs = append(logs, models.InvitationLog{
+			InvitationID: invitationID,
+			Channel:      "manual",
+			Action:       "resent",
+			Status:       "success",
+			Timestamp:    now,
+		})
+	}
+
+	if err := s.logRepo.CreateManyInvitationLogs(logs); err != nil {
+		return err
+	}
+
+	inv.InvitationSent = true
+	return s.repo.UpdateInvitation(inv)
 }
