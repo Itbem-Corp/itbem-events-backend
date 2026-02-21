@@ -109,10 +109,17 @@ func (m *mockTokenRepo) GetByPrettyToken(code string) (*models.InvitationAccessT
 
 var _ ports.AccessTokenRepository = (*mockTokenRepo)(nil)
 
-type mockLogRepo struct{}
+type mockLogRepo struct {
+	CreateManyCalled bool
+	LastLogs         []models.InvitationLog
+}
 
-func (m *mockLogRepo) CreateInvitationLog(log *models.InvitationLog) error        { return nil }
-func (m *mockLogRepo) CreateManyInvitationLogs(logs []models.InvitationLog) error { return nil }
+func (m *mockLogRepo) CreateInvitationLog(log *models.InvitationLog) error { return nil }
+func (m *mockLogRepo) CreateManyInvitationLogs(logs []models.InvitationLog) error {
+	m.CreateManyCalled = true
+	m.LastLogs = logs
+	return nil
+}
 
 var _ ports.InvitationLogRepository = (*mockLogRepo)(nil)
 
@@ -385,8 +392,9 @@ func TestResendInvitation_Success_Returns200(t *testing.T) {
 			}, nil
 		},
 	}
+	logRepo := &mockLogRepo{}
 	svc := invitationsService.NewInvitationService(
-		repo, &mockGuestRepo{}, &mockTokenRepo{}, &mockLogRepo{}, &mockCacheRepo{},
+		repo, &mockGuestRepo{}, &mockTokenRepo{}, logRepo, &mockCacheRepo{},
 	)
 	orig := invitationSvc
 	invitationSvc = svc
@@ -397,4 +405,42 @@ func TestResendInvitation_Success_Returns200(t *testing.T) {
 	c.SetParamValues(invID.String())
 	require.NoError(t, ResendInvitation(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
+
+	assert.True(t, logRepo.CreateManyCalled, "expected CreateManyInvitationLogs to be called")
+	if assert.Len(t, logRepo.LastLogs, 1) {
+		assert.Equal(t, "whatsapp", logRepo.LastLogs[0].Channel)
+		assert.Equal(t, "resent", logRepo.LastLogs[0].Action)
+		assert.Equal(t, "success", logRepo.LastLogs[0].Status)
+	}
+}
+
+func TestResendInvitation_Success_ManualFallback_Returns200(t *testing.T) {
+	invID := uuid.Must(uuid.NewV4())
+	repo := &mockInvRepo{
+		GetInvitationByIDLiteFunc: func(id uuid.UUID) (*models.Invitation, error) {
+			return &models.Invitation{
+				ID:             id,
+				EnableWhatsApp: false,
+				EnableEmail:    false,
+				InvitationSent: false,
+			}, nil
+		},
+	}
+	logRepo := &mockLogRepo{}
+	svc := invitationsService.NewInvitationService(
+		repo, &mockGuestRepo{}, &mockTokenRepo{}, logRepo, &mockCacheRepo{},
+	)
+	orig := invitationSvc
+	invitationSvc = svc
+	defer func() { invitationSvc = orig }()
+
+	c, rec := newEchoCtx(http.MethodPost, "/invitations/"+invID.String()+"/resend", "")
+	c.SetParamNames("id")
+	c.SetParamValues(invID.String())
+	require.NoError(t, ResendInvitation(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	if assert.Len(t, logRepo.LastLogs, 1) {
+		assert.Equal(t, "manual", logRepo.LastLogs[0].Channel)
+	}
 }

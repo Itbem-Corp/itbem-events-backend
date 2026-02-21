@@ -207,6 +207,7 @@ func (s *InvitationService) ResendInvitation(invitationID uuid.UUID) error {
 			Action:       "resent",
 			Status:       "success",
 			Timestamp:    now,
+			CreatedAt:    now,
 		})
 	}
 	if inv.EnableEmail {
@@ -216,6 +217,7 @@ func (s *InvitationService) ResendInvitation(invitationID uuid.UUID) error {
 			Action:       "resent",
 			Status:       "success",
 			Timestamp:    now,
+			CreatedAt:    now,
 		})
 	}
 	if len(logs) == 0 {
@@ -225,6 +227,7 @@ func (s *InvitationService) ResendInvitation(invitationID uuid.UUID) error {
 			Action:       "resent",
 			Status:       "success",
 			Timestamp:    now,
+			CreatedAt:    now,
 		})
 	}
 
