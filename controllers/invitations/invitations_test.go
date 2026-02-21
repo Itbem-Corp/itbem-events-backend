@@ -33,6 +33,7 @@ func newEchoCtx(method, path, body string) (echo.Context, *httptest.ResponseReco
 type mockInvRepo struct {
 	GetInvitationByIDFunc     func(id uuid.UUID) (*models.Invitation, error)
 	GetInvitationByIDLiteFunc func(id uuid.UUID) (*models.Invitation, error)
+	ListByEventIDFunc         func(eventID uuid.UUID) ([]models.Invitation, error)
 }
 
 func (m *mockInvRepo) CreateInvitation(obj *models.Invitation) error       { return nil }
@@ -50,6 +51,12 @@ func (m *mockInvRepo) GetInvitationByIDLite(id uuid.UUID) (*models.Invitation, e
 		return m.GetInvitationByIDLiteFunc(id)
 	}
 	return &models.Invitation{ID: id, MaxGuests: 10}, nil
+}
+func (m *mockInvRepo) ListByEventID(eventID uuid.UUID) ([]models.Invitation, error) {
+	if m.ListByEventIDFunc != nil {
+		return m.ListByEventIDFunc(eventID)
+	}
+	return []models.Invitation{}, nil
 }
 
 var _ ports.InvitationRepository = (*mockInvRepo)(nil)
@@ -227,4 +234,84 @@ func TestGetInvitationByToken_TokenNotFound_Returns401(t *testing.T) {
 	c.SetParamValues("BADTOK")
 	require.NoError(t, GetInvitationByToken(c))
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+// ── ListByEvent tests ──────────────────────────────────────────────────────────
+
+func TestListByEvent_InvalidUUID_Returns400(t *testing.T) {
+	orig := invitationSvc
+	invitationSvc = nil
+	defer func() { invitationSvc = orig }()
+
+	c, rec := newEchoCtx(http.MethodGet, "/events/not-a-uuid/invitations", "")
+	c.SetParamNames("id")
+	c.SetParamValues("not-a-uuid")
+	require.NoError(t, ListByEvent(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestListByEvent_ServiceError_Returns500(t *testing.T) {
+	repo := &mockInvRepo{
+		ListByEventIDFunc: func(eventID uuid.UUID) ([]models.Invitation, error) {
+			return nil, errors.New("db error")
+		},
+	}
+	svc := invitationsService.NewInvitationService(
+		repo, &mockGuestRepo{}, &mockTokenRepo{}, &mockLogRepo{}, &mockCacheRepo{},
+	)
+	orig := invitationSvc
+	invitationSvc = svc
+	defer func() { invitationSvc = orig }()
+
+	eventID := uuid.Must(uuid.NewV4())
+	c, rec := newEchoCtx(http.MethodGet, "/events/"+eventID.String()+"/invitations", "")
+	c.SetParamNames("id")
+	c.SetParamValues(eventID.String())
+	require.NoError(t, ListByEvent(c))
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+func TestListByEvent_EmptyResult_Returns200(t *testing.T) {
+	repo := &mockInvRepo{
+		ListByEventIDFunc: func(eventID uuid.UUID) ([]models.Invitation, error) {
+			return []models.Invitation{}, nil
+		},
+	}
+	svc := invitationsService.NewInvitationService(
+		repo, &mockGuestRepo{}, &mockTokenRepo{}, &mockLogRepo{}, &mockCacheRepo{},
+	)
+	orig := invitationSvc
+	invitationSvc = svc
+	defer func() { invitationSvc = orig }()
+
+	eventID := uuid.Must(uuid.NewV4())
+	c, rec := newEchoCtx(http.MethodGet, "/events/"+eventID.String()+"/invitations", "")
+	c.SetParamNames("id")
+	c.SetParamValues(eventID.String())
+	require.NoError(t, ListByEvent(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestListByEvent_PopulatedResult_Returns200(t *testing.T) {
+	invID := uuid.Must(uuid.NewV4())
+	eventID := uuid.Must(uuid.NewV4())
+	repo := &mockInvRepo{
+		ListByEventIDFunc: func(eID uuid.UUID) ([]models.Invitation, error) {
+			return []models.Invitation{
+				{ID: invID, EventID: eID, MaxGuests: 2},
+			}, nil
+		},
+	}
+	svc := invitationsService.NewInvitationService(
+		repo, &mockGuestRepo{}, &mockTokenRepo{}, &mockLogRepo{}, &mockCacheRepo{},
+	)
+	orig := invitationSvc
+	invitationSvc = svc
+	defer func() { invitationSvc = orig }()
+
+	c, rec := newEchoCtx(http.MethodGet, "/events/"+eventID.String()+"/invitations", "")
+	c.SetParamNames("id")
+	c.SetParamValues(eventID.String())
+	require.NoError(t, ListByEvent(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
 }
