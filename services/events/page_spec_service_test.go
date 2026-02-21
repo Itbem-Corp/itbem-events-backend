@@ -49,7 +49,8 @@ func stubEvent(musicUrl string) *models.Event {
 	return &models.Event{
 		ID:       testEventID,
 		Name:     "Graduación Izapa 2025",
-		MusicUrl: musicUrl,
+		MusicUrl:   musicUrl,
+		Identifier: "grad-izapa-2025",
 	}
 }
 
@@ -131,6 +132,8 @@ func TestGetPageSpec_Success_WithMusic(t *testing.T) {
 	assert.Equal(t, "Graduación Izapa 2025", spec.Meta.PageTitle)
 	require.NotNil(t, spec.Meta.MusicUrl)
 	assert.Equal(t, musicUrl, *spec.Meta.MusicUrl)
+	assert.Equal(t, testEventID.String(), spec.Meta.EventID)
+	assert.Equal(t, "grad-izapa-2025", spec.Meta.Identifier)
 
 	// sections
 	require.Len(t, spec.Sections, 2)
