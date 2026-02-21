@@ -1,9 +1,10 @@
 package momentrepository
 
 import (
-    "events-stocks/models"
-    "events-stocks/repositories/gormrepository"
-    "github.com/gofrs/uuid"
+	"events-stocks/configuration"
+	"events-stocks/models"
+	"events-stocks/repositories/gormrepository"
+	"github.com/gofrs/uuid"
 )
 
 func CreateMoment(m *models.Moment) error {
@@ -40,3 +41,18 @@ func (r *MomentRepo) UpdateMoment(m *models.Moment) error                { retur
 func (r *MomentRepo) DeleteMoment(id uuid.UUID) error                    { return DeleteMoment(id) }
 func (r *MomentRepo) GetMomentByID(id uuid.UUID) (*models.Moment, error) { return GetMomentByID(id) }
 func (r *MomentRepo) ListMoments() ([]models.Moment, error)              { return ListMoments() }
+
+// ListMomentsByEventID returns moments for a specific event, optionally filtering to approved only.
+func ListMomentsByEventID(eventID uuid.UUID, approvedOnly bool) ([]models.Moment, error) {
+	var list []models.Moment
+	query := configuration.DB.Where("event_id = ?", eventID)
+	if approvedOnly {
+		query = query.Where("is_approved = ?", true)
+	}
+	err := query.Order("created_at DESC").Find(&list).Error
+	return list, err
+}
+
+func (r *MomentRepo) ListByEventID(eventID uuid.UUID, approvedOnly bool) ([]models.Moment, error) {
+	return ListMomentsByEventID(eventID, approvedOnly)
+}

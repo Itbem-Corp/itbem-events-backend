@@ -94,6 +94,10 @@ func (m *mockMomentRepo) ListMoments() ([]models.Moment, error) {
 	return nil, nil
 }
 
+func (m *mockMomentRepo) ListByEventID(eventID uuid.UUID, approvedOnly bool) ([]models.Moment, error) {
+	return nil, nil
+}
+
 var _ ports.MomentRepository = (*mockMomentRepo)(nil)
 
 // ---------------------------------------------------------------------------

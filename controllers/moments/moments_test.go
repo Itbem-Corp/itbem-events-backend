@@ -37,6 +37,7 @@ func (m *mockMomentRepo) UpdateMoment(obj *models.Moment) error                 
 func (m *mockMomentRepo) DeleteMoment(id uuid.UUID) error                        { return nil }
 func (m *mockMomentRepo) GetMomentByID(id uuid.UUID) (*models.Moment, error)     { return &models.Moment{ID: id}, nil }
 func (m *mockMomentRepo) ListMoments() ([]models.Moment, error)                  { return nil, nil }
+func (m *mockMomentRepo) ListByEventID(eventID uuid.UUID, approvedOnly bool) ([]models.Moment, error) { return nil, nil }
 
 var _ ports.MomentRepository = (*mockMomentRepo)(nil)
 

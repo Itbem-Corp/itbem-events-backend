@@ -91,6 +91,7 @@ type MomentRepository interface {
 	DeleteMoment(id uuid.UUID) error
 	GetMomentByID(id uuid.UUID) (*models.Moment, error)
 	ListMoments() ([]models.Moment, error)
+	ListByEventID(eventID uuid.UUID, approvedOnly bool) ([]models.Moment, error)
 }
 
 // UserRepository is the data access contract for User records.

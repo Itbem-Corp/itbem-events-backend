@@ -8,6 +8,7 @@ import (
 
 type Moment struct {
 	ID           uuid.UUID  `gorm:"type:uuid;default:uuid_generate_v4();primaryKey"`
+	EventID      *uuid.UUID `gorm:"type:uuid;index" json:"event_id,omitempty"`
 	InvitationID uuid.UUID  `gorm:"type:uuid;index"`
 	Invitation   Invitation `gorm:"foreignKey:InvitationID" validate:"-"`
 	MomentTypeID uuid.UUID  `gorm:"type:uuid;index"`

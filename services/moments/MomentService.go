@@ -20,6 +20,9 @@ func GetMomentByID(id uuid.UUID) (*models.Moment, error) { return _momentSvc.Get
 func CreateMoment(obj *models.Moment) error              { return _momentSvc.CreateMoment(obj) }
 func UpdateMoment(obj *models.Moment) error              { return _momentSvc.UpdateMoment(obj) }
 func DeleteMoment(id uuid.UUID) error                    { return _momentSvc.DeleteMoment(id) }
+func ListMomentsByEventID(eventID uuid.UUID, approvedOnly bool) ([]models.Moment, error) {
+	return _momentSvc.ListByEventID(eventID, approvedOnly)
+}
 
 // MomentService is the injectable, struct-based moment service.
 type MomentService struct {
@@ -73,4 +76,8 @@ func (s *MomentService) DeleteMoment(id uuid.UUID) error {
 		return err
 	}
 	return s.cache.Invalidate("moments", "all")
+}
+
+func (s *MomentService) ListByEventID(eventID uuid.UUID, approvedOnly bool) ([]models.Moment, error) {
+	return s.repo.ListByEventID(eventID, approvedOnly)
 }
