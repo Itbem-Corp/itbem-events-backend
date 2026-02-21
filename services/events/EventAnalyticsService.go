@@ -62,3 +62,30 @@ func DeleteEventAnalytics(id uuid.UUID) error {
 func GetEventAnalyticsByEventID(eventID uuid.UUID) (*models.EventAnalytics, error) {
 	return eventanalyticsrepository.GetEventAnalyticsByEventID(eventID)
 }
+
+// IncrementAnalytics atomically increments one analytics counter for an event.
+// Call as a goroutine -- never blocks the main request.
+func IncrementAnalytics(eventID uuid.UUID, field string) {
+	analytics, err := GetEventAnalyticsByEventID(eventID)
+	if err != nil || analytics == nil {
+		analytics = &models.EventAnalytics{EventID: eventID}
+		applyIncrement(analytics, field)
+		_ = CreateEventAnalytics(analytics)
+		return
+	}
+	applyIncrement(analytics, field)
+	_ = UpdateEventAnalytics(analytics)
+}
+
+func applyIncrement(a *models.EventAnalytics, field string) {
+	switch field {
+	case "views":
+		a.Views++
+	case "rsvp_confirmed":
+		a.RSVPConfirmed++
+	case "rsvp_declined":
+		a.RSVPDeclined++
+	case "moment_uploads":
+		a.MomentUploads++
+	}
+}

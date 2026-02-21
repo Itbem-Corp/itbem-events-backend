@@ -54,6 +54,10 @@ func CreateMoment(c echo.Context) error {
 		return utils.Error(c, http.StatusInternalServerError, "Error creating moment", err.Error())
 	}
 
+	// TODO: track moment_uploads in EventAnalytics once models.Moment has an EventID field.
+	// Currently Moment only has InvitationID; resolve via Invitation -> EventID to enable:
+	// go func() { eventService.IncrementAnalytics(eventID, "moment_uploads") }()
+
 	return utils.Success(c, http.StatusCreated, "Moment created", moment)
 }
 
