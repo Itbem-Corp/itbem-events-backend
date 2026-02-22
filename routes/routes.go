@@ -105,6 +105,7 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	// Events (Lectura pública)
 	public.GET("/events/page-spec", events.GetPageSpec)                        // SDUI: PageSpec por token
 	public.GET("/events/section/:sectionId/attendees", guests.GetAttendees)    // SDUI: Graduados por sección
+	public.GET("/events/:identifier/page-spec", events.GetPageSpecByIdentifier) // SDUI: PageSpec por identifier (vista previa)
 	public.GET("/events/:key", events.GetEvents)
 	public.POST("/events/:identifier/view", events.TrackView)                  // Incrementa contador de vistas
 	public.POST("/events/:identifier/verify-access", events.VerifyEventAccess) // Verifica contraseña
@@ -146,6 +147,7 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	protected.POST("/events", events.CreateEvent)
 	protected.PUT("/events/:id", events.UpdateEvent)
 	protected.DELETE("/events/:id", events.DeleteEvent)
+	protected.POST("/events/:id/repair", events.RepairEvent)
 
 	// ── Event Config (1:1 con Event, mismo ID) ─
 	protected.GET("/events/:id/config", eventconfig.GetEventConfig)
