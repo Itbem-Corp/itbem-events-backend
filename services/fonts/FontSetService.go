@@ -11,7 +11,7 @@ import (
 )
 
 func ListFontSets() ([]models.FontSet, error) {
-	cacheKey := "all:fonts"
+	cacheKey := "all:font_sets"
 	ctx := context.Background()
 
 	cached, err := redisrepository.GetKey(ctx, cacheKey)
@@ -41,19 +41,19 @@ func CreateFontSet(obj *models.FontSet) error {
 	if err := fontrepository.CreateFontSet(obj); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("fonts", "all")
+	return redisrepository.Invalidate("font_sets", "all")
 }
 
 func UpdateFontSet(obj *models.FontSet) error {
 	if err := fontrepository.UpdateFontSet(obj); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("fonts", "all")
+	return redisrepository.Invalidate("font_sets", "all")
 }
 
 func DeleteFontSet(id uuid.UUID) error {
 	if err := fontrepository.DeleteFontSet(id); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("fonts", "all")
+	return redisrepository.Invalidate("font_sets", "all")
 }

@@ -38,7 +38,7 @@ func NewEventSectionService(repo ports.EventSectionRepository, cache ports.Cache
 }
 
 func (s *EventSectionService) ListEventSections() ([]models.EventSection, error) {
-	cacheKey := "all:events"
+	cacheKey := "all:event_sections"
 	ctx := context.Background()
 	cached, err := s.cache.GetKey(ctx, cacheKey)
 	if err == nil && cached != "" {
@@ -64,21 +64,21 @@ func (s *EventSectionService) CreateEventSection(obj *models.EventSection) error
 	if err := s.repo.CreateEventSection(obj); err != nil {
 		return err
 	}
-	return s.cache.Invalidate("events", "all")
+	return s.cache.Invalidate("event_sections", "all")
 }
 
 func (s *EventSectionService) UpdateEventSection(obj *models.EventSection) error {
 	if err := s.repo.UpdateEventSection(obj); err != nil {
 		return err
 	}
-	return s.cache.Invalidate("events", "all")
+	return s.cache.Invalidate("event_sections", "all")
 }
 
 func (s *EventSectionService) DeleteEventSection(id uuid.UUID) error {
 	if err := s.repo.DeleteEventSection(id); err != nil {
 		return err
 	}
-	return s.cache.Invalidate("events", "all")
+	return s.cache.Invalidate("event_sections", "all")
 }
 
 func (s *EventSectionService) ListByEventID(eventID uuid.UUID) ([]models.EventSection, error) {

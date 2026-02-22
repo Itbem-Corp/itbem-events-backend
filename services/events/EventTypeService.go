@@ -11,7 +11,7 @@ import (
 )
 
 func ListEventTypes() ([]models.EventType, error) {
-	cacheKey := "all:events"
+	cacheKey := "all:event_types"
 	ctx := context.Background()
 
 	cached, err := redisrepository.GetKey(ctx, cacheKey)
@@ -41,19 +41,19 @@ func CreateEventType(obj *models.EventType) error {
 	if err := eventtyperepository.CreateEventType(obj); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("events", "all")
+	return redisrepository.Invalidate("event_types", "all")
 }
 
 func UpdateEventType(obj *models.EventType) error {
 	if err := eventtyperepository.UpdateEventType(obj); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("events", "all")
+	return redisrepository.Invalidate("event_types", "all")
 }
 
 func DeleteEventType(id uuid.UUID) error {
 	if err := eventtyperepository.DeleteEventType(id); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("events", "all")
+	return redisrepository.Invalidate("event_types", "all")
 }

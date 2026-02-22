@@ -11,7 +11,7 @@ import (
 )
 
 func ListInvitationAccessTokens() ([]models.InvitationAccessToken, error) {
-	cacheKey := "all:invitations"
+	cacheKey := "all:invitation_access_tokens"
 	ctx := context.Background()
 
 	cached, err := redisrepository.GetKey(ctx, cacheKey)
@@ -41,19 +41,19 @@ func CreateInvitationAccessToken(obj *models.InvitationAccessToken) error {
 	if err := invitationaccesstokenrepository.CreateInvitationAccessToken(obj); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("invitations", "all")
+	return redisrepository.Invalidate("invitation_access_tokens", "all")
 }
 
 func UpdateInvitationAccessToken(obj *models.InvitationAccessToken) error {
 	if err := invitationaccesstokenrepository.UpdateInvitationAccessToken(obj); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("invitations", "all")
+	return redisrepository.Invalidate("invitation_access_tokens", "all")
 }
 
 func DeleteInvitationAccessToken(id uuid.UUID) error {
 	if err := invitationaccesstokenrepository.DeleteInvitationAccessToken(id); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("invitations", "all")
+	return redisrepository.Invalidate("invitation_access_tokens", "all")
 }

@@ -11,7 +11,7 @@ import (
 )
 
 func ListColorPalettePatterns() ([]models.ColorPalettePattern, error) {
-	cacheKey := "all:colors"
+	cacheKey := "all:color_palette_patterns"
 	ctx := context.Background()
 
 	cached, err := redisrepository.GetKey(ctx, cacheKey)
@@ -41,19 +41,19 @@ func CreateColorPalettePattern(obj *models.ColorPalettePattern) error {
 	if err := colorrepository.CreatePattern(obj); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("colors", "all")
+	return redisrepository.Invalidate("color_palette_patterns", "all")
 }
 
 func UpdateColorPalettePattern(obj *models.ColorPalettePattern) error {
 	if err := colorrepository.UpdatePattern(obj); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("colors", "all")
+	return redisrepository.Invalidate("color_palette_patterns", "all")
 }
 
 func DeleteColorPalettePattern(id uuid.UUID) error {
 	if err := colorrepository.DeletePattern(id); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("colors", "all")
+	return redisrepository.Invalidate("color_palette_patterns", "all")
 }

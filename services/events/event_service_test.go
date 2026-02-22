@@ -92,7 +92,7 @@ func (m *mockEventsRepo) GetEventByID(id uuid.UUID) (string, error) {
 	if m.GetEventByIDFunc != nil {
 		return m.GetEventByIDFunc(id)
 	}
-	return "{}", nil
+	return "[{}]", nil
 }
 func (m *mockEventsRepo) IdentifierExists(identifier string) bool {
 	if m.IdentifierExistsFunc != nil {

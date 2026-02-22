@@ -11,7 +11,7 @@ import (
 )
 
 func ListMomentTypes() ([]models.MomentType, error) {
-	cacheKey := "all:moments"
+	cacheKey := "all:moment_types"
 	ctx := context.Background()
 
 	cached, err := redisrepository.GetKey(ctx, cacheKey)
@@ -41,19 +41,19 @@ func CreateMomentType(obj *models.MomentType) error {
 	if err := momenttyperepository.CreateMomentType(obj); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("moments", "all")
+	return redisrepository.Invalidate("moment_types", "all")
 }
 
 func UpdateMomentType(obj *models.MomentType) error {
 	if err := momenttyperepository.UpdateMomentType(obj); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("moments", "all")
+	return redisrepository.Invalidate("moment_types", "all")
 }
 
 func DeleteMomentType(id uuid.UUID) error {
 	if err := momenttyperepository.DeleteMomentType(id); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("moments", "all")
+	return redisrepository.Invalidate("moment_types", "all")
 }

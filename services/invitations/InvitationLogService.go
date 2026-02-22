@@ -11,7 +11,7 @@ import (
 )
 
 func ListInvitationLogs() ([]models.InvitationLog, error) {
-	cacheKey := "all:invitations"
+	cacheKey := "all:invitation_logs"
 	ctx := context.Background()
 
 	cached, err := redisrepository.GetKey(ctx, cacheKey)
@@ -41,19 +41,19 @@ func CreateInvitationLog(obj *models.InvitationLog) error {
 	if err := invitationlogrepository.CreateInvitationLog(obj); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("invitations", "all")
+	return redisrepository.Invalidate("invitation_logs", "all")
 }
 
 func UpdateInvitationLog(obj *models.InvitationLog) error {
 	if err := invitationlogrepository.UpdateInvitationLog(obj); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("invitations", "all")
+	return redisrepository.Invalidate("invitation_logs", "all")
 }
 
 func DeleteInvitationLog(id uuid.UUID) error {
 	if err := invitationlogrepository.DeleteInvitationLog(id); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("invitations", "all")
+	return redisrepository.Invalidate("invitation_logs", "all")
 }

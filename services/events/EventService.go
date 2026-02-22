@@ -56,11 +56,16 @@ func (s *EventService) GetEventByID(id uuid.UUID) (*models.Event, error) {
 	if err != nil {
 		return nil, err
 	}
-	var event models.Event
-	if err := json.Unmarshal([]byte(jsonStr), &event); err != nil {
+	// The repo wraps the result in an array for cache-loader compatibility,
+	// so we must unmarshal as a slice and return the first element.
+	var events []models.Event
+	if err := json.Unmarshal([]byte(jsonStr), &events); err != nil {
 		return nil, err
 	}
-	return &event, nil
+	if len(events) == 0 {
+		return nil, fmt.Errorf("event %s not found", id)
+	}
+	return &events[0], nil
 }
 
 func (s *EventService) CreateEvent(obj *models.Event) error {
@@ -70,6 +75,9 @@ func (s *EventService) CreateEvent(obj *models.Event) error {
 	if err := s.repo.CreateEvent(obj); err != nil {
 		return err
 	}
+	// Auto-create related records so dashboard doesn't get 404s.
+	// Best-effort: config/analytics endpoints also auto-create on first access.
+	s.autoCreateRelated(obj.ID)
 	return s.cache.Invalidate("events", "all")
 }
 
@@ -84,6 +92,16 @@ func (s *EventService) generateUniqueIdentifier(name string) string {
 		candidate = fmt.Sprintf("%s-%d", base, i)
 	}
 	return candidate
+}
+
+// autoCreateRelated creates EventConfig and EventAnalytics for a new event.
+// Failures are silently ignored — both endpoints auto-create on first access.
+func (s *EventService) autoCreateRelated(eventID uuid.UUID) {
+	defer func() { recover() }()
+	if _eventConfigSvc != nil {
+		_ = CreateEventConfig(&models.EventConfig{ID: eventID})
+	}
+	_ = CreateEventAnalytics(&models.EventAnalytics{EventID: eventID})
 }
 
 func (s *EventService) UpdateEvent(obj *models.Event) error {

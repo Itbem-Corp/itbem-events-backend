@@ -11,7 +11,7 @@ import (
 )
 
 func ListGuestStatuss() ([]models.GuestStatus, error) {
-	cacheKey := "all:guests"
+	cacheKey := "all:guest_statuses"
 	ctx := context.Background()
 
 	cached, err := redisrepository.GetKey(ctx, cacheKey)
@@ -41,19 +41,19 @@ func CreateGuestStatus(obj *models.GuestStatus) error {
 	if err := gueststatusrepository.CreateGuestStatus(obj); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("guests", "all")
+	return redisrepository.Invalidate("guest_statuses", "all")
 }
 
 func UpdateGuestStatus(obj *models.GuestStatus) error {
 	if err := gueststatusrepository.UpdateGuestStatus(obj); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("guests", "all")
+	return redisrepository.Invalidate("guest_statuses", "all")
 }
 
 func DeleteGuestStatus(id uuid.UUID) error {
 	if err := gueststatusrepository.DeleteGuestStatus(id); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("guests", "all")
+	return redisrepository.Invalidate("guest_statuses", "all")
 }

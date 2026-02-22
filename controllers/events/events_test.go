@@ -35,7 +35,7 @@ func (m *mockEventsRepo) CreateEvent(event *models.Event) error                 
 func (m *mockEventsRepo) UpdateEvent(event *models.Event) error                                  { return nil }
 func (m *mockEventsRepo) DeleteEvent(id uuid.UUID) error                                         { return nil }
 func (m *mockEventsRepo) ListEvents(_ int, _ int, _ string) ([]models.Event, error)              { return nil, nil }
-func (m *mockEventsRepo) GetEventByID(_ uuid.UUID) (string, error)                               { return `{}`, nil }
+func (m *mockEventsRepo) GetEventByID(_ uuid.UUID) (string, error)                               { return `[{}]`, nil }
 func (m *mockEventsRepo) IdentifierExists(_ string) bool                                         { return false }
 
 var _ ports.EventsRepository = (*mockEventsRepo)(nil)

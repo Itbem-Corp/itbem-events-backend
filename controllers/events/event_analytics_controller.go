@@ -2,6 +2,7 @@ package events
 
 import (
 	"errors"
+	"events-stocks/models"
 	"net/http"
 
 	eventsService "events-stocks/services/events"
@@ -22,7 +23,12 @@ func GetEventAnalytics(c echo.Context) error {
 	analytics, err := eventsService.GetEventAnalyticsByEventID(eventID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return utils.Error(c, http.StatusNotFound, "Analytics not found", err.Error())
+			// Auto-create empty analytics for this event
+			newAnalytics := &models.EventAnalytics{EventID: eventID}
+			if createErr := eventsService.CreateEventAnalytics(newAnalytics); createErr != nil {
+				return utils.Error(c, http.StatusInternalServerError, "Error creating analytics", createErr.Error())
+			}
+			return utils.Success(c, http.StatusOK, "Analytics loaded", newAnalytics)
 		}
 		return utils.Error(c, http.StatusInternalServerError, "Error fetching analytics", err.Error())
 	}

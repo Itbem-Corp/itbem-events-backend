@@ -11,7 +11,7 @@ import (
 )
 
 func ListFontSetPatterns(id *uuid.UUID) ([]models.FontSetPattern, error) {
-	cacheKey := "all:fonts"
+	cacheKey := "all:font_set_patterns"
 	ctx := context.Background()
 
 	cached, err := redisrepository.GetKey(ctx, cacheKey)
@@ -41,19 +41,19 @@ func CreateFontSetPattern(obj *models.FontSetPattern) error {
 	if err := fontrepository.CreateFontPattern(obj); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("fonts", "all")
+	return redisrepository.Invalidate("font_set_patterns", "all")
 }
 
 func UpdateFontSetPattern(obj *models.FontSetPattern) error {
 	if err := fontrepository.UpdateFontPattern(obj); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("fonts", "all")
+	return redisrepository.Invalidate("font_set_patterns", "all")
 }
 
 func DeleteFontSetPattern(id uuid.UUID) error {
 	if err := fontrepository.DeleteFontPattern(id); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("fonts", "all")
+	return redisrepository.Invalidate("font_set_patterns", "all")
 }
