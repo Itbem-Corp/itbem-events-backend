@@ -106,6 +106,8 @@ func GetAllModels() []interface{} {
 }
 
 func MigrarModelos() {
+	// Ensure uuid-ossp extension exists for uuid_generate_v4()
+	DB.Exec("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\"")
 	if err := DB.AutoMigrate(GetAllModels()...); err != nil {
 		slog.Error("model migration failed", "error", err)
 		os.Exit(1)
