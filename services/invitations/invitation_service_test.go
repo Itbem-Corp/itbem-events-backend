@@ -261,7 +261,7 @@ func TestConfirmRSVP_InvalidToken(t *testing.T) {
 	}
 
 	svc := newService(nil, nil, tokenRepo, nil, nil)
-	guest, err := svc.ConfirmRSVP("BAD-TOKEN", "confirmed", "web", 1)
+	guest, err := svc.ConfirmRSVP("BAD-TOKEN", "confirmed", "web", 1, "")
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid or expired token")
@@ -277,7 +277,7 @@ func TestConfirmRSVP_InvalidToken_NilReturn(t *testing.T) {
 	}
 
 	svc := newService(nil, nil, tokenRepo, nil, nil)
-	guest, err := svc.ConfirmRSVP("MISSING", "confirmed", "web", 1)
+	guest, err := svc.ConfirmRSVP("MISSING", "confirmed", "web", 1, "")
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid or expired token")
@@ -304,7 +304,7 @@ func TestConfirmRSVP_InvitationNotFound(t *testing.T) {
 	}
 
 	svc := newService(invRepo, nil, tokenRepo, nil, nil)
-	guest, err := svc.ConfirmRSVP("VALID-TOKEN", "confirmed", "web", 1)
+	guest, err := svc.ConfirmRSVP("VALID-TOKEN", "confirmed", "web", 1, "")
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invitation not found")
@@ -335,7 +335,7 @@ func TestConfirmRSVP_ExceedsMaxGuests(t *testing.T) {
 
 	svc := newService(invRepo, nil, tokenRepo, nil, nil)
 	// Requesting 5 guests when max is 3 — must fail
-	guest, err := svc.ConfirmRSVP("VALID-TOKEN", "confirmed", "web", 5)
+	guest, err := svc.ConfirmRSVP("VALID-TOKEN", "confirmed", "web", 5, "")
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exceeds allowed max")
@@ -377,7 +377,7 @@ func TestConfirmRSVP_ExceedsMaxGuests_ExactBoundary(t *testing.T) {
 
 	svc := newService(invRepo, guestRepo, tokenRepo, nil, nil)
 	// guestCount == MaxGuests: should succeed
-	result, err := svc.ConfirmRSVP("VALID-TOKEN", "confirmed", "web", 4)
+	result, err := svc.ConfirmRSVP("VALID-TOKEN", "confirmed", "web", 4, "")
 
 	require.NoError(t, err)
 	assert.NotNil(t, result)
@@ -422,7 +422,7 @@ func TestConfirmRSVP_Success(t *testing.T) {
 	}
 
 	svc := newService(invRepo, guestRepo, tokenRepo, nil, nil)
-	result, err := svc.ConfirmRSVP("MY-TOKEN", "confirmed", "web", 2)
+	result, err := svc.ConfirmRSVP("MY-TOKEN", "confirmed", "web", 2, "")
 
 	require.NoError(t, err)
 	require.NotNil(t, result)
