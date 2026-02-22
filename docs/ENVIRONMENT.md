@@ -45,6 +45,9 @@ go run server.go
 | `GOOGLE_CLIENT_ID` | **yes** | Google OAuth 2.0 client ID |
 | `GOOGLE_CLIENT_SECRET` | **yes** | Google OAuth 2.0 client secret |
 | `CORS_ALLOW_ORIGINS` | no | Comma-separated extra CORS origins (local dev only). Production domains are hardcoded. Example: `http://localhost:4321,http://localhost:3000` |
+| `SQS_IMAGE_QUEUE_URL` | no | AWS SQS queue URL for async image processing. Leave empty to disable. |
+| `SQS_VIDEO_QUEUE_URL` | no | AWS SQS queue URL for async video processing. Leave empty to disable. |
+| `INTERNAL_API_SECRET` | no | Shared secret for Lambda → backend callbacks (`PUT /api/moments/:id/content`). Generate with `openssl rand -hex 32`. |
 
 ## GitHub Actions secrets mapping
 
@@ -74,8 +77,12 @@ The deploy workflow (`deploy-backend.yml`) maps GitHub Secrets → container env
 | `BACKEND_REDIS_TLS` | `REDIS_TLS` |
 | `BACKEND_GOOGLE_CLIENT_ID` | `GOOGLE_CLIENT_ID` |
 | `BACKEND_GOOGLE_CLIENT_SECRET` | `GOOGLE_CLIENT_SECRET` |
+| `CORS_ALLOW_ORIGINS` | `CORS_ALLOW_ORIGINS` |
+| `INTERNAL_API_SECRET` | `INTERNAL_API_SECRET` |
+| `SQS_IMAGE_QUEUE_URL` | `SQS_IMAGE_QUEUE_URL` |
+| `SQS_VIDEO_QUEUE_URL` | `SQS_VIDEO_QUEUE_URL` |
 
-> `CORS_ALLOW_ORIGINS` is intentionally absent from the deploy workflow — production only allows the hardcoded domains in `configuration/cors.go`.
+> `CORS_ALLOW_ORIGINS` is typically empty in production — production only allows the hardcoded domains in `configuration/cors.go`.
 
 ## Accessing config in code
 
