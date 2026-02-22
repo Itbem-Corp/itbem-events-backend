@@ -8,6 +8,8 @@ import (
 
 type Event struct {
 	ID               uuid.UUID      `gorm:"type:uuid;default:uuid_generate_v4();primaryKey" json:"id"`
+	ClientID         *uuid.UUID     `gorm:"type:uuid;index" json:"client_id"`
+	Client           *Client        `gorm:"foreignKey:ClientID" json:"client,omitempty" validate:"-"`
 	Name             string         `gorm:"uniqueIndex" json:"name" validate:"required"`
 	Identifier       string         `gorm:"uniqueIndex" json:"identifier" validate:"required"`
 	Description      string         `json:"description"`

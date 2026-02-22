@@ -99,3 +99,45 @@ func GetEventByIDRaw(id uuid.UUID) (*models.Event, error) {
 	}
 	return &event, nil
 }
+
+// GetEventsByClientID returns all events belonging to a specific client.
+func GetEventsByClientID(clientID uuid.UUID) ([]models.Event, error) {
+	var events []models.Event
+	err := gormrepository.DB().
+		Where("client_id = ?", clientID).
+		Order("event_date_time DESC").
+		Find(&events).Error
+	return events, err
+}
+
+// GetAllEventsForDashboard returns all events (for root users).
+func GetAllEventsForDashboard() ([]models.Event, error) {
+	var events []models.Event
+	err := gormrepository.DB().
+		Order("event_date_time DESC").
+		Find(&events).Error
+	return events, err
+}
+
+// GetEventsForUser returns events for all clients a user is a member of.
+func GetEventsForUser(userID uuid.UUID) ([]models.Event, error) {
+	var events []models.Event
+	err := gormrepository.DB().
+		Joins("JOIN client_members ON client_members.client_id = events.client_id").
+		Where("client_members.user_id = ? AND client_members.is_active = true", userID).
+		Order("events.event_date_time DESC").
+		Find(&events).Error
+	return events, err
+}
+
+// GetEventByIdentifier returns a bare Event record by its slug identifier.
+func GetEventByIdentifier(identifier string) (*models.Event, error) {
+	var event models.Event
+	err := gormrepository.DB().
+		Where("identifier = ?", identifier).
+		First(&event).Error
+	if err != nil {
+		return nil, err
+	}
+	return &event, nil
+}

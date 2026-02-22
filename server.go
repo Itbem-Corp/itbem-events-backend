@@ -16,6 +16,7 @@ import (
 	customValidator "events-stocks/middleware/validator"
 	authproviderrepository "events-stocks/repositories/authproviderrepository"
 	clientrepository "events-stocks/repositories/clientrepository"
+	sqsrepository "events-stocks/repositories/sqsrepository"
 	clientrolerepository "events-stocks/repositories/clientrolerepository"
 	clienttyperepository "events-stocks/repositories/clienttyperepository"
 	eventconfigrepository "events-stocks/repositories/eventconfigrepository"
@@ -59,6 +60,8 @@ func main() {
 	configuration.MigrarModelos()
 	configuration.SeedBaseData()
 	configuration.InitAwsServices(cfg)
+	sqsrepository.Init(cfg.AwsRegion, cfg.S3ClientId, cfg.S3ClientSecret,
+		cfg.SQSImageQueueURL, cfg.SQSVideoQueueURL)
 
 	e := echo.New()
 	e.HideBanner = true
@@ -119,12 +122,12 @@ func main() {
 	})
 	e.Use(configuration.GetCORSConfig(cfg))
 
-	// ── Límites de entrada ─────────────────────────────────────────────────────
-	e.Use(middleware.BodyLimit("2M")) // Rechaza payloads > 2 MB antes de leerlos
+	// ── Body limits se aplican por grupo en routes.go (público=2M, uploads=225M) ──
 
 	// ── Timeout global ────────────────────────────────────────────────────────
+	// 5 min para acomodar uploads de video de hasta 200 MB en conexiones lentas.
 	e.Use(middleware.TimeoutWithConfig(middleware.TimeoutConfig{
-		Timeout: 10 * time.Second,
+		Timeout: 5 * time.Minute,
 	}))
 
 	// ── Compresión ────────────────────────────────────────────────────────────

@@ -14,7 +14,7 @@ type User struct {
 	LastName     string         `json:"last_name"`
 	ProfileImage string         `gorm:"text" json:"profile_image"`
 	IsActive     bool           `gorm:"default:true" json:"is_active"`
-	IsRoot       bool           `gorm:"default:false" json:"-"`
+	IsRoot       bool           `gorm:"default:false" json:"is_root"`
 	// Relaciones (Has Many)
 	EventMembers  []EventMember  `gorm:"foreignKey:UserID" json:"event_members,omitempty"`
 	ClientMembers []ClientMember `gorm:"foreignKey:UserID" json:"client_members,omitempty"`

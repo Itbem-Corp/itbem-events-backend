@@ -28,8 +28,8 @@ func SetDefaultInvitationService(svc *InvitationService) { _invitationSvc = svc 
 func GetInvitationByToken(token string) (*InvitationWithGuest, error) {
 	return _invitationSvc.GetInvitationByToken(token)
 }
-func ConfirmRSVP(prettyToken string, status string, method string, guestCount int) (*models.Guest, error) {
-	return _invitationSvc.ConfirmRSVP(prettyToken, status, method, guestCount)
+func ConfirmRSVP(prettyToken string, status string, method string, guestCount int, notes string) (*models.Guest, error) {
+	return _invitationSvc.ConfirmRSVP(prettyToken, status, method, guestCount, notes)
 }
 func ListInvitations() ([]models.Invitation, error)   { return _invitationSvc.ListInvitations() }
 func CreateInvitation(obj *models.Invitation) error   { return _invitationSvc.CreateInvitation(obj) }
@@ -105,7 +105,7 @@ func (s *InvitationService) GetInvitationByToken(token string) (*InvitationWithG
 	}, nil
 }
 
-func (s *InvitationService) ConfirmRSVP(prettyToken string, status string, method string, guestCount int) (*models.Guest, error) {
+func (s *InvitationService) ConfirmRSVP(prettyToken string, status string, method string, guestCount int, notes string) (*models.Guest, error) {
 	accessToken, err := s.tokenRepo.GetByPrettyToken(prettyToken)
 	if err != nil || accessToken == nil {
 		return nil, fmt.Errorf("invalid or expired token")
@@ -127,6 +127,9 @@ func (s *InvitationService) ConfirmRSVP(prettyToken string, status string, metho
 	guest.RSVPMethod = method
 	guest.RSVPTokenID = &accessToken.ID
 	guest.RSVPGuestCount = guestCount
+	if notes != "" {
+		guest.DietaryRestrictions = notes
+	}
 	if err := s.guestRepo.UpdateGuest(guest); err != nil {
 		return nil, err
 	}

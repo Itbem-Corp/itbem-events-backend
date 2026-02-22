@@ -3,7 +3,13 @@ package moments
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
+	"strings"
+	"time"
+
 	"events-stocks/models"
+	sqsrepository "events-stocks/repositories/sqsrepository"
 	"events-stocks/services/ports"
 	"events-stocks/utils"
 	"github.com/gofrs/uuid"
@@ -23,6 +29,18 @@ func DeleteMoment(id uuid.UUID) error                    { return _momentSvc.Del
 func ListMomentsByEventID(eventID uuid.UUID, approvedOnly bool) ([]models.Moment, error) {
 	return _momentSvc.ListByEventID(eventID, approvedOnly)
 }
+func UpdateMomentContent(id uuid.UUID, contentURL, status string, durationMs, originalBytes, optimizedBytes int64) error {
+	return _momentSvc.UpdateMomentContent(id, contentURL, status, durationMs, originalBytes, optimizedBytes)
+}
+func ListForDashboard(eventID uuid.UUID) ([]models.Moment, error) {
+	return _momentSvc.ListForDashboard(eventID)
+}
+func ListApprovedForWall(eventID uuid.UUID, page, limit int) ([]models.Moment, int64, error) {
+	return _momentSvc.ListApprovedForWall(eventID, page, limit)
+}
+func BulkUpdateApproval(ids []uuid.UUID, isApproved bool) error {
+	return _momentSvc.BulkUpdateApproval(ids, isApproved)
+}
 
 // MomentService is the injectable, struct-based moment service.
 type MomentService struct {
@@ -32,6 +50,17 @@ type MomentService struct {
 
 func NewMomentService(repo ports.MomentRepository, cache ports.CacheRepository) *MomentService {
 	return &MomentService{repo: repo, cache: cache}
+}
+
+// wallCacheKey returns the Redis key for a paginated public wall result.
+func wallCacheKey(eventID uuid.UUID, page, limit int) string {
+	return fmt.Sprintf("moments:wall:%s:p%d:l%d", eventID.String(), page, limit)
+}
+
+// invalidateWallCache removes all cached wall pages for an event.
+func (s *MomentService) invalidateWallCache(eventID uuid.UUID) {
+	ctx := context.Background()
+	_ = s.cache.DeleteKeysByPattern(ctx, fmt.Sprintf("moments:wall:%s:*", eventID.String()))
 }
 
 func (s *MomentService) ListMoments() ([]models.Moment, error) {
@@ -68,16 +97,124 @@ func (s *MomentService) UpdateMoment(obj *models.Moment) error {
 	if err := s.repo.UpdateMoment(obj); err != nil {
 		return err
 	}
+	// Invalidate wall cache when approval status changes
+	if obj.EventID != nil {
+		s.invalidateWallCache(*obj.EventID)
+	}
 	return s.cache.Invalidate("moments", "all")
 }
 
 func (s *MomentService) DeleteMoment(id uuid.UUID) error {
+	// Fetch before deleting so we can invalidate the wall cache for the right event
+	m, _ := s.repo.GetMomentByID(id)
 	if err := s.repo.DeleteMoment(id); err != nil {
 		return err
+	}
+	if m != nil && m.EventID != nil {
+		s.invalidateWallCache(*m.EventID)
 	}
 	return s.cache.Invalidate("moments", "all")
 }
 
 func (s *MomentService) ListByEventID(eventID uuid.UUID, approvedOnly bool) ([]models.Moment, error) {
 	return s.repo.ListByEventID(eventID, approvedOnly)
+}
+
+// ListForDashboard returns moments ready for admin review — excludes pending/processing.
+// Dashboard always gets fresh data so admins see processing state changes immediately.
+func (s *MomentService) ListForDashboard(eventID uuid.UUID) ([]models.Moment, error) {
+	return s.repo.ListForDashboard(eventID)
+}
+
+// ListApprovedForWall returns approved + optimized moments for the public wall, paginated.
+// Results are cached in Redis for 5 minutes; cache is busted on approval changes or Lambda completion.
+func (s *MomentService) ListApprovedForWall(eventID uuid.UUID, page, limit int) ([]models.Moment, int64, error) {
+	ctx := context.Background()
+	cacheKey := wallCacheKey(eventID, page, limit)
+
+	if cached, err := s.cache.GetKey(ctx, cacheKey); err == nil && cached != "" {
+		var payload struct {
+			Items []models.Moment `json:"items"`
+			Total int64           `json:"total"`
+		}
+		if err := json.Unmarshal([]byte(cached), &payload); err == nil {
+			return payload.Items, payload.Total, nil
+		}
+	}
+
+	items, total, err := s.repo.ListApprovedForWall(eventID, page, limit)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	data, _ := json.Marshal(struct {
+		Items []models.Moment `json:"items"`
+		Total int64           `json:"total"`
+	}{items, total})
+	_ = s.cache.SaveKey(ctx, cacheKey, string(data), 5*time.Minute)
+
+	return items, total, nil
+}
+
+// UpdateMomentContent is called by the Lambda after media processing completes.
+// durationMs/originalBytes/optimizedBytes are the Lambda processing metrics; pass 0 to skip.
+// When processing_status becomes "done", we must bust the wall cache so the
+// newly optimized file is served fresh.
+func (s *MomentService) UpdateMomentContent(id uuid.UUID, contentURL, processingStatus string, durationMs, originalBytes, optimizedBytes int64) error {
+	if err := s.repo.UpdateMomentContent(id, contentURL, processingStatus, durationMs, originalBytes, optimizedBytes); err != nil {
+		return err
+	}
+	// Invalidate wall cache for the event (need to look up moment to get eventID)
+	m, _ := s.repo.GetMomentByID(id)
+	if m != nil && m.EventID != nil {
+		s.invalidateWallCache(*m.EventID)
+	}
+	return s.cache.Invalidate("moments", "all")
+}
+
+// RequeueMoment resets processing_status to "pending" and republishes the SQS job.
+// Called by admin when a moment is stuck in "failed" or "processing".
+// The raw S3 key must still be present in ContentURL (i.e. the moment has not yet
+// been fully optimized and the raw path replaced). If the path no longer contains
+// "/raw/", an error is returned — the moment cannot be requeued without the raw file.
+func (s *MomentService) RequeueMoment(moment *models.Moment) error {
+	if moment.EventID == nil {
+		return fmt.Errorf("cannot requeue: moment has no EventID")
+	}
+
+	if !strings.Contains(moment.ContentURL, "/raw/") {
+		return fmt.Errorf("cannot requeue: optimized file already processed, raw key not available")
+	}
+
+	// Reset to pending
+	if err := s.repo.UpdateMomentContent(moment.ID, moment.ContentURL, "pending", 0, 0, 0); err != nil {
+		return err
+	}
+
+	isVideo := strings.HasSuffix(moment.ContentURL, ".mp4") ||
+		strings.HasSuffix(moment.ContentURL, ".mov") ||
+		strings.HasSuffix(moment.ContentURL, ".webm")
+
+	if err := sqsrepository.PublishMediaJob(sqsrepository.MediaProcessMessage{
+		MomentID:    moment.ID.String(),
+		EventID:     moment.EventID.String(),
+		RawS3Key:    moment.ContentURL,
+		Bucket:      os.Getenv("S3_BUCKET_NAME"),
+		ContentType: "image/jpeg", // best effort; Lambda will detect actual type
+		IsVideo:     isVideo,
+	}); err != nil {
+		return fmt.Errorf("requeue SQS publish failed: %w", err)
+	}
+
+	// Invalidate wall cache
+	s.invalidateWallCache(*moment.EventID)
+	return s.cache.Invalidate("moments", "all")
+}
+
+// BulkUpdateApproval updates is_approved for multiple moments by ID.
+func (s *MomentService) BulkUpdateApproval(ids []uuid.UUID, isApproved bool) error {
+	if err := s.repo.BulkUpdateApproval(ids, isApproved); err != nil {
+		return err
+	}
+	return s.cache.Invalidate("moments", "all")
 }

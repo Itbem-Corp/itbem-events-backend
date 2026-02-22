@@ -20,6 +20,7 @@ type RSVPRequest struct {
 	Status         string `json:"status" form:"status" query:"status" validate:"required,oneof=confirmed declined pending"`
 	Method         string `json:"method" form:"method" query:"method"`
 	GuestCount     int    `json:"guest_count"`
+	Notes          string `json:"notes" form:"notes" query:"notes"` // dietary restrictions / free-text notes
 }
 
 func GetInvitationByToken(c echo.Context) error {
@@ -52,7 +53,7 @@ func ConfirmRSVP(c echo.Context) error {
 	if req.Method == "" {
 		req.Method = "web"
 	}
-	guest, err := invitationSvc.ConfirmRSVP(token, req.Status, req.Method, req.GuestCount)
+	guest, err := invitationSvc.ConfirmRSVP(token, req.Status, req.Method, req.GuestCount, req.Notes)
 	if err != nil {
 		return utils.Error(c, http.StatusUnauthorized, "RSVP confirmation failed", err.Error())
 	}

@@ -34,4 +34,15 @@ type Config struct {
 
 	// CORS — comma-separated extra origins (e.g. local dev: http://localhost:4321,http://localhost:3000)
 	CorsAllowOrigins string `required:"false"`
+
+	// Media processing — separate SQS queues for images and videos (Lambda).
+	// Leave empty to disable async processing for that type.
+	// Recommended: route to separate queues for independent concurrency control.
+	SQSImageQueueURL string `required:"false"` // itbem-media-images queue
+	SQSVideoQueueURL string `required:"false"` // itbem-media-videos queue
+
+	// Internal API secret — used by Lambda to call PUT /api/moments/:id/content
+	// Generate with: openssl rand -hex 32
+	// Must match INTERNAL_API_SECRET in Lambda environment variables.
+	InternalAPISecret string `required:"false"`
 }

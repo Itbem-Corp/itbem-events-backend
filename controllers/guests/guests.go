@@ -100,6 +100,31 @@ func UpdateGuest(c echo.Context) error {
 	return utils.Success(c, http.StatusOK, "Guest updated", guest)
 }
 
+// DELETE /guests/bulk — body: {"ids": ["uuid1", "uuid2", ...]}
+func BulkDeleteGuests(c echo.Context) error {
+	var body struct {
+		IDs []string `json:"ids"`
+	}
+	if err := c.Bind(&body); err != nil {
+		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
+	}
+	if len(body.IDs) == 0 {
+		return utils.Error(c, http.StatusBadRequest, "No IDs provided", "")
+	}
+	uuids := make([]uuid.UUID, 0, len(body.IDs))
+	for _, id := range body.IDs {
+		u, err := uuid.FromString(id)
+		if err != nil {
+			return utils.Error(c, http.StatusBadRequest, "Invalid UUID: "+id, err.Error())
+		}
+		uuids = append(uuids, u)
+	}
+	if err := guestSvc.BulkDeleteGuests(uuids); err != nil {
+		return utils.Error(c, http.StatusInternalServerError, "Error deleting guests", err.Error())
+	}
+	return utils.Success(c, http.StatusOK, "Guests deleted", nil)
+}
+
 // DELETE /guests/:id
 func DeleteGuest(c echo.Context) error {
 	idParam := c.Param("id")

@@ -7,6 +7,7 @@ import (
 	"events-stocks/controllers/clienttypes"
 	"events-stocks/controllers/eventconfig"
 	"events-stocks/controllers/events"
+	"events-stocks/controllers/eventtypes"
 	"events-stocks/controllers/eventsection"
 	"events-stocks/controllers/fonts"
 	"events-stocks/controllers/guests"
@@ -96,19 +97,26 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	// 🌍 RUTAS PÚBLICAS (Invitados / Vista)
 	// ==========================================
 	public := e.Group("/api")
+	public.Use(middleware.BodyLimit("2M")) // Protege endpoints públicos no-upload
 	public.Use(publicRateLimiter())
 	public.Use(redisMiddleware.RetrieveCache)
 
 	// Events (Lectura pública)
-	public.GET("/events/page-spec", events.GetPageSpec) // SDUI: PageSpec por token
-	public.GET("/events/section/:sectionId/attendees", guests.GetAttendees) // SDUI: Graduados por sección
+	public.GET("/events/page-spec", events.GetPageSpec)                        // SDUI: PageSpec por token
+	public.GET("/events/section/:sectionId/attendees", guests.GetAttendees)    // SDUI: Graduados por sección
 	public.GET("/events/:key", events.GetEvents)
+	public.POST("/events/:identifier/view", events.TrackView)                  // Incrementa contador de vistas
+	public.POST("/events/:identifier/verify-access", events.VerifyEventAccess) // Verifica contraseña
 
-	// Public moments
+	// Public moments — view wall (GET) + personal-token upload (POST) + shared QR upload
+	// Upload endpoints get a LARGER body limit (225M) to handle up to 200MB videos.
+	// GET inherits the 2M public limit (no body expected).
 	public.GET("/events/:identifier/moments", moments.ListPublicMoments)
 	momentsUploadGroup := public.Group("/events/:identifier/moments")
+	momentsUploadGroup.Use(middleware.BodyLimit("225M")) // Override for uploads
 	momentsUploadGroup.Use(sensitiveRateLimiter())
 	momentsUploadGroup.POST("", moments.CreatePublicMoment)
+	momentsUploadGroup.POST("/shared", moments.CreateSharedMoment) // QR-code shared upload (no token)
 
 	// Resources
 	public.GET("/resources/:id", resources.GetResource)
@@ -127,11 +135,13 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	// 🔒 RUTAS PROTEGIDAS (Dashboard / Admins)
 	// ==========================================
 	protected := e.Group("/api")
+	protected.Use(middleware.BodyLimit("25M")) // Permite subir recursos (logos, fuentes, etc.)
 	protected.Use(token.Autenticacion(cfg))
 	protected.Use(protectedRateLimiter())
 	protected.Use(redisMiddleware.RetrieveCache)
 
 	// ── Events ────────────────────────────────
+	protected.GET("/events", events.ListEvents)
 	protected.POST("/events", events.CreateEvent)
 	protected.PUT("/events/:id", events.UpdateEvent)
 	protected.DELETE("/events/:id", events.DeleteEvent)
@@ -161,14 +171,17 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 
 	// ── Guests ────────────────────────────────
 	protected.POST("/guests", guests.CreateGuest)
-	protected.POST("/guests/batch", guests.CreateGuests) // Batch con invitaciones automáticas
+	protected.POST("/guests/batch", guests.CreateGuests)    // Batch con invitaciones automáticas
 	protected.PUT("/guests/:id", guests.UpdateGuest)
+	protected.DELETE("/guests/bulk", guests.BulkDeleteGuests) // Bulk delete — must be before /:id
 	protected.DELETE("/guests/:id", guests.DeleteGuest)
 
 	// ── Moments ───────────────────────────────
 	protected.GET("/moments", moments.ListMoments)
+	protected.POST("/moments/bulk-approve", moments.BulkApproveRejectMoments) // must be before /:id
 	protected.GET("/moments/:id", moments.GetMoment)
 	protected.POST("/moments", moments.CreateMoment)
+	protected.PUT("/moments/:id/requeue", moments.RequeueMoment) // must be before /:id plain PUT
 	protected.PUT("/moments/:id", moments.UpdateMoment)
 	protected.DELETE("/moments/:id", moments.DeleteMoment)
 
@@ -207,4 +220,15 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	// ── Catálogos ─────────────────────────────
 	protected.GET("/catalogs/client-types", clienttypes.ListClientTypes)
 	protected.GET("/catalogs/roles", clientroles.ListClientRoles)
+	protected.GET("/event-types", eventtypes.ListEventTypes)
+
+	// ==========================================
+	// 🔑 RUTAS INTERNAS (Lambda callbacks)
+	// ==========================================
+	// These endpoints are NOT protected by Cognito JWT — they are only
+	// accessible with the X-Internal-Secret header validated inside each handler.
+	// Keep these at the end to avoid route conflicts.
+	internal := e.Group("/api")
+	internal.Use(middleware.BodyLimit("2M"))
+	internal.PUT("/moments/:id/content", moments.UpdateMomentContent) // Lambda callback: processing done
 }

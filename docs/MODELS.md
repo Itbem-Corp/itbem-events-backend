@@ -4,7 +4,9 @@
 
 ## JSON Tag Convention
 
-All models use **snake_case** JSON tags on every field.  Sensitive/internal fields use `json:"-"` (e.g. `CognitoSub`, `IsRoot`, `Token` in InvitationAccessToken, all `DeletedAt`).  Relation fields use `json:"...,omitempty"`.
+All models use **snake_case** JSON tags on every field.  Sensitive/internal fields use `json:"-"` (e.g. `CognitoSub`, `Token` in InvitationAccessToken, all `DeletedAt`).  Relation fields use `json:"...,omitempty"`.
+
+**Note:** `IsRoot` on User is **intentionally exposed** as `json:"is_root"` — the dashboard needs it to control sidebar visibility and super-admin access.
 
 ```go
 // Example: correct tag pattern
@@ -19,7 +21,8 @@ Event     Event          `gorm:"foreignKey:EventID" json:"event,omitempty"`
 ### Event
 - **File**: `models/Event.go`
 - **Purpose**: Main event entity
-- **Relationships**: HasMany Guests, HasMany Invitations, HasMany Resources, BelongsTo Client, BelongsTo EventType
+- **Key fields**: `ClientID *uuid.UUID` (nullable, FK to Client — added Phase 1), `client_id` JSON tag
+- **Relationships**: HasMany Guests, HasMany Invitations, HasMany Resources, BelongsTo Client (optional), BelongsTo EventType
 
 ### EventType
 - **File**: `models/EventType.go`
@@ -28,7 +31,8 @@ Event     Event          `gorm:"foreignKey:EventID" json:"event,omitempty"`
 
 ### EventConfig
 - **File**: `models/EventConfig.go`
-- **Purpose**: Per-event configuration (design settings, sections order, etc.)
+- **Purpose**: Per-event configuration (design settings, sections order, MomentWall gating)
+- **Key fields**: `show_moment_wall bool` (gates public visibility), `share_uploads_enabled bool` (enables QR-code upload page without personal token), `allow_uploads bool`, `allow_messages bool`, `max_uploads_per_guest int` (per-IP upload limit, default 3; set to 0 for global default), `auto_approve_uploads bool` (auto-approves all incoming moments, default false)
 - **Relationships**: BelongsTo Event
 
 ### EventSection
@@ -123,13 +127,24 @@ Event     Event          `gorm:"foreignKey:EventID" json:"event,omitempty"`
 
 ### Moment
 - **File**: `models/Moment.go`
-- **Purpose**: Timeline moments/segments within an event section
-- **Relationships**: BelongsTo EventSection, BelongsTo MomentType
-
-### MomentType
-- **File**: `models/MomentType.go`
-- **Purpose**: Catalog – type of moment (ceremony, reception, dinner, etc.)
-- **Relationships**: HasMany Moments (seed data)
+- **Purpose**: Guest-uploaded photo/video/note for the event MomentWall
+- **Key fields**:
+  - `event_id *uuid.UUID` — FK to Event (nullable)
+  - `invitation_id *uuid.UUID` — FK to Invitation (nullable — NULL for shared QR uploads)
+  - `content_url string` — S3 key of the file. Initially the raw path (`moments/{eventID}/raw/{uuid}.ext`); updated to optimized path (`moments/{eventID}/{uuid}.webp|.mp4`) once Lambda completes.
+  - `description string` — guest message/note left with the upload
+  - `is_approved bool` — admin approve/reject flag (default false)
+  - `processing_status string` — async processing state: `""` (legacy), `"pending"` (queued), `"processing"` (Lambda working), `"done"` (optimized), `"failed"` (Lambda error)
+  - `processing_duration_ms int64` — how long Lambda took to process (ms). Zero until `done`.
+  - `original_size_bytes int64` — raw file size in bytes. Zero until `done`.
+  - `optimized_size_bytes int64` — optimized file size in bytes. Zero until `done`.
+  - `error_message string` — populated by Lambda when processing fails; empty string means no error or not yet processed.
+  - `order int` — display order on wall
+- **Dashboard behavior**: `GET /api/moments?event_id=X` only returns moments with `processing_status NOT IN ('pending','processing')` — admins see items only after Lambda finishes.
+- **Public wall behavior**: Only shows `is_approved=true AND processing_status IN ('','done')` moments. Results cached in Redis (key: `moments:wall:{eventID}:p{N}:l{N}`, TTL 5min). Cache is busted on approval changes or Lambda callback.
+- **Upload limits**: Per-IP upload limit per event controlled by `EventConfig.MaxUploadsPerGuest` (default 3 if unset). Redis counter: `moments:upload_count:{eventID}:{ip}`, 30-day TTL. After limit reached: 429 with personalized thank-you message.
+- **S3 structure**: `moments/{eventID}/raw/{uuid}.ext` (raw) → `moments/{eventID}/{uuid}.webp|.mp4` (optimized)
+- **Relationships**: BelongsTo Event, BelongsTo Invitation (optional)
 
 ---
 

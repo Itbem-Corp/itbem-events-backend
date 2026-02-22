@@ -157,6 +157,31 @@ func CreateGuests(models []models.Guest) error {
 	return nil
 }
 
+// BulkDeleteGuests soft-deletes multiple guests by ID and invalidates their event caches.
+func BulkDeleteGuests(ids []uuid.UUID) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	// Fetch event IDs before deletion for cache invalidation
+	var guests []models.Guest
+	if err := configuration.DB.Select("id", "event_id").Where("id IN ?", ids).Find(&guests).Error; err != nil {
+		return err
+	}
+	if err := configuration.DB.Where("id IN ?", ids).Delete(&models.Guest{}).Error; err != nil {
+		return err
+	}
+	// Invalidate per-event guest caches
+	seen := make(map[uuid.UUID]bool)
+	for _, g := range guests {
+		if g.EventID != uuid.Nil && !seen[g.EventID] {
+			seen[g.EventID] = true
+			pattern := "all:" + g.EventID.String() + ":guests"
+			_ = redisrepository.DeleteKeysByPattern(context.Background(), pattern)
+		}
+	}
+	return nil
+}
+
 // ListAttendeesByEventID returns guests for an event ordered by display order.
 // Only public-safe fields are returned (first_name, last_name, nickname, role, order).
 func ListAttendeesByEventID(eventID uuid.UUID) ([]models.Guest, error) {

@@ -50,6 +50,38 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **REMEMBER: Docs first, code second. Update docs always.**
 
+## 🔌 Context7 MCP — Always Use for Library Documentation
+
+**MANDATORY: Use Context7 MCP whenever you need documentation for any library or framework.**
+
+Context7 provides up-to-date, version-specific docs directly in your context window — no web searches needed.
+
+### When to use Context7
+- Need to look up a Go library (Echo, GORM, uuid, aws-sdk-go, etc.)
+- Need to check function signatures, middleware patterns, or breaking changes
+- Any uncertainty about a third-party package's API
+
+### How to use
+```
+# 1. Resolve the library ID
+mcp__context7__resolve-library-id libraryName:"echo labstack"
+
+# 2. Fetch relevant docs
+mcp__context7__get-library-docs libraryId:"/labstack/echo" topic:"middleware" tokens:5000
+```
+
+**Common library IDs for this project:**
+- Echo v4: `/labstack/echo`
+- GORM: `/go-gorm/gorm`
+- AWS SDK Go v2: `/aws/aws-sdk-go-v2`
+- Redis (go-redis): `/redis/go-redis`
+- JWT (golang-jwt): `/golang-jwt/jwt`
+- UUID (gofrs): `/gofrs/uuid`
+
+**Why this matters:** Reading Context7 docs costs ~1,000 tokens vs 15,000+ for web searches or exploring source code. Always resolve+fetch before writing code that uses an unfamiliar API.
+
+---
+
 ## 🤖 Use Specialized Agents (Advanced Token Optimization)
 
 This project has **12 custom Claude Code agents** for common tasks. Using agents can save 10,000-25,000 tokens per task!

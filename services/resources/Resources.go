@@ -18,9 +18,11 @@ import (
 )
 
 const (
-	MaxFileSizeMB     = 8
-	MaxFileSizeBytes  = MaxFileSizeMB * 1024 * 1024
-	ErrPrefixValidate = "validation_error:"
+	MaxFileSizeMB        = 10                           // general resources: images, fonts
+	MaxFileSizeBytes     = MaxFileSizeMB * 1024 * 1024
+	MaxVideoFileSizeMB   = 200                          // moment video uploads
+	MaxVideoFileSizeBytes = MaxVideoFileSizeMB * 1024 * 1024
+	ErrPrefixValidate    = "validation_error:"
 )
 
 var AllowedMimeTypes = map[string]bool{
@@ -252,8 +254,69 @@ func (rs *ResourceService) UploadAndCreateResource(
 }
 
 
-// UploadToMomentsFolder uploads a guest moment photo to S3 and returns the storage path.
+// UploadRawToMomentsFolder uploads a guest moment file to S3 WITHOUT optimization.
+// The raw file is stored under moments/{eventID}/raw/ for async Lambda processing.
+// Returns the S3 key, detected content-type, and any error.
 // Does NOT create a Resource record — the path is stored in Moment.ContentURL.
+func (rs *ResourceService) UploadRawToMomentsFolder(
+	file multipart.File,
+	header *multipart.FileHeader,
+	eventID string,
+) (s3Key string, contentType string, err error) {
+	ct := header.Header.Get("Content-Type")
+	if ct == "" {
+		ext := ""
+		if idx := strings.LastIndex(header.Filename, "."); idx != -1 {
+			ext = strings.ToLower(header.Filename[idx+1:])
+		}
+		ct = guessMimeType(ext)
+	}
+
+	// Allow only image and video types for moments
+	isImg := strings.HasPrefix(ct, "image/")
+	isVid := strings.HasPrefix(ct, "video/")
+	if !isImg && !isVid {
+		return "", "", services.ValidationError{Msg: fmt.Sprintf("unsupported file type for moments: %s", ct)}
+	}
+
+	// Enforce per-type size limits
+	maxBytes := int64(MaxFileSizeBytes) // 25 MB for images
+	if isVid {
+		maxBytes = int64(MaxVideoFileSizeBytes) // 200 MB for videos
+	}
+	if header.Size > maxBytes {
+		limitMB := MaxFileSizeMB
+		if isVid {
+			limitMB = MaxVideoFileSizeMB
+		}
+		return "", "", services.ValidationError{Msg: fmt.Sprintf("file size exceeds %d MB", limitMB)}
+	}
+
+	// Read raw bytes without optimization
+	raw, err := io.ReadAll(file)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to read uploaded file: %w", err)
+	}
+
+	// Build a UUID-based filename preserving extension
+	u, _ := uuid.NewV4()
+	ext := ""
+	if idx := strings.LastIndex(header.Filename, "."); idx != -1 {
+		ext = strings.ToLower(header.Filename[idx:])
+	}
+	filename := u.String() + ext
+
+	// Organize: moments/{eventID}/raw/{uuid}.ext
+	folder := fmt.Sprintf("moments/%s/raw", eventID)
+	if err := bucketrepository.UploadRawBytesSimple(raw, filename, ct, folder, rs.Bucket, rs.Provider); err != nil {
+		return "", "", fmt.Errorf("failed to upload raw moment: %w", err)
+	}
+
+	return fmt.Sprintf("%s/%s", folder, filename), ct, nil
+}
+
+// UploadToMomentsFolder is kept for backward compatibility.
+// Deprecated: use UploadRawToMomentsFolder.
 func (rs *ResourceService) UploadToMomentsFolder(
 	file multipart.File,
 	header *multipart.FileHeader,

@@ -257,3 +257,14 @@ func (r *ClientRepo) ListClientsByUser(userID uuid.UUID) ([]models.Client, error
 func (r *ClientRepo) CountClientsByUsers(userIDs []uuid.UUID) (map[uuid.UUID]int64, error) {
 	return CountClientsByUsers(userIDs)
 }
+
+// GetAllClients returns every non-deleted client (for root/super-admin use).
+func GetAllClients() ([]models.Client, error) {
+	var clients []models.Client
+	err := gormrepository.DB().
+		Preload("ClientType").
+		Preload("Parent").
+		Order("name ASC").
+		Find(&clients).Error
+	return clients, err
+}

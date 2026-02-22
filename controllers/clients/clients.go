@@ -104,7 +104,12 @@ func ListMyClients(c echo.Context) error {
 		return utils.Error(c, http.StatusUnauthorized, "User not found", err.Error())
 	}
 
-	myClients, err := clientSvc.GetMyClients(user.ID)
+	var myClients []models.Client
+	if user.IsRoot {
+		myClients, err = clients.GetAllClients()
+	} else {
+		myClients, err = clientSvc.GetMyClients(user.ID)
+	}
 	if err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Error fetching clients", err.Error())
 	}

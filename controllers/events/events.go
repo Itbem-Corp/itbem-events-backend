@@ -3,7 +3,11 @@ package events
 import (
 	"encoding/json"
 	"events-stocks/models"
+	"events-stocks/repositories/clientrepository"
+	"events-stocks/repositories/eventconfigrepository"
+	"events-stocks/repositories/eventsrepository"
 	eventsService "events-stocks/services/events"
+	"events-stocks/services/users"
 	"events-stocks/utils"
 	"github.com/gofrs/uuid"
 	"github.com/labstack/echo/v4"
@@ -14,6 +18,58 @@ var eventSvc *eventsService.EventService
 
 func InitEventsController(svc *eventsService.EventService) {
 	eventSvc = svc
+}
+
+// GET /api/events  (protected — scoped by client or root)
+// ?client_id=UUID  → events for that specific client (access-checked)
+// no param + root  → all events
+// no param + user  → events for all user's accessible clients
+func ListEvents(c echo.Context) error {
+	cognitoSub, ok := c.Get("cognito_sub").(string)
+	if !ok {
+		return utils.Error(c, http.StatusUnauthorized, "Unauthorized", "")
+	}
+	user, err := users.SyncUser(cognitoSub)
+	if err != nil {
+		return utils.Error(c, http.StatusUnauthorized, "User not found", err.Error())
+	}
+
+	clientIDStr := c.QueryParam("client_id")
+
+	if clientIDStr != "" {
+		clientID, err := uuid.FromString(clientIDStr)
+		if err != nil {
+			return utils.Error(c, http.StatusBadRequest, "Invalid client_id", err.Error())
+		}
+		// Root users can access any client; regular users need to have access
+		if !user.IsRoot {
+			allowed, _ := clientrepository.CheckAccessRecursive(user.ID, clientID)
+			if !allowed {
+				return utils.Error(c, http.StatusForbidden, "Access denied", "You don't have access to this client's events")
+			}
+		}
+		events, err := eventsrepository.GetEventsByClientID(clientID)
+		if err != nil {
+			return utils.Error(c, http.StatusInternalServerError, "Error fetching events", err.Error())
+		}
+		return utils.Success(c, http.StatusOK, "Events loaded", events)
+	}
+
+	// No client_id param
+	if user.IsRoot {
+		events, err := eventsrepository.GetAllEventsForDashboard()
+		if err != nil {
+			return utils.Error(c, http.StatusInternalServerError, "Error fetching events", err.Error())
+		}
+		return utils.Success(c, http.StatusOK, "Events loaded", events)
+	}
+
+	// Regular user: return events for all their clients
+	events, err := eventsrepository.GetEventsForUser(user.ID)
+	if err != nil {
+		return utils.Error(c, http.StatusInternalServerError, "Error fetching events", err.Error())
+	}
+	return utils.Success(c, http.StatusOK, "Events loaded", events)
 }
 
 // GET /events/:key
@@ -112,3 +168,63 @@ func GetPageSpec(c echo.Context) error {
 
 	return utils.Success(c, http.StatusOK, "Page spec loaded", spec)
 }
+
+// POST /api/events/:identifier/view
+// Public endpoint — increments the view counter for an event. Fire-and-forget.
+// Called by the Astro public page on first load (session-guarded in the client).
+func TrackView(c echo.Context) error {
+	identifier := c.Param("identifier")
+	if identifier == "" {
+		return utils.Error(c, http.StatusBadRequest, "Missing identifier", "")
+	}
+
+	event, err := eventsrepository.GetEventByIdentifier(identifier)
+	if err != nil || event == nil {
+		// Return 200 anyway — caller is fire-and-forget, no need to surface 404
+		return utils.Success(c, http.StatusOK, "ok", nil)
+	}
+
+	// Increment asynchronously — never block the guest page
+	go eventsService.IncrementAnalytics(event.ID, "views")
+
+	return utils.Success(c, http.StatusOK, "ok", nil)
+}
+
+// POST /api/events/:identifier/verify-access
+// Public endpoint — verifies the password for a password-protected event.
+// Returns 200 if correct, 401 if wrong. The password itself is never exposed.
+func VerifyEventAccess(c echo.Context) error {
+	identifier := c.Param("identifier")
+	if identifier == "" {
+		return utils.Error(c, http.StatusBadRequest, "Missing identifier", "")
+	}
+
+	var body struct {
+		Password string `json:"password"`
+	}
+	if err := c.Bind(&body); err != nil || body.Password == "" {
+		return utils.Error(c, http.StatusBadRequest, "Password required", "")
+	}
+
+	event, err := eventsrepository.GetEventByIdentifier(identifier)
+	if err != nil || event == nil {
+		return utils.Error(c, http.StatusNotFound, "Event not found", "")
+	}
+
+	cfg, err := eventconfigrepository.GetEventConfigByID(event.ID)
+	if err != nil || cfg == nil {
+		return utils.Error(c, http.StatusNotFound, "Event config not found", "")
+	}
+
+	if cfg.AuthPasswordPreview == "" {
+		// No password set — allow access
+		return utils.Success(c, http.StatusOK, "Access granted", nil)
+	}
+
+	if cfg.AuthPasswordPreview != body.Password {
+		return utils.Error(c, http.StatusUnauthorized, "Contraseña incorrecta", "")
+	}
+
+	return utils.Success(c, http.StatusOK, "Access granted", nil)
+}
+

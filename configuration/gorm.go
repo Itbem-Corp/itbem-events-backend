@@ -110,6 +110,8 @@ func MigrarModelos() {
 		slog.Error("model migration failed", "error", err)
 		os.Exit(1)
 	}
+	// Allow invitation_id to be NULL (needed for shared QR uploads without a personal token)
+	DB.Exec("ALTER TABLE IF EXISTS moments ALTER COLUMN invitation_id DROP NOT NULL")
 	slog.Info("models migrated")
 }
 

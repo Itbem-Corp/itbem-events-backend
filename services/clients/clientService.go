@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"events-stocks/configuration/constants"
 	"events-stocks/models"
+	"events-stocks/repositories/clientrepository"
 	"events-stocks/services/ports"
 	ResourceService "events-stocks/services/resources"
 	"fmt"
@@ -38,6 +39,10 @@ func UpdateClientDetails(
 
 func GetMyClients(userID uuid.UUID) ([]models.Client, error) {
 	return _clientSvc.GetMyClients(userID)
+}
+
+func GetAllClients() ([]models.Client, error) {
+	return clientrepository.GetAllClients()
 }
 
 func GetClientChildren(parentID, userID uuid.UUID) ([]models.Client, error) {

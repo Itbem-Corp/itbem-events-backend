@@ -3,6 +3,7 @@ package guests
 import (
 	"context"
 	"events-stocks/models"
+	guestrepository "events-stocks/repositories/guestrepository"
 	"events-stocks/services/ports"
 	"github.com/gofrs/uuid"
 	"gorm.io/gorm"
@@ -22,6 +23,7 @@ func CreateGuest(obj *models.Guest) error    { return _guestSvc.CreateGuest(obj)
 func UpdateGuest(obj *models.Guest) error    { return _guestSvc.UpdateGuest(obj) }
 func DeleteGuest(id uuid.UUID) error         { return _guestSvc.DeleteGuest(id) }
 func CreateGuests(objs []models.Guest) error { return _guestSvc.CreateGuests(objs) }
+func BulkDeleteGuests(ids []uuid.UUID) error { return _guestSvc.BulkDeleteGuests(ids) }
 
 // GuestService is the injectable, struct-based guest service.
 type GuestService struct {
@@ -170,6 +172,10 @@ func (s *GuestService) DeleteGuest(id uuid.UUID) error {
 		return s.cache.DeleteKeysByPattern(context.Background(), pattern)
 	}
 	return nil
+}
+
+func (s *GuestService) BulkDeleteGuests(ids []uuid.UUID) error {
+	return guestrepository.BulkDeleteGuests(ids)
 }
 
 func (s *GuestService) CreateGuests(objs []models.Guest) error {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"events-stocks/dtos"
 	"events-stocks/models"
+	"events-stocks/repositories/eventconfigrepository"
 	"events-stocks/repositories/eventsectionrepository"
 	"events-stocks/repositories/eventsrepository"
 	"events-stocks/repositories/invitationaccesstokenrepository"
@@ -20,6 +21,7 @@ type pageSpecDeps struct {
 	getInvitation func(id uuid.UUID) (*models.Invitation, error)
 	getEvent      func(id uuid.UUID) (*models.Event, error)
 	getSections   func(eventID uuid.UUID) ([]models.EventSection, error)
+	getConfig     func(id uuid.UUID) (*models.EventConfig, error)
 }
 
 // getPageSpec is the testable core — it accepts deps explicitly.
@@ -58,25 +60,71 @@ func getPageSpec(deps pageSpecDeps, token string) (*dtos.PageSpec, error) {
 		}
 	}
 
-	// 6. Build meta
+	// 6. Build access control from EventConfig (best-effort — never blocks the page)
+	var access *dtos.PageSpecAccess
+	if deps.getConfig != nil {
+		cfg, cfgErr := deps.getConfig(event.ID)
+		if cfgErr == nil && cfg != nil {
+			// Use zero time as "not set" sentinel for ActiveFrom (GORM sets it to 0001-01-01)
+			isZero := cfg.ActiveFrom.IsZero() || cfg.ActiveFrom.Year() <= 1970
+			access = &dtos.PageSpecAccess{
+				PasswordProtected: cfg.AuthPasswordPreview != "",
+			}
+			if !isZero {
+				t := cfg.ActiveFrom
+				access.ActiveFrom = &t
+			}
+			if cfg.ActiveUntil != nil && !cfg.ActiveUntil.IsZero() {
+				access.ActiveUntil = cfg.ActiveUntil
+			}
+		}
+	}
+
+	// 7. Build meta
 	meta := dtos.PageSpecMeta{
 		PageTitle:  event.Name,
 		Contact:    contact,
 		EventID:    event.ID.String(),
 		Identifier: event.Identifier,
+		Access:     access,
 	}
 	if event.MusicUrl != "" {
 		musicUrl := event.MusicUrl
 		meta.MusicUrl = &musicUrl
 	}
 
-	// 7. Build sections
+	// 8. Build sections — for MomentWall, inject runtime flags from EventConfig
 	specSections := make([]dtos.PageSpecSection, 0, len(sections))
 	for _, s := range sections {
 		config := json.RawMessage(s.Config)
 		if len(config) == 0 || string(config) == "null" || string(config) == "" {
 			config = json.RawMessage("{}")
 		}
+
+		// Inject MomentWall visibility/upload flags so the Astro component knows
+		// whether to show content and the upload button without an extra API call.
+		if s.ComponentType == "MomentWall" {
+			var cfgForSection *models.EventConfig
+			if deps.getConfig != nil {
+				cfgForSection, _ = deps.getConfig(event.ID)
+			}
+			allowUploads := cfgForSection != nil && cfgForSection.AllowUploads
+			allowMessages := cfgForSection != nil && cfgForSection.AllowMessages
+			published := cfgForSection != nil && cfgForSection.ShowMomentWall
+			shareEnabled := cfgForSection != nil && cfgForSection.ShareUploadsEnabled
+
+			var configMap map[string]interface{}
+			if err := json.Unmarshal(config, &configMap); err == nil {
+				configMap["allow_uploads"] = allowUploads
+				configMap["allow_messages"] = allowMessages
+				configMap["published"] = published
+				configMap["share_uploads_enabled"] = shareEnabled
+				if updated, mergeErr := json.Marshal(configMap); mergeErr == nil {
+					config = json.RawMessage(updated)
+				}
+			}
+		}
+
 		specSections = append(specSections, dtos.PageSpecSection{
 			Type:      s.ComponentType,
 			SectionId: s.ID.String(),
@@ -99,5 +147,6 @@ func GetPageSpecByToken(token string) (*dtos.PageSpec, error) {
 		getInvitation: invitationrepository.GetInvitationByIDLite,
 		getEvent:      eventsrepository.GetEventByIDRaw,
 		getSections:   eventsectionrepository.ListByEventIDForSpec,
+		getConfig:     eventconfigrepository.GetEventConfigByID,
 	}, token)
 }
