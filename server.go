@@ -105,11 +105,11 @@ func main() {
 	e.Use(middleware.SecureWithConfig(middleware.SecureConfig{
 		XSSProtection:         "1; mode=block",
 		ContentTypeNosniff:    "nosniff",
-		XFrameOptions:         "DENY",
+		XFrameOptions:         "SAMEORIGIN",
 		HSTSMaxAge:            31536000,
 		HSTSExcludeSubdomains: false,
 		HSTSPreloadEnabled:    true,
-		ContentSecurityPolicy: "default-src 'self'",
+		ContentSecurityPolicy: "default-src 'self'; frame-ancestors 'self' https://dashboard.eventiapp.com.mx",
 	}))
 	e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
