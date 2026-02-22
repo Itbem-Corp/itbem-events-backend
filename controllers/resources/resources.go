@@ -75,19 +75,47 @@ func CreateResource(c echo.Context) error {
 	altText := c.FormValue("alt_text")
 	title := c.FormValue("title")
 
-	sectionID, err := uuid.FromString(sectionIDStr)
-	if err != nil {
-		return utils.Error(c, http.StatusBadRequest, "Invalid section_id UUID", err.Error())
+	// section_id is optional — resources like event covers don't belong to a section
+	var sectionID *uuid.UUID
+	if sectionIDStr != "" {
+		parsed, err := uuid.FromString(sectionIDStr)
+		if err != nil {
+			return utils.Error(c, http.StatusBadRequest, "Invalid section_id UUID", err.Error())
+		}
+		sectionID = &parsed
 	}
 
-	resourceTypeID, err := uuid.FromString(resourceTypeIDStr)
-	if err != nil {
-		return utils.Error(c, http.StatusBadRequest, "Invalid resource_type_id UUID", err.Error())
+	// resource_type_id is optional — when omitted, infer from file MIME type
+	var resourceTypeID uuid.UUID
+	if resourceTypeIDStr != "" {
+		parsed, err := uuid.FromString(resourceTypeIDStr)
+		if err != nil {
+			return utils.Error(c, http.StatusBadRequest, "Invalid resource_type_id UUID", err.Error())
+		}
+		resourceTypeID = parsed
 	}
 
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "File is required", err.Error())
+	}
+
+	// If no resource_type_id provided, resolve from MIME type
+	if resourceTypeIDStr == "" {
+		code := "file"
+		ct := fileHeader.Header.Get("Content-Type")
+		if strings.HasPrefix(ct, "image/") {
+			code = "image"
+		} else if strings.HasPrefix(ct, "video/") {
+			code = "video"
+		} else if strings.HasPrefix(ct, "audio/") {
+			code = "audio"
+		}
+		resolved, err := resourceSvc.ResolveResourceTypeByCode(code)
+		if err != nil {
+			return utils.Error(c, http.StatusInternalServerError, "Could not resolve resource type", err.Error())
+		}
+		resourceTypeID = resolved
 	}
 
 	file, err := fileHeader.Open()
@@ -99,7 +127,7 @@ func CreateResource(c echo.Context) error {
 	resource, err := resourceSvc.UploadAndCreateResource(
 		file,
 		fileHeader,
-		&sectionID,
+		sectionID,
 		resourceTypeID,
 		altText,
 		title,
@@ -139,14 +167,28 @@ func UploadMultipleResources(c echo.Context) error {
 	sectionIDStr := c.FormValue("section_id")
 	resourceTypeIDStr := c.FormValue("resource_type_id")
 
-	sectionID, err := uuid.FromString(sectionIDStr)
-	if err != nil {
-		return utils.Error(c, http.StatusBadRequest, "Invalid section_id UUID", err.Error())
+	var sectionID *uuid.UUID
+	if sectionIDStr != "" {
+		parsed, err := uuid.FromString(sectionIDStr)
+		if err != nil {
+			return utils.Error(c, http.StatusBadRequest, "Invalid section_id UUID", err.Error())
+		}
+		sectionID = &parsed
 	}
 
-	resourceTypeID, err := uuid.FromString(resourceTypeIDStr)
-	if err != nil {
-		return utils.Error(c, http.StatusBadRequest, "Invalid resource_type_id UUID", err.Error())
+	var resourceTypeID uuid.UUID
+	if resourceTypeIDStr != "" {
+		parsed, err := uuid.FromString(resourceTypeIDStr)
+		if err != nil {
+			return utils.Error(c, http.StatusBadRequest, "Invalid resource_type_id UUID", err.Error())
+		}
+		resourceTypeID = parsed
+	} else {
+		resolved, err := resourceSvc.ResolveResourceTypeByCode("image")
+		if err != nil {
+			return utils.Error(c, http.StatusInternalServerError, "Could not resolve resource type", err.Error())
+		}
+		resourceTypeID = resolved
 	}
 
 	form, err := c.MultipartForm()
@@ -159,7 +201,7 @@ func UploadMultipleResources(c echo.Context) error {
 		return utils.Error(c, http.StatusBadRequest, "No files provided", "")
 	}
 
-	resources, err := resourceSvc.UploadMultipleResources(files, &sectionID, resourceTypeID)
+	resources, err := resourceSvc.UploadMultipleResources(files, sectionID, resourceTypeID)
 	if err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Failed to upload resources", err.Error())
 	}

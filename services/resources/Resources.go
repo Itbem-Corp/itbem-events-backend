@@ -494,8 +494,10 @@ func UpdateResource(resource *models.Resource) error {
 		return err
 	}
 
-	// Invalidar cache de esa sección
-	return redisrepository.Invalidate("resources", resource.EventSectionID.String())
+	if resource.EventSectionID != nil {
+		return redisrepository.Invalidate("resources", resource.EventSectionID.String())
+	}
+	return nil
 }
 
 func CreateResource(resource *models.Resource) error {
@@ -504,7 +506,10 @@ func CreateResource(resource *models.Resource) error {
 		return err
 	}
 
-	return redisrepository.Invalidate("resources", resource.EventSectionID.String())
+	if resource.EventSectionID != nil {
+		return redisrepository.Invalidate("resources", resource.EventSectionID.String())
+	}
+	return nil
 }
 
 func DeleteResource(resourceID uuid.UUID, sectionID *uuid.UUID) error {
@@ -513,7 +518,10 @@ func DeleteResource(resourceID uuid.UUID, sectionID *uuid.UUID) error {
 		return err
 	}
 
-	return redisrepository.Invalidate("resources", sectionID.String())
+	if sectionID != nil {
+		return redisrepository.Invalidate("resources", sectionID.String())
+	}
+	return nil
 }
 
 func guessMimeType(ext string) string {

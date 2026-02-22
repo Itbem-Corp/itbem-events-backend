@@ -169,6 +169,23 @@ func GetPageSpec(c echo.Context) error {
 	return utils.Success(c, http.StatusOK, "Page spec loaded", spec)
 }
 
+// GET /api/events/:identifier/page-spec
+// Public endpoint — returns the SDUI PageSpec for a public preview of the event.
+// Used by the Astro /e/{identifier} route (no invitation token required).
+func GetPageSpecByIdentifier(c echo.Context) error {
+	identifier := c.Param("identifier")
+	if identifier == "" {
+		return utils.Error(c, http.StatusBadRequest, "Missing identifier", "")
+	}
+
+	spec, err := eventsService.GetPageSpecByIdentifier(identifier)
+	if err != nil {
+		return utils.Error(c, http.StatusNotFound, "Page spec not found", err.Error())
+	}
+
+	return utils.Success(c, http.StatusOK, "Page spec loaded", spec)
+}
+
 // POST /api/events/:identifier/view
 // Public endpoint — increments the view counter for an event. Fire-and-forget.
 // Called by the Astro public page on first load (session-guarded in the client).

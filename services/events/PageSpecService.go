@@ -24,33 +24,22 @@ type pageSpecDeps struct {
 	getConfig     func(id uuid.UUID) (*models.EventConfig, error)
 }
 
-// getPageSpec is the testable core — it accepts deps explicitly.
-func getPageSpec(deps pageSpecDeps, token string) (*dtos.PageSpec, error) {
-	// 1. Resolve token → access token record
-	accessToken, err := deps.getToken(token)
-	if err != nil || accessToken == nil {
-		return nil, fmt.Errorf("token not found")
-	}
+// buildSpecDeps holds the repository functions needed after the event is resolved.
+type buildSpecDeps struct {
+	getSections func(eventID uuid.UUID) ([]models.EventSection, error)
+	getConfig   func(id uuid.UUID) (*models.EventConfig, error)
+}
 
-	// 2. Access token → invitation → event ID
-	invitation, err := deps.getInvitation(accessToken.InvitationID)
-	if err != nil || invitation == nil {
-		return nil, fmt.Errorf("invitation not found")
-	}
-
-	// 3. Fetch event (Name as pageTitle, MusicUrl if set)
-	event, err := deps.getEvent(invitation.EventID)
-	if err != nil || event == nil {
-		return nil, fmt.Errorf("event not found")
-	}
-
-	// 4. Fetch visible SDUI sections ordered by position
-	sections, err := deps.getSections(invitation.EventID)
+// buildPageSpecFromEvent builds a PageSpec from an already-resolved event.
+// Shared by both the token-based and identifier-based flows.
+func buildPageSpecFromEvent(event *models.Event, deps buildSpecDeps) (*dtos.PageSpec, error) {
+	// 1. Fetch visible SDUI sections ordered by position
+	sections, err := deps.getSections(event.ID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load sections: %w", err)
 	}
 
-	// 5. Build contact only if event has organizer data
+	// 2. Build contact only if event has organizer data
 	var contact *dtos.PageSpecContact
 	if event.OrganizerName != "" || event.OrganizerPhone != "" || event.OrganizerEmail != "" {
 		contact = &dtos.PageSpecContact{
@@ -60,12 +49,11 @@ func getPageSpec(deps pageSpecDeps, token string) (*dtos.PageSpec, error) {
 		}
 	}
 
-	// 6. Build access control from EventConfig (best-effort — never blocks the page)
+	// 3. Build access control from EventConfig (best-effort — never blocks the page)
 	var access *dtos.PageSpecAccess
 	if deps.getConfig != nil {
 		cfg, cfgErr := deps.getConfig(event.ID)
 		if cfgErr == nil && cfg != nil {
-			// Use zero time as "not set" sentinel for ActiveFrom (GORM sets it to 0001-01-01)
 			isZero := cfg.ActiveFrom.IsZero() || cfg.ActiveFrom.Year() <= 1970
 			access = &dtos.PageSpecAccess{
 				PasswordProtected: cfg.AuthPasswordPreview != "",
@@ -80,7 +68,7 @@ func getPageSpec(deps pageSpecDeps, token string) (*dtos.PageSpec, error) {
 		}
 	}
 
-	// 7. Build meta
+	// 4. Build meta
 	meta := dtos.PageSpecMeta{
 		PageTitle:  event.Name,
 		Contact:    contact,
@@ -93,7 +81,7 @@ func getPageSpec(deps pageSpecDeps, token string) (*dtos.PageSpec, error) {
 		meta.MusicUrl = &musicUrl
 	}
 
-	// 8. Build sections — for MomentWall, inject runtime flags from EventConfig
+	// 5. Build sections — for MomentWall, inject runtime flags from EventConfig
 	specSections := make([]dtos.PageSpecSection, 0, len(sections))
 	for _, s := range sections {
 		config := json.RawMessage(s.Config)
@@ -101,8 +89,6 @@ func getPageSpec(deps pageSpecDeps, token string) (*dtos.PageSpec, error) {
 			config = json.RawMessage("{}")
 		}
 
-		// Inject MomentWall visibility/upload flags so the Astro component knows
-		// whether to show content and the upload button without an extra API call.
 		if s.ComponentType == "MomentWall" {
 			var cfgForSection *models.EventConfig
 			if deps.getConfig != nil {
@@ -139,6 +125,32 @@ func getPageSpec(deps pageSpecDeps, token string) (*dtos.PageSpec, error) {
 	}, nil
 }
 
+// getPageSpec is the testable core — it accepts deps explicitly.
+func getPageSpec(deps pageSpecDeps, token string) (*dtos.PageSpec, error) {
+	// 1. Resolve token → access token record
+	accessToken, err := deps.getToken(token)
+	if err != nil || accessToken == nil {
+		return nil, fmt.Errorf("token not found")
+	}
+
+	// 2. Access token → invitation → event ID
+	invitation, err := deps.getInvitation(accessToken.InvitationID)
+	if err != nil || invitation == nil {
+		return nil, fmt.Errorf("invitation not found")
+	}
+
+	// 3. Fetch event
+	event, err := deps.getEvent(invitation.EventID)
+	if err != nil || event == nil {
+		return nil, fmt.Errorf("event not found")
+	}
+
+	return buildPageSpecFromEvent(event, buildSpecDeps{
+		getSections: deps.getSections,
+		getConfig:   deps.getConfig,
+	})
+}
+
 // GetPageSpecByToken builds a SDUI PageSpec for the event associated with the given access token.
 // The token can be either the raw UUID token or the human-readable pretty_token.
 func GetPageSpecByToken(token string) (*dtos.PageSpec, error) {
@@ -149,4 +161,18 @@ func GetPageSpecByToken(token string) (*dtos.PageSpec, error) {
 		getSections:   eventsectionrepository.ListByEventIDForSpec,
 		getConfig:     eventconfigrepository.GetEventConfigByID,
 	}, token)
+}
+
+// GetPageSpecByIdentifier builds a SDUI PageSpec by event slug identifier.
+// Used by the public preview route (/e/{identifier}).
+func GetPageSpecByIdentifier(identifier string) (*dtos.PageSpec, error) {
+	event, err := eventsrepository.GetEventByIdentifier(identifier)
+	if err != nil || event == nil {
+		return nil, fmt.Errorf("event not found")
+	}
+
+	return buildPageSpecFromEvent(event, buildSpecDeps{
+		getSections: eventsectionrepository.ListByEventIDForSpec,
+		getConfig:   eventconfigrepository.GetEventConfigByID,
+	})
 }
