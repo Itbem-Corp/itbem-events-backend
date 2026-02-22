@@ -60,7 +60,8 @@ type mockEventsRepo struct {
 	UpdateEventFunc func(event *models.Event) error
 	DeleteEventFunc func(id uuid.UUID) error
 	ListEventsFunc  func(page int, pageSize int, name string) ([]models.Event, error)
-	GetEventByIDFunc func(id uuid.UUID) (string, error)
+	GetEventByIDFunc      func(id uuid.UUID) (string, error)
+	IdentifierExistsFunc  func(identifier string) bool
 }
 
 func (m *mockEventsRepo) CreateEvent(event *models.Event) error {
@@ -92,6 +93,12 @@ func (m *mockEventsRepo) GetEventByID(id uuid.UUID) (string, error) {
 		return m.GetEventByIDFunc(id)
 	}
 	return "{}", nil
+}
+func (m *mockEventsRepo) IdentifierExists(identifier string) bool {
+	if m.IdentifierExistsFunc != nil {
+		return m.IdentifierExistsFunc(identifier)
+	}
+	return false
 }
 
 var _ ports.EventsRepository = (*mockEventsRepo)(nil)

@@ -29,6 +29,7 @@ type EventsRepository interface {
 	DeleteEvent(id uuid.UUID) error
 	ListEvents(page int, pageSize int, name string) ([]models.Event, error)
 	GetEventByID(id uuid.UUID) (string, error)
+	IdentifierExists(identifier string) bool
 }
 
 // EventConfigRepository is the data access contract for EventConfig records.

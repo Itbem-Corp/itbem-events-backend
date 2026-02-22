@@ -6,6 +6,7 @@ import (
 	"events-stocks/models"
 	"events-stocks/services/ports"
 	"events-stocks/utils"
+	"fmt"
 	"github.com/gofrs/uuid"
 )
 
@@ -63,10 +64,26 @@ func (s *EventService) GetEventByID(id uuid.UUID) (*models.Event, error) {
 }
 
 func (s *EventService) CreateEvent(obj *models.Event) error {
+	if obj.Identifier == "" && obj.Name != "" {
+		obj.Identifier = s.generateUniqueIdentifier(obj.Name)
+	}
 	if err := s.repo.CreateEvent(obj); err != nil {
 		return err
 	}
 	return s.cache.Invalidate("events", "all")
+}
+
+// generateUniqueIdentifier creates a unique slug from the event name.
+func (s *EventService) generateUniqueIdentifier(name string) string {
+	base := utils.Slugify(name)
+	if base == "" {
+		base = "event"
+	}
+	candidate := base
+	for i := 2; s.repo.IdentifierExists(candidate); i++ {
+		candidate = fmt.Sprintf("%s-%d", base, i)
+	}
+	return candidate
 }
 
 func (s *EventService) UpdateEvent(obj *models.Event) error {

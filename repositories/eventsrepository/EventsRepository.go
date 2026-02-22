@@ -89,6 +89,14 @@ func (r *EventsRepo) ListEvents(page, pageSize int, name string) ([]models.Event
 	return ListEvents(page, pageSize, name)
 }
 func (r *EventsRepo) GetEventByID(id uuid.UUID) (string, error) { return GetEventByID(id) }
+func (r *EventsRepo) IdentifierExists(identifier string) bool   { return IdentifierExists(identifier) }
+
+// IdentifierExists returns true if an event with the given identifier already exists.
+func IdentifierExists(identifier string) bool {
+	var count int64
+	gormrepository.DB().Model(&models.Event{}).Where("identifier = ?", identifier).Count(&count)
+	return count > 0
+}
 
 // GetEventByIDRaw returns a bare Event record by ID without any preloads.
 func GetEventByIDRaw(id uuid.UUID) (*models.Event, error) {

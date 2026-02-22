@@ -16,7 +16,7 @@
 
 | File | Purpose |
 |------|---------|
-| `EventService.go` | CRUD + business rules for events |
+| `EventService.go` | CRUD + business rules for events. Auto-generates `Identifier` slug from `Name` on create if empty (uses `utils.Slugify`, ensures uniqueness). |
 | `EventTypeService.go` | Catalog CRUD for event types |
 | `EventConfigService.go` | Per-event configuration management |
 | `EventSectionService.go` | Event section ordering and management |

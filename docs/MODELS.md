@@ -21,7 +21,7 @@ Event     Event          `gorm:"foreignKey:EventID" json:"event,omitempty"`
 ### Event
 - **File**: `models/Event.go`
 - **Purpose**: Main event entity
-- **Key fields**: `ClientID *uuid.UUID` (nullable, FK to Client — added Phase 1), `client_id` JSON tag
+- **Key fields**: `ClientID *uuid.UUID` (nullable, FK to Client — added Phase 1), `client_id` JSON tag, `Identifier string` (unique slug, auto-generated from Name if empty on create)
 - **Relationships**: HasMany Guests, HasMany Invitations, HasMany Resources, BelongsTo Client (optional), BelongsTo EventType
 
 ### EventType

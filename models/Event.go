@@ -11,7 +11,7 @@ type Event struct {
 	ClientID         *uuid.UUID     `gorm:"type:uuid;index" json:"client_id"`
 	Client           *Client        `gorm:"foreignKey:ClientID" json:"client,omitempty" validate:"-"`
 	Name             string         `gorm:"uniqueIndex" json:"name" validate:"required"`
-	Identifier       string         `gorm:"uniqueIndex" json:"identifier" validate:"required"`
+	Identifier       string         `gorm:"uniqueIndex" json:"identifier"`
 	Description      string         `json:"description"`
 	CoverImageURL    string         `json:"cover_image_url"`
 	CoverImageURL2   string         `json:"cover_image_url2"`
