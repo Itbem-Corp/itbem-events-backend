@@ -127,6 +127,8 @@ jobs:
               -e GOOGLE_CLIENT_SECRET='${{ secrets.BACKEND_GOOGLE_CLIENT_SECRET }}' \
               -e CORS_ALLOW_ORIGINS='${{ secrets.CORS_ALLOW_ORIGINS }}' \
               -e INTERNAL_API_SECRET='${{ secrets.INTERNAL_API_SECRET }}' \
+              -e SQS_IMAGE_QUEUE_URL='${{ secrets.SQS_IMAGE_QUEUE_URL }}' \
+              -e SQS_VIDEO_QUEUE_URL='${{ secrets.SQS_VIDEO_QUEUE_URL }}' \
               itbem-events-backend
 
             echo "✅ Deploy complete. Running containers:"
