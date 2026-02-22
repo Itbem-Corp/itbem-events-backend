@@ -60,6 +60,7 @@ func ConfirmRSVP(c echo.Context) error {
 
 	// Fire-and-forget: track RSVP in analytics without blocking response
 	go func() {
+		defer func() { recover() }() // prevent panics from crashing the server
 		field := "rsvp_confirmed"
 		if req.Status == "declined" {
 			field = "rsvp_declined"
