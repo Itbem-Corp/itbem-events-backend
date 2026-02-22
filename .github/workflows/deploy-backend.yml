@@ -62,7 +62,7 @@ jobs:
             --ssh-public-key file://~/.ssh/ec2_deploy.pub \
             --region us-east-2
           # Trust EC2 host key
-          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
           chmod 600 ~/.ssh/ec2_deploy
 
       - name: Deploy backend
