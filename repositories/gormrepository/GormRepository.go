@@ -85,9 +85,10 @@ func GetByID[T any](model *T, id interface{}, preloads ...string) error {
 	}
 }
 
-// Update actualiza un registro existente
+// Update actualiza un registro existente.
+// Usa Select("*") para que GORM persista valores cero (false, 0, "").
 func Update[T any](model *T, id interface{}) error {
-	result := configuration.DB.Model(model).Where("id = ?", id).Updates(model)
+	result := configuration.DB.Model(model).Where("id = ?", id).Select("*").Updates(model)
 	if result.RowsAffected == 0 {
 		return errors.New("record not found")
 	}

@@ -126,3 +126,17 @@ func BulkUpdateApproval(ids []uuid.UUID, isApproved bool) error {
 func (r *MomentRepo) BulkUpdateApproval(ids []uuid.UUID, isApproved bool) error {
 	return BulkUpdateApproval(ids, isApproved)
 }
+
+// GetDistinctEventIDsByMomentIDs returns the unique event_id values for the given moment IDs.
+func GetDistinctEventIDsByMomentIDs(ids []uuid.UUID) ([]uuid.UUID, error) {
+	var eventIDs []uuid.UUID
+	err := configuration.DB.Model(&models.Moment{}).
+		Where("id IN ? AND event_id IS NOT NULL", ids).
+		Distinct("event_id").
+		Pluck("event_id", &eventIDs).Error
+	return eventIDs, err
+}
+
+func (r *MomentRepo) GetDistinctEventIDsByMomentIDs(ids []uuid.UUID) ([]uuid.UUID, error) {
+	return GetDistinctEventIDsByMomentIDs(ids)
+}

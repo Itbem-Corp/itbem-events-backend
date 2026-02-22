@@ -99,6 +99,8 @@ type MomentRepository interface {
 	ListApprovedForWall(eventID uuid.UUID, page, limit int) ([]models.Moment, int64, error)
 	// BulkUpdateApproval updates is_approved for multiple moments.
 	BulkUpdateApproval(ids []uuid.UUID, isApproved bool) error
+	// GetDistinctEventIDsByMomentIDs returns unique event_id values for the given moment IDs.
+	GetDistinctEventIDsByMomentIDs(ids []uuid.UUID) ([]uuid.UUID, error)
 }
 
 // UserRepository is the data access contract for User records.

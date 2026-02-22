@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"mime"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -195,12 +197,21 @@ func (s *MomentService) RequeueMoment(moment *models.Moment) error {
 		strings.HasSuffix(moment.ContentURL, ".mov") ||
 		strings.HasSuffix(moment.ContentURL, ".webm")
 
-	if err := sqsrepository.PublishMediaJob(sqsrepository.MediaProcessMessage{
+	// Use stored ContentType if available; otherwise infer from file extension.
+	ct := moment.ContentType
+	if ct == "" {
+		ct = mime.TypeByExtension(filepath.Ext(moment.ContentURL))
+		if ct == "" {
+			ct = "application/octet-stream"
+		}
+	}
+
+	if _, err := sqsrepository.PublishMediaJob(sqsrepository.MediaProcessMessage{
 		MomentID:    moment.ID.String(),
 		EventID:     moment.EventID.String(),
 		RawS3Key:    moment.ContentURL,
 		Bucket:      os.Getenv("S3_BUCKET_NAME"),
-		ContentType: "image/jpeg", // best effort; Lambda will detect actual type
+		ContentType: ct,
 		IsVideo:     isVideo,
 	}); err != nil {
 		return fmt.Errorf("requeue SQS publish failed: %w", err)
@@ -213,8 +224,15 @@ func (s *MomentService) RequeueMoment(moment *models.Moment) error {
 
 // BulkUpdateApproval updates is_approved for multiple moments by ID.
 func (s *MomentService) BulkUpdateApproval(ids []uuid.UUID, isApproved bool) error {
+	// Fetch distinct event IDs before updating so we can invalidate per-event wall caches.
+	eventIDs, _ := s.repo.GetDistinctEventIDsByMomentIDs(ids)
+
 	if err := s.repo.BulkUpdateApproval(ids, isApproved); err != nil {
 		return err
+	}
+
+	for _, eid := range eventIDs {
+		s.invalidateWallCache(eid)
 	}
 	return s.cache.Invalidate("moments", "all")
 }

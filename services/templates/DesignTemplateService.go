@@ -7,6 +7,10 @@ import (
 	"github.com/gofrs/uuid"
 )
 
+func ListDesignTemplates() ([]models.DesignTemplate, error) {
+	return templatesrepository.ListDesignTemplates()
+}
+
 func GetDesignTemplateByID(id uuid.UUID) (*models.DesignTemplate, error) {
 	return templatesrepository.GetDesignTemplateByID(id)
 }

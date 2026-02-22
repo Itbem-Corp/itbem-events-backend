@@ -20,7 +20,15 @@ func DeleteEventConfig(id uuid.UUID) error {
 
 func GetEventConfigByID(id uuid.UUID) (*models.EventConfig, error) {
     var model models.EventConfig
-    err := gormrepository.GetByID(&model, id)
+    err := gormrepository.GetByID(&model, id,
+        "DesignTemplate",
+        "DesignTemplate.ColorPalette",
+        "DesignTemplate.ColorPalette.Patterns",
+        "DesignTemplate.ColorPalette.Patterns.Color",
+        "DesignTemplate.FontSet",
+        "DesignTemplate.FontSet.Patterns",
+        "DesignTemplate.FontSet.Patterns.Font",
+    )
     return &model, err
 }
 

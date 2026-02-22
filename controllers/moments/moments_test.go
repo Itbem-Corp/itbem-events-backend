@@ -42,6 +42,7 @@ func (m *mockMomentRepo) UpdateMomentContent(id uuid.UUID, contentURL, processin
 func (m *mockMomentRepo) ListForDashboard(eventID uuid.UUID) ([]models.Moment, error)              { return nil, nil }
 func (m *mockMomentRepo) ListApprovedForWall(eventID uuid.UUID, page, limit int) ([]models.Moment, int64, error) { return nil, 0, nil }
 func (m *mockMomentRepo) BulkUpdateApproval(ids []uuid.UUID, isApproved bool) error               { return nil }
+func (m *mockMomentRepo) GetDistinctEventIDsByMomentIDs(ids []uuid.UUID) ([]uuid.UUID, error)    { return nil, nil }
 
 var _ ports.MomentRepository = (*mockMomentRepo)(nil)
 

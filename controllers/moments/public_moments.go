@@ -62,21 +62,27 @@ func detectIsVideo(contentType, filename string) bool {
 // publishMediaJob queues optimization for images AND videos via SQS.
 // Runs synchronously so errors are captured and logged; the moment is already
 // saved so a failed publish can be retried via PUT /moments/:id/requeue.
-func publishMediaJob(moment *models.Moment, rawKey, bucket, contentType string) {
+// Returns true if the job was enqueued. When SQS is not configured (local/staging
+// without queues), returns false so the caller can set processing_status="" to
+// make the moment visible immediately.
+func publishMediaJob(moment *models.Moment, rawKey, bucket, contentType string) bool {
 	if moment.EventID == nil {
-		return
+		return false
 	}
-	if err := sqsrepository.PublishMediaJob(sqsrepository.MediaProcessMessage{
+	enqueued, err := sqsrepository.PublishMediaJob(sqsrepository.MediaProcessMessage{
 		MomentID:    moment.ID.String(),
 		EventID:     moment.EventID.String(),
 		RawS3Key:    rawKey,
 		Bucket:      bucket,
 		ContentType: contentType,
 		IsVideo:     detectIsVideo(contentType, rawKey),
-	}); err != nil {
+	})
+	if err != nil {
 		slog.Error("failed to queue media job", "momentId", moment.ID, "error", err)
 		// Don't fail the request — moment is created, job can be manually requeued
+		return false
 	}
+	return enqueued
 }
 
 // uploadLimitKey returns the Redis key for tracking per-IP uploads for an event.
@@ -264,6 +270,7 @@ func CreatePublicMoment(c echo.Context) error {
 		EventID:          &eventID,
 		InvitationID:     &invID,
 		ContentURL:       rawKey,
+		ContentType:      contentType,
 		Description:      description,
 		IsApproved:       isApproved,
 		ProcessingStatus: "pending",
@@ -273,8 +280,11 @@ func CreatePublicMoment(c echo.Context) error {
 		return utils.Error(c, http.StatusInternalServerError, "Error saving moment", err.Error())
 	}
 
-	// Fire-and-forget: queue optimization job for images and videos
-	publishMediaJob(&moment, rawKey, publicResSvc.Bucket, contentType)
+	// Queue optimization job; if SQS is not configured, mark as ready immediately
+	if !publishMediaJob(&moment, rawKey, publicResSvc.Bucket, contentType) {
+		moment.ProcessingStatus = ""
+		_ = momentsService.UpdateMoment(&moment)
+	}
 
 	go eventsService.IncrementAnalytics(eventID, "moment_uploads")
 
@@ -341,6 +351,7 @@ func CreateSharedMoment(c echo.Context) error {
 	moment := models.Moment{
 		EventID:          &eventID,
 		ContentURL:       rawKey,
+		ContentType:      contentType,
 		Description:      description,
 		IsApproved:       isApproved,
 		ProcessingStatus: "pending",
@@ -350,7 +361,11 @@ func CreateSharedMoment(c echo.Context) error {
 		return utils.Error(c, http.StatusInternalServerError, "Error saving moment", err.Error())
 	}
 
-	publishMediaJob(&moment, rawKey, publicResSvc.Bucket, contentType)
+	// Queue optimization job; if SQS is not configured, mark as ready immediately
+	if !publishMediaJob(&moment, rawKey, publicResSvc.Bucket, contentType) {
+		moment.ProcessingStatus = ""
+		_ = momentsService.UpdateMoment(&moment)
+	}
 
 	go eventsService.IncrementAnalytics(eventID, "moment_uploads")
 

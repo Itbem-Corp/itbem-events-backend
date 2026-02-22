@@ -20,12 +20,31 @@ func DeleteDesignTemplate(id uuid.UUID) error {
 
 func GetDesignTemplateByID(id uuid.UUID) (*models.DesignTemplate, error) {
 	var model models.DesignTemplate
-	err := gormrepository.GetByID(&model, id)
+	err := gormrepository.GetByID(&model, id,
+		"ColorPalette",
+		"ColorPalette.Patterns",
+		"ColorPalette.Patterns.Color",
+		"FontSet",
+		"FontSet.Patterns",
+		"FontSet.Patterns.Font",
+	)
 	return &model, err
 }
 
 func ListDesignTemplates() ([]models.DesignTemplate, error) {
 	var list []models.DesignTemplate
-	err := gormrepository.GetList(&list, gormrepository.QueryOptions{})
+	err := gormrepository.GetList(&list, gormrepository.QueryOptions{
+		Preload: []string{
+			"ColorPalette",
+			"ColorPalette.Patterns",
+			"ColorPalette.Patterns.Color",
+			"FontSet",
+			"FontSet.Patterns",
+			"FontSet.Patterns.Font",
+		},
+		OrderBy:  "created_at",
+		OrderDir: "DESC",
+		Filters:  map[string]interface{}{"is_active": true},
+	})
 	return list, err
 }

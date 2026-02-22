@@ -32,8 +32,9 @@ Event     Event          `gorm:"foreignKey:EventID" json:"event,omitempty"`
 ### EventConfig
 - **File**: `models/EventConfig.go`
 - **Purpose**: Per-event configuration (design settings, sections order, MomentWall gating)
-- **Key fields**: `show_moment_wall bool` (gates public visibility), `share_uploads_enabled bool` (enables QR-code upload page without personal token), `allow_uploads bool`, `allow_messages bool`, `max_uploads_per_guest int` (per-IP upload limit, default 3; set to 0 for global default), `auto_approve_uploads bool` (auto-approves all incoming moments, default false)
-- **Relationships**: BelongsTo Event
+- **Key fields**: `show_moment_wall bool` (gates public visibility), `share_uploads_enabled bool` (enables QR-code upload page without personal token), `allow_uploads bool`, `allow_messages bool`, `max_uploads_per_guest int` (per-IP upload limit, default 3; set to 0 for global default), `auto_approve_uploads bool` (auto-approves all incoming moments, default false), `design_template_id *uuid.UUID` (nullable FK to DesignTemplate)
+- **Relationships**: BelongsTo Event, BelongsTo DesignTemplate (optional — nullable FK)
+- **Auto-create**: `GetEventConfigByID` auto-creates a default config if none exists for the event
 
 ### EventSection
 - **File**: `models/EventSection.go`
@@ -123,27 +124,32 @@ Event     Event          `gorm:"foreignKey:EventID" json:"event,omitempty"`
 ### DesignTemplate
 - **File**: `models/DesignTemplate.go`
 - **Purpose**: Pre-built design templates for events
-- **Relationships**: BelongsTo ColorPalette, BelongsTo FontSet
+- **Key fields**: `color_palette_id *uuid.UUID` (nullable FK), `font_set_id *uuid.UUID` (nullable FK), `identifier string` (unique, e.g. "classic-elegant"), `is_active bool`, `is_premium bool`, `category string`
+- **JSON tags**: All fields use snake_case (`preview_url`, `color_palette_id`, `animations_enabled`, etc.)
+- **Relationships**: BelongsTo ColorPalette (optional), BelongsTo FontSet (optional)
 
 ### Moment
 - **File**: `models/Moment.go`
 - **Purpose**: Guest-uploaded photo/video/note for the event MomentWall
+- **JSON tags**: All fields use snake_case. `DeletedAt` uses `json:"-"`. Nullable FKs and relations use `omitempty`.
 - **Key fields**:
   - `event_id *uuid.UUID` — FK to Event (nullable)
   - `invitation_id *uuid.UUID` — FK to Invitation (nullable — NULL for shared QR uploads)
   - `content_url string` — S3 key of the file. Initially the raw path (`moments/{eventID}/raw/{uuid}.ext`); updated to optimized path (`moments/{eventID}/{uuid}.webp|.mp4`) once Lambda completes.
+  - `content_type string` — original MIME type from the upload (e.g. `image/jpeg`, `video/mp4`). Used by RequeueMoment to re-publish correct content type to SQS.
   - `description string` — guest message/note left with the upload
   - `is_approved bool` — admin approve/reject flag (default false)
-  - `processing_status string` — async processing state: `""` (legacy), `"pending"` (queued), `"processing"` (Lambda working), `"done"` (optimized), `"failed"` (Lambda error)
+  - `processing_status string` — async processing state: `""` (legacy/no SQS), `"pending"` (queued), `"processing"` (Lambda working), `"done"` (optimized), `"failed"` (Lambda error). When SQS is not configured, status stays `""` so moments are visible immediately.
   - `processing_duration_ms int64` — how long Lambda took to process (ms). Zero until `done`.
   - `original_size_bytes int64` — raw file size in bytes. Zero until `done`.
   - `optimized_size_bytes int64` — optimized file size in bytes. Zero until `done`.
   - `error_message string` — populated by Lambda when processing fails; empty string means no error or not yet processed.
   - `order int` — display order on wall
 - **Dashboard behavior**: `GET /api/moments?event_id=X` only returns moments with `processing_status NOT IN ('pending','processing')` — admins see items only after Lambda finishes.
-- **Public wall behavior**: Only shows `is_approved=true AND processing_status IN ('','done')` moments. Results cached in Redis (key: `moments:wall:{eventID}:p{N}:l{N}`, TTL 5min). Cache is busted on approval changes or Lambda callback.
+- **Public wall behavior**: Only shows `is_approved=true AND processing_status IN ('','done')` moments. Results cached in Redis (key: `moments:wall:{eventID}:p{N}:l{N}`, TTL 5min). Cache is busted on approval changes (including bulk), or Lambda callback.
 - **Upload limits**: Per-IP upload limit per event controlled by `EventConfig.MaxUploadsPerGuest` (default 3 if unset). Redis counter: `moments:upload_count:{eventID}:{ip}`, 30-day TTL. After limit reached: 429 with personalized thank-you message.
 - **S3 structure**: `moments/{eventID}/raw/{uuid}.ext` (raw) → `moments/{eventID}/{uuid}.webp|.mp4` (optimized)
+- **SQS behavior**: When SQS queues are not configured (local dev without `SQS_IMAGE_QUEUE_URL`/`SQS_VIDEO_QUEUE_URL`), public uploads set `processing_status=""` instead of `"pending"`, making moments visible immediately without Lambda processing.
 - **Relationships**: BelongsTo Event, BelongsTo Invitation (optional)
 
 ---

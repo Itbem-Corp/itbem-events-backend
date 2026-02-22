@@ -79,11 +79,11 @@ func Init(region, accessKeyID, secretAccessKey, imgQueue, vidQueue string) {
 
 // PublishMediaJob routes the media processing job to the correct SQS queue
 // (image queue or video queue) based on msg.IsVideo.
-// Returns an error so callers can log failures and offer manual requeue.
-// If the target queue is not configured, the call is a no-op (returns nil).
-func PublishMediaJob(msg MediaProcessMessage) error {
+// Returns (enqueued, error): enqueued is true only when the message was actually
+// sent to SQS. When SQS is not configured the call is a no-op (false, nil).
+func PublishMediaJob(msg MediaProcessMessage) (bool, error) {
 	if sqsClient == nil {
-		return nil
+		return false, nil
 	}
 
 	targetQueue := imageQueueURL
@@ -93,13 +93,13 @@ func PublishMediaJob(msg MediaProcessMessage) error {
 	if targetQueue == "" {
 		slog.Debug("sqsrepository: queue not configured for type",
 			"is_video", msg.IsVideo, "moment_id", msg.MomentID)
-		return nil
+		return false, nil
 	}
 
 	body, err := json.Marshal(msg)
 	if err != nil {
 		slog.Error("sqsrepository: failed to marshal SQS message", "error", err)
-		return fmt.Errorf("SQS marshal failed: %w", err)
+		return false, fmt.Errorf("SQS marshal failed: %w", err)
 	}
 	_, err = sqsClient.SendMessage(context.Background(), &sqs.SendMessageInput{
 		QueueUrl:    aws.String(targetQueue),
@@ -108,7 +108,7 @@ func PublishMediaJob(msg MediaProcessMessage) error {
 	if err != nil {
 		slog.Error("sqsrepository: failed to send SQS message",
 			"moment_id", msg.MomentID, "is_video", msg.IsVideo, "error", err)
-		return fmt.Errorf("SQS publish failed: %w", err)
+		return false, fmt.Errorf("SQS publish failed: %w", err)
 	}
-	return nil
+	return true, nil
 }

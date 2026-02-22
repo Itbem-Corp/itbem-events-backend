@@ -1,9 +1,11 @@
 package events
 
 import (
+	"errors"
 	"events-stocks/models"
 	"events-stocks/services/ports"
 	"github.com/gofrs/uuid"
+	"gorm.io/gorm"
 )
 
 // _eventConfigSvc is the package-level singleton set by server.go.
@@ -30,7 +32,20 @@ func NewEventConfigService(repo ports.EventConfigRepository, cache ports.CacheRe
 }
 
 func (s *EventConfigService) GetEventConfigByID(id uuid.UUID) (*models.EventConfig, error) {
-	return s.repo.GetEventConfigByID(id)
+	config, err := s.repo.GetEventConfigByID(id)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// Auto-create a default config with the same ID as the event
+			defaultConfig := &models.EventConfig{ID: id}
+			if createErr := s.repo.CreateEventConfig(defaultConfig); createErr != nil {
+				return nil, createErr
+			}
+			// Re-fetch with preloads
+			return s.repo.GetEventConfigByID(id)
+		}
+		return nil, err
+	}
+	return config, nil
 }
 
 func (s *EventConfigService) CreateEventConfig(obj *models.EventConfig) error {

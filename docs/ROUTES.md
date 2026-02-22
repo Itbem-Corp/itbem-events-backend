@@ -118,6 +118,10 @@
 ### Catalogs
 - `GET /api/catalogs/client-types` → `clienttypes.ListClientTypes`
 - `GET /api/catalogs/roles` → `clientroles.ListClientRoles` (?client_id=...)
+- `GET /api/catalogs/design-templates` → `designtemplates.ListDesignTemplates` — list active design templates with color palettes and font sets
+- `GET /api/catalogs/design-templates/:id` → `designtemplates.GetDesignTemplate` — get single design template with full relations
+- `GET /api/catalogs/color-palettes` → `designtemplates.ListColorPalettes` — list color palettes with patterns and colors
+- `GET /api/catalogs/font-sets` → `designtemplates.ListFontSets` — list font sets with patterns and fonts
 - `GET /api/event-types` → `eventtypes.ListEventTypes`
 
 ---
@@ -155,3 +159,4 @@ cfg        := c.Get("config").(*models.Config)
 | `controllers/eventconfig/eventconfig.go` | `/api/events/:id/config` |
 | `controllers/eventsection/eventsection.go` | `/api/events/:id/sections`, `/api/sections/:id` |
 | `controllers/moments/moments.go` | `/api/moments*` |
+| `controllers/designtemplates/designtemplates.go` | `/api/catalogs/design-templates*`, `/api/catalogs/color-palettes`, `/api/catalogs/font-sets` |

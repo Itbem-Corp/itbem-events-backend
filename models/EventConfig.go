@@ -14,8 +14,8 @@ type EventConfig struct {
 	AllowMessages               bool           `json:"allow_messages"`
 	AuthPasswordPreview         string         `json:"auth_password_preview"`
 	NotifyOnMomentUpload        bool           `json:"notify_on_moment_upload"`
-	DesignTemplateID            uuid.UUID      `gorm:"type:uuid;index" json:"design_template_id"`
-	DesignTemplate              DesignTemplate `gorm:"foreignKey:DesignTemplateID" json:"design_template,omitempty"`
+	DesignTemplateID            *uuid.UUID     `gorm:"type:uuid;index" json:"design_template_id"`
+	DesignTemplate              *DesignTemplate `gorm:"foreignKey:DesignTemplateID" json:"design_template,omitempty"`
 	ActiveFrom                  time.Time      `json:"active_from"`
 	ActiveUntil                 *time.Time     `json:"active_until,omitempty"`
 	DefaultWelcomeMessage       string         `json:"default_welcome_message"`

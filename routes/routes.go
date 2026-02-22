@@ -5,6 +5,7 @@ import (
 	"events-stocks/controllers/clientroles"
 	"events-stocks/controllers/clients"
 	"events-stocks/controllers/clienttypes"
+	"events-stocks/controllers/designtemplates"
 	"events-stocks/controllers/eventconfig"
 	"events-stocks/controllers/events"
 	"events-stocks/controllers/eventtypes"
@@ -220,6 +221,10 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	// ── Catálogos ─────────────────────────────
 	protected.GET("/catalogs/client-types", clienttypes.ListClientTypes)
 	protected.GET("/catalogs/roles", clientroles.ListClientRoles)
+	protected.GET("/catalogs/design-templates", designtemplates.ListDesignTemplates)
+	protected.GET("/catalogs/design-templates/:id", designtemplates.GetDesignTemplate)
+	protected.GET("/catalogs/color-palettes", designtemplates.ListColorPalettes)
+	protected.GET("/catalogs/font-sets", designtemplates.ListFontSets)
 	protected.GET("/event-types", eventtypes.ListEventTypes)
 
 	// ==========================================
