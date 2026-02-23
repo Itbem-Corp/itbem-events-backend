@@ -31,8 +31,8 @@ func DeleteMoment(id uuid.UUID) error                    { return _momentSvc.Del
 func ListMomentsByEventID(eventID uuid.UUID, approvedOnly bool) ([]models.Moment, error) {
 	return _momentSvc.ListByEventID(eventID, approvedOnly)
 }
-func UpdateMomentContent(id uuid.UUID, contentURL, status string, durationMs, originalBytes, optimizedBytes int64) error {
-	return _momentSvc.UpdateMomentContent(id, contentURL, status, durationMs, originalBytes, optimizedBytes)
+func UpdateMomentContent(id uuid.UUID, contentURL, status, thumbnailURL string, durationMs, originalBytes, optimizedBytes int64) error {
+	return _momentSvc.UpdateMomentContent(id, contentURL, status, thumbnailURL, durationMs, originalBytes, optimizedBytes)
 }
 func ListForDashboard(eventID uuid.UUID) ([]models.Moment, error) {
 	return _momentSvc.ListForDashboard(eventID)
@@ -159,11 +159,12 @@ func (s *MomentService) ListApprovedForWall(eventID uuid.UUID, page, limit int) 
 }
 
 // UpdateMomentContent is called by the Lambda after media processing completes.
-// durationMs/originalBytes/optimizedBytes are the Lambda processing metrics; pass 0 to skip.
+// thumbnailURL is the S3 key of the extracted thumbnail; pass "" to skip (images, failures).
+// durationMs/originalBytes/optimizedBytes are Lambda processing metrics; pass 0 to skip.
 // When processing_status becomes "done", we must bust the wall cache so the
 // newly optimized file is served fresh.
-func (s *MomentService) UpdateMomentContent(id uuid.UUID, contentURL, processingStatus string, durationMs, originalBytes, optimizedBytes int64) error {
-	if err := s.repo.UpdateMomentContent(id, contentURL, processingStatus, durationMs, originalBytes, optimizedBytes); err != nil {
+func (s *MomentService) UpdateMomentContent(id uuid.UUID, contentURL, processingStatus, thumbnailURL string, durationMs, originalBytes, optimizedBytes int64) error {
+	if err := s.repo.UpdateMomentContent(id, contentURL, processingStatus, thumbnailURL, durationMs, originalBytes, optimizedBytes); err != nil {
 		return err
 	}
 	// Invalidate wall cache for the event (need to look up moment to get eventID)
@@ -188,8 +189,8 @@ func (s *MomentService) RequeueMoment(moment *models.Moment) error {
 		return fmt.Errorf("cannot requeue: optimized file already processed, raw key not available")
 	}
 
-	// Reset to pending
-	if err := s.repo.UpdateMomentContent(moment.ID, moment.ContentURL, "pending", 0, 0, 0); err != nil {
+	// Reset to pending — preserve existing thumbnail_url (pass "" = no-op in repo)
+	if err := s.repo.UpdateMomentContent(moment.ID, moment.ContentURL, "pending", "", 0, 0, 0); err != nil {
 		return err
 	}
 

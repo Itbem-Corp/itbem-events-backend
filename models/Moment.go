@@ -18,6 +18,7 @@ type Moment struct {
 	Title        string     `json:"title"`
 	Description  string     `json:"description"`  // texto, caption o nota del invitado
 	ContentURL   string     `json:"content_url"`   // imagen, video o audio en S3
+	ThumbnailURL string     `gorm:"type:varchar(500);default:''" json:"thumbnail_url,omitempty"` // WebP thumbnail for videos (extracted by Lambda)
 	ContentType  string     `gorm:"type:varchar(100);default:''" json:"content_type,omitempty"` // original MIME type from upload
 	IsApproved   bool       `gorm:"default:false" json:"is_approved"` // moderación
 	// ProcessingStatus tracks async video transcoding: "" | "pending" | "processing" | "done" | "failed"

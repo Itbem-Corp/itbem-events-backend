@@ -119,6 +119,7 @@ func UpdateMomentContent(c echo.Context) error {
 	var body struct {
 		ContentURL           string `json:"content_url"`
 		ProcessingStatus     string `json:"processing_status"`
+		ThumbnailURL         string `json:"thumbnail_url"`
 		ProcessingDurationMs int64  `json:"processing_duration_ms"`
 		OriginalSizeBytes    int64  `json:"original_size_bytes"`
 		OptimizedSizeBytes   int64  `json:"optimized_size_bytes"`
@@ -127,7 +128,7 @@ func UpdateMomentContent(c echo.Context) error {
 		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
 	}
 
-	if err := momentSvc.UpdateMomentContent(id, body.ContentURL, body.ProcessingStatus, body.ProcessingDurationMs, body.OriginalSizeBytes, body.OptimizedSizeBytes); err != nil {
+	if err := momentSvc.UpdateMomentContent(id, body.ContentURL, body.ProcessingStatus, body.ThumbnailURL, body.ProcessingDurationMs, body.OriginalSizeBytes, body.OptimizedSizeBytes); err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Error updating moment", err.Error())
 	}
 
