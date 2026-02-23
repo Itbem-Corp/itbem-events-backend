@@ -176,6 +176,7 @@ func main() {
 	resources.InitResourceController(cfg)
 	fontsController.InitFontsController(cfg)
 	eventsController.InitEventsController(eventSvc)
+	eventsController.InitCoverController(resourceSvc)
 	eventconfigController.InitEventConfigController(eventConfigSvc)
 	eventsectionController.InitEventSectionController(eventSectSvc)
 	guestsController.InitGuestsController(guestSvc)

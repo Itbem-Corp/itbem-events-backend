@@ -93,7 +93,8 @@ func uploadLimitKey(eventID, ip string) string {
 const uploadWindowDays = 30
 
 // defaultMaxUploadsPerIP is the global fallback when EventConfig.MaxUploadsPerGuest is 0.
-const defaultMaxUploadsPerIP = 3
+// 30 = allows up to 3 batches of 10 files from the shared upload page.
+const defaultMaxUploadsPerIP = 30
 
 // checkAndIncrementUploadLimit checks the per-IP upload counter.
 // maxUploads is the per-event configured limit; pass 0 to use the global default (3).

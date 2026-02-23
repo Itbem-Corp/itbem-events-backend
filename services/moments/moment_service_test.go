@@ -97,7 +97,7 @@ func (m *mockMomentRepo) ListMoments() ([]models.Moment, error) {
 func (m *mockMomentRepo) ListByEventID(eventID uuid.UUID, approvedOnly bool) ([]models.Moment, error) {
 	return nil, nil
 }
-func (m *mockMomentRepo) UpdateMomentContent(id uuid.UUID, contentURL, processingStatus string, durationMs, originalBytes, optimizedBytes int64) error {
+func (m *mockMomentRepo) UpdateMomentContent(id uuid.UUID, contentURL, processingStatus, thumbnailURL string, durationMs, originalBytes, optimizedBytes int64) error {
 	return nil
 }
 func (m *mockMomentRepo) ListForDashboard(eventID uuid.UUID) ([]models.Moment, error) {

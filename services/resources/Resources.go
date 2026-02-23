@@ -254,6 +254,23 @@ func (rs *ResourceService) UploadAndCreateResource(
 }
 
 
+// UploadEventCover uploads and optimizes a cover image to the events/ S3 folder.
+// Returns the S3 key ("events/{uuid}.webp") to store in Event.CoverImageURL.
+func (rs *ResourceService) UploadEventCover(
+	file multipart.File,
+	header *multipart.FileHeader,
+) (string, error) {
+	optimized, filename, contentType, err := rs.sanitizeAndOptimizeUpload(file, header, "")
+	if err != nil {
+		return "", err
+	}
+	err = bucketrepository.UploadRawBytesSimple(optimized, filename, contentType, rs.UploadPath, rs.Bucket, rs.Provider)
+	if err != nil {
+		return "", fmt.Errorf("failed to upload cover image: %w", err)
+	}
+	return fmt.Sprintf("%s/%s", rs.UploadPath, filename), nil
+}
+
 // UploadRawToMomentsFolder uploads a guest moment file to S3 WITHOUT optimization.
 // The raw file is stored under moments/{eventID}/raw/ for async Lambda processing.
 // Returns the S3 key, detected content-type, and any error.

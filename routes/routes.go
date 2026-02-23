@@ -110,15 +110,17 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	public.POST("/events/:identifier/view", events.TrackView)                  // Incrementa contador de vistas
 	public.POST("/events/:identifier/verify-access", events.VerifyEventAccess) // Verifica contraseña
 
-	// Public moments — view wall (GET) + personal-token upload (POST) + shared QR upload
-	// Upload endpoints get a LARGER body limit (225M) to handle up to 200MB videos.
-	// GET inherits the 2M public limit (no body expected).
+	// Public moments — view wall (GET only; inherits public 2M limit and Redis cache)
 	public.GET("/events/:identifier/moments", moments.ListPublicMoments)
-	momentsUploadGroup := public.Group("/events/:identifier/moments")
-	momentsUploadGroup.Use(middleware.BodyLimit("225M")) // Override for uploads
-	momentsUploadGroup.Use(sensitiveRateLimiter())
-	momentsUploadGroup.POST("", moments.CreatePublicMoment)
-	momentsUploadGroup.POST("/shared", moments.CreateSharedMoment) // QR-code shared upload (no token)
+
+	// Upload endpoints get a SEPARATE top-level group so they are NOT limited by the
+	// 2M body limit on the public group. They run their own rate limiting only.
+	// 225M supports video uploads up to 200 MB plus multipart overhead.
+	uploadsGroup := e.Group("/api")
+	uploadsGroup.Use(middleware.BodyLimit("225M"))
+	uploadsGroup.Use(sensitiveRateLimiter())
+	uploadsGroup.POST("/events/:identifier/moments", moments.CreatePublicMoment)
+	uploadsGroup.POST("/events/:identifier/moments/shared", moments.CreateSharedMoment) // QR shared upload
 
 	// Resources
 	public.GET("/resources/:id", resources.GetResource)
@@ -147,6 +149,7 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	protected.POST("/events", events.CreateEvent)
 	protected.PUT("/events/:id", events.UpdateEvent)
 	protected.DELETE("/events/:id", events.DeleteEvent)
+	protected.POST("/events/:id/cover", events.UploadEventCover)
 	protected.POST("/events/:id/repair", events.RepairEvent)
 
 	// ── Event Config (1:1 con Event, mismo ID) ─
