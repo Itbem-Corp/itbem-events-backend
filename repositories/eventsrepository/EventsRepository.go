@@ -66,6 +66,7 @@ func ListEvents(page int, pageSize int, name string) ([]models.Event, error) {
 		Filters:  filters,
 		OrderBy:  "id",
 		OrderDir: "desc",
+		Preload:  []string{"EventType"},
 	}
 
 	if pageSize > 0 {
@@ -112,6 +113,7 @@ func GetEventByIDRaw(id uuid.UUID) (*models.Event, error) {
 func GetEventsByClientID(clientID uuid.UUID) ([]models.Event, error) {
 	var events []models.Event
 	err := gormrepository.DB().
+		Preload("EventType").
 		Where("client_id = ?", clientID).
 		Order("event_date_time DESC").
 		Find(&events).Error
@@ -122,6 +124,7 @@ func GetEventsByClientID(clientID uuid.UUID) ([]models.Event, error) {
 func GetAllEventsForDashboard() ([]models.Event, error) {
 	var events []models.Event
 	err := gormrepository.DB().
+		Preload("EventType").
 		Order("event_date_time DESC").
 		Find(&events).Error
 	return events, err
@@ -131,6 +134,7 @@ func GetAllEventsForDashboard() ([]models.Event, error) {
 func GetEventsForUser(userID uuid.UUID) ([]models.Event, error) {
 	var events []models.Event
 	err := gormrepository.DB().
+		Preload("EventType").
 		Joins("JOIN client_members ON client_members.client_id = events.client_id").
 		Where("client_members.user_id = ? AND client_members.is_active = true", userID).
 		Order("events.event_date_time DESC").

@@ -28,7 +28,7 @@ type Guest struct {
 	Headline        string         `json:"headline"`  // Encabezado personalizado
 	Signature       string         `json:"signature"` // Firma visual o textual
 	GuestStatusID   uuid.UUID      `gorm:"type:uuid;index" json:"guest_status_id"`
-	GuestStatus     GuestStatus    `gorm:"foreignKey:GuestStatusID" json:"-" validate:"-"`
+	GuestStatus     GuestStatus    `gorm:"foreignKey:GuestStatusID" json:"guest_status" validate:"-"`
 	IsHost          bool           `json:"is_host"`
 	MaxGuests       int            `gorm:"-" json:"max_guests,omitempty"`
 	CreatedAt       time.Time      `json:"created_at"`

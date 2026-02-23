@@ -70,6 +70,7 @@ func ListGuestsByEventID(eventID uuid.UUID) ([]models.Guest, error) {
 		},
 		OrderBy:  "id",
 		OrderDir: "desc",
+		Preload:  []string{"GuestStatus"},
 	})
 	return list, err
 }
