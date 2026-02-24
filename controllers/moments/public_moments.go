@@ -273,14 +273,17 @@ func RequestSharedUploadURL(c echo.Context) error {
 		return utils.Error(c, http.StatusBadRequest, fmt.Sprintf("unsupported file type: %s", body.ContentType), "")
 	}
 
-	// Build the S3 key: moments/{eventID}/raw/{uuid}.ext
+	// Build a UUID-named file under the shared staging prefix.
+	// Using a fixed staging prefix (not event-scoped) lets us put a simple S3
+	// lifecycle rule on "moments/uploads/tmp/" to auto-expire orphaned files
+	// (uploads where the browser never called /confirm) after 1 day.
 	ext := ""
 	if idx := strings.LastIndex(body.Filename, "."); idx != -1 {
 		ext = strings.ToLower(body.Filename[idx:])
 	}
 	u, _ := uuid.NewV4()
 	filename := u.String() + ext
-	folder := fmt.Sprintf("moments/%s/raw", event.ID.String())
+	folder := "moments/uploads/tmp"
 	s3Key := fmt.Sprintf("%s/%s", folder, filename)
 
 	uploadURL, err := bucketrepository.GetPresignedUploadURL(filename, folder, body.ContentType, publicResSvc.Bucket, constants.DefaultCloudProvider, 15)
@@ -334,17 +337,49 @@ func ConfirmSharedMoment(c echo.Context) error {
 		return utils.Error(c, http.StatusBadRequest, "s3_key and content_type are required", "")
 	}
 
-	// Guard: key must be scoped to this event to prevent forged keys
-	expectedPrefix := fmt.Sprintf("moments/%s/raw/", event.ID.String())
-	if !strings.HasPrefix(body.S3Key, expectedPrefix) {
-		return utils.Error(c, http.StatusBadRequest, "Invalid s3_key for this event", "")
+	// Guard: key must come from our own staging prefix to prevent forged paths
+	const tmpPrefix = "moments/uploads/tmp/"
+	if !strings.HasPrefix(body.S3Key, tmpPrefix) {
+		return utils.Error(c, http.StatusBadRequest, "Invalid s3_key", "")
 	}
+
+	// FIX #3 — Verify the file actually exists in S3 (detect phantom confirms)
+	// FIX #2 — Enforce per-type size limits (25 MB images / 200 MB videos)
+	filename := body.S3Key[len(tmpPrefix):]
+	fileSize, err := bucketrepository.GetFileSize(filename, "moments/uploads/tmp", publicResSvc.Bucket, constants.DefaultCloudProvider)
+	if err != nil {
+		return utils.Error(c, http.StatusUnprocessableEntity, "File not found in storage — upload may have failed", "")
+	}
+	isVid := strings.HasPrefix(body.ContentType, "video/")
+	maxBytes := int64(25 * 1024 * 1024) // 25 MB for images
+	if isVid {
+		maxBytes = int64(200 * 1024 * 1024) // 200 MB for videos
+	}
+	if fileSize > maxBytes {
+		limitMB := 25
+		if isVid {
+			limitMB = 200
+		}
+		// Clean up the oversized file from S3 before rejecting
+		_ = bucketrepository.DeleteFile(filename, "moments/uploads/tmp", publicResSvc.Bucket, constants.DefaultCloudProvider)
+		return utils.Error(c, http.StatusRequestEntityTooLarge, fmt.Sprintf("File exceeds %d MB limit", limitMB), "")
+	}
+
+	// Move file from staging to the event-scoped raw folder so Lambda can find it
+	rawFolder := fmt.Sprintf("moments/%s/raw", event.ID.String())
+	if err := bucketrepository.CopyFile(filename, "moments/uploads/tmp", filename, rawFolder, publicResSvc.Bucket, constants.DefaultCloudProvider); err != nil {
+		return utils.Error(c, http.StatusInternalServerError, "Error moving file to storage", err.Error())
+	}
+	// Delete the staging copy (best-effort; lifecycle rule cleans up any leftovers)
+	_ = bucketrepository.DeleteFile(filename, "moments/uploads/tmp", publicResSvc.Bucket, constants.DefaultCloudProvider)
+
+	rawKey := fmt.Sprintf("%s/%s", rawFolder, filename)
 
 	eventID := event.ID
 	isApproved := cfg.AutoApproveUploads
 	moment := models.Moment{
 		EventID:          &eventID,
-		ContentURL:       body.S3Key,
+		ContentURL:       rawKey,
 		ContentType:      body.ContentType,
 		Description:      body.Description,
 		IsApproved:       isApproved,
@@ -355,7 +390,7 @@ func ConfirmSharedMoment(c echo.Context) error {
 		return utils.Error(c, http.StatusInternalServerError, "Error saving moment", err.Error())
 	}
 
-	if !publishMediaJob(&moment, body.S3Key, publicResSvc.Bucket, body.ContentType) {
+	if !publishMediaJob(&moment, rawKey, publicResSvc.Bucket, body.ContentType) {
 		moment.ProcessingStatus = ""
 		_ = momentsService.UpdateMoment(&moment)
 	}

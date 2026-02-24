@@ -142,6 +142,34 @@ func ListFilesInFolder(folder string, bucket string, provider string) ([]string,
 	}
 }
 
+// GetFileSize returns the byte size of a file in the selected cloud provider.
+// Returns an error if the object does not exist.
+func GetFileSize(filename, folder, bucket, provider string) (int64, error) {
+	ctx := context.Background()
+	objectKey := fmt.Sprintf("%s/%s", folder, filename)
+
+	switch strings.ToLower(provider) {
+	case "aws":
+		return awsrepository.GetS3ObjectSize(ctx, objectKey, bucket)
+	default:
+		return 0, fmt.Errorf("unsupported provider: %s", provider)
+	}
+}
+
+// CopyFile performs a server-side copy of a file within the same bucket.
+func CopyFile(srcFilename, srcFolder, dstFilename, dstFolder, bucket, provider string) error {
+	ctx := context.Background()
+	srcKey := fmt.Sprintf("%s/%s", srcFolder, srcFilename)
+	dstKey := fmt.Sprintf("%s/%s", dstFolder, dstFilename)
+
+	switch strings.ToLower(provider) {
+	case "aws":
+		return awsrepository.CopyS3Object(ctx, srcKey, dstKey, bucket)
+	default:
+		return fmt.Errorf("unsupported provider: %s", provider)
+	}
+}
+
 // GetFileStream retrieves a file stream from the selected cloud provider
 func GetFileStream(filename string, folder string, bucket string, provider string) (io.ReadCloser, error) {
 	ctx := context.Background()
