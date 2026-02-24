@@ -133,6 +133,14 @@ func ListPublicMoments(c echo.Context) error {
 		return utils.Error(c, http.StatusInternalServerError, "Error loading moments", err.Error())
 	}
 
+	// Presign S3 URLs so the browser streams directly from S3 (no backend proxy).
+	// presignMomentURL is a no-op for keys that are already full URLs or empty strings.
+	bucket := publicResSvc.Bucket
+	for i := range items {
+		items[i].ContentURL = presignMomentURL(items[i].ContentURL, bucket)
+		items[i].ThumbnailURL = presignMomentURL(items[i].ThumbnailURL, bucket)
+	}
+
 	return utils.Success(c, http.StatusOK, "Moments loaded", map[string]interface{}{
 		"items":    items,
 		"total":    total,
