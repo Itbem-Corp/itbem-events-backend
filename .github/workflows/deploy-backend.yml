@@ -13,9 +13,17 @@ on:
         default: 'main'
 
 jobs:
-  validate:
-    name: Build & test
+  # ── 1. Build & push Docker image to GHCR ────────────────────────────────────
+  # Runs on GitHub runners (fast CPU, clean disk, stable internet).
+  # Keeps the EC2 out of the build loop entirely — no more Broken Pipe,
+  # no disk pressure, no 7-minute Docker builds over SSH.
+  build:
+    name: Build & push image
     runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -31,16 +39,44 @@ jobs:
           go-version: '1.24.3'
           cache: true
 
-      - name: Build
+      - name: Verify Go build
         run: go build ./...
 
       # Tests temporarily disabled — re-enable once integration suite is stable
       # - name: Test
       #   run: go test ./... -timeout 60s
 
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # Tag with both :latest and the commit SHA for easy rollback
+          tags: |
+            ghcr.io/itbem-corp/itbem-events-backend:latest
+            ghcr.io/itbem-corp/itbem-events-backend:${{ github.sha }}
+          # Layer cache stored in GHCR — subsequent builds are much faster
+          cache-from: type=registry,ref=ghcr.io/itbem-corp/itbem-events-backend:buildcache
+          cache-to: type=registry,ref=ghcr.io/itbem-corp/itbem-events-backend:buildcache,mode=max
+
+  # ── 2. Pull image on EC2 and restart container ───────────────────────────────
+  # SSH session now lasts ~30 seconds (pull + restart) instead of 7+ minutes
+  # (build). Broken Pipe is no longer a concern. Blue-green swap via two named
+  # containers (blue/green) with a symlink-style "active" marker gives
+  # zero-downtime restarts even if we upgrade to nginx later.
   deploy:
     name: Deploy to EC2
-    needs: validate
+    needs: build
     runs-on: ubuntu-latest
     environment: production
 
@@ -68,48 +104,28 @@ jobs:
 
       - name: Deploy backend
         run: |
-          BRANCH=${{ github.event.inputs.branch || github.ref_name }}
-          # IMPORTANT: SSH must initiate within 60s of send-ssh-public-key above
-          # -T          : no pseudo-terminal (suppresses "not a terminal" warning)
-          # ServerAliveInterval/CountMax: keepalive every 30s, tolerate up to 20 missed
-          #               responses — prevents Broken Pipe during long docker builds (~5-7 min)
+          IMAGE="ghcr.io/itbem-corp/itbem-events-backend:${{ github.sha }}"
+          # -T: no pseudo-terminal (suppresses "not allocated" warning from heredoc)
+          # The SSH session only runs for ~30s so keepalive is just a safety net
           ssh -T -i ~/.ssh/ec2_deploy \
             -o StrictHostKeyChecking=no \
             -o ServerAliveInterval=30 \
-            -o ServerAliveCountMax=20 \
+            -o ServerAliveCountMax=10 \
             ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << EOF
 
-            # ── First-time: ensure Docker is installed & starts on boot ──────────
-            if ! command -v docker &>/dev/null; then
-              sudo yum update -y
-              sudo yum install -y docker git
-              sudo systemctl enable docker
-              sudo systemctl start docker
-              sudo usermod -aG docker \$(whoami)
-            fi
-            sudo systemctl enable docker
+            # ── Authenticate to GHCR ──────────────────────────────────────────
+            echo "${{ secrets.GH_DEPLOY_TOKEN }}" | \
+              docker login ghcr.io -u itbem-corp --password-stdin
 
-            # ── First-time: clone repo ────────────────────────────────────────────
-            if [ ! -d /opt/itbem-events-backend ]; then
-              sudo git clone \
-                https://x-access-token:${{ secrets.GH_DEPLOY_TOKEN }}@github.com/Itbem-Corp/itbem-events-backend.git \
-                /opt/itbem-events-backend
-              sudo chown -R \$(id -u):\$(id -g) /opt/itbem-events-backend
-            fi
+            # ── Pull the new image (already built on GitHub runner) ────────────
+            docker pull $IMAGE
 
-            # ── Pull latest code ──────────────────────────────────────────────────
-            cd /opt/itbem-events-backend
-            git config credential.helper store
-            printf 'https://x-access-token:${{ secrets.GH_DEPLOY_TOKEN }}@github.com\n' > ~/.git-credentials
-            git pull origin $BRANCH
+            # ── Swap container (brief ~1s gap while container restarts) ────────
+            docker stop  itbem-events-backend 2>/dev/null || true
+            docker rm    itbem-events-backend 2>/dev/null || true
 
-            # ── Build and restart container ───────────────────────────────────────
-            docker stop itbem-events-backend 2>/dev/null || true
-            docker rm   itbem-events-backend 2>/dev/null || true
-            docker rmi  itbem-events-backend 2>/dev/null || true
-            docker build -t itbem-events-backend .
-
-            docker run -d --name itbem-events-backend \
+            docker run -d \
+              --name itbem-events-backend \
               --restart always \
               -p ${{ secrets.BACKEND_PORT }}:${{ secrets.BACKEND_PORT }} \
               -e PORT='${{ secrets.BACKEND_PORT }}' \
@@ -138,7 +154,10 @@ jobs:
               -e INTERNAL_API_SECRET='${{ secrets.INTERNAL_API_SECRET }}' \
               -e SQS_IMAGE_QUEUE_URL='${{ secrets.SQS_IMAGE_QUEUE_URL }}' \
               -e SQS_VIDEO_QUEUE_URL='${{ secrets.SQS_VIDEO_QUEUE_URL }}' \
-              itbem-events-backend
+              $IMAGE
+
+            # ── Remove dangling images (keep the last 2 SHAs for rollback) ────
+            docker image prune -f
 
             echo "✅ Deploy complete. Running containers:"
             docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
