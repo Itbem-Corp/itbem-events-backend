@@ -120,7 +120,16 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	uploadsGroup.Use(middleware.BodyLimit("225M"))
 	uploadsGroup.Use(sensitiveRateLimiter())
 	uploadsGroup.POST("/events/:identifier/moments", moments.CreatePublicMoment)
-	uploadsGroup.POST("/events/:identifier/moments/shared", moments.CreateSharedMoment) // QR shared upload
+	uploadsGroup.POST("/events/:identifier/moments/shared", moments.CreateSharedMoment) // QR shared upload (legacy relay)
+
+	// Direct-upload endpoints: browser uploads file bytes directly to S3 (no relay through backend).
+	// These are JSON-only (no file bytes), so the 2M public limit is fine — use a separate group
+	// with the same sensitive rate limiter.
+	directUploadGroup := e.Group("/api")
+	directUploadGroup.Use(middleware.BodyLimit("2M"))
+	directUploadGroup.Use(sensitiveRateLimiter())
+	directUploadGroup.POST("/events/:identifier/moments/shared/upload-url", moments.RequestSharedUploadURL) // step 1: get presigned PUT URL
+	directUploadGroup.POST("/events/:identifier/moments/shared/confirm", moments.ConfirmSharedMoment)       // step 2: save record + queue Lambda
 
 	// Resources
 	public.GET("/resources/:id", resources.GetResource)

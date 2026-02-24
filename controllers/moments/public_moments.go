@@ -2,6 +2,7 @@ package moments
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"path/filepath"
@@ -9,7 +10,9 @@ import (
 	"strings"
 
 	"events-stocks/configuration"
+	"events-stocks/configuration/constants"
 	"events-stocks/models"
+	"events-stocks/repositories/bucketrepository"
 	"events-stocks/repositories/eventconfigrepository"
 	sqsrepository "events-stocks/repositories/sqsrepository"
 	"events-stocks/services/ports"
@@ -18,6 +21,7 @@ import (
 	eventsService "events-stocks/services/events"
 	"events-stocks/utils"
 
+	"github.com/gofrs/uuid"
 	"github.com/labstack/echo/v4"
 	"gorm.io/gorm"
 )
@@ -212,6 +216,146 @@ func CreatePublicMoment(c echo.Context) error {
 
 	// Queue optimization job; if SQS is not configured, mark as ready immediately
 	if !publishMediaJob(&moment, rawKey, publicResSvc.Bucket, contentType) {
+		moment.ProcessingStatus = ""
+		_ = momentsService.UpdateMoment(&moment)
+	}
+
+	go eventsService.IncrementAnalytics(eventID, "moment_uploads")
+
+	return utils.Success(c, http.StatusCreated, "Moment submitted for review", moment)
+}
+
+// POST /api/events/:identifier/moments/shared/upload-url
+// Step 1 of direct-upload flow: returns a short-lived presigned S3 PUT URL plus the
+// S3 key the client must use. The browser can then PUT the file bytes directly to S3
+// without routing through the backend. After the PUT succeeds, the client calls the
+// /confirm endpoint to persist the moment and queue Lambda processing.
+func RequestSharedUploadURL(c echo.Context) error {
+	identifier := c.Param("identifier")
+	if identifier == "" {
+		return utils.Error(c, http.StatusBadRequest, "Missing event identifier", "")
+	}
+
+	event, err := getEventByIdentifier(identifier)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return utils.Error(c, http.StatusNotFound, "Event not found", "")
+		}
+		return utils.Error(c, http.StatusInternalServerError, "Error loading event", err.Error())
+	}
+
+	cfg, err := eventconfigrepository.GetEventConfigByID(event.ID)
+	if err != nil || cfg == nil {
+		return utils.Error(c, http.StatusNotFound, "Event config not found", "")
+	}
+	if !cfg.ShareUploadsEnabled {
+		return utils.Error(c, http.StatusForbidden, "Shared uploads are not enabled for this event", "")
+	}
+	if !cfg.AllowUploads {
+		return utils.Error(c, http.StatusForbidden, "Uploads are disabled for this event", "")
+	}
+
+	var body struct {
+		ContentType string `json:"content_type"`
+		Filename    string `json:"filename"`
+	}
+	if err := c.Bind(&body); err != nil {
+		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
+	}
+	if body.ContentType == "" {
+		return utils.Error(c, http.StatusBadRequest, "content_type is required", "")
+	}
+
+	// Validate content type
+	isImg := strings.HasPrefix(body.ContentType, "image/")
+	isVid := strings.HasPrefix(body.ContentType, "video/")
+	if !isImg && !isVid {
+		return utils.Error(c, http.StatusBadRequest, fmt.Sprintf("unsupported file type: %s", body.ContentType), "")
+	}
+
+	// Build the S3 key: moments/{eventID}/raw/{uuid}.ext
+	ext := ""
+	if idx := strings.LastIndex(body.Filename, "."); idx != -1 {
+		ext = strings.ToLower(body.Filename[idx:])
+	}
+	u, _ := uuid.NewV4()
+	filename := u.String() + ext
+	folder := fmt.Sprintf("moments/%s/raw", event.ID.String())
+	s3Key := fmt.Sprintf("%s/%s", folder, filename)
+
+	uploadURL, err := bucketrepository.GetPresignedUploadURL(filename, folder, body.ContentType, publicResSvc.Bucket, constants.DefaultCloudProvider, 15)
+	if err != nil {
+		return utils.Error(c, http.StatusInternalServerError, "Error generating upload URL", err.Error())
+	}
+
+	return utils.Success(c, http.StatusOK, "Upload URL ready", map[string]string{
+		"upload_url": uploadURL,
+		"s3_key":     s3Key,
+	})
+}
+
+// POST /api/events/:identifier/moments/shared/confirm
+// Step 2 of direct-upload flow: called after the browser has PUT the file to S3.
+// Creates the Moment record in the DB and queues the Lambda processing job.
+func ConfirmSharedMoment(c echo.Context) error {
+	identifier := c.Param("identifier")
+	if identifier == "" {
+		return utils.Error(c, http.StatusBadRequest, "Missing event identifier", "")
+	}
+
+	event, err := getEventByIdentifier(identifier)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return utils.Error(c, http.StatusNotFound, "Event not found", "")
+		}
+		return utils.Error(c, http.StatusInternalServerError, "Error loading event", err.Error())
+	}
+
+	cfg, err := eventconfigrepository.GetEventConfigByID(event.ID)
+	if err != nil || cfg == nil {
+		return utils.Error(c, http.StatusNotFound, "Event config not found", "")
+	}
+	if !cfg.ShareUploadsEnabled {
+		return utils.Error(c, http.StatusForbidden, "Shared uploads are not enabled for this event", "")
+	}
+	if !cfg.AllowUploads {
+		return utils.Error(c, http.StatusForbidden, "Uploads are disabled for this event", "")
+	}
+
+	var body struct {
+		S3Key       string `json:"s3_key"`
+		ContentType string `json:"content_type"`
+		Description string `json:"description"`
+	}
+	if err := c.Bind(&body); err != nil {
+		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
+	}
+	if body.S3Key == "" || body.ContentType == "" {
+		return utils.Error(c, http.StatusBadRequest, "s3_key and content_type are required", "")
+	}
+
+	// Guard: key must be scoped to this event to prevent forged keys
+	expectedPrefix := fmt.Sprintf("moments/%s/raw/", event.ID.String())
+	if !strings.HasPrefix(body.S3Key, expectedPrefix) {
+		return utils.Error(c, http.StatusBadRequest, "Invalid s3_key for this event", "")
+	}
+
+	eventID := event.ID
+	isApproved := cfg.AutoApproveUploads
+	moment := models.Moment{
+		EventID:          &eventID,
+		ContentURL:       body.S3Key,
+		ContentType:      body.ContentType,
+		Description:      body.Description,
+		IsApproved:       isApproved,
+		ProcessingStatus: "pending",
+	}
+
+	if err := momentsService.CreateMoment(&moment); err != nil {
+		return utils.Error(c, http.StatusInternalServerError, "Error saving moment", err.Error())
+	}
+
+	if !publishMediaJob(&moment, body.S3Key, publicResSvc.Bucket, body.ContentType) {
 		moment.ProcessingStatus = ""
 		_ = momentsService.UpdateMoment(&moment)
 	}

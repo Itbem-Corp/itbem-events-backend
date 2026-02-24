@@ -122,3 +122,23 @@ func GeneratePresignedURL(ctx context.Context, key, bucket string, expiresInMinu
 
 	return resp.URL, nil
 }
+
+// GeneratePresignedPutURL returns a short-lived presigned URL the browser can use
+// to PUT a file directly to S3, bypassing the backend for the file bytes.
+func GeneratePresignedPutURL(ctx context.Context, key, bucket, contentType string, expiresInMinutes int) (string, error) {
+	s3Client := configuration.GetS3Client(nil)
+	presignClient := s3.NewPresignClient(s3Client)
+
+	resp, err := presignClient.PresignPutObject(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(bucket),
+		Key:         aws.String(key),
+		ContentType: aws.String(contentType),
+	}, func(opts *s3.PresignOptions) {
+		opts.Expires = time.Duration(expiresInMinutes) * time.Minute
+	})
+	if err != nil {
+		return "", err
+	}
+
+	return resp.URL, nil
+}

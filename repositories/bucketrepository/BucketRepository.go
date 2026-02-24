@@ -26,6 +26,20 @@ func GetPresignedFileURL(filename string, folder string, bucket string, provider
 	}
 }
 
+// GetPresignedUploadURL returns a short-lived presigned PUT URL the browser can use
+// to upload a file directly to S3.
+func GetPresignedUploadURL(filename, folder, contentType, bucket, provider string, minutes int) (string, error) {
+	ctx := context.Background()
+	objectKey := fmt.Sprintf("%s/%s", folder, filename)
+
+	switch strings.ToLower(provider) {
+	case "aws":
+		return awsrepository.GeneratePresignedPutURL(ctx, objectKey, bucket, contentType, minutes)
+	default:
+		return "", fmt.Errorf("unsupported provider: %s", provider)
+	}
+}
+
 // UploadFile uploads a multipart file to the selected cloud provider
 func UploadFile(file multipart.File, fileHeader *multipart.FileHeader, folder string, bucket string, provider string) (string, error) {
 	ctx := context.Background()
