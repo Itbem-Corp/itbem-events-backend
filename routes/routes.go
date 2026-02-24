@@ -68,6 +68,29 @@ func sensitiveRateLimiter() echo.MiddlewareFunc {
 	})
 }
 
+// directUploadRateLimiter: for JSON-only direct-upload coordination endpoints.
+// A single user uploading 10 files needs up to 20 requests (upload-url + confirm per file).
+// Burst=30 covers that with margin; rate=3 req/s allows sustained bulk uploads.
+func directUploadRateLimiter() echo.MiddlewareFunc {
+	return middleware.RateLimiterWithConfig(middleware.RateLimiterConfig{
+		Store: middleware.NewRateLimiterMemoryStoreWithConfig(
+			middleware.RateLimiterMemoryStoreConfig{
+				Rate:      3,
+				Burst:     30,
+				ExpiresIn: 3 * time.Minute,
+			},
+		),
+		IdentifierExtractor: func(c echo.Context) (string, error) {
+			return c.RealIP(), nil
+		},
+		DenyHandler: func(c echo.Context, id string, err error) error {
+			return c.JSON(http.StatusTooManyRequests, map[string]string{
+				"message": "Too many requests, please slow down",
+			})
+		},
+	})
+}
+
 // protectedRateLimiter: más permisivo para el dashboard: 60 req/s por IP, burst 100
 func protectedRateLimiter() echo.MiddlewareFunc {
 	return middleware.RateLimiterWithConfig(middleware.RateLimiterConfig{
@@ -123,13 +146,18 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	uploadsGroup.POST("/events/:identifier/moments/shared", moments.CreateSharedMoment) // QR shared upload (legacy relay)
 
 	// Direct-upload endpoints: browser uploads file bytes directly to S3 (no relay through backend).
-	// These are JSON-only (no file bytes), so the 2M public limit is fine — use a separate group
-	// with the same sensitive rate limiter.
+	// These are JSON-only (tiny payloads), so 2M body limit is fine.
+	// Rate limit is more permissive than sensitiveRateLimiter — a user uploading 10 files
+	// needs up to 20 requests (upload-url + confirm × 10). Burst=30, rate=3 req/s.
 	directUploadGroup := e.Group("/api")
 	directUploadGroup.Use(middleware.BodyLimit("2M"))
-	directUploadGroup.Use(sensitiveRateLimiter())
-	directUploadGroup.POST("/events/:identifier/moments/shared/upload-url", moments.RequestSharedUploadURL) // step 1: get presigned PUT URL
-	directUploadGroup.POST("/events/:identifier/moments/shared/confirm", moments.ConfirmSharedMoment)       // step 2: save record + queue Lambda
+	directUploadGroup.Use(directUploadRateLimiter())
+	// Shared QR upload (no personal token)
+	directUploadGroup.POST("/events/:identifier/moments/shared/upload-url", moments.RequestSharedUploadURL)
+	directUploadGroup.POST("/events/:identifier/moments/shared/confirm", moments.ConfirmSharedMoment)
+	// Personal invitation upload
+	directUploadGroup.POST("/events/:identifier/moments/upload-url", moments.RequestPersonalUploadURL)
+	directUploadGroup.POST("/events/:identifier/moments/confirm", moments.ConfirmPersonalMoment)
 
 	// Resources
 	public.GET("/resources/:id", resources.GetResource)

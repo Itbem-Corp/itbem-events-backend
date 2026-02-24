@@ -343,44 +343,216 @@ func ConfirmSharedMoment(c echo.Context) error {
 		return utils.Error(c, http.StatusBadRequest, "Invalid s3_key", "")
 	}
 
-	// FIX #3 — Verify the file actually exists in S3 (detect phantom confirms)
-	// FIX #2 — Enforce per-type size limits (25 MB images / 200 MB videos)
 	filename := body.S3Key[len(tmpPrefix):]
-	fileSize, err := bucketrepository.GetFileSize(filename, "moments/uploads/tmp", publicResSvc.Bucket, constants.DefaultCloudProvider)
+	rawKey, contentType, err := promoteFromStaging(filename, event.ID.String(), publicResSvc.Bucket)
 	if err != nil {
-		return utils.Error(c, http.StatusUnprocessableEntity, "File not found in storage — upload may have failed", "")
+		return utils.Error(c, http.StatusUnprocessableEntity, err.Error(), "")
 	}
-	isVid := strings.HasPrefix(body.ContentType, "video/")
-	maxBytes := int64(25 * 1024 * 1024) // 25 MB for images
+
+	eventID := event.ID
+	moment := models.Moment{
+		EventID:          &eventID,
+		ContentURL:       rawKey,
+		ContentType:      contentType,
+		Description:      body.Description,
+		IsApproved:       cfg.AutoApproveUploads,
+		ProcessingStatus: "pending",
+	}
+
+	if err := momentsService.CreateMoment(&moment); err != nil {
+		return utils.Error(c, http.StatusInternalServerError, "Error saving moment", err.Error())
+	}
+
+	if !publishMediaJob(&moment, rawKey, publicResSvc.Bucket, contentType) {
+		moment.ProcessingStatus = ""
+		_ = momentsService.UpdateMoment(&moment)
+	}
+
+	go eventsService.IncrementAnalytics(eventID, "moment_uploads")
+
+	return utils.Success(c, http.StatusCreated, "Moment submitted for review", moment)
+}
+
+// promoteFromStaging validates a staged file and moves it to the event-scoped
+// raw folder. Returns the final S3 key and the content-type read from S3.
+// Returns an error if the file is missing, oversized, or cannot be moved.
+func promoteFromStaging(filename, eventID, bucket string) (rawKey, contentType string, err error) {
+	// FIX #3 — verify file exists; FIX #2 — enforce size limits
+	// FIX #4 — read content-type from S3, not from client
+	fileSize, s3ContentType, err := bucketrepository.GetFileMeta(filename, "moments/uploads/tmp", bucket, constants.DefaultCloudProvider)
+	if err != nil {
+		return "", "", fmt.Errorf("file not found in storage — upload may have failed")
+	}
+
+	isVid := strings.HasPrefix(s3ContentType, "video/")
+	maxBytes := int64(25 * 1024 * 1024)
 	if isVid {
-		maxBytes = int64(200 * 1024 * 1024) // 200 MB for videos
+		maxBytes = int64(200 * 1024 * 1024)
 	}
 	if fileSize > maxBytes {
 		limitMB := 25
 		if isVid {
 			limitMB = 200
 		}
-		// Clean up the oversized file from S3 before rejecting
-		_ = bucketrepository.DeleteFile(filename, "moments/uploads/tmp", publicResSvc.Bucket, constants.DefaultCloudProvider)
-		return utils.Error(c, http.StatusRequestEntityTooLarge, fmt.Sprintf("File exceeds %d MB limit", limitMB), "")
+		_ = bucketrepository.DeleteFile(filename, "moments/uploads/tmp", bucket, constants.DefaultCloudProvider)
+		return "", "", fmt.Errorf("file exceeds %d MB limit", limitMB)
 	}
 
-	// Move file from staging to the event-scoped raw folder so Lambda can find it
-	rawFolder := fmt.Sprintf("moments/%s/raw", event.ID.String())
-	if err := bucketrepository.CopyFile(filename, "moments/uploads/tmp", filename, rawFolder, publicResSvc.Bucket, constants.DefaultCloudProvider); err != nil {
-		return utils.Error(c, http.StatusInternalServerError, "Error moving file to storage", err.Error())
+	rawFolder := fmt.Sprintf("moments/%s/raw", eventID)
+	if err := bucketrepository.CopyFile(filename, "moments/uploads/tmp", filename, rawFolder, bucket, constants.DefaultCloudProvider); err != nil {
+		return "", "", fmt.Errorf("error moving file to storage: %w", err)
 	}
-	// Delete the staging copy (best-effort; lifecycle rule cleans up any leftovers)
-	_ = bucketrepository.DeleteFile(filename, "moments/uploads/tmp", publicResSvc.Bucket, constants.DefaultCloudProvider)
+	_ = bucketrepository.DeleteFile(filename, "moments/uploads/tmp", bucket, constants.DefaultCloudProvider)
 
-	rawKey := fmt.Sprintf("%s/%s", rawFolder, filename)
+	return fmt.Sprintf("%s/%s", rawFolder, filename), s3ContentType, nil
+}
+
+// POST /api/events/:identifier/moments/upload-url  — personal invitation upload
+// Step 1: returns a presigned PUT URL for direct browser → S3 upload.
+func RequestPersonalUploadURL(c echo.Context) error {
+	identifier := c.Param("identifier")
+	if identifier == "" {
+		return utils.Error(c, http.StatusBadRequest, "Missing event identifier", "")
+	}
+
+	var body struct {
+		PrettyToken string `json:"pretty_token"`
+		ContentType string `json:"content_type"`
+		Filename    string `json:"filename"`
+	}
+	if err := c.Bind(&body); err != nil {
+		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
+	}
+	if body.PrettyToken == "" {
+		return utils.Error(c, http.StatusUnauthorized, "Missing invitation token", "")
+	}
+	if body.ContentType == "" {
+		return utils.Error(c, http.StatusBadRequest, "content_type is required", "")
+	}
+
+	token, err := publicTokenRepo.GetByPrettyToken(body.PrettyToken)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return utils.Error(c, http.StatusUnauthorized, "Invalid invitation token", "")
+		}
+		return utils.Error(c, http.StatusInternalServerError, "Error validating token", err.Error())
+	}
+
+	event, err := getEventByIdentifier(identifier)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return utils.Error(c, http.StatusNotFound, "Event not found", "")
+		}
+		return utils.Error(c, http.StatusInternalServerError, "Error loading event", err.Error())
+	}
+
+	cfg, _ := eventconfigrepository.GetEventConfigByID(event.ID)
+	if cfg != nil && !cfg.AllowUploads {
+		return utils.Error(c, http.StatusForbidden, "Uploads are disabled for this event", "")
+	}
+
+	if err := configuration.DB.Where("id = ? AND event_id = ?", token.InvitationID, event.ID).First(&models.Invitation{}).Error; err != nil {
+		return utils.Error(c, http.StatusUnauthorized, "Token does not belong to this event", "")
+	}
+
+	isImg := strings.HasPrefix(body.ContentType, "image/")
+	isVid := strings.HasPrefix(body.ContentType, "video/")
+	if !isImg && !isVid {
+		return utils.Error(c, http.StatusBadRequest, fmt.Sprintf("unsupported file type: %s", body.ContentType), "")
+	}
+
+	ext := ""
+	if idx := strings.LastIndex(body.Filename, "."); idx != -1 {
+		ext = strings.ToLower(body.Filename[idx:])
+	}
+	u, _ := uuid.NewV4()
+	filename := u.String() + ext
+	folder := "moments/uploads/tmp"
+	s3Key := fmt.Sprintf("%s/%s", folder, filename)
+
+	uploadURL, err := bucketrepository.GetPresignedUploadURL(filename, folder, body.ContentType, publicResSvc.Bucket, constants.DefaultCloudProvider, 15)
+	if err != nil {
+		return utils.Error(c, http.StatusInternalServerError, "Error generating upload URL", err.Error())
+	}
+
+	return utils.Success(c, http.StatusOK, "Upload URL ready", map[string]string{
+		"upload_url": uploadURL,
+		"s3_key":     s3Key,
+	})
+}
+
+// POST /api/events/:identifier/moments/confirm  — personal invitation upload
+// Step 2: validates the file in S3, moves it to the event folder, creates the
+// Moment record, and queues Lambda.
+func ConfirmPersonalMoment(c echo.Context) error {
+	identifier := c.Param("identifier")
+	if identifier == "" {
+		return utils.Error(c, http.StatusBadRequest, "Missing event identifier", "")
+	}
+
+	var body struct {
+		PrettyToken string `json:"pretty_token"`
+		S3Key       string `json:"s3_key"`
+		Description string `json:"description"`
+	}
+	if err := c.Bind(&body); err != nil {
+		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
+	}
+	if body.PrettyToken == "" {
+		return utils.Error(c, http.StatusUnauthorized, "Missing invitation token", "")
+	}
+	if body.S3Key == "" {
+		return utils.Error(c, http.StatusBadRequest, "s3_key is required", "")
+	}
+
+	token, err := publicTokenRepo.GetByPrettyToken(body.PrettyToken)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return utils.Error(c, http.StatusUnauthorized, "Invalid invitation token", "")
+		}
+		return utils.Error(c, http.StatusInternalServerError, "Error validating token", err.Error())
+	}
+
+	event, err := getEventByIdentifier(identifier)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return utils.Error(c, http.StatusNotFound, "Event not found", "")
+		}
+		return utils.Error(c, http.StatusInternalServerError, "Error loading event", err.Error())
+	}
+
+	cfg, _ := eventconfigrepository.GetEventConfigByID(event.ID)
+	if cfg != nil && !cfg.AllowUploads {
+		return utils.Error(c, http.StatusForbidden, "Uploads are disabled for this event", "")
+	}
+
+	var inv models.Invitation
+	if err := configuration.DB.Where("id = ? AND event_id = ?", token.InvitationID, event.ID).First(&inv).Error; err != nil {
+		return utils.Error(c, http.StatusUnauthorized, "Token does not belong to this event", "")
+	}
+
+	const tmpPrefix = "moments/uploads/tmp/"
+	if !strings.HasPrefix(body.S3Key, tmpPrefix) {
+		return utils.Error(c, http.StatusBadRequest, "Invalid s3_key", "")
+	}
+
+	filename := body.S3Key[len(tmpPrefix):]
+	rawKey, contentType, err := promoteFromStaging(filename, event.ID.String(), publicResSvc.Bucket)
+	if err != nil {
+		return utils.Error(c, http.StatusUnprocessableEntity, err.Error(), "")
+	}
 
 	eventID := event.ID
-	isApproved := cfg.AutoApproveUploads
+	invID := token.InvitationID
+	isApproved := false
+	if cfg != nil && cfg.AutoApproveUploads {
+		isApproved = true
+	}
 	moment := models.Moment{
 		EventID:          &eventID,
+		InvitationID:     &invID,
 		ContentURL:       rawKey,
-		ContentType:      body.ContentType,
+		ContentType:      contentType,
 		Description:      body.Description,
 		IsApproved:       isApproved,
 		ProcessingStatus: "pending",
@@ -390,7 +562,7 @@ func ConfirmSharedMoment(c echo.Context) error {
 		return utils.Error(c, http.StatusInternalServerError, "Error saving moment", err.Error())
 	}
 
-	if !publishMediaJob(&moment, rawKey, publicResSvc.Bucket, body.ContentType) {
+	if !publishMediaJob(&moment, rawKey, publicResSvc.Bucket, contentType) {
 		moment.ProcessingStatus = ""
 		_ = momentsService.UpdateMoment(&moment)
 	}

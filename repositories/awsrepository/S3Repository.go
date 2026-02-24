@@ -71,18 +71,29 @@ func DeleteS3Object(ctx context.Context, key, bucket string) error {
 // GetS3ObjectSize returns the byte size of an S3 object via HeadObject.
 // Returns an error (including NoSuchKey) if the object does not exist.
 func GetS3ObjectSize(ctx context.Context, key, bucket string) (int64, error) {
+	size, _, err := GetS3ObjectMeta(ctx, key, bucket)
+	return size, err
+}
+
+// GetS3ObjectMeta returns the byte size and Content-Type of an S3 object in a
+// single HeadObject call. Use this when you need both values to avoid a double
+// round-trip. Returns an error if the object does not exist.
+func GetS3ObjectMeta(ctx context.Context, key, bucket string) (size int64, contentType string, err error) {
 	s3Client := configuration.GetS3Client(nil)
 	resp, err := s3Client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
-	if resp.ContentLength == nil {
-		return 0, nil
+	if resp.ContentLength != nil {
+		size = *resp.ContentLength
 	}
-	return *resp.ContentLength, nil
+	if resp.ContentType != nil {
+		contentType = *resp.ContentType
+	}
+	return size, contentType, nil
 }
 
 // CopyS3Object performs a server-side copy within the same bucket.

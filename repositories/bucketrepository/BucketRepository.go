@@ -145,14 +145,21 @@ func ListFilesInFolder(folder string, bucket string, provider string) ([]string,
 // GetFileSize returns the byte size of a file in the selected cloud provider.
 // Returns an error if the object does not exist.
 func GetFileSize(filename, folder, bucket, provider string) (int64, error) {
+	size, _, err := GetFileMeta(filename, folder, bucket, provider)
+	return size, err
+}
+
+// GetFileMeta returns the byte size and Content-Type of a file in a single
+// round-trip. Prefer this over GetFileSize when you also need the content type.
+func GetFileMeta(filename, folder, bucket, provider string) (size int64, contentType string, err error) {
 	ctx := context.Background()
 	objectKey := fmt.Sprintf("%s/%s", folder, filename)
 
 	switch strings.ToLower(provider) {
 	case "aws":
-		return awsrepository.GetS3ObjectSize(ctx, objectKey, bucket)
+		return awsrepository.GetS3ObjectMeta(ctx, objectKey, bucket)
 	default:
-		return 0, fmt.Errorf("unsupported provider: %s", provider)
+		return 0, "", fmt.Errorf("unsupported provider: %s", provider)
 	}
 }
 
