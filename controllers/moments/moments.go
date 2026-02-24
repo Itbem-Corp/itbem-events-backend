@@ -182,12 +182,25 @@ func DownloadMomentFile(c echo.Context) error {
 	}
 	defer stream.Close()
 
-	ext := strings.TrimPrefix(filepath.Ext(filename), ".")
-	contentType := fmt.Sprintf("image/%s", ext)
-	if ext == "webp" {
-		contentType = "image/webp"
-	} else if ext == "jpg" || ext == "jpeg" {
-		contentType = "image/jpeg"
+	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(filename), "."))
+	contentTypeMap := map[string]string{
+		"webp": "image/webp",
+		"jpg":  "image/jpeg",
+		"jpeg": "image/jpeg",
+		"png":  "image/png",
+		"gif":  "image/gif",
+		"avif": "image/avif",
+		"heic": "image/heic",
+		"heif": "image/heif",
+		"mp4":  "video/mp4",
+		"webm": "video/webm",
+		"mov":  "video/quicktime",
+		"m4v":  "video/x-m4v",
+		"3gp":  "video/3gpp",
+	}
+	contentType, ok := contentTypeMap[ext]
+	if !ok {
+		contentType = "application/octet-stream"
 	}
 
 	c.Response().Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))

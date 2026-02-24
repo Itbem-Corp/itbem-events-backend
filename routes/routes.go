@@ -136,14 +136,13 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	// Public moments — view wall (GET only; inherits public 2M limit and Redis cache)
 	public.GET("/events/:identifier/moments", moments.ListPublicMoments)
 
-	// Upload endpoints get a SEPARATE top-level group so they are NOT limited by the
-	// 2M body limit on the public group. They run their own rate limiting only.
-	// 225M supports video uploads up to 200 MB plus multipart overhead.
-	uploadsGroup := e.Group("/api")
-	uploadsGroup.Use(middleware.BodyLimit("225M"))
-	uploadsGroup.Use(sensitiveRateLimiter())
-	uploadsGroup.POST("/events/:identifier/moments", moments.CreatePublicMoment)
-	uploadsGroup.POST("/events/:identifier/moments/shared", moments.CreateSharedMoment) // QR shared upload (legacy relay)
+	// Legacy relay upload group — kept only for emergency rollback; the frontend
+	// no longer calls these. Remove once direct-upload is confirmed stable in prod.
+	// uploadsGroup := e.Group("/api")
+	// uploadsGroup.Use(middleware.BodyLimit("225M"))
+	// uploadsGroup.Use(sensitiveRateLimiter())
+	// uploadsGroup.POST("/events/:identifier/moments", moments.CreatePublicMoment)
+	// uploadsGroup.POST("/events/:identifier/moments/shared", moments.CreateSharedMoment)
 
 	// Direct-upload endpoints: browser uploads file bytes directly to S3 (no relay through backend).
 	// These are JSON-only (tiny payloads), so 2M body limit is fine.
