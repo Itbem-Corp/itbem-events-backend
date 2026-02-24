@@ -1,15 +1,12 @@
 package moments
 
 import (
-	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"events-stocks/configuration"
 	"events-stocks/models"
@@ -85,37 +82,6 @@ func publishMediaJob(moment *models.Moment, rawKey, bucket, contentType string) 
 	return enqueued
 }
 
-// uploadLimitKey returns the Redis key for tracking per-IP uploads for an event.
-func uploadLimitKey(eventID, ip string) string {
-	return fmt.Sprintf("moments:upload_count:%s:%s", eventID, ip)
-}
-
-const uploadWindowDays = 30
-
-// defaultMaxUploadsPerIP is the global fallback when EventConfig.MaxUploadsPerGuest is 0.
-// 30 = allows up to 3 batches of 10 files from the shared upload page.
-const defaultMaxUploadsPerIP = 30
-
-// checkAndIncrementUploadLimit checks the per-IP upload counter.
-// maxUploads is the per-event configured limit; pass 0 to use the global default (3).
-// Returns (limitReached, currentCount, error).
-func checkAndIncrementUploadLimit(ctx context.Context, eventID, ip string, maxUploads int) (bool, int64, error) {
-	if maxUploads <= 0 {
-		maxUploads = defaultMaxUploadsPerIP
-	}
-	key := uploadLimitKey(eventID, ip)
-	count, err := configuration.RedisClient.Incr(ctx, key).Result()
-	if err != nil {
-		// Redis unavailable — allow the upload rather than blocking
-		return false, 0, nil
-	}
-	// Set TTL on first increment
-	if count == 1 {
-		configuration.RedisClient.Expire(ctx, key, uploadWindowDays*24*time.Hour)
-	}
-	return count > int64(maxUploads), count, nil
-}
-
 const defaultPageLimit = 20
 const maxPageLimit = 50
 
@@ -157,37 +123,19 @@ func ListPublicMoments(c echo.Context) error {
 		limit = l
 	}
 
-	// Check if the requesting IP has already uploaded (for UI state)
-	ip := c.RealIP()
-	ctx := c.Request().Context()
-	countStr, _ := configuration.RedisClient.Get(ctx, uploadLimitKey(event.ID.String(), ip)).Result()
-	var uploadedCount int64
-	fmt.Sscanf(countStr, "%d", &uploadedCount)
-
 	// Cached + paginated approved moments
 	items, total, err := momentsService.ListApprovedForWall(event.ID, page, limit)
 	if err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Error loading moments", err.Error())
 	}
 
-	maxUploads := int64(defaultMaxUploadsPerIP)
-	if cfg != nil && cfg.MaxUploadsPerGuest > 0 {
-		maxUploads = int64(cfg.MaxUploadsPerGuest)
-	}
-	uploadsRemaining := maxUploads - uploadedCount
-	if uploadsRemaining < 0 {
-		uploadsRemaining = 0
-	}
-
 	return utils.Success(c, http.StatusOK, "Moments loaded", map[string]interface{}{
-		"items":             items,
-		"total":             total,
-		"page":              page,
-		"limit":             limit,
-		"has_more":          int64(page*limit) < total,
-		"published":         true,
-		"uploads_remaining": uploadsRemaining,
-		"uploads_used":      uploadedCount,
+		"items":    items,
+		"total":    total,
+		"page":     page,
+		"limit":    limit,
+		"has_more": int64(page*limit) < total,
+		"published": true,
 	})
 }
 
@@ -228,25 +176,6 @@ func CreatePublicMoment(c echo.Context) error {
 	var inv models.Invitation
 	if err := configuration.DB.Where("id = ? AND event_id = ?", token.InvitationID, event.ID).First(&inv).Error; err != nil {
 		return utils.Error(c, http.StatusUnauthorized, "Token does not belong to this event", "")
-	}
-
-	// Per-IP upload limit — respect per-event config, fall back to global default
-	maxUploads := 0
-	if cfg != nil {
-		maxUploads = cfg.MaxUploadsPerGuest
-	}
-	ip := c.RealIP()
-	ctx := c.Request().Context()
-	limitReached, _, _ := checkAndIncrementUploadLimit(ctx, event.ID.String(), ip, maxUploads)
-	if maxUploads <= 0 {
-		maxUploads = defaultMaxUploadsPerIP
-	}
-	if limitReached {
-		return c.JSON(http.StatusTooManyRequests, map[string]interface{}{
-			"message":          fmt.Sprintf("Gracias por compartir tus momentos en %s. ¡Ya registramos tus %d contribuciones!", event.Name, maxUploads),
-			"already_uploaded": true,
-			"event_name":       event.Name,
-		})
 	}
 
 	file, header, err := c.Request().FormFile("file")
@@ -317,22 +246,6 @@ func CreateSharedMoment(c echo.Context) error {
 	}
 	if !cfg.AllowUploads {
 		return utils.Error(c, http.StatusForbidden, "Uploads are disabled for this event", "")
-	}
-
-	// Per-IP upload limit — respect per-event config, fall back to global default
-	maxUploads := cfg.MaxUploadsPerGuest
-	ip := c.RealIP()
-	ctx := c.Request().Context()
-	limitReached, _, _ := checkAndIncrementUploadLimit(ctx, event.ID.String(), ip, maxUploads)
-	if maxUploads <= 0 {
-		maxUploads = defaultMaxUploadsPerIP
-	}
-	if limitReached {
-		return c.JSON(http.StatusTooManyRequests, map[string]interface{}{
-			"message":          fmt.Sprintf("Gracias por compartir tus momentos en %s. ¡Ya registramos tus %d contribuciones!", event.Name, maxUploads),
-			"already_uploaded": true,
-			"event_name":       event.Name,
-		})
 	}
 
 	file, header, err := c.Request().FormFile("file")

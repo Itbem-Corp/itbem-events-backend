@@ -7,10 +7,13 @@ import (
 	momentsService "events-stocks/services/moments"
 	"events-stocks/repositories/bucketrepository"
 	"events-stocks/utils"
+	"fmt"
 	"github.com/gofrs/uuid"
 	"github.com/labstack/echo/v4"
+	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -143,6 +146,56 @@ func UpdateMomentContent(c echo.Context) error {
 	}
 
 	return utils.Success(c, http.StatusOK, "Moment content updated", nil)
+}
+
+// GET /moments/:id/download — proxies the S3 file through the backend so the
+// browser can fetch it without S3 CORS restrictions (used for ZIP generation).
+func DownloadMomentFile(c echo.Context) error {
+	idParam := c.Param("id")
+	id, err := uuid.FromString(idParam)
+	if err != nil {
+		return utils.Error(c, http.StatusBadRequest, "Invalid UUID", err.Error())
+	}
+
+	moment, err := momentSvc.GetMomentByID(id)
+	if err != nil {
+		return utils.Error(c, http.StatusNotFound, "Moment not found", err.Error())
+	}
+
+	key := moment.ContentURL
+	if key == "" || strings.HasPrefix(key, "http") {
+		return utils.Error(c, http.StatusUnprocessableEntity, "Moment has no downloadable file", "")
+	}
+
+	cfg, ok := c.Get("config").(*models.Config)
+	if !ok || cfg.AwsBucketName == "" {
+		return utils.Error(c, http.StatusInternalServerError, "Storage not configured", "")
+	}
+
+	parts := strings.SplitN(key, "/", -1)
+	filename := parts[len(parts)-1]
+	folder := strings.Join(parts[:len(parts)-1], "/")
+
+	stream, err := bucketrepository.GetFileStream(filename, folder, cfg.AwsBucketName, constants.DefaultCloudProvider)
+	if err != nil {
+		return utils.Error(c, http.StatusInternalServerError, "Error fetching file from storage", err.Error())
+	}
+	defer stream.Close()
+
+	ext := strings.TrimPrefix(filepath.Ext(filename), ".")
+	contentType := fmt.Sprintf("image/%s", ext)
+	if ext == "webp" {
+		contentType = "image/webp"
+	} else if ext == "jpg" || ext == "jpeg" {
+		contentType = "image/jpeg"
+	}
+
+	c.Response().Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+	c.Response().Header().Set("Cache-Control", "private, max-age=3600")
+	c.Response().WriteHeader(http.StatusOK)
+	c.Response().Header().Set(echo.HeaderContentType, contentType)
+	_, _ = io.Copy(c.Response(), stream)
+	return nil
 }
 
 // DELETE /moments/:id

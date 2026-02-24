@@ -186,6 +186,7 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	protected.GET("/moments", moments.ListMoments)
 	protected.POST("/moments/bulk-approve", moments.BulkApproveRejectMoments) // must be before /:id
 	protected.GET("/moments/:id", moments.GetMoment)
+	protected.GET("/moments/:id/download", moments.DownloadMomentFile) // proxy S3 file — avoids browser CORS
 	protected.POST("/moments", moments.CreateMoment)
 	protected.PUT("/moments/:id/requeue", moments.RequeueMoment) // must be before /:id plain PUT
 	protected.PUT("/moments/:id", moments.UpdateMoment)
