@@ -20,7 +20,9 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
+	"github.com/testcontainers/testcontainers-go/wait"
 	gormpostgres "gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
@@ -63,6 +65,13 @@ func TestMain(m *testing.M) {
 		tcpostgres.WithDatabase("testdb"),
 		tcpostgres.WithUsername("test"),
 		tcpostgres.WithPassword("test"),
+		testcontainers.WithWaitStrategy(
+			// Postgres restarts once during initialization; wait for the second
+			// "ready to accept connections" before connecting (testcontainers-go v0.40+).
+			wait.ForLog("database system is ready to accept connections").
+				WithOccurrence(2).
+				WithStartupTimeout(60*time.Second),
+		),
 	)
 	if err != nil {
 		panic("could not start postgres container: " + err.Error())
@@ -211,7 +220,7 @@ func TestRSVP_HappyPath_Confirmed(t *testing.T) {
 
 	var resp map[string]interface{}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Equal(t, "success", resp["status"])
+	assert.Equal(t, float64(http.StatusOK), resp["status"]) // APIResponse.Status is int → float64 in JSON
 	assert.Equal(t, "RSVP confirmed", resp["message"])
 
 	data, ok := resp["data"].(map[string]interface{})

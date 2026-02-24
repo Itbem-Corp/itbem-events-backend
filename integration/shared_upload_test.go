@@ -17,6 +17,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
 	"testing"
 	"time"
 
@@ -30,18 +31,26 @@ import (
 	customValidator "events-stocks/middleware/validator"
 	"events-stocks/models"
 	invitationaccesstokenrepository "events-stocks/repositories/invitationaccesstokenrepository"
+	momentrepository "events-stocks/repositories/momentrepository"
+	redisrepository "events-stocks/repositories/redisrepository"
+	momentsSvc "events-stocks/services/moments"
 )
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 // sharedUploadEcho returns a minimal Echo instance wired for public moment routes.
-// publicResSvc is left nil: tests must not trigger the S3 upload code path.
+// publicResSvc is left nil: upload tests that reach the S3 call path will get
+// a nil-dereference (caught by the Recover test variant).
+// The package-level moments service is wired with real repos so ListPublicMoments works.
 func sharedUploadEcho() *echo.Echo {
 	e := echo.New()
 	e.HideBanner = true
 	e.Validator = customValidator.New()
 	tokenRepo := invitationaccesstokenrepository.NewAccessTokenRepo()
 	momentsCtrl.InitPublicMomentsController(tokenRepo, nil)
+	// Wire moments service so ListPublicMoments can call _momentSvc.ListApprovedForWall.
+	svc := momentsSvc.NewMomentService(momentrepository.NewMomentRepo(), redisrepository.NewRedisRepo())
+	momentsSvc.SetDefaultMomentService(svc)
 	e.GET("/api/events/:identifier/moments", momentsCtrl.ListPublicMoments)
 	e.POST("/api/events/:identifier/moments/shared", momentsCtrl.CreateSharedMoment)
 	return e
@@ -112,12 +121,18 @@ func multipartNoFile(t *testing.T, url string) *http.Request {
 	return req
 }
 
-// multipartWithFile builds a POST request with a minimal 1-byte JPEG file attached.
+// multipartWithFile builds a POST request with a minimal JPEG file attached.
+// The part Content-Type is set to "image/jpeg" explicitly so the MIME validation
+// guard in UploadRawToMomentsFolder passes (it reads header.Header.Get("Content-Type")).
 func multipartWithFile(t *testing.T, url string) *http.Request {
 	t.Helper()
 	var buf bytes.Buffer
 	w := multipart.NewWriter(&buf)
-	fw, err := w.CreateFormFile("file", "photo.jpg")
+	// Use CreatePart directly so we can set Content-Type: image/jpeg on the part.
+	h := make(textproto.MIMEHeader)
+	h.Set("Content-Disposition", `form-data; name="file"; filename="photo.jpg"`)
+	h.Set("Content-Type", "image/jpeg")
+	fw, err := w.CreatePart(h)
 	require.NoError(t, err)
 	// Minimal JPEG: SOI + EOI markers — enough to pass FormFile parsing
 	_, err = fw.Write([]byte{0xFF, 0xD8, 0xFF, 0xD9})
