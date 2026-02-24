@@ -1,14 +1,17 @@
 package moments
 
 import (
+	"events-stocks/configuration/constants"
 	"events-stocks/models"
 	eventsService "events-stocks/services/events"
 	momentsService "events-stocks/services/moments"
+	"events-stocks/repositories/bucketrepository"
 	"events-stocks/utils"
 	"github.com/gofrs/uuid"
 	"github.com/labstack/echo/v4"
 	"net/http"
 	"os"
+	"strings"
 )
 
 var momentSvc *momentsService.MomentService
@@ -31,6 +34,13 @@ func ListMoments(c echo.Context) error {
 		list, err := momentSvc.ListForDashboard(eventID)
 		if err != nil {
 			return utils.Error(c, http.StatusInternalServerError, "Error loading moments", err.Error())
+		}
+		cfg, ok := c.Get("config").(*models.Config)
+		if ok && cfg != nil {
+			for i := range list {
+				list[i].ContentURL = presignMomentURL(list[i].ContentURL, cfg.AwsBucketName)
+				list[i].ThumbnailURL = presignMomentURL(list[i].ThumbnailURL, cfg.AwsBucketName)
+			}
 		}
 		return utils.Success(c, http.StatusOK, "Moments loaded", list)
 	}
@@ -197,4 +207,23 @@ func BulkApproveRejectMoments(c echo.Context) error {
 		return utils.Error(c, http.StatusInternalServerError, "Error updating moments", err.Error())
 	}
 	return utils.Success(c, http.StatusOK, "Moments updated", nil)
+}
+
+// presignMomentURL converts a raw S3 key like "moments/id/raw/file.jpg"
+// into a 12-hour presigned GET URL. Returns the original key unchanged on error.
+func presignMomentURL(key, bucket string) string {
+	if key == "" || strings.HasPrefix(key, "http") {
+		return key // already a full URL (legacy rows) or empty
+	}
+	parts := strings.Split(key, "/")
+	if len(parts) < 2 {
+		return key
+	}
+	filename := parts[len(parts)-1]
+	folder := strings.Join(parts[:len(parts)-1], "/")
+	signed, err := bucketrepository.GetPresignedFileURL(filename, folder, bucket, constants.DefaultCloudProvider, 720)
+	if err != nil {
+		return key
+	}
+	return signed
 }
