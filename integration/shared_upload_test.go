@@ -12,6 +12,7 @@ package integration_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"mime/multipart"
@@ -289,4 +290,71 @@ func TestListPublicMoments_WallEnabled_ReturnsEmptyList(t *testing.T) {
 	assert.Equal(t, true, data["published"])
 	items, _ := data["items"].([]interface{})
 	assert.Empty(t, items)
+}
+
+// ── Preview Token ─────────────────────────────────────────────────────────────
+
+// previewEcho wires both ListPublicMoments and CreatePreviewToken.
+// No JWT middleware — tests call the preview-token endpoint directly.
+func previewEcho() *echo.Echo {
+	e := echo.New()
+	e.HideBanner = true
+	e.Validator = customValidator.New()
+	tokenRepo := invitationaccesstokenrepository.NewAccessTokenRepo()
+	momentsCtrl.InitPublicMomentsController(tokenRepo, nil)
+	svc := momentsSvc.NewMomentService(momentrepository.NewMomentRepo(), redisrepository.NewRedisRepo())
+	momentsSvc.SetDefaultMomentService(svc)
+	e.GET("/api/events/:identifier/moments", momentsCtrl.ListPublicMoments)
+	e.POST("/events/:id/preview-token", momentsCtrl.CreatePreviewToken)
+	return e
+}
+
+func TestPreviewToken_ValidToken_BypassesWall(t *testing.T) {
+	fx := setupMomentsEvent(t, sharedUploadOpts{showWall: false})
+	e := previewEcho()
+
+	token := uuid.Must(uuid.NewV4()).String()
+	redisKey := fmt.Sprintf("preview:moments:%s:%s", fx.eventID.String(), token)
+	require.NoError(t, redisrepository.SaveKey(context.Background(), redisKey, "1", time.Hour))
+
+	req := httptest.NewRequest(http.MethodGet,
+		fmt.Sprintf("/api/events/%s/moments?preview_token=%s", fx.identifier, token), nil)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	data := resp["data"].(map[string]interface{})
+	assert.NotEqual(t, false, data["published"], "preview should bypass wall")
+}
+
+func TestPreviewToken_InvalidToken_Returns403(t *testing.T) {
+	fx := setupMomentsEvent(t, sharedUploadOpts{showWall: false})
+	e := previewEcho()
+
+	req := httptest.NewRequest(http.MethodGet,
+		fmt.Sprintf("/api/events/%s/moments?preview_token=not-a-real-token", fx.identifier), nil)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+func TestPreviewToken_ValidToken_AllowsPagination(t *testing.T) {
+	fx := setupMomentsEvent(t, sharedUploadOpts{showWall: false})
+	e := previewEcho()
+
+	token := uuid.Must(uuid.NewV4()).String()
+	redisKey := fmt.Sprintf("preview:moments:%s:%s", fx.eventID.String(), token)
+	require.NoError(t, redisrepository.SaveKey(context.Background(), redisKey, "1", time.Hour))
+
+	url := fmt.Sprintf("/api/events/%s/moments?preview_token=%s", fx.identifier, token)
+
+	for i := 0; i < 3; i++ {
+		req := httptest.NewRequest(http.MethodGet, url, nil)
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusOK, rec.Code, "page %d should succeed with same token", i+1)
+	}
 }
