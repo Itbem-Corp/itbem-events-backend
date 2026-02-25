@@ -14,6 +14,7 @@ import (
 	"events-stocks/configuration/constants"
 	"events-stocks/models"
 	"events-stocks/repositories/bucketrepository"
+	"events-stocks/repositories/clientrepository"
 	"events-stocks/repositories/eventconfigrepository"
 	redisrepository "events-stocks/repositories/redisrepository"
 	sqsrepository "events-stocks/repositories/sqsrepository"
@@ -21,6 +22,7 @@ import (
 	resourcesService "events-stocks/services/resources"
 	momentsService "events-stocks/services/moments"
 	eventsService "events-stocks/services/events"
+	"events-stocks/services/users"
 	"events-stocks/utils"
 
 	"github.com/gofrs/uuid"
@@ -115,7 +117,10 @@ func ListPublicMoments(c echo.Context) error {
 		if previewToken != "" {
 			redisKey := fmt.Sprintf("preview:moments:%s:%s", event.ID.String(), previewToken)
 			ctx := c.Request().Context()
-			valid, _ := redisrepository.ExistKey(ctx, redisKey)
+			valid, redisErr := redisrepository.ExistKey(ctx, redisKey)
+			if redisErr != nil {
+				return utils.Error(c, http.StatusServiceUnavailable, "Cache unavailable", redisErr.Error())
+			}
 			if !valid {
 				return utils.Error(c, http.StatusForbidden, "Invalid or expired preview token", "")
 			}
@@ -169,6 +174,16 @@ func ListPublicMoments(c echo.Context) error {
 // Token is stored in Redis with a 1-hour TTL; validated (without deletion) by
 // ListPublicMoments so paginated preview requests work for the full hour.
 func CreatePreviewToken(c echo.Context) error {
+	// Verify caller identity
+	cognitoSub, ok := c.Get("cognito_sub").(string)
+	if !ok {
+		return utils.Error(c, http.StatusUnauthorized, "Unauthorized", "")
+	}
+	caller, err := users.SyncUser(cognitoSub)
+	if err != nil {
+		return utils.Error(c, http.StatusUnauthorized, "User not found", err.Error())
+	}
+
 	idParam := c.Param("id")
 	eventID, err := uuid.FromString(idParam)
 	if err != nil {
@@ -181,6 +196,14 @@ func CreatePreviewToken(c echo.Context) error {
 			return utils.Error(c, http.StatusNotFound, "Event not found", "")
 		}
 		return utils.Error(c, http.StatusInternalServerError, "Error loading event", err.Error())
+	}
+
+	// Non-root users must have access to the event's client
+	if !caller.IsRoot && event.ClientID != nil {
+		allowed, _ := clientrepository.CheckAccessRecursive(caller.ID, *event.ClientID)
+		if !allowed {
+			return utils.Error(c, http.StatusForbidden, "Access denied", "")
+		}
 	}
 
 	token, err := uuid.NewV4()

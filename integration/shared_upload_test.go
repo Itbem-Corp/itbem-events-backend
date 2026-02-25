@@ -326,7 +326,7 @@ func TestPreviewToken_ValidToken_BypassesWall(t *testing.T) {
 	var resp map[string]interface{}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	data := resp["data"].(map[string]interface{})
-	assert.NotEqual(t, false, data["published"], "preview should bypass wall")
+	assert.Equal(t, true, data["published"], "preview should bypass wall and return published=true")
 }
 
 func TestPreviewToken_InvalidToken_Returns403(t *testing.T) {
