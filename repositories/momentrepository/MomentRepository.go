@@ -103,21 +103,46 @@ func (r *MomentRepo) ListForDashboard(eventID uuid.UUID) ([]models.Moment, error
 
 // ListApprovedForWall returns approved + fully optimized moments for the public wall, paginated.
 // Only shows: is_approved=true AND processing_status IN ('', 'done').
+// Uses a single SQL query with COUNT(*) OVER() window function to avoid a separate COUNT query.
 func ListApprovedForWall(eventID uuid.UUID, page, limit int) ([]models.Moment, int64, error) {
-	var list []models.Moment
-	var total int64
+	type row struct {
+		models.Moment
+		TotalCount int64 `gorm:"column:total_count"`
+	}
 
 	offset := (page - 1) * limit
-	query := configuration.DB.Model(&models.Moment{}).
-		Where("event_id = ?", eventID).
-		Where("is_approved = ?", true).
-		Where("processing_status IN ?", []string{"", "done"})
+	var rows []row
 
-	if err := query.Count(&total).Error; err != nil {
+	err := configuration.DB.Raw(`
+		SELECT m.*, COUNT(*) OVER() AS total_count
+		FROM moments m
+		WHERE m.event_id = ?
+		  AND m.is_approved = true
+		  AND m.processing_status IN ('', 'done')
+		  AND m.deleted_at IS NULL
+		ORDER BY m.created_at DESC
+		LIMIT ? OFFSET ?
+	`, eventID, limit, offset).Scan(&rows).Error
+	if err != nil {
 		return nil, 0, err
 	}
-	err := query.Order("created_at DESC").Offset(offset).Limit(limit).Find(&list).Error
-	return list, total, err
+
+	if len(rows) == 0 {
+		// Page is empty — need total for pagination (e.g. page 2 beyond last item).
+		// Fall back to a simple count only on empty pages.
+		var total int64
+		configuration.DB.Model(&models.Moment{}).
+			Where("event_id = ? AND is_approved = ? AND processing_status IN ? AND deleted_at IS NULL",
+				eventID, true, []string{"", "done"}).
+			Count(&total)
+		return nil, total, nil
+	}
+
+	moments := make([]models.Moment, len(rows))
+	for i, r := range rows {
+		moments[i] = r.Moment
+	}
+	return moments, rows[0].TotalCount, nil
 }
 
 func (r *MomentRepo) ListApprovedForWall(eventID uuid.UUID, page, limit int) ([]models.Moment, int64, error) {
