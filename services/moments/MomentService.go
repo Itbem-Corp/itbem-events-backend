@@ -31,8 +31,8 @@ func DeleteMoment(id uuid.UUID) error                    { return _momentSvc.Del
 func ListMomentsByEventID(eventID uuid.UUID, approvedOnly bool) ([]models.Moment, error) {
 	return _momentSvc.ListByEventID(eventID, approvedOnly)
 }
-func UpdateMomentContent(id uuid.UUID, contentURL, status, thumbnailURL string, durationMs, originalBytes, optimizedBytes int64) error {
-	return _momentSvc.UpdateMomentContent(id, contentURL, status, thumbnailURL, durationMs, originalBytes, optimizedBytes)
+func UpdateMomentContent(id uuid.UUID, contentURL, status, thumbnailURL string, durationMs, originalBytes, optimizedBytes int64, eventID *uuid.UUID) error {
+	return _momentSvc.UpdateMomentContent(id, contentURL, status, thumbnailURL, durationMs, originalBytes, optimizedBytes, eventID)
 }
 func ListForDashboard(eventID uuid.UUID) ([]models.Moment, error) {
 	return _momentSvc.ListForDashboard(eventID)
@@ -161,16 +161,20 @@ func (s *MomentService) ListApprovedForWall(eventID uuid.UUID, page, limit int) 
 // UpdateMomentContent is called by the Lambda after media processing completes.
 // thumbnailURL is the S3 key of the extracted thumbnail; pass "" to skip (images, failures).
 // durationMs/originalBytes/optimizedBytes are Lambda processing metrics; pass 0 to skip.
-// When processing_status becomes "done", we must bust the wall cache so the
-// newly optimized file is served fresh.
-func (s *MomentService) UpdateMomentContent(id uuid.UUID, contentURL, processingStatus, thumbnailURL string, durationMs, originalBytes, optimizedBytes int64) error {
+// eventID, when non-nil, is used directly to bust the wall cache without an extra DB query.
+// When nil, falls back to a GetMomentByID lookup (backward compatibility).
+func (s *MomentService) UpdateMomentContent(id uuid.UUID, contentURL, processingStatus, thumbnailURL string, durationMs, originalBytes, optimizedBytes int64, eventID *uuid.UUID) error {
 	if err := s.repo.UpdateMomentContent(id, contentURL, processingStatus, thumbnailURL, durationMs, originalBytes, optimizedBytes); err != nil {
 		return err
 	}
-	// Invalidate wall cache for the event (need to look up moment to get eventID)
-	m, _ := s.repo.GetMomentByID(id)
-	if m != nil && m.EventID != nil {
-		s.invalidateWallCache(*m.EventID)
+	if eventID != nil {
+		s.invalidateWallCache(*eventID)
+	} else {
+		// Fallback: fetch moment to get event_id for cache invalidation
+		m, _ := s.repo.GetMomentByID(id)
+		if m != nil && m.EventID != nil {
+			s.invalidateWallCache(*m.EventID)
+		}
 	}
 	return s.cache.Invalidate("moments", "all")
 }

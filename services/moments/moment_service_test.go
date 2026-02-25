@@ -360,3 +360,52 @@ func TestMomentService_ListMoments_CacheMiss_RepoError(t *testing.T) {
 	assert.Contains(t, err.Error(), "connection timeout")
 	assert.Nil(t, result)
 }
+
+func TestMomentService_UpdateMomentContent_UsesProvidedEventID_NoExtraGet(t *testing.T) {
+	id := uuid.Must(uuid.NewV4())
+	eventID := uuid.Must(uuid.NewV4())
+
+	getCallCount := 0
+	wallInvalidateCalled := false
+
+	repo := &mockMomentRepo{
+		GetMomentByIDFunc: func(uuid.UUID) (*models.Moment, error) {
+			getCallCount++
+			return &models.Moment{}, nil
+		},
+	}
+	cache := &mockCacheRepo{
+		DeleteKeysByPatternFunc: func(ctx context.Context, pattern string) error {
+			wallInvalidateCalled = true
+			return nil
+		},
+	}
+
+	svc := NewMomentService(repo, cache)
+	err := svc.UpdateMomentContent(id, "moments/e/opt/file.webp", "done", "", 0, 0, 0, &eventID)
+
+	require.NoError(t, err)
+	assert.Equal(t, 0, getCallCount, "GetMomentByID must NOT be called when eventID is provided")
+	assert.True(t, wallInvalidateCalled, "wall cache must be invalidated using provided eventID")
+}
+
+func TestMomentService_UpdateMomentContent_NilEventID_FallsBackToGet(t *testing.T) {
+	id := uuid.Must(uuid.NewV4())
+	eventID := uuid.Must(uuid.NewV4())
+
+	getCallCount := 0
+
+	repo := &mockMomentRepo{
+		GetMomentByIDFunc: func(uuid.UUID) (*models.Moment, error) {
+			getCallCount++
+			return &models.Moment{ID: id, EventID: &eventID}, nil
+		},
+	}
+	cache := &mockCacheRepo{}
+
+	svc := NewMomentService(repo, cache)
+	err := svc.UpdateMomentContent(id, "moments/e/opt/file.webp", "done", "", 0, 0, 0, nil)
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, getCallCount, "GetMomentByID must be called exactly once when eventID is nil")
+}
