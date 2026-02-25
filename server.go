@@ -126,7 +126,7 @@ func main() {
 
 	// ── Timeout global ────────────────────────────────────────────────────────
 	// 5 min para acomodar uploads de video de hasta 200 MB en conexiones lentas.
-	e.Use(middleware.TimeoutWithConfig(middleware.TimeoutConfig{
+	e.Use(middleware.ContextTimeoutWithConfig(middleware.ContextTimeoutConfig{
 		Timeout: 5 * time.Minute,
 	}))
 
