@@ -64,8 +64,10 @@ func UpdateMomentContent(id uuid.UUID, contentURL, processingStatus, thumbnailUR
 	updates := map[string]interface{}{
 		"content_url":       contentURL,
 		"processing_status": processingStatus,
-		// Always write error_message (empty string clears previous error on retry)
-		"error_message":     errorMessage,
+		// error_message is always written — including "" to clear previous errors on retry.
+		// This uses map[string]interface{} intentionally; GORM struct updates would suppress
+		// the empty string as a zero value and silently skip the clear.
+		"error_message": errorMessage,
 	}
 	if thumbnailURL != "" {
 		updates["thumbnail_url"] = thumbnailURL

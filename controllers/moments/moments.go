@@ -133,7 +133,7 @@ func UpdateMomentContent(c echo.Context) error {
 		ContentURL           string `json:"content_url"`
 		ProcessingStatus     string `json:"processing_status"`
 		ThumbnailURL         string `json:"thumbnail_url"`
-		ErrorMessage         string     `json:"error_message"`
+		ErrorMessage         string `json:"error_message"`
 		EventID              *uuid.UUID `json:"event_id"`
 		ProcessingDurationMs int64  `json:"processing_duration_ms"`
 		OriginalSizeBytes    int64  `json:"original_size_bytes"`
