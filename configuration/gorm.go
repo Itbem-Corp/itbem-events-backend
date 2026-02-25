@@ -39,6 +39,7 @@ var modelsWithoutSeed = []interface{}{
 	&models.InvitationLog{},
 	&models.InvitationAccessToken{},
 	&models.EventAnalytics{},
+	&models.EventPhrase{},
 	&models.User{},
 	&models.EventMember{},
 	&models.ClientMember{},
