@@ -56,11 +56,12 @@ var _ ports.CacheRepository = (*mockCacheRepo)(nil)
 // ---------------------------------------------------------------------------
 
 type mockMomentRepo struct {
-	CreateMomentFunc func(m *models.Moment) error
-	UpdateMomentFunc func(m *models.Moment) error
-	DeleteMomentFunc func(id uuid.UUID) error
-	GetMomentByIDFunc func(id uuid.UUID) (*models.Moment, error)
-	ListMomentsFunc  func() ([]models.Moment, error)
+	CreateMomentFunc        func(m *models.Moment) error
+	UpdateMomentFunc        func(m *models.Moment) error
+	DeleteMomentFunc        func(id uuid.UUID) error
+	GetMomentByIDFunc       func(id uuid.UUID) (*models.Moment, error)
+	ListMomentsFunc         func() ([]models.Moment, error)
+	UpdateMomentContentFunc func(id uuid.UUID, contentURL, processingStatus, thumbnailURL, errorMessage string, durationMs, originalBytes, optimizedBytes int64) error
 }
 
 func (m *mockMomentRepo) CreateMoment(obj *models.Moment) error {
@@ -97,7 +98,10 @@ func (m *mockMomentRepo) ListMoments() ([]models.Moment, error) {
 func (m *mockMomentRepo) ListByEventID(eventID uuid.UUID, approvedOnly bool) ([]models.Moment, error) {
 	return nil, nil
 }
-func (m *mockMomentRepo) UpdateMomentContent(id uuid.UUID, contentURL, processingStatus, thumbnailURL string, durationMs, originalBytes, optimizedBytes int64) error {
+func (m *mockMomentRepo) UpdateMomentContent(id uuid.UUID, contentURL, processingStatus, thumbnailURL, errorMessage string, durationMs, originalBytes, optimizedBytes int64) error {
+	if m.UpdateMomentContentFunc != nil {
+		return m.UpdateMomentContentFunc(id, contentURL, processingStatus, thumbnailURL, errorMessage, durationMs, originalBytes, optimizedBytes)
+	}
 	return nil
 }
 func (m *mockMomentRepo) ListForDashboard(eventID uuid.UUID) ([]models.Moment, error) {
@@ -382,7 +386,7 @@ func TestMomentService_UpdateMomentContent_UsesProvidedEventID_NoExtraGet(t *tes
 	}
 
 	svc := NewMomentService(repo, cache)
-	err := svc.UpdateMomentContent(id, "moments/e/opt/file.webp", "done", "", 0, 0, 0, &eventID)
+	err := svc.UpdateMomentContent(id, "moments/e/opt/file.webp", "done", "", "", 0, 0, 0, &eventID)
 
 	require.NoError(t, err)
 	assert.Equal(t, 0, getCallCount, "GetMomentByID must NOT be called when eventID is provided")
@@ -410,9 +414,27 @@ func TestMomentService_UpdateMomentContent_NilEventID_FallsBackToGet(t *testing.
 	}
 
 	svc := NewMomentService(repo, cache)
-	err := svc.UpdateMomentContent(id, "moments/e/opt/file.webp", "done", "", 0, 0, 0, nil)
+	err := svc.UpdateMomentContent(id, "moments/e/opt/file.webp", "done", "", "", 0, 0, 0, nil)
 
 	require.NoError(t, err)
 	assert.Equal(t, 1, getCallCount, "GetMomentByID must be called exactly once when eventID is nil")
 	assert.True(t, wallInvalidateCalled, "wall cache must be invalidated using the event ID from GetMomentByID")
+}
+
+func TestMomentService_UpdateMomentContent_ErrorMessage_ForwardedToRepo(t *testing.T) {
+	id := uuid.Must(uuid.NewV4())
+	var capturedErrMsg string
+
+	repo := &mockMomentRepo{
+		UpdateMomentContentFunc: func(id uuid.UUID, contentURL, processingStatus, thumbnailURL, errorMessage string, durationMs, originalBytes, optimizedBytes int64) error {
+			capturedErrMsg = errorMessage
+			return nil
+		},
+	}
+
+	svc := NewMomentService(repo, &mockCacheRepo{})
+	err := svc.UpdateMomentContent(id, "", "failed", "", "sharp: unsupported format", 0, 0, 0, nil)
+
+	require.NoError(t, err)
+	assert.Equal(t, "sharp: unsupported format", capturedErrMsg, "error_message must be forwarded to the repo")
 }

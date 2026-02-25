@@ -31,8 +31,8 @@ func DeleteMoment(id uuid.UUID) error                    { return _momentSvc.Del
 func ListMomentsByEventID(eventID uuid.UUID, approvedOnly bool) ([]models.Moment, error) {
 	return _momentSvc.ListByEventID(eventID, approvedOnly)
 }
-func UpdateMomentContent(id uuid.UUID, contentURL, status, thumbnailURL string, durationMs, originalBytes, optimizedBytes int64, eventID *uuid.UUID) error {
-	return _momentSvc.UpdateMomentContent(id, contentURL, status, thumbnailURL, durationMs, originalBytes, optimizedBytes, eventID)
+func UpdateMomentContent(id uuid.UUID, contentURL, status, thumbnailURL, errorMessage string, durationMs, originalBytes, optimizedBytes int64, eventID *uuid.UUID) error {
+	return _momentSvc.UpdateMomentContent(id, contentURL, status, thumbnailURL, errorMessage, durationMs, originalBytes, optimizedBytes, eventID)
 }
 func ListForDashboard(eventID uuid.UUID) ([]models.Moment, error) {
 	return _momentSvc.ListForDashboard(eventID)
@@ -163,8 +163,8 @@ func (s *MomentService) ListApprovedForWall(eventID uuid.UUID, page, limit int) 
 // durationMs/originalBytes/optimizedBytes are Lambda processing metrics; pass 0 to skip.
 // eventID, when non-nil, is used directly to bust the wall cache without an extra DB query.
 // When nil, falls back to a GetMomentByID lookup (backward compatibility).
-func (s *MomentService) UpdateMomentContent(id uuid.UUID, contentURL, processingStatus, thumbnailURL string, durationMs, originalBytes, optimizedBytes int64, eventID *uuid.UUID) error {
-	if err := s.repo.UpdateMomentContent(id, contentURL, processingStatus, thumbnailURL, durationMs, originalBytes, optimizedBytes); err != nil {
+func (s *MomentService) UpdateMomentContent(id uuid.UUID, contentURL, processingStatus, thumbnailURL, errorMessage string, durationMs, originalBytes, optimizedBytes int64, eventID *uuid.UUID) error {
+	if err := s.repo.UpdateMomentContent(id, contentURL, processingStatus, thumbnailURL, errorMessage, durationMs, originalBytes, optimizedBytes); err != nil {
 		return err
 	}
 	if eventID != nil {
@@ -194,7 +194,7 @@ func (s *MomentService) RequeueMoment(moment *models.Moment) error {
 	}
 
 	// Reset to pending — preserve existing thumbnail_url (pass "" = no-op in repo)
-	if err := s.repo.UpdateMomentContent(moment.ID, moment.ContentURL, "pending", "", 0, 0, 0); err != nil {
+	if err := s.repo.UpdateMomentContent(moment.ID, moment.ContentURL, "pending", "", "", 0, 0, 0); err != nil {
 		return err
 	}
 

@@ -93,7 +93,7 @@ type MomentRepository interface {
 	GetMomentByID(id uuid.UUID) (*models.Moment, error)
 	ListMoments() ([]models.Moment, error)
 	ListByEventID(eventID uuid.UUID, approvedOnly bool) ([]models.Moment, error)
-	UpdateMomentContent(id uuid.UUID, contentURL, processingStatus, thumbnailURL string, durationMs, originalBytes, optimizedBytes int64) error
+	UpdateMomentContent(id uuid.UUID, contentURL, processingStatus, thumbnailURL, errorMessage string, durationMs, originalBytes, optimizedBytes int64) error
 	// ListForDashboard returns moments ready for admin review (excludes pending/processing).
 	ListForDashboard(eventID uuid.UUID) ([]models.Moment, error)
 	// ListApprovedForWall returns approved+optimized moments paginated for the public wall.

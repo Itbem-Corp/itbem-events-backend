@@ -60,10 +60,12 @@ func (r *MomentRepo) ListByEventID(eventID uuid.UUID, approvedOnly bool) ([]mode
 // UpdateMomentContent updates ContentURL, ProcessingStatus, and optional Lambda metrics.
 // Pass thumbnailURL="" to skip writing it (e.g. for images or "processing" transitions).
 // Pass durationMs=0 to skip writing metrics (e.g. for "processing" status transitions).
-func UpdateMomentContent(id uuid.UUID, contentURL, processingStatus, thumbnailURL string, durationMs, originalBytes, optimizedBytes int64) error {
+func UpdateMomentContent(id uuid.UUID, contentURL, processingStatus, thumbnailURL, errorMessage string, durationMs, originalBytes, optimizedBytes int64) error {
 	updates := map[string]interface{}{
 		"content_url":       contentURL,
 		"processing_status": processingStatus,
+		// Always write error_message (empty string clears previous error on retry)
+		"error_message":     errorMessage,
 	}
 	if thumbnailURL != "" {
 		updates["thumbnail_url"] = thumbnailURL
@@ -76,8 +78,8 @@ func UpdateMomentContent(id uuid.UUID, contentURL, processingStatus, thumbnailUR
 	return configuration.DB.Model(&models.Moment{}).Where("id = ?", id).Updates(updates).Error
 }
 
-func (r *MomentRepo) UpdateMomentContent(id uuid.UUID, contentURL, processingStatus, thumbnailURL string, durationMs, originalBytes, optimizedBytes int64) error {
-	return UpdateMomentContent(id, contentURL, processingStatus, thumbnailURL, durationMs, originalBytes, optimizedBytes)
+func (r *MomentRepo) UpdateMomentContent(id uuid.UUID, contentURL, processingStatus, thumbnailURL, errorMessage string, durationMs, originalBytes, optimizedBytes int64) error {
+	return UpdateMomentContent(id, contentURL, processingStatus, thumbnailURL, errorMessage, durationMs, originalBytes, optimizedBytes)
 }
 
 // ListForDashboard returns moments ready for admin review.
