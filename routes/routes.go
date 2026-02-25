@@ -187,6 +187,7 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	protected.DELETE("/events/:id", events.DeleteEvent)
 	protected.POST("/events/:id/cover", events.UploadEventCover)
 	protected.POST("/events/:id/repair", events.RepairEvent)
+	protected.POST("/events/:id/preview-token", moments.CreatePreviewToken)
 
 	// ── Event Config (1:1 con Event, mismo ID) ─
 	protected.GET("/events/:id/config", eventconfig.GetEventConfig)

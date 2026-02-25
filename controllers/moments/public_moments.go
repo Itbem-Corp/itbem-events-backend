@@ -8,12 +8,14 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"events-stocks/configuration"
 	"events-stocks/configuration/constants"
 	"events-stocks/models"
 	"events-stocks/repositories/bucketrepository"
 	"events-stocks/repositories/eventconfigrepository"
+	redisrepository "events-stocks/repositories/redisrepository"
 	sqsrepository "events-stocks/repositories/sqsrepository"
 	"events-stocks/services/ports"
 	resourcesService "events-stocks/services/resources"
@@ -106,15 +108,26 @@ func ListPublicMoments(c echo.Context) error {
 		return utils.Error(c, http.StatusInternalServerError, "Error loading event", err.Error())
 	}
 
-	// Respect ShowMomentWall flag
+	// Respect ShowMomentWall flag — unless a valid admin preview token is present.
 	cfg, _ := eventconfigrepository.GetEventConfigByID(event.ID)
 	if cfg != nil && !cfg.ShowMomentWall {
-		return utils.Success(c, http.StatusOK, "Moments not yet available", map[string]interface{}{
-			"items":     []interface{}{},
-			"published": false,
-			"total":     0,
-			"has_more":  false,
-		})
+		previewToken := c.QueryParam("preview_token")
+		if previewToken != "" {
+			redisKey := fmt.Sprintf("preview:moments:%s:%s", event.ID.String(), previewToken)
+			ctx := c.Request().Context()
+			valid, _ := redisrepository.ExistKey(ctx, redisKey)
+			if !valid {
+				return utils.Error(c, http.StatusForbidden, "Invalid or expired preview token", "")
+			}
+			// Token remains valid in Redis until TTL expires (1 hour) so pagination works.
+		} else {
+			return utils.Success(c, http.StatusOK, "Moments not yet available", map[string]interface{}{
+				"items":     []interface{}{},
+				"published": false,
+				"total":     0,
+				"has_more":  false,
+			})
+		}
 	}
 
 	// Parse pagination params
@@ -148,6 +161,42 @@ func ListPublicMoments(c echo.Context) error {
 		"limit":    limit,
 		"has_more": int64(page*limit) < total,
 		"published": true,
+	})
+}
+
+// POST /events/:id/preview-token  — protected (Cognito JWT required)
+// Generates a single-use admin preview token for the moments wall.
+// Token is stored in Redis with a 1-hour TTL; validated (without deletion) by
+// ListPublicMoments so paginated preview requests work for the full hour.
+func CreatePreviewToken(c echo.Context) error {
+	idParam := c.Param("id")
+	eventID, err := uuid.FromString(idParam)
+	if err != nil {
+		return utils.Error(c, http.StatusBadRequest, "Invalid event ID", err.Error())
+	}
+
+	var event models.Event
+	if err := configuration.DB.First(&event, "id = ?", eventID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return utils.Error(c, http.StatusNotFound, "Event not found", "")
+		}
+		return utils.Error(c, http.StatusInternalServerError, "Error loading event", err.Error())
+	}
+
+	token, err := uuid.NewV4()
+	if err != nil {
+		return utils.Error(c, http.StatusInternalServerError, "Error generating token", err.Error())
+	}
+
+	redisKey := fmt.Sprintf("preview:moments:%s:%s", eventID.String(), token.String())
+	ctx := c.Request().Context()
+	if err := redisrepository.SaveKey(ctx, redisKey, "1", time.Hour); err != nil {
+		return utils.Error(c, http.StatusServiceUnavailable, "Cache unavailable", err.Error())
+	}
+
+	return utils.Success(c, http.StatusCreated, "Preview token created", map[string]interface{}{
+		"token":      token.String(),
+		"expires_in": 3600,
 	})
 }
 
