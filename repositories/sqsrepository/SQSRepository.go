@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -101,7 +102,9 @@ func PublishMediaJob(msg MediaProcessMessage) (bool, error) {
 		slog.Error("sqsrepository: failed to marshal SQS message", "error", err)
 		return false, fmt.Errorf("SQS marshal failed: %w", err)
 	}
-	_, err = sqsClient.SendMessage(context.Background(), &sqs.SendMessageInput{
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err = sqsClient.SendMessage(ctx, &sqs.SendMessageInput{
 		QueueUrl:    aws.String(targetQueue),
 		MessageBody: aws.String(string(body)),
 	})
