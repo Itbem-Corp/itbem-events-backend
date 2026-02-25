@@ -394,6 +394,7 @@ func TestMomentService_UpdateMomentContent_NilEventID_FallsBackToGet(t *testing.
 	eventID := uuid.Must(uuid.NewV4())
 
 	getCallCount := 0
+	wallInvalidateCalled := false
 
 	repo := &mockMomentRepo{
 		GetMomentByIDFunc: func(uuid.UUID) (*models.Moment, error) {
@@ -401,11 +402,17 @@ func TestMomentService_UpdateMomentContent_NilEventID_FallsBackToGet(t *testing.
 			return &models.Moment{ID: id, EventID: &eventID}, nil
 		},
 	}
-	cache := &mockCacheRepo{}
+	cache := &mockCacheRepo{
+		DeleteKeysByPatternFunc: func(ctx context.Context, pattern string) error {
+			wallInvalidateCalled = true
+			return nil
+		},
+	}
 
 	svc := NewMomentService(repo, cache)
 	err := svc.UpdateMomentContent(id, "moments/e/opt/file.webp", "done", "", 0, 0, 0, nil)
 
 	require.NoError(t, err)
 	assert.Equal(t, 1, getCallCount, "GetMomentByID must be called exactly once when eventID is nil")
+	assert.True(t, wallInvalidateCalled, "wall cache must be invalidated using the event ID from GetMomentByID")
 }
