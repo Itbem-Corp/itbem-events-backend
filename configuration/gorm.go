@@ -39,7 +39,6 @@ var modelsWithoutSeed = []interface{}{
 	&models.InvitationLog{},
 	&models.InvitationAccessToken{},
 	&models.EventAnalytics{},
-	&models.EventPhrase{},
 	&models.User{},
 	&models.EventMember{},
 	&models.ClientMember{},
@@ -53,6 +52,7 @@ var modelSeedList = []ModelSeed{
 	{Model: &models.ClientType{}, SeedFunc: seeds.SeedClientTypes},
 	{Model: &models.ClientRole{}, SeedFunc: seeds.SeedClientRoles},
 	{Model: &models.Client{}, SeedFunc: seeds.SeedClientEventiAppSeed},
+	{Model: &models.EventPhrase{}, SeedFunc: seeds.SeedEventPhrases},
 }
 
 // InicializarPostgreSQL inicializa la conexión con PostgreSQL usando GORM
