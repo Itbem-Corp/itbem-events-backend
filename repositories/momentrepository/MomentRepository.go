@@ -110,9 +110,14 @@ func ListApprovedForWall(eventID uuid.UUID, page, limit int) ([]models.Moment, i
 		TotalCount int64 `gorm:"column:total_count"`
 	}
 
+	if page < 1 {
+		page = 1
+	}
 	offset := (page - 1) * limit
 	var rows []row
 
+	// Raw query: GORM soft-delete scope does NOT apply to Raw().
+	// deleted_at IS NULL must be explicit here (unlike the ORM fallback below).
 	err := configuration.DB.Raw(`
 		SELECT m.*, COUNT(*) OVER() AS total_count
 		FROM moments m
@@ -129,12 +134,15 @@ func ListApprovedForWall(eventID uuid.UUID, page, limit int) ([]models.Moment, i
 
 	if len(rows) == 0 {
 		// Page is empty — need total for pagination (e.g. page 2 beyond last item).
-		// Fall back to a simple count only on empty pages.
+		// Fall back to a simple count only on empty pages. GORM soft-delete scope
+		// applies automatically here (deleted_at IS NULL injected by ORM).
 		var total int64
-		configuration.DB.Model(&models.Moment{}).
+		if err := configuration.DB.Model(&models.Moment{}).
 			Where("event_id = ? AND is_approved = ? AND processing_status IN ? AND deleted_at IS NULL",
 				eventID, true, []string{"", "done"}).
-			Count(&total)
+			Count(&total).Error; err != nil {
+			return nil, 0, err
+		}
 		return nil, total, nil
 	}
 
