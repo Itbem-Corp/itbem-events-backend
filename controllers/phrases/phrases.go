@@ -1,9 +1,9 @@
 package phrases
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math/rand"
 	"net/http"
 	"strconv"
@@ -28,7 +28,7 @@ const (
 // Returns N random phrases for the given event type.
 // Cached in Redis for 1 hour per (type, count) pair.
 func GetPhrases(c echo.Context) error {
-	ctx := context.Background()
+	ctx := c.Request().Context()
 
 	eventType := strings.ToUpper(strings.TrimSpace(c.QueryParam("type")))
 	if eventType == "" {
@@ -70,9 +70,11 @@ func GetPhrases(c echo.Context) error {
 		err = gormrepo.GetList(&fallback, gormrepo.QueryOptions{
 			Filters: map[string]interface{}{"event_type": "DEFAULT"},
 		})
-		if err == nil {
-			rows = fallback
+		if err != nil {
+			slog.Error("phrases: fallback DEFAULT query failed", "error", err)
+			return utils.Error(c, http.StatusInternalServerError, "Failed to fetch phrases", err.Error())
 		}
+		rows = fallback
 	}
 
 	// If still nothing, return empty
