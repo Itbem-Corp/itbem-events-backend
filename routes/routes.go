@@ -15,6 +15,7 @@ import (
 	"events-stocks/controllers/health"
 	"events-stocks/controllers/invitations"
 	"events-stocks/controllers/moments"
+	phrasesCtrl "events-stocks/controllers/phrases"
 	"events-stocks/controllers/resources"
 	"events-stocks/controllers/users"
 	redisMiddleware "events-stocks/middleware/redis"
@@ -128,6 +129,7 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	// Events (Lectura pública)
 	public.GET("/events/page-spec", events.GetPageSpec)                        // SDUI: PageSpec por token
 	public.GET("/events/section/:sectionId/attendees", guests.GetAttendees)    // SDUI: Graduados por sección
+	public.GET("/events/phrases", phrasesCtrl.GetPhrases)                      // Random phrases by event type
 	public.GET("/events/:identifier/page-spec", events.GetPageSpecByIdentifier) // SDUI: PageSpec por identifier (vista previa)
 	public.GET("/events/:key", events.GetEvents)
 	public.POST("/events/:identifier/view", events.TrackView)                  // Incrementa contador de vistas
