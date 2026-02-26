@@ -43,6 +43,12 @@ func TestRewriteToCDN(t *testing.T) {
 			input:    "",
 			expected: "",
 		},
+		{
+			name:     "path-style S3 URL rewritten without bucket prefix",
+			cdnBase:  "https://cdn.eventiapp.com.mx",
+			input:    "https://s3.amazonaws.com/itbem-events-bucket-prod/moments/123/raw/photo.jpg",
+			expected: "https://cdn.eventiapp.com.mx/moments/123/raw/photo.jpg",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -43,6 +43,8 @@ func UploadToS3(ctx context.Context, content []byte, key, contentType, bucket st
 }
 
 func GetS3URL(bucket, key string) string {
+	// CDN_BASE_URL is read on every call intentionally: allows CDN to be enabled
+	// via env update (ECS redeploy) without a binary rebuild. Per-call cost is sub-microsecond.
 	if base := os.Getenv("CDN_BASE_URL"); base != "" {
 		return strings.TrimRight(base, "/") + "/" + key
 	}
@@ -54,6 +56,8 @@ func GetS3URL(bucket, key string) string {
 // Handles both virtual-hosted (bucket.s3.amazonaws.com/key) and
 // regional (bucket.s3.region.amazonaws.com/key) S3 URL formats.
 func RewriteToCDN(rawURL string) string {
+	// CDN_BASE_URL is read on every call intentionally: allows CDN to be enabled
+	// via env update (ECS redeploy) without a binary rebuild. Per-call cost is sub-microsecond.
 	base := os.Getenv("CDN_BASE_URL")
 	if base == "" || rawURL == "" {
 		return rawURL
@@ -66,7 +70,17 @@ func RewriteToCDN(rawURL string) string {
 	if !strings.Contains(host, ".s3.") && !strings.HasSuffix(host, ".amazonaws.com") {
 		return rawURL // already a CDN URL or unknown format
 	}
-	return strings.TrimRight(base, "/") + "/" + strings.TrimPrefix(u.Path, "/")
+
+	path := strings.TrimPrefix(u.Path, "/")
+
+	// Path-style URL (s3.amazonaws.com/bucket/key): strip the bucket-name prefix.
+	if !strings.Contains(host, ".s3.") {
+		if parts := strings.SplitN(path, "/", 2); len(parts) == 2 {
+			path = parts[1]
+		}
+	}
+
+	return strings.TrimRight(base, "/") + "/" + path
 }
 
 func CheckS3ObjectExists(ctx context.Context, key, bucket string) (bool, error) {

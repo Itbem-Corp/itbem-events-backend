@@ -32,6 +32,10 @@ func ListMoments(c echo.Context) error {
 		if err != nil {
 			return utils.Error(c, http.StatusBadRequest, "Invalid event_id", err.Error())
 		}
+		// When event_id is provided (dashboard per-event view), moments are served via
+		// presigned S3 URLs to support private-bucket access in the admin dashboard.
+		// CDN rewrites are applied only for legacy rows (HTTP-prefixed keys).
+		// When event_id is absent, CDN rewriting is applied uniformly via rewriteMomentsURLs.
 		// Only return moments that are ready for review (optimized or legacy).
 		// Excludes moments still queued/processing by Lambda.
 		list, err := momentSvc.ListForDashboard(eventID)
