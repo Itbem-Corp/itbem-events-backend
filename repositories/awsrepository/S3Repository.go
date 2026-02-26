@@ -10,6 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 	"io"
 	"time"
@@ -162,6 +163,79 @@ func GeneratePresignedURL(ctx context.Context, key, bucket string, expiresInMinu
 	}
 
 	return resp.URL, nil
+}
+
+// CompletedPart holds the PartNumber and ETag returned by S3 for a single uploaded part.
+// Used when assembling the final object via CompleteMultipartUpload.
+type CompletedPart struct {
+	PartNumber int
+	ETag       string
+}
+
+// CreateMultipartUpload initiates a multipart upload and returns the upload ID.
+// The caller must eventually call CompleteMultipartUpload or AbortMultipartUpload.
+func CreateMultipartUpload(ctx context.Context, key, bucket, contentType string) (string, error) {
+	client := configuration.GetS3Client(nil)
+	resp, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket:      aws.String(bucket),
+		Key:         aws.String(key),
+		ContentType: aws.String(contentType),
+	})
+	if err != nil {
+		return "", err
+	}
+	return aws.ToString(resp.UploadId), nil
+}
+
+// GetPresignedPartURL returns a short-lived presigned URL for uploading one part.
+// partNumber is 1-based (S3 requirement). ttlMin is the URL lifetime in minutes.
+func GetPresignedPartURL(ctx context.Context, key, bucket, uploadID string, partNumber, ttlMin int) (string, error) {
+	client := configuration.GetS3Client(nil)
+	presignClient := s3.NewPresignClient(client)
+	pn := int32(partNumber)
+	resp, err := presignClient.PresignUploadPart(ctx, &s3.UploadPartInput{
+		Bucket:     aws.String(bucket),
+		Key:        aws.String(key),
+		UploadId:   aws.String(uploadID),
+		PartNumber: &pn,
+	}, func(opts *s3.PresignOptions) {
+		opts.Expires = time.Duration(ttlMin) * time.Minute
+	})
+	if err != nil {
+		return "", err
+	}
+	return resp.URL, nil
+}
+
+// CompleteMultipartUpload assembles the uploaded parts into the final S3 object.
+// parts must include every part number with its ETag (including surrounding quotes).
+func CompleteMultipartUpload(ctx context.Context, key, bucket, uploadID string, parts []CompletedPart) error {
+	client := configuration.GetS3Client(nil)
+	completed := make([]types.CompletedPart, len(parts))
+	for i, p := range parts {
+		pn := int32(p.PartNumber)
+		etag := p.ETag
+		completed[i] = types.CompletedPart{PartNumber: &pn, ETag: &etag}
+	}
+	_, err := client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:          aws.String(bucket),
+		Key:             aws.String(key),
+		UploadId:        aws.String(uploadID),
+		MultipartUpload: &types.CompletedMultipartUpload{Parts: completed},
+	})
+	return err
+}
+
+// AbortMultipartUpload cancels a multipart upload and removes all uploaded parts.
+// Call this on error or user cancellation to avoid orphaned storage charges.
+func AbortMultipartUpload(ctx context.Context, key, bucket, uploadID string) error {
+	client := configuration.GetS3Client(nil)
+	_, err := client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+		Bucket:   aws.String(bucket),
+		Key:      aws.String(key),
+		UploadId: aws.String(uploadID),
+	})
+	return err
 }
 
 // GeneratePresignedPutURL returns a short-lived presigned URL the browser can use
