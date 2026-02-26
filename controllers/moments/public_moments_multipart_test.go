@@ -34,14 +34,10 @@ func TestValidateMultipartKey(t *testing.T) {
 	}
 }
 
-// TestCompleteMultipartMoment_RejectsEmptyParts is a smoke test that exercises
-// the handler entry path when no DB is initialised. configuration.DB is nil in
-// unit-test environments, so GORM panics before the parts-validation branch is
-// reached. The test therefore asserts a panic — which proves the handler is
-// callable and that the empty-parts guard code compiles and links correctly.
-// The logical check "parts must not be empty → 400" is exercised in integration
-// tests where a real DB connection is available.
-func TestCompleteMultipartMoment_RejectsEmptyParts(t *testing.T) {
+// TestCompleteMultipartMoment_PanicsWithoutDB confirms the handler is reachable
+// and linked correctly. Without a real database, GORM panics on event lookup
+// before reaching any business logic; require.Panics documents this expected behavior.
+func TestCompleteMultipartMoment_PanicsWithoutDB(t *testing.T) {
 	e := echo.New()
 	body := `{"upload_id":"uid","s3_key":"moments/abc/raw/file.mp4","content_type":"video/mp4","parts":[]}`
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))

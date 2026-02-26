@@ -793,7 +793,6 @@ func CompleteMultipartMoment(c echo.Context) error {
 	var body struct {
 		UploadID    string `json:"upload_id"`
 		S3Key       string `json:"s3_key"`
-		ContentType string `json:"content_type"`
 		Description string `json:"description"`
 		Parts       []struct {
 			PartNumber int    `json:"part_number"`
@@ -803,8 +802,8 @@ func CompleteMultipartMoment(c echo.Context) error {
 	if err := c.Bind(&body); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
 	}
-	if body.UploadID == "" || body.S3Key == "" || body.ContentType == "" {
-		return utils.Error(c, http.StatusBadRequest, "upload_id, s3_key, and content_type are required", "")
+	if body.UploadID == "" || body.S3Key == "" {
+		return utils.Error(c, http.StatusBadRequest, "upload_id and s3_key are required", "")
 	}
 	if len(body.Parts) == 0 {
 		return utils.Error(c, http.StatusBadRequest, "parts must not be empty", "")
@@ -825,11 +824,21 @@ func CompleteMultipartMoment(c echo.Context) error {
 		return utils.Error(c, http.StatusUnprocessableEntity, "Error completing multipart upload", err.Error())
 	}
 
+	// Read the actual content type from S3 — don't trust the client-supplied value.
+	// The content type was set in S3 when CreateMultipartUpload was called at /start.
+	lastSlash := strings.LastIndex(body.S3Key, "/")
+	s3Filename := body.S3Key[lastSlash+1:]
+	s3Folder := body.S3Key[:lastSlash]
+	_, actualContentType, err := bucketrepository.GetFileMeta(s3Filename, s3Folder, publicResSvc.Bucket, constants.DefaultCloudProvider)
+	if err != nil {
+		return utils.Error(c, http.StatusUnprocessableEntity, "Error reading uploaded file metadata", err.Error())
+	}
+
 	eventID := event.ID
 	moment := models.Moment{
 		EventID:          &eventID,
 		ContentURL:       body.S3Key,
-		ContentType:      body.ContentType,
+		ContentType:      actualContentType,
 		Description:      body.Description,
 		IsApproved:       cfg.AutoApproveUploads,
 		ProcessingStatus: "pending",
@@ -839,7 +848,7 @@ func CompleteMultipartMoment(c echo.Context) error {
 		return utils.Error(c, http.StatusInternalServerError, "Error saving moment", err.Error())
 	}
 
-	if !publishMediaJob(&moment, body.S3Key, publicResSvc.Bucket, body.ContentType) {
+	if !publishMediaJob(&moment, body.S3Key, publicResSvc.Bucket, actualContentType) {
 		moment.ProcessingStatus = ""
 		_ = momentsService.UpdateMoment(&moment)
 	}
