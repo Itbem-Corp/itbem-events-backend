@@ -154,6 +154,7 @@ jobs:
               -e INTERNAL_API_SECRET='${{ secrets.INTERNAL_API_SECRET }}' \
               -e SQS_IMAGE_QUEUE_URL='${{ secrets.SQS_IMAGE_QUEUE_URL }}' \
               -e SQS_VIDEO_QUEUE_URL='${{ secrets.SQS_VIDEO_QUEUE_URL }}' \
+              -e CDN_BASE_URL='${{ secrets.CDN_BASE_URL }}' \
               $IMAGE
 
             # ── Remove dangling images (keep the last 2 SHAs for rollback) ────
