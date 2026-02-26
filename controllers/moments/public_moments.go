@@ -355,17 +355,15 @@ func RequestSharedUploadURL(c echo.Context) error {
 		return utils.Error(c, http.StatusBadRequest, fmt.Sprintf("unsupported file type: %s", body.ContentType), "")
 	}
 
-	// Build a UUID-named file under the shared staging prefix.
-	// Using a fixed staging prefix (not event-scoped) lets us put a simple S3
-	// lifecycle rule on "moments/uploads/tmp/" to auto-expire orphaned files
-	// (uploads where the browser never called /confirm) after 1 day.
+	// Build the final S3 key directly — no staging needed for single-PUT uploads.
+	// The browser uploads straight to the event-scoped raw folder.
 	ext := ""
 	if idx := strings.LastIndex(body.Filename, "."); idx != -1 {
 		ext = strings.ToLower(body.Filename[idx:])
 	}
 	u, _ := uuid.NewV4()
 	filename := u.String() + ext
-	folder := "moments/uploads/tmp"
+	folder := "moments/" + event.ID.String() + "/raw"
 	s3Key := fmt.Sprintf("%s/%s", folder, filename)
 
 	uploadURL, err := bucketrepository.GetPresignedUploadURL(filename, folder, body.ContentType, publicResSvc.Bucket, constants.DefaultCloudProvider, 15)
@@ -419,17 +417,19 @@ func ConfirmSharedMoment(c echo.Context) error {
 		return utils.Error(c, http.StatusBadRequest, "s3_key and content_type are required", "")
 	}
 
-	// Guard: key must come from our own staging prefix to prevent forged paths
-	const tmpPrefix = "moments/uploads/tmp/"
-	if !strings.HasPrefix(body.S3Key, tmpPrefix) {
+	// Guard: key must match our event-scoped raw path to prevent forged keys
+	if !validateMultipartKey(body.S3Key, event.ID.String()) {
 		return utils.Error(c, http.StatusBadRequest, "Invalid s3_key", "")
 	}
 
-	filename := body.S3Key[len(tmpPrefix):]
-	rawKey, contentType, err := promoteFromStaging(filename, event.ID.String(), publicResSvc.Bucket)
+	rawFolder := "moments/" + event.ID.String() + "/raw"
+	filename := body.S3Key[len(rawFolder)+1:]
+	_, contentType, err := bucketrepository.GetFileMeta(filename, rawFolder, publicResSvc.Bucket, constants.DefaultCloudProvider)
 	if err != nil {
-		return utils.Error(c, http.StatusUnprocessableEntity, err.Error(), "")
+		return utils.Error(c, http.StatusUnprocessableEntity, "file not found in storage — upload may have failed", "")
 	}
+
+	rawKey := body.S3Key
 
 	eventID := event.ID
 	moment := models.Moment{
@@ -453,40 +453,6 @@ func ConfirmSharedMoment(c echo.Context) error {
 	go eventsService.IncrementAnalytics(eventID, "moment_uploads")
 
 	return utils.Success(c, http.StatusCreated, "Moment submitted for review", moment)
-}
-
-// promoteFromStaging validates a staged file and moves it to the event-scoped
-// raw folder. Returns the final S3 key and the content-type read from S3.
-// Returns an error if the file is missing, oversized, or cannot be moved.
-func promoteFromStaging(filename, eventID, bucket string) (rawKey, contentType string, err error) {
-	// FIX #3 — verify file exists; FIX #2 — enforce size limits
-	// FIX #4 — read content-type from S3, not from client
-	fileSize, s3ContentType, err := bucketrepository.GetFileMeta(filename, "moments/uploads/tmp", bucket, constants.DefaultCloudProvider)
-	if err != nil {
-		return "", "", fmt.Errorf("file not found in storage — upload may have failed")
-	}
-
-	isVid := strings.HasPrefix(s3ContentType, "video/")
-	maxBytes := int64(25 * 1024 * 1024)
-	if isVid {
-		maxBytes = int64(200 * 1024 * 1024)
-	}
-	if fileSize > maxBytes {
-		limitMB := 25
-		if isVid {
-			limitMB = 200
-		}
-		_ = bucketrepository.DeleteFile(filename, "moments/uploads/tmp", bucket, constants.DefaultCloudProvider)
-		return "", "", fmt.Errorf("file exceeds %d MB limit", limitMB)
-	}
-
-	rawFolder := fmt.Sprintf("moments/%s/raw", eventID)
-	if err := bucketrepository.CopyFile(filename, "moments/uploads/tmp", filename, rawFolder, bucket, constants.DefaultCloudProvider); err != nil {
-		return "", "", fmt.Errorf("error moving file to storage: %w", err)
-	}
-	_ = bucketrepository.DeleteFile(filename, "moments/uploads/tmp", bucket, constants.DefaultCloudProvider)
-
-	return fmt.Sprintf("%s/%s", rawFolder, filename), s3ContentType, nil
 }
 
 // POST /api/events/:identifier/moments/upload-url  — personal invitation upload
@@ -549,7 +515,7 @@ func RequestPersonalUploadURL(c echo.Context) error {
 	}
 	u, _ := uuid.NewV4()
 	filename := u.String() + ext
-	folder := "moments/uploads/tmp"
+	folder := "moments/" + event.ID.String() + "/raw"
 	s3Key := fmt.Sprintf("%s/%s", folder, filename)
 
 	uploadURL, err := bucketrepository.GetPresignedUploadURL(filename, folder, body.ContentType, publicResSvc.Bucket, constants.DefaultCloudProvider, 15)
@@ -613,16 +579,19 @@ func ConfirmPersonalMoment(c echo.Context) error {
 		return utils.Error(c, http.StatusUnauthorized, "Token does not belong to this event", "")
 	}
 
-	const tmpPrefix = "moments/uploads/tmp/"
-	if !strings.HasPrefix(body.S3Key, tmpPrefix) {
+	// Guard: key must match our event-scoped raw path to prevent forged keys
+	if !validateMultipartKey(body.S3Key, event.ID.String()) {
 		return utils.Error(c, http.StatusBadRequest, "Invalid s3_key", "")
 	}
 
-	filename := body.S3Key[len(tmpPrefix):]
-	rawKey, contentType, err := promoteFromStaging(filename, event.ID.String(), publicResSvc.Bucket)
+	rawFolder := "moments/" + event.ID.String() + "/raw"
+	filename := body.S3Key[len(rawFolder)+1:]
+	_, contentType, err := bucketrepository.GetFileMeta(filename, rawFolder, publicResSvc.Bucket, constants.DefaultCloudProvider)
 	if err != nil {
-		return utils.Error(c, http.StatusUnprocessableEntity, err.Error(), "")
+		return utils.Error(c, http.StatusUnprocessableEntity, "file not found in storage — upload may have failed", "")
 	}
+
+	rawKey := body.S3Key
 
 	eventID := event.ID
 	invID := token.InvitationID
