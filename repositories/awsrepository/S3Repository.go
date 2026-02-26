@@ -13,6 +13,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 	"io"
+	"net/url"
+	"os"
+	"strings"
 	"time"
 )
 
@@ -40,7 +43,30 @@ func UploadToS3(ctx context.Context, content []byte, key, contentType, bucket st
 }
 
 func GetS3URL(bucket, key string) string {
+	if base := os.Getenv("CDN_BASE_URL"); base != "" {
+		return strings.TrimRight(base, "/") + "/" + key
+	}
 	return fmt.Sprintf("https://%s.s3.amazonaws.com/%s", bucket, key)
+}
+
+// RewriteToCDN rewrites a stored S3 URL to the CDN base URL.
+// Returns the original URL unchanged if CDN_BASE_URL is not set or URL is empty.
+// Handles both virtual-hosted (bucket.s3.amazonaws.com/key) and
+// regional (bucket.s3.region.amazonaws.com/key) S3 URL formats.
+func RewriteToCDN(rawURL string) string {
+	base := os.Getenv("CDN_BASE_URL")
+	if base == "" || rawURL == "" {
+		return rawURL
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	host := u.Hostname()
+	if !strings.Contains(host, ".s3.") && !strings.HasSuffix(host, ".amazonaws.com") {
+		return rawURL // already a CDN URL or unknown format
+	}
+	return strings.TrimRight(base, "/") + "/" + strings.TrimPrefix(u.Path, "/")
 }
 
 func CheckS3ObjectExists(ctx context.Context, key, bucket string) (bool, error) {

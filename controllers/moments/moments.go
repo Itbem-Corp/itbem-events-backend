@@ -51,6 +51,7 @@ func ListMoments(c echo.Context) error {
 	if err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Error loading moments", err.Error())
 	}
+	rewriteMomentsURLs(list)
 	return utils.Success(c, http.StatusOK, "Moments loaded", list)
 }
 
@@ -67,6 +68,7 @@ func GetMoment(c echo.Context) error {
 		return utils.Error(c, http.StatusNotFound, "Moment not found", err.Error())
 	}
 
+	rewriteMomentURLs(moment)
 	return utils.Success(c, http.StatusOK, "Moment loaded", moment)
 }
 
@@ -279,9 +281,10 @@ func BulkApproveRejectMoments(c echo.Context) error {
 
 // presignMomentURL converts a raw S3 key like "moments/id/raw/file.jpg"
 // into a 12-hour presigned GET URL. Returns the original key unchanged on error.
+// Legacy rows that already contain a full S3 URL are rewritten to CDN if CDN_BASE_URL is set.
 func presignMomentURL(key, bucket string) string {
 	if key == "" || strings.HasPrefix(key, "http") {
-		return key // already a full URL (legacy rows) or empty
+		return rewriteMomentURL(key) // rewrite legacy S3 URLs to CDN if configured
 	}
 	parts := strings.Split(key, "/")
 	if len(parts) < 2 {
