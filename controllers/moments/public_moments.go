@@ -304,6 +304,7 @@ func CreatePublicMoment(c echo.Context) error {
 
 	go eventsService.IncrementAnalytics(eventID, "moment_uploads")
 
+	rewriteMomentURLs(&moment)
 	return utils.Success(c, http.StatusCreated, "Moment submitted for review", moment)
 }
 
@@ -452,6 +453,7 @@ func ConfirmSharedMoment(c echo.Context) error {
 
 	go eventsService.IncrementAnalytics(eventID, "moment_uploads")
 
+	rewriteMomentURLs(&moment)
 	return utils.Success(c, http.StatusCreated, "Moment submitted for review", moment)
 }
 
@@ -620,6 +622,7 @@ func ConfirmPersonalMoment(c echo.Context) error {
 
 	go eventsService.IncrementAnalytics(eventID, "moment_uploads")
 
+	rewriteMomentURLs(&moment)
 	return utils.Success(c, http.StatusCreated, "Moment submitted for review", moment)
 }
 
@@ -835,6 +838,7 @@ func CompleteMultipartMoment(c echo.Context) error {
 
 	go eventsService.IncrementAnalytics(eventID, "moment_uploads")
 
+	rewriteMomentURLs(&moment)
 	return utils.Success(c, http.StatusCreated, "Moment submitted for review", moment)
 }
 
@@ -943,5 +947,6 @@ func CreateSharedMoment(c echo.Context) error {
 
 	go eventsService.IncrementAnalytics(eventID, "moment_uploads")
 
+	rewriteMomentURLs(&moment)
 	return utils.Success(c, http.StatusCreated, "Moment submitted for review", moment)
 }

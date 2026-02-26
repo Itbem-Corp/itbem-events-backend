@@ -90,6 +90,7 @@ func CreateMoment(c echo.Context) error {
 		go eventsService.IncrementAnalytics(*moment.EventID, "moment_uploads")
 	}
 
+	rewriteMomentURLs(&moment)
 	return utils.Success(c, http.StatusCreated, "Moment created", moment)
 }
 
@@ -114,6 +115,7 @@ func UpdateMoment(c echo.Context) error {
 		return utils.Error(c, http.StatusInternalServerError, "Error updating moment", err.Error())
 	}
 
+	rewriteMomentURLs(&moment)
 	return utils.Success(c, http.StatusOK, "Moment updated", moment)
 }
 
@@ -248,6 +250,7 @@ func RequeueMoment(c echo.Context) error {
 		return utils.Error(c, http.StatusInternalServerError, "Error requeueing moment", err.Error())
 	}
 
+	rewriteMomentURLs(moment)
 	return utils.Success(c, http.StatusOK, "Moment requeued", moment)
 }
 
