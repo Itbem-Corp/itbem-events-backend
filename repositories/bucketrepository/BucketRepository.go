@@ -14,6 +14,12 @@ import (
 
 const defaultUploadDir = "uploads"
 
+// CompletedPart holds the PartNumber and ETag for one uploaded multipart segment.
+type CompletedPart struct {
+	PartNumber int
+	ETag       string
+}
+
 func GetPresignedFileURL(filename string, folder string, bucket string, provider string, minutes int) (string, error) {
 	ctx := context.Background()
 	objectKey := fmt.Sprintf("%s/%s", folder, filename)
@@ -215,7 +221,8 @@ func CreateMultipartUpload(key, bucket, contentType, provider string) (string, e
 	}
 }
 
-// GetPresignedPartURL signs a URL for uploading one specific part. partNumber is 1-based.
+// GetPresignedPartURL signs a URL for uploading one specific part.
+// partNumber is 1-based (S3 requirement). ttlMin is the URL lifetime in minutes.
 func GetPresignedPartURL(key, bucket, uploadID string, partNumber, ttlMin int, provider string) (string, error) {
 	ctx := context.Background()
 	switch strings.ToLower(provider) {
@@ -227,11 +234,15 @@ func GetPresignedPartURL(key, bucket, uploadID string, partNumber, ttlMin int, p
 }
 
 // CompleteMultipartUpload assembles all uploaded parts into the final S3 object.
-func CompleteMultipartUpload(key, bucket, uploadID, provider string, parts []awsrepository.CompletedPart) error {
+func CompleteMultipartUpload(key, bucket, uploadID string, parts []CompletedPart, provider string) error {
 	ctx := context.Background()
 	switch strings.ToLower(provider) {
 	case "aws":
-		return awsrepository.CompleteMultipartUpload(ctx, key, bucket, uploadID, parts)
+		awsParts := make([]awsrepository.CompletedPart, len(parts))
+		for i, p := range parts {
+			awsParts[i] = awsrepository.CompletedPart{PartNumber: p.PartNumber, ETag: p.ETag}
+		}
+		return awsrepository.CompleteMultipartUpload(ctx, key, bucket, uploadID, awsParts)
 	default:
 		return fmt.Errorf("unsupported provider: %s", provider)
 	}
