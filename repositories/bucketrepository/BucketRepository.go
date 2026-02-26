@@ -202,3 +202,48 @@ func UploadRawBytesSimple(content []byte, filename, contentType, folder, bucket,
 		return fmt.Errorf("unsupported provider: %s", provider)
 	}
 }
+
+// CreateMultipartUpload initiates a multipart upload. key is the full S3 object key
+// (e.g. "moments/{eventID}/raw/{uuid}.mp4"). Returns the upload ID.
+func CreateMultipartUpload(key, bucket, contentType, provider string) (string, error) {
+	ctx := context.Background()
+	switch strings.ToLower(provider) {
+	case "aws":
+		return awsrepository.CreateMultipartUpload(ctx, key, bucket, contentType)
+	default:
+		return "", fmt.Errorf("unsupported provider: %s", provider)
+	}
+}
+
+// GetPresignedPartURL signs a URL for uploading one specific part. partNumber is 1-based.
+func GetPresignedPartURL(key, bucket, uploadID string, partNumber, ttlMin int, provider string) (string, error) {
+	ctx := context.Background()
+	switch strings.ToLower(provider) {
+	case "aws":
+		return awsrepository.GetPresignedPartURL(ctx, key, bucket, uploadID, partNumber, ttlMin)
+	default:
+		return "", fmt.Errorf("unsupported provider: %s", provider)
+	}
+}
+
+// CompleteMultipartUpload assembles all uploaded parts into the final S3 object.
+func CompleteMultipartUpload(key, bucket, uploadID, provider string, parts []awsrepository.CompletedPart) error {
+	ctx := context.Background()
+	switch strings.ToLower(provider) {
+	case "aws":
+		return awsrepository.CompleteMultipartUpload(ctx, key, bucket, uploadID, parts)
+	default:
+		return fmt.Errorf("unsupported provider: %s", provider)
+	}
+}
+
+// AbortMultipartUpload cancels a multipart upload, freeing all uploaded parts.
+func AbortMultipartUpload(key, bucket, uploadID, provider string) error {
+	ctx := context.Background()
+	switch strings.ToLower(provider) {
+	case "aws":
+		return awsrepository.AbortMultipartUpload(ctx, key, bucket, uploadID)
+	default:
+		return fmt.Errorf("unsupported provider: %s", provider)
+	}
+}
