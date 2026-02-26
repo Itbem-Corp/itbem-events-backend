@@ -5,6 +5,7 @@ import (
 	"events-stocks/models"
 	eventsService "events-stocks/services/events"
 	momentsService "events-stocks/services/moments"
+	"events-stocks/repositories/awsrepository"
 	"events-stocks/repositories/bucketrepository"
 	"events-stocks/utils"
 	"fmt"
@@ -286,12 +287,28 @@ func BulkApproveRejectMoments(c echo.Context) error {
 	return utils.Success(c, http.StatusOK, "Moments updated", nil)
 }
 
-// presignMomentURL converts a raw S3 key like "moments/id/raw/file.jpg"
-// into a 12-hour presigned GET URL. Returns the original key unchanged on error.
-// Legacy rows that already contain a full S3 URL are rewritten to CDN if CDN_BASE_URL is set.
+// presignMomentURL resolves a moment URL for the admin dashboard.
+//
+// When CDN_BASE_URL is configured (production): returns a CDN URL — no expiry,
+// no presign complexity, works for both raw keys and legacy full S3 URLs.
+//
+// When CDN is not configured (local dev / staging without CDN): falls back to
+// a 12-hour presigned GET URL so the private S3 bucket is still accessible.
+// Returns the original key unchanged if presigning fails.
 func presignMomentURL(key, bucket string) string {
-	if key == "" || strings.HasPrefix(key, "http") {
-		return rewriteMomentURL(key) // rewrite legacy S3 URLs to CDN if configured
+	if key == "" {
+		return ""
+	}
+	// CDN active — prefer it over presigned URLs (no expiry, cacheable, simpler).
+	if os.Getenv("CDN_BASE_URL") != "" {
+		if strings.HasPrefix(key, "http") {
+			return awsrepository.RewriteToCDN(key) // legacy full S3 URL → CDN
+		}
+		return awsrepository.GetS3URL(bucket, key) // raw key → CDN URL
+	}
+	// No CDN: legacy full URLs stay as-is, raw keys get presigned.
+	if strings.HasPrefix(key, "http") {
+		return key
 	}
 	parts := strings.Split(key, "/")
 	if len(parts) < 2 {
@@ -301,7 +318,7 @@ func presignMomentURL(key, bucket string) string {
 	folder := strings.Join(parts[:len(parts)-1], "/")
 	signed, err := bucketrepository.GetPresignedFileURL(filename, folder, bucket, constants.DefaultCloudProvider, 720)
 	if err != nil {
-		return key
+		return key // presign failed and no CDN — return raw key (best-effort)
 	}
 	return signed
 }
