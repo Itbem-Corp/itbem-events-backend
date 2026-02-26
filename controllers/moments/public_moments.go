@@ -25,6 +25,8 @@ import (
 	"events-stocks/services/users"
 	"events-stocks/utils"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/gofrs/uuid"
 	"github.com/labstack/echo/v4"
 	"gorm.io/gorm"
@@ -743,14 +745,23 @@ func RequestMultipartUploadStart(c echo.Context) error {
 		URL        string `json:"url"`
 	}
 	partURLs := make([]partURL, totalParts)
+
+	eg := new(errgroup.Group)
 	for i := 0; i < totalParts; i++ {
-		url, err := bucketrepository.GetPresignedPartURL(s3Key, publicResSvc.Bucket, uploadID, i+1, 60, constants.DefaultCloudProvider)
-		if err != nil {
-			// Abort the initiated upload before returning — don't leave orphaned state
-			_ = bucketrepository.AbortMultipartUpload(s3Key, publicResSvc.Bucket, uploadID, constants.DefaultCloudProvider)
-			return utils.Error(c, http.StatusInternalServerError, "Error signing part URLs", err.Error())
-		}
-		partURLs[i] = partURL{PartNumber: i + 1, URL: url}
+		i := i // capture loop variable
+		eg.Go(func() error {
+			u, err := bucketrepository.GetPresignedPartURL(s3Key, publicResSvc.Bucket, uploadID, i+1, 60, constants.DefaultCloudProvider)
+			if err != nil {
+				return err
+			}
+			partURLs[i] = partURL{PartNumber: i + 1, URL: u}
+			return nil
+		})
+	}
+	if err := eg.Wait(); err != nil {
+		// Abort the initiated upload before returning
+		_ = bucketrepository.AbortMultipartUpload(s3Key, publicResSvc.Bucket, uploadID, constants.DefaultCloudProvider)
+		return utils.Error(c, http.StatusInternalServerError, "Error signing part URLs", err.Error())
 	}
 
 	return utils.Success(c, http.StatusOK, "Multipart upload started", map[string]interface{}{
