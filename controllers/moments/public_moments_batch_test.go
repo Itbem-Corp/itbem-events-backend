@@ -42,7 +42,7 @@ func TestRequestBatchSharedUploadURLs_MissingIdentifier_ReturnsBadRequest(t *tes
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-func TestRequestBatchSharedUploadURLs_EmptyFiles_ReturnsBadRequest(t *testing.T) {
+func TestRequestBatchSharedUploadURLs_EmptyFiles_PanicsWithoutDB(t *testing.T) {
 	e := echo.New()
 	body := `{"files":[]}`
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
@@ -52,9 +52,8 @@ func TestRequestBatchSharedUploadURLs_EmptyFiles_ReturnsBadRequest(t *testing.T)
 	c.SetParamNames("identifier")
 	c.SetParamValues("test-event-id")
 
-	// Empty files → panics on DB lookup (same as non-empty: event check happens first)
-	// OR returns 400 if we add a pre-DB validation guard
-	// Either is acceptable — this test just confirms the handler compiles and is callable
+	// The empty-files guard (400) lives after the DB lookup, so without a live DB
+	// the handler panics on DB access before it can ever reach the validation check.
 	require.Panics(t, func() {
 		_ = RequestBatchSharedUploadURLs(c)
 	})
