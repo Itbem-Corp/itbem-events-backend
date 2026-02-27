@@ -378,6 +378,88 @@ func RequestSharedUploadURL(c echo.Context) error {
 	})
 }
 
+// POST /api/events/:identifier/moments/shared/batch-upload-urls
+// Returns presigned S3 PUT URLs for multiple files in a single request,
+// eliminating N serial round-trips before uploads can start.
+// Max 20 files per batch (matches MAX_FILES frontend limit with headroom).
+func RequestBatchSharedUploadURLs(c echo.Context) error {
+	identifier := c.Param("identifier")
+	if identifier == "" {
+		return utils.Error(c, http.StatusBadRequest, "Missing event identifier", "")
+	}
+
+	event, err := getEventByIdentifier(identifier)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return utils.Error(c, http.StatusNotFound, "Event not found", "")
+		}
+		return utils.Error(c, http.StatusInternalServerError, "Error loading event", err.Error())
+	}
+
+	cfg, err := eventconfigrepository.GetEventConfigByID(event.ID)
+	if err != nil || cfg == nil {
+		return utils.Error(c, http.StatusNotFound, "Event config not found", "")
+	}
+	if !cfg.ShareUploadsEnabled {
+		return utils.Error(c, http.StatusForbidden, "Shared uploads are not enabled for this event", "")
+	}
+	if !cfg.AllowUploads {
+		return utils.Error(c, http.StatusForbidden, "Uploads are disabled for this event", "")
+	}
+
+	var body struct {
+		Files []struct {
+			ContentType string `json:"content_type"`
+			Filename    string `json:"filename"`
+		} `json:"files"`
+	}
+	if err := c.Bind(&body); err != nil {
+		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
+	}
+	if len(body.Files) == 0 {
+		return utils.Error(c, http.StatusBadRequest, "files array must not be empty", "")
+	}
+	if len(body.Files) > 20 {
+		return utils.Error(c, http.StatusBadRequest, "maximum 20 files per batch", "")
+	}
+
+	type urlEntry struct {
+		UploadURL string `json:"upload_url"`
+		S3Key     string `json:"s3_key"`
+	}
+	results := make([]urlEntry, 0, len(body.Files))
+
+	for _, f := range body.Files {
+		if f.ContentType == "" {
+			return utils.Error(c, http.StatusBadRequest, "content_type is required for each file", "")
+		}
+		isImg := strings.HasPrefix(f.ContentType, "image/")
+		isVid := strings.HasPrefix(f.ContentType, "video/")
+		if !isImg && !isVid {
+			return utils.Error(c, http.StatusBadRequest, fmt.Sprintf("unsupported file type: %s", f.ContentType), "")
+		}
+
+		ext := ""
+		if idx := strings.LastIndex(f.Filename, "."); idx != -1 {
+			ext = strings.ToLower(f.Filename[idx:])
+		}
+		u, _ := uuid.NewV4()
+		filename := u.String() + ext
+		folder := "moments/" + event.ID.String() + "/raw"
+		s3Key := fmt.Sprintf("%s/%s", folder, filename)
+
+		uploadURL, err := bucketrepository.GetPresignedUploadURL(filename, folder, f.ContentType, publicResSvc.Bucket, constants.DefaultCloudProvider, 15)
+		if err != nil {
+			return utils.Error(c, http.StatusInternalServerError, "Error generating upload URL", err.Error())
+		}
+		results = append(results, urlEntry{UploadURL: uploadURL, S3Key: s3Key})
+	}
+
+	return utils.Success(c, http.StatusOK, "Batch upload URLs ready", map[string]interface{}{
+		"urls": results,
+	})
+}
+
 // POST /api/events/:identifier/moments/shared/confirm
 // Step 2 of direct-upload flow: called after the browser has PUT the file to S3.
 // Creates the Moment record in the DB and queues the Lambda processing job.

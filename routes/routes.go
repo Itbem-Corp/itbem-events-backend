@@ -155,6 +155,7 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	directUploadGroup.Use(directUploadRateLimiter())
 	// Shared QR upload (no personal token)
 	directUploadGroup.POST("/events/:identifier/moments/shared/upload-url", moments.RequestSharedUploadURL)
+	directUploadGroup.POST("/events/:identifier/moments/shared/batch-upload-urls", moments.RequestBatchSharedUploadURLs)
 	directUploadGroup.POST("/events/:identifier/moments/shared/confirm", moments.ConfirmSharedMoment)
 	// Multipart upload coordination (for large videos > 10 MB)
 	directUploadGroup.POST("/events/:identifier/moments/shared/multipart/start", moments.RequestMultipartUploadStart)
