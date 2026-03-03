@@ -86,7 +86,7 @@ func BatchAssign(c echo.Context) error {
 		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
 	}
 	if len(req.Assignments) == 0 {
-		return utils.Success(c, http.StatusOK, "No assignments to process", nil)
+		return utils.Error(c, http.StatusBadRequest, "No assignments provided", "")
 	}
 	if err := tableSvc.BatchAssign(req.Assignments); err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Error assigning guests", err.Error())
