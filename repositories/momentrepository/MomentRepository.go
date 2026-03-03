@@ -6,6 +6,7 @@ import (
 	"events-stocks/repositories/gormrepository"
 	"github.com/gofrs/uuid"
 	"gorm.io/gorm"
+	"time"
 )
 
 func CreateMoment(m *models.Moment) error {
@@ -209,6 +210,44 @@ func ListApprovedForWall(eventID uuid.UUID, page, limit int) ([]models.Moment, i
 
 func (r *MomentRepo) ListApprovedForWall(eventID uuid.UUID, page, limit int) ([]models.Moment, int64, error) {
 	return ListApprovedForWall(eventID, page, limit)
+}
+
+// ListApprovedForWallCursor returns approved + optimized moments using keyset pagination.
+// Pass afterCreatedAt=nil / afterID="" for the first page (returns most recent N moments).
+// Cursor mode orders strictly by (created_at DESC, id DESC) — ignores the manual "order" field
+// so pagination is stable and simple. Page mode (existing) still respects manual ordering.
+func ListApprovedForWallCursor(eventID uuid.UUID, afterCreatedAt *time.Time, afterID string, limit int) ([]models.Moment, error) {
+	var moments []models.Moment
+	if afterCreatedAt != nil && afterID != "" {
+		err := configuration.DB.Raw(`
+			SELECT m.*
+			FROM moments m
+			WHERE m.event_id = ?
+			  AND m.is_approved = true
+			  AND m.processing_status IN ('', 'done')
+			  AND m.deleted_at IS NULL
+			  AND (m.created_at < ? OR (m.created_at = ? AND m.id::text < ?))
+			ORDER BY m.created_at DESC, m.id::text DESC
+			LIMIT ?
+		`, eventID, afterCreatedAt, afterCreatedAt, afterID, limit).Scan(&moments).Error
+		return moments, err
+	}
+	// First page — no cursor condition
+	err := configuration.DB.Raw(`
+		SELECT m.*
+		FROM moments m
+		WHERE m.event_id = ?
+		  AND m.is_approved = true
+		  AND m.processing_status IN ('', 'done')
+		  AND m.deleted_at IS NULL
+		ORDER BY m.created_at DESC, m.id::text DESC
+		LIMIT ?
+	`, eventID, limit).Scan(&moments).Error
+	return moments, err
+}
+
+func (r *MomentRepo) ListApprovedForWallCursor(eventID uuid.UUID, afterCreatedAt *time.Time, afterID string, limit int) ([]models.Moment, error) {
+	return ListApprovedForWallCursor(eventID, afterCreatedAt, afterID, limit)
 }
 
 // BulkUpdateApproval updates is_approved for multiple moments in a single query.
