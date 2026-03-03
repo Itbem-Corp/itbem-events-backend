@@ -5,6 +5,7 @@ import (
 	"events-stocks/dtos"
 	"events-stocks/models"
 	"github.com/gofrs/uuid"
+	"gorm.io/gorm"
 )
 
 type TableRepo struct{}
@@ -45,29 +46,33 @@ func (r *TableRepo) Delete(id uuid.UUID) error {
 
 func (r *TableRepo) GetByID(id uuid.UUID) (*models.Table, error) {
 	var table models.Table
-	err := configuration.DB.Where("id = ?", id).First(&table).Error
-	return &table, err
+	if err := configuration.DB.Where("id = ?", id).First(&table).Error; err != nil {
+		return nil, err
+	}
+	return &table, nil
 }
 
 func (r *TableRepo) BatchAssign(assignments []dtos.SeatAssignment) error {
-	for _, a := range assignments {
-		guestID, err := uuid.FromString(a.GuestID)
-		if err != nil {
-			continue
-		}
-		update := configuration.DB.Model(&models.Guest{}).Where("id = ?", guestID)
-		if a.TableID == nil {
-			update = update.Update("table_id", nil)
-		} else {
-			tableID, err := uuid.FromString(*a.TableID)
+	return configuration.DB.Transaction(func(tx *gorm.DB) error {
+		for _, a := range assignments {
+			guestID, err := uuid.FromString(a.GuestID)
 			if err != nil {
 				continue
 			}
-			update = update.Update("table_id", tableID)
+			q := tx.Model(&models.Guest{}).Where("id = ?", guestID)
+			if a.TableID == nil {
+				q = q.Update("table_id", nil)
+			} else {
+				tableID, err := uuid.FromString(*a.TableID)
+				if err != nil {
+					continue
+				}
+				q = q.Update("table_id", tableID)
+			}
+			if err := q.Error; err != nil {
+				return err
+			}
 		}
-		if err := update.Error; err != nil {
-			return err
-		}
-	}
-	return nil
+		return nil
+	})
 }
