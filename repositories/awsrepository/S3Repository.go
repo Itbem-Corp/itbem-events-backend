@@ -83,6 +83,44 @@ func RewriteToCDN(rawURL string) string {
 	return strings.TrimRight(base, "/") + "/" + path
 }
 
+// S3KeyFromURL extracts the bare S3 key from a URL.
+// If the URL starts with CDN_BASE_URL it strips that prefix.
+// If it starts with an S3 virtual-hosted or path-style prefix it strips that too.
+// If the input is already a bare key (no scheme) it is returned unchanged.
+func S3KeyFromURL(rawURL string) string {
+	if rawURL == "" {
+		return rawURL
+	}
+	// Bare key — no scheme, nothing to strip.
+	if !strings.Contains(rawURL, "://") {
+		return rawURL
+	}
+	// CDN URL: https://cdn.example.com/moments/... → moments/...
+	if base := os.Getenv("CDN_BASE_URL"); base != "" {
+		prefix := strings.TrimRight(base, "/") + "/"
+		if strings.HasPrefix(rawURL, prefix) {
+			return strings.TrimPrefix(rawURL, prefix)
+		}
+	}
+	// S3 URL: https://bucket.s3.amazonaws.com/key or https://s3.region.amazonaws.com/bucket/key
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	host := u.Hostname()
+	path := strings.TrimPrefix(u.Path, "/")
+	if strings.Contains(host, ".s3.") || strings.HasSuffix(host, ".amazonaws.com") {
+		if !strings.Contains(host, ".s3.") {
+			// path-style: strip bucket prefix
+			if parts := strings.SplitN(path, "/", 2); len(parts) == 2 {
+				return parts[1]
+			}
+		}
+		return path
+	}
+	return rawURL
+}
+
 func CheckS3ObjectExists(ctx context.Context, key, bucket string) (bool, error) {
 	s3Client := configuration.GetS3Client(nil)
 	_, err := s3Client.HeadObject(ctx, &s3.HeadObjectInput{

@@ -541,20 +541,27 @@ func TestBatchReoptimize_ResetsStatusToPending(t *testing.T) {
 		OptimizedSizeBytes: 200_000,
 	}
 
-	var capturedStatus string
+	// Capture only the first UpdateMomentContent call (the reset to "pending").
+	// SQS is not configured in tests so BatchReoptimize will also issue a rollback
+	// call (to "done") — we want to verify the first call happened correctly.
+	var firstStatus string
+	callCount := 0
 	repo := &mockMomentRepo{
 		GetMomentsByIDsFunc: func(ids []uuid.UUID) ([]models.Moment, error) {
 			return []models.Moment{m}, nil
 		},
 		UpdateMomentContentFunc: func(id uuid.UUID, contentURL, processingStatus, thumbnailURL, errorMessage string, durationMs, originalBytes, optimizedBytes int64) error {
-			capturedStatus = processingStatus
+			callCount++
+			if callCount == 1 {
+				firstStatus = processingStatus
+			}
 			return nil
 		},
 	}
 	svc := NewMomentService(repo, &mockCacheRepo{})
 	svc.BatchReoptimize([]uuid.UUID{id})
 
-	assert.Equal(t, "pending", capturedStatus, "processing_status must be reset to 'pending'")
+	assert.Equal(t, "pending", firstStatus, "processing_status must be reset to 'pending' before SQS publish")
 }
 
 // ---------------------------------------------------------------------------
