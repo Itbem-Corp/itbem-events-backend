@@ -136,6 +136,9 @@ func (m *mockMomentRepo) ListReoptimizing(eventID uuid.UUID) ([]models.Moment, e
 	}
 	return nil, nil
 }
+func (m *mockMomentRepo) ListInFlight(eventID uuid.UUID) ([]models.Moment, error) {
+	return nil, nil
+}
 
 var _ ports.MomentRepository = (*mockMomentRepo)(nil)
 
