@@ -102,6 +102,8 @@ type MomentRepository interface {
 	BulkUpdateApproval(ids []uuid.UUID, isApproved bool) error
 	// GetDistinctEventIDsByMomentIDs returns unique event_id values for the given moment IDs.
 	GetDistinctEventIDsByMomentIDs(ids []uuid.UUID) ([]uuid.UUID, error)
+	// SummaryByEventIDs returns the pending moment count per event in one query.
+	SummaryByEventIDs(eventIDs []uuid.UUID) ([]models.MomentSummary, error)
 }
 
 // UserRepository is the data access contract for User records.

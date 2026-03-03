@@ -227,6 +227,16 @@ func (s *MomentService) RequeueMoment(moment *models.Moment) error {
 	return s.cache.Invalidate("moments", "all")
 }
 
+// SummaryByEventIDs returns the pending moment count for a batch of events.
+// No cache — counts change frequently and the query is a single GROUP BY.
+func (s *MomentService) SummaryByEventIDs(eventIDs []uuid.UUID) ([]models.MomentSummary, error) {
+	return s.repo.SummaryByEventIDs(eventIDs)
+}
+
+func SummaryByEventIDs(eventIDs []uuid.UUID) ([]models.MomentSummary, error) {
+	return _momentSvc.SummaryByEventIDs(eventIDs)
+}
+
 // BulkUpdateApproval updates is_approved for multiple moments by ID.
 func (s *MomentService) BulkUpdateApproval(ids []uuid.UUID, isApproved bool) error {
 	// Fetch distinct event IDs before updating so we can invalidate per-event wall caches.

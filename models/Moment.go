@@ -6,6 +6,13 @@ import (
 	"time"
 )
 
+// MomentSummary holds the pending moment count for one event.
+// Returned by GET /moments/summary to let the dashboard batch-fetch badge counts.
+type MomentSummary struct {
+	EventID      uuid.UUID `json:"event_id"`
+	PendingCount int64     `json:"pending_count"`
+}
+
 type Moment struct {
 	ID           uuid.UUID  `gorm:"type:uuid;default:uuid_generate_v4();primaryKey" json:"id"`
 	EventID      *uuid.UUID `gorm:"type:uuid;index" json:"event_id,omitempty"`

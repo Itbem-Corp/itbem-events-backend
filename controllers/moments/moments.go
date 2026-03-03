@@ -60,6 +60,30 @@ func ListMoments(c echo.Context) error {
 	return utils.Success(c, http.StatusOK, "Moments loaded", list)
 }
 
+// GET /moments/summary?event_ids=id1,id2,...
+// Returns pending moment counts for a batch of events in a single query.
+// Used by the dashboard events list to show per-event pending badges without N+1 calls.
+func SummaryMoments(c echo.Context) error {
+	raw := c.QueryParam("event_ids")
+	if raw == "" {
+		return utils.Success(c, http.StatusOK, "Summary loaded", []models.MomentSummary{})
+	}
+	parts := strings.Split(raw, ",")
+	eventIDs := make([]uuid.UUID, 0, len(parts))
+	for _, p := range parts {
+		id, err := uuid.FromString(strings.TrimSpace(p))
+		if err != nil {
+			return utils.Error(c, http.StatusBadRequest, "Invalid event_id: "+p, err.Error())
+		}
+		eventIDs = append(eventIDs, id)
+	}
+	summary, err := momentSvc.SummaryByEventIDs(eventIDs)
+	if err != nil {
+		return utils.Error(c, http.StatusInternalServerError, "Error loading summary", err.Error())
+	}
+	return utils.Success(c, http.StatusOK, "Summary loaded", summary)
+}
+
 // GET /moments/:id
 func GetMoment(c echo.Context) error {
 	idParam := c.Param("id")

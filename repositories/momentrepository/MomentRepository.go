@@ -181,3 +181,34 @@ func GetDistinctEventIDsByMomentIDs(ids []uuid.UUID) ([]uuid.UUID, error) {
 func (r *MomentRepo) GetDistinctEventIDsByMomentIDs(ids []uuid.UUID) ([]uuid.UUID, error) {
 	return GetDistinctEventIDsByMomentIDs(ids)
 }
+
+// SummaryByEventIDs returns the count of pending (not approved, not failed)
+// moments for each of the given event IDs in a single GROUP BY query.
+func SummaryByEventIDs(eventIDs []uuid.UUID) ([]models.MomentSummary, error) {
+	type row struct {
+		EventID      uuid.UUID `gorm:"column:event_id"`
+		PendingCount int64     `gorm:"column:pending_count"`
+	}
+	var rows []row
+	err := configuration.DB.Raw(`
+		SELECT event_id, COUNT(*) AS pending_count
+		FROM moments
+		WHERE event_id IN ?
+		  AND is_approved = false
+		  AND processing_status <> 'failed'
+		  AND deleted_at IS NULL
+		GROUP BY event_id
+	`, eventIDs).Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	result := make([]models.MomentSummary, len(rows))
+	for i, r := range rows {
+		result[i] = models.MomentSummary{EventID: r.EventID, PendingCount: r.PendingCount}
+	}
+	return result, nil
+}
+
+func (r *MomentRepo) SummaryByEventIDs(eventIDs []uuid.UUID) ([]models.MomentSummary, error) {
+	return SummaryByEventIDs(eventIDs)
+}
