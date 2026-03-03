@@ -42,6 +42,9 @@ func ListForDashboard(eventID uuid.UUID) ([]models.Moment, error) {
 func ListApprovedForWall(eventID uuid.UUID, page, limit int) ([]models.Moment, int64, error) {
 	return _momentSvc.ListApprovedForWall(eventID, page, limit)
 }
+func ListApprovedForWallCursor(eventID uuid.UUID, afterCreatedAt *time.Time, afterID string, limit int) ([]models.Moment, error) {
+	return _momentSvc.ListApprovedForWallCursor(eventID, afterCreatedAt, afterID, limit)
+}
 func BulkUpdateApproval(ids []uuid.UUID, isApproved bool) error {
 	return _momentSvc.BulkUpdateApproval(ids, isApproved)
 }
@@ -59,6 +62,12 @@ func NewMomentService(repo ports.MomentRepository, cache ports.CacheRepository) 
 // wallCacheKey returns the Redis key for a paginated public wall result.
 func wallCacheKey(eventID uuid.UUID, page, limit int) string {
 	return fmt.Sprintf("moments:wall:%s:p%d:l%d", eventID.String(), page, limit)
+}
+
+// wallCursorCacheKey returns the Redis key for a cursor-paginated wall page.
+// Empty afterID means first page.
+func wallCursorCacheKey(eventID uuid.UUID, afterID string, limit int) string {
+	return fmt.Sprintf("moments:wall:%s:cursor:%s:l%d", eventID.String(), afterID, limit)
 }
 
 // invalidateWallCache removes all cached wall pages for an event.
@@ -177,6 +186,30 @@ func (s *MomentService) ListApprovedForWall(eventID uuid.UUID, page, limit int) 
 	_ = s.cache.SaveKey(ctx, cacheKey, string(data), 5*time.Minute)
 
 	return items, total, nil
+}
+
+// ListApprovedForWallCursor returns approved + optimized moments using keyset pagination.
+// Results are cached in Redis for 5 minutes; cache is busted by invalidateWallCache (same pattern).
+func (s *MomentService) ListApprovedForWallCursor(eventID uuid.UUID, afterCreatedAt *time.Time, afterID string, limit int) ([]models.Moment, error) {
+	ctx := context.Background()
+	cacheKey := wallCursorCacheKey(eventID, afterID, limit)
+
+	if cached, err := s.cache.GetKey(ctx, cacheKey); err == nil && cached != "" {
+		var items []models.Moment
+		if err := json.Unmarshal([]byte(cached), &items); err == nil {
+			return items, nil
+		}
+	}
+
+	items, err := s.repo.ListApprovedForWallCursor(eventID, afterCreatedAt, afterID, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	data, _ := json.Marshal(items)
+	_ = s.cache.SaveKey(ctx, cacheKey, string(data), 5*time.Minute)
+
+	return items, nil
 }
 
 // UpdateMomentContent is called by the Lambda after media processing completes.
