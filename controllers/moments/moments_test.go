@@ -157,3 +157,17 @@ func TestReorderMoments_ValidBody_Returns200(t *testing.T) {
 	require.NoError(t, ReorderMoments(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
+
+func TestGetReoptimizingMoments_MissingEventID(t *testing.T) {
+	c, rec := newEchoCtx("GET", "/moments/reoptimizing", "")
+	err := GetReoptimizingMoments(c)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestGetReoptimizingMoments_InvalidEventID(t *testing.T) {
+	c, rec := newEchoCtx("GET", "/moments/reoptimizing?event_id=not-a-uuid", "")
+	err := GetReoptimizingMoments(c)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}

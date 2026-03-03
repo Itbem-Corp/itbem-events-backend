@@ -366,6 +366,32 @@ func BatchReoptimizeMoments(c echo.Context) error {
 	})
 }
 
+// GET /moments/reoptimizing?event_id=<uuid>
+// Returns moments currently being re-optimized (pending/processing with an already-optimized content_url).
+// Used by the dashboard to show an in-flight processing section.
+func GetReoptimizingMoments(c echo.Context) error {
+	eventIDStr := c.QueryParam("event_id")
+	if eventIDStr == "" {
+		return utils.Error(c, http.StatusBadRequest, "event_id required", "")
+	}
+	eventID, err := uuid.FromString(eventIDStr)
+	if err != nil {
+		return utils.Error(c, http.StatusBadRequest, "Invalid event_id", err.Error())
+	}
+	list, err := momentSvc.GetReoptimizing(eventID)
+	if err != nil {
+		return utils.Error(c, http.StatusInternalServerError, "Error loading reoptimizing moments", err.Error())
+	}
+	cfg, ok := c.Get("config").(*models.Config)
+	if ok && cfg != nil {
+		for i := range list {
+			list[i].ContentURL = presignMomentURL(list[i].ContentURL, cfg.AwsBucketName)
+			list[i].ThumbnailURL = presignMomentURL(list[i].ThumbnailURL, cfg.AwsBucketName)
+		}
+	}
+	return utils.Success(c, http.StatusOK, "Reoptimizing moments loaded", list)
+}
+
 // presignMomentURL resolves a moment URL for the admin dashboard.
 //
 // When CDN_BASE_URL is configured (production): returns a CDN URL — no expiry,
