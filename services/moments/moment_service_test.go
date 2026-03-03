@@ -116,6 +116,9 @@ func (m *mockMomentRepo) BulkUpdateApproval(ids []uuid.UUID, isApproved bool) er
 func (m *mockMomentRepo) GetDistinctEventIDsByMomentIDs(ids []uuid.UUID) ([]uuid.UUID, error) {
 	return nil, nil
 }
+func (m *mockMomentRepo) SummaryByEventIDs(eventIDs []uuid.UUID) ([]models.MomentSummary, error) {
+	return nil, nil
+}
 
 var _ ports.MomentRepository = (*mockMomentRepo)(nil)
 
