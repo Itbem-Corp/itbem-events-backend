@@ -64,6 +64,7 @@ type mockMomentRepo struct {
 	ListMomentsFunc         func() ([]models.Moment, error)
 	UpdateMomentContentFunc func(id uuid.UUID, contentURL, processingStatus, thumbnailURL, errorMessage string, durationMs, originalBytes, optimizedBytes int64) error
 	ListReoptimizingFunc    func(eventID uuid.UUID) ([]models.Moment, error)
+	ListInFlightFunc        func(eventID uuid.UUID) ([]models.Moment, error)
 }
 
 func (m *mockMomentRepo) CreateMoment(obj *models.Moment) error {
@@ -137,6 +138,9 @@ func (m *mockMomentRepo) ListReoptimizing(eventID uuid.UUID) ([]models.Moment, e
 	return nil, nil
 }
 func (m *mockMomentRepo) ListInFlight(eventID uuid.UUID) ([]models.Moment, error) {
+	if m.ListInFlightFunc != nil {
+		return m.ListInFlightFunc(eventID)
+	}
 	return nil, nil
 }
 
@@ -600,4 +604,46 @@ func TestGetReoptimizing_PropagatesRepoError(t *testing.T) {
 	_, err := svc.GetReoptimizing(uuid.Must(uuid.NewV4()))
 
 	assert.EqualError(t, err, "db error")
+}
+
+// ---------------------------------------------------------------------------
+// GetInFlight
+// ---------------------------------------------------------------------------
+
+func TestGetInFlight_ReturnsFromRepo(t *testing.T) {
+	// arrange
+	eventID := uuid.Must(uuid.NewV4())
+	expected := []models.Moment{{ID: uuid.Must(uuid.NewV4())}}
+	repo := &mockMomentRepo{
+		ListInFlightFunc: func(id uuid.UUID) ([]models.Moment, error) {
+			assert.Equal(t, eventID, id)
+			return expected, nil
+		},
+	}
+	svc := NewMomentService(repo, &mockCacheRepo{})
+
+	// act
+	got, err := svc.GetInFlight(eventID)
+
+	// assert
+	require.NoError(t, err)
+	assert.Equal(t, expected, got)
+}
+
+func TestGetInFlight_PropagatesRepoError(t *testing.T) {
+	// arrange
+	eventID := uuid.Must(uuid.NewV4())
+	repo := &mockMomentRepo{
+		ListInFlightFunc: func(id uuid.UUID) ([]models.Moment, error) {
+			return nil, errors.New("db error")
+		},
+	}
+	svc := NewMomentService(repo, &mockCacheRepo{})
+
+	// act
+	_, err := svc.GetInFlight(eventID)
+
+	// assert
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "db error")
 }
