@@ -236,7 +236,7 @@ func (s *MomentService) RequeueMoment(moment *models.Moment) error {
 		MomentID:    moment.ID.String(),
 		EventID:     moment.EventID.String(),
 		RawS3Key:    awsrepository.S3KeyFromURL(moment.ContentURL),
-		Bucket:      os.Getenv("S3_BUCKET_NAME"),
+		Bucket:      os.Getenv("AWS_BUCKET_NAME"),
 		ContentType: ct,
 		IsVideo:     isVideo,
 	})
@@ -371,7 +371,7 @@ func (s *MomentService) BatchReoptimize(ids []uuid.UUID) (succeeded, skipped, fa
 			MomentID:        m.ID.String(),
 			EventID:         m.EventID.String(),
 			RawS3Key:        awsrepository.S3KeyFromURL(m.ContentURL),
-			Bucket:          os.Getenv("S3_BUCKET_NAME"),
+			Bucket:          os.Getenv("AWS_BUCKET_NAME"),
 			ContentType:     ct,
 			IsVideo:         isVid,
 			ForceReoptimize: true,
