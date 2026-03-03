@@ -26,6 +26,17 @@ func GetMomentByID(id uuid.UUID) (*models.Moment, error) {
     return &model, err
 }
 
+// GetMomentsByIDs fetches multiple moments by primary key in one query.
+// Order of results is not guaranteed. Missing IDs are silently omitted.
+func GetMomentsByIDs(ids []uuid.UUID) ([]models.Moment, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var moments []models.Moment
+	err := configuration.DB.Where("id IN ? AND deleted_at IS NULL", ids).Find(&moments).Error
+	return moments, err
+}
+
 func ListMoments() ([]models.Moment, error) {
     var list []models.Moment
     err := gormrepository.GetList(&list, gormrepository.QueryOptions{})
@@ -41,6 +52,9 @@ func (r *MomentRepo) CreateMoment(m *models.Moment) error                { retur
 func (r *MomentRepo) UpdateMoment(m *models.Moment) error                { return UpdateMoment(m) }
 func (r *MomentRepo) DeleteMoment(id uuid.UUID) error                    { return DeleteMoment(id) }
 func (r *MomentRepo) GetMomentByID(id uuid.UUID) (*models.Moment, error) { return GetMomentByID(id) }
+func (r *MomentRepo) GetMomentsByIDs(ids []uuid.UUID) ([]models.Moment, error) {
+	return GetMomentsByIDs(ids)
+}
 func (r *MomentRepo) ListMoments() ([]models.Moment, error)              { return ListMoments() }
 
 // ListMomentsByEventID returns moments for a specific event, optionally filtering to approved only.

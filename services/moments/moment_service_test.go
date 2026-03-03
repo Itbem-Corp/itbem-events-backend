@@ -60,6 +60,7 @@ type mockMomentRepo struct {
 	UpdateMomentFunc        func(m *models.Moment) error
 	DeleteMomentFunc        func(id uuid.UUID) error
 	GetMomentByIDFunc       func(id uuid.UUID) (*models.Moment, error)
+	GetMomentsByIDsFunc     func(ids []uuid.UUID) ([]models.Moment, error)
 	ListMomentsFunc         func() ([]models.Moment, error)
 	UpdateMomentContentFunc func(id uuid.UUID, contentURL, processingStatus, thumbnailURL, errorMessage string, durationMs, originalBytes, optimizedBytes int64) error
 }
@@ -87,6 +88,12 @@ func (m *mockMomentRepo) GetMomentByID(id uuid.UUID) (*models.Moment, error) {
 		return m.GetMomentByIDFunc(id)
 	}
 	return &models.Moment{}, nil
+}
+func (m *mockMomentRepo) GetMomentsByIDs(ids []uuid.UUID) ([]models.Moment, error) {
+	if m.GetMomentsByIDsFunc != nil {
+		return m.GetMomentsByIDsFunc(ids)
+	}
+	return nil, nil
 }
 func (m *mockMomentRepo) ListMoments() ([]models.Moment, error) {
 	if m.ListMomentsFunc != nil {

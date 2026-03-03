@@ -101,6 +101,8 @@ type MomentRepository interface {
 	UpdateMoment(m *models.Moment) error
 	DeleteMoment(id uuid.UUID) error
 	GetMomentByID(id uuid.UUID) (*models.Moment, error)
+	// GetMomentsByIDs fetches multiple moments by ID in one query.
+	GetMomentsByIDs(ids []uuid.UUID) ([]models.Moment, error)
 	ListMoments() ([]models.Moment, error)
 	ListByEventID(eventID uuid.UUID, approvedOnly bool) ([]models.Moment, error)
 	UpdateMomentContent(id uuid.UUID, contentURL, processingStatus, thumbnailURL, errorMessage string, durationMs, originalBytes, optimizedBytes int64) error
