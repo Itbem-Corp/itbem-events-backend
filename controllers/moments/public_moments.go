@@ -1,6 +1,8 @@
 package moments
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -97,6 +99,33 @@ func publishMediaJob(moment *models.Moment, rawKey, bucket, contentType string) 
 const defaultPageLimit = 20
 const maxPageLimit = 500
 
+// momentCursor is the decoded form of the opaque pagination cursor token.
+type momentCursor struct {
+	CreatedAt time.Time `json:"ca"`
+	ID        string    `json:"id"`
+}
+
+// encodeCursor encodes the last-seen moment's (created_at, id) into a URL-safe base64 token.
+func encodeCursor(m models.Moment) string {
+	b, _ := json.Marshal(momentCursor{CreatedAt: m.CreatedAt, ID: m.ID.String()})
+	return base64.URLEncoding.EncodeToString(b)
+}
+
+// decodeCursor decodes a cursor token.
+// Returns nil, nil when token is empty (first page).
+// Returns nil, error when token is present but malformed.
+func decodeCursor(s string) (*momentCursor, error) {
+	if s == "" {
+		return nil, nil // first page
+	}
+	b, err := base64.URLEncoding.DecodeString(s)
+	if err != nil {
+		return nil, err
+	}
+	var c momentCursor
+	return &c, json.Unmarshal(b, &c)
+}
+
 // GET /api/events/:identifier/moments?page=1&limit=20
 // Returns only approved + fully optimized moments (processing_status IN ('','done')).
 // Results are cached in Redis/Valkey; cache is busted on approval changes or Lambda completion.
@@ -138,6 +167,58 @@ func ListPublicMoments(c echo.Context) error {
 			})
 		}
 	}
+
+	// ── Cursor mode ────────────────────────────────────────────────────────────
+	// Activated when ?cursor= query param is present (even empty = first page).
+	// Returns items + next_cursor; does not return total count.
+	cursorRaw, cursorPresent := c.QueryParams()["cursor"]
+	if cursorPresent {
+		cursorStr := ""
+		if len(cursorRaw) > 0 {
+			cursorStr = cursorRaw[0]
+		}
+
+		cursor, err := decodeCursor(cursorStr)
+		if err != nil {
+			return utils.Error(c, http.StatusBadRequest, "invalid cursor", "")
+		}
+
+		cursorLimit := defaultPageLimit
+		if l, err := strconv.Atoi(c.QueryParam("limit")); err == nil && l > 0 && l <= maxPageLimit {
+			cursorLimit = l
+		}
+
+		var afterCreatedAt *time.Time
+		var afterID string
+		if cursor != nil {
+			afterCreatedAt = &cursor.CreatedAt
+			afterID = cursor.ID
+		}
+
+		items, err := momentsService.ListApprovedForWallCursor(event.ID, afterCreatedAt, afterID, cursorLimit)
+		if err != nil {
+			return utils.Error(c, http.StatusInternalServerError, "Error loading moments", err.Error())
+		}
+
+		bucket := publicResSvc.Bucket
+		for i := range items {
+			items[i].ContentURL = presignMomentURL(items[i].ContentURL, bucket)
+			items[i].ThumbnailURL = presignMomentURL(items[i].ThumbnailURL, bucket)
+		}
+
+		nextCursor := ""
+		if len(items) == cursorLimit {
+			nextCursor = encodeCursor(items[len(items)-1])
+		}
+
+		return utils.Success(c, http.StatusOK, "Moments loaded", map[string]interface{}{
+			"items":       items,
+			"next_cursor": nextCursor,
+			"published":   true,
+			"event_name":  event.Name,
+		})
+	}
+	// ── End cursor mode ─────────────────────────────────────────────────────────
 
 	// Parse pagination params
 	page := 1
