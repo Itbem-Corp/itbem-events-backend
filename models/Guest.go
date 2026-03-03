@@ -40,5 +40,6 @@ type Guest struct {
 	RSVPTokenID     *uuid.UUID     `json:"rsvp_token_id" gorm:"type:uuid"`
 	RSVPGuestCount      int        `json:"rsvp_guest_count"`
 	TableID             *uuid.UUID `gorm:"type:uuid;index" json:"table_id,omitempty"`
+	Table               *Table     `gorm:"foreignKey:TableID" json:"table,omitempty" validate:"-"`
 	DietaryRestrictions string     `gorm:"type:varchar(255)" json:"dietary_restrictions"`
 }
