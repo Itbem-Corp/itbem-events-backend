@@ -476,22 +476,26 @@ func TestBatchReoptimize_SkipsNonDone(t *testing.T) {
 	assert.Equal(t, 0, failed)
 }
 
-func TestBatchReoptimize_SkipsZeroSize(t *testing.T) {
+func TestBatchReoptimize_IncludesZeroSizeDoneMoments(t *testing.T) {
+	// Zero-size done moments (legacy/pre-metric uploads) must NOT be skipped.
+	// They are sent for re-optimization so Lambda can populate their size metrics.
 	eventID := uuid.Must(uuid.NewV4())
-	m := models.Moment{ID: uuid.Must(uuid.NewV4()), EventID: &eventID, ProcessingStatus: "done", OptimizedSizeBytes: 0}
+	m := models.Moment{ID: uuid.Must(uuid.NewV4()), EventID: &eventID, ProcessingStatus: "done", ContentURL: "moments/e/opt/file.jpg", OptimizedSizeBytes: 0}
 
 	repo := &mockMomentRepo{
 		GetMomentsByIDsFunc: func(ids []uuid.UUID) ([]models.Moment, error) {
 			return []models.Moment{m}, nil
+		},
+		UpdateMomentContentFunc: func(id uuid.UUID, contentURL, processingStatus, thumbnailURL, errorMessage string, durationMs, originalBytes, optimizedBytes int64) error {
+			return nil
 		},
 	}
 	svc := NewMomentService(repo, &mockCacheRepo{})
 	succeeded, skipped, failed, err := svc.BatchReoptimize([]uuid.UUID{m.ID})
 
 	require.NoError(t, err)
-	assert.Equal(t, 0, succeeded)
-	assert.Equal(t, 1, skipped)
-	assert.Equal(t, 0, failed)
+	assert.Equal(t, 0, skipped, "zero-size done moments must not be skipped")
+	assert.Equal(t, 1, succeeded+failed, "moment must be attempted (succeeded or failed at SQS)")
 }
 
 func TestBatchReoptimize_DeduplicatesIDs(t *testing.T) {

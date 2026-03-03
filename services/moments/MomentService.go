@@ -305,12 +305,12 @@ func (s *MomentService) BatchReoptimize(ids []uuid.UUID) (succeeded, skipped, fa
 	}
 
 	for _, m := range moments {
-		// Skip if already in-flight or no size data
-		if m.ProcessingStatus == "pending" || m.ProcessingStatus == "processing" || m.OptimizedSizeBytes == 0 {
+		// Skip if already in-flight (idempotency guard)
+		if m.ProcessingStatus == "pending" || m.ProcessingStatus == "processing" {
 			skipped++
 			continue
 		}
-		// Only re-optimize successfully processed moments
+		// Only re-optimize successfully processed moments (includes size=0 / legacy moments)
 		if m.ProcessingStatus != "done" {
 			skipped++
 			continue
