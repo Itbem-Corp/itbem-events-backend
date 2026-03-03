@@ -105,6 +105,18 @@ func (s *EventService) autoCreateRelated(eventID uuid.UUID) {
 }
 
 func (s *EventService) UpdateEvent(obj *models.Event) error {
+	// If identifier was not provided in the update payload (empty string),
+	// restore the existing identifier from DB to prevent GORM Select("*")
+	// from zeroing it out and breaking distributed QR codes and links.
+	if obj.Identifier == "" {
+		existing, err := s.GetEventByID(obj.ID)
+		if err != nil {
+			return fmt.Errorf("UpdateEvent: could not fetch existing identifier: %w", err)
+		}
+		if existing != nil && existing.Identifier != "" {
+			obj.Identifier = existing.Identifier
+		}
+	}
 	if err := s.repo.UpdateEvent(obj); err != nil {
 		return err
 	}

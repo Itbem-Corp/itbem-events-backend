@@ -2,6 +2,7 @@ package events
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"events-stocks/models"
 	"events-stocks/services/ports"
@@ -628,4 +629,70 @@ func TestEventSectionService_ListByEventID_RepoError(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Nil(t, result)
+}
+
+// ---------------------------------------------------------------------------
+// UpdateEvent identifier-preservation tests
+// ---------------------------------------------------------------------------
+
+func TestUpdateEvent_PreservesIdentifierWhenOmitted(t *testing.T) {
+	eventID := uuid.Must(uuid.NewV4())
+
+	getByIDCalled := false
+	var capturedUpdate *models.Event
+
+	repo := &mockEventsRepo{
+		GetEventByIDFunc: func(id uuid.UUID) (string, error) {
+			getByIDCalled = true
+			assert.Equal(t, eventID, id)
+			// Simulate existing DB row with a non-empty identifier
+			event := models.Event{ID: id, Identifier: "boda-andres-ivanna"}
+			b, _ := json.Marshal([]models.Event{event})
+			return string(b), nil
+		},
+		UpdateEventFunc: func(event *models.Event) error {
+			capturedUpdate = event
+			return nil
+		},
+	}
+	cache := &mockCacheRepo{}
+
+	svc := NewEventService(repo, cache)
+	// Simulate a dashboard PUT that omits identifier (sends empty string)
+	err := svc.UpdateEvent(&models.Event{ID: eventID, Identifier: ""})
+
+	require.NoError(t, err)
+	assert.True(t, getByIDCalled, "GetEventByID must be called when identifier is empty")
+	require.NotNil(t, capturedUpdate)
+	assert.Equal(t, "boda-andres-ivanna", capturedUpdate.Identifier,
+		"existing identifier must be restored before the DB write")
+}
+
+func TestUpdateEvent_AllowsExplicitIdentifierChange(t *testing.T) {
+	eventID := uuid.Must(uuid.NewV4())
+
+	getByIDCalled := false
+	var capturedUpdate *models.Event
+
+	repo := &mockEventsRepo{
+		GetEventByIDFunc: func(id uuid.UUID) (string, error) {
+			getByIDCalled = true
+			return "", errors.New("should not be called")
+		},
+		UpdateEventFunc: func(event *models.Event) error {
+			capturedUpdate = event
+			return nil
+		},
+	}
+	cache := &mockCacheRepo{}
+
+	svc := NewEventService(repo, cache)
+	// Simulate a dashboard PUT that explicitly sets a new slug
+	err := svc.UpdateEvent(&models.Event{ID: eventID, Identifier: "nuevo-slug"})
+
+	require.NoError(t, err)
+	assert.False(t, getByIDCalled, "GetEventByID must NOT be called when identifier is already set")
+	require.NotNil(t, capturedUpdate)
+	assert.Equal(t, "nuevo-slug", capturedUpdate.Identifier,
+		"explicit new identifier must be kept as-is")
 }
