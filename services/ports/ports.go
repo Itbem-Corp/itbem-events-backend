@@ -60,6 +60,16 @@ type GuestRepository interface {
 	CreateGuests(guests []models.Guest) error
 	GetPendingStatusID() uuid.UUID
 }
+// TableRepository is the data access contract for Table records.
+type TableRepository interface {
+	ListByEventID(eventID uuid.UUID) ([]models.Table, error)
+	Create(table *models.Table) error
+	Update(table *models.Table) error
+	Delete(id uuid.UUID) error
+	GetByID(id uuid.UUID) (*models.Table, error)
+	BatchAssign(assignments []dtos.SeatAssignment) error
+}
+
 
 // InvitationRepository is the data access contract for Invitation records.
 type InvitationRepository interface {
