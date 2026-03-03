@@ -556,3 +556,38 @@ func TestBatchReoptimize_ResetsStatusToPending(t *testing.T) {
 
 	assert.Equal(t, "pending", capturedStatus, "processing_status must be reset to 'pending'")
 }
+
+// ---------------------------------------------------------------------------
+// GetReoptimizing
+// ---------------------------------------------------------------------------
+
+func TestGetReoptimizing_ReturnsFromRepo(t *testing.T) {
+	eventID := uuid.Must(uuid.NewV4())
+	expected := []models.Moment{
+		{ID: uuid.Must(uuid.NewV4()), EventID: &eventID, ProcessingStatus: "pending", ContentURL: "moments/e/opt/file.jpg"},
+		{ID: uuid.Must(uuid.NewV4()), EventID: &eventID, ProcessingStatus: "processing", ContentURL: "moments/e/opt/vid.mp4"},
+	}
+	repo := &mockMomentRepo{
+		ListReoptimizingFunc: func(id uuid.UUID) ([]models.Moment, error) {
+			assert.Equal(t, eventID, id)
+			return expected, nil
+		},
+	}
+	svc := NewMomentService(repo, &mockCacheRepo{})
+	result, err := svc.GetReoptimizing(eventID)
+
+	require.NoError(t, err)
+	assert.Equal(t, expected, result)
+}
+
+func TestGetReoptimizing_PropagatesRepoError(t *testing.T) {
+	repo := &mockMomentRepo{
+		ListReoptimizingFunc: func(id uuid.UUID) ([]models.Moment, error) {
+			return nil, errors.New("db error")
+		},
+	}
+	svc := NewMomentService(repo, &mockCacheRepo{})
+	_, err := svc.GetReoptimizing(uuid.Must(uuid.NewV4()))
+
+	assert.EqualError(t, err, "db error")
+}

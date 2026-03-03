@@ -129,6 +129,16 @@ func (s *MomentService) ListForDashboard(eventID uuid.UUID) ([]models.Moment, er
 	return s.repo.ListForDashboard(eventID)
 }
 
+// GetReoptimizing returns moments currently queued for re-optimization (pending/processing,
+// already-optimized content_url). Used by the dashboard to show an in-flight section.
+func (s *MomentService) GetReoptimizing(eventID uuid.UUID) ([]models.Moment, error) {
+	return s.repo.ListReoptimizing(eventID)
+}
+
+func GetReoptimizing(eventID uuid.UUID) ([]models.Moment, error) {
+	return _momentSvc.GetReoptimizing(eventID)
+}
+
 // ListApprovedForWall returns approved + optimized moments for the public wall, paginated.
 // Results are cached in Redis for 5 minutes; cache is busted on approval changes or Lambda completion.
 func (s *MomentService) ListApprovedForWall(eventID uuid.UUID, page, limit int) ([]models.Moment, int64, error) {
