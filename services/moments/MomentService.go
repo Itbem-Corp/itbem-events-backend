@@ -323,7 +323,7 @@ func (s *MomentService) BatchReoptimize(ids []uuid.UUID) (succeeded, skipped, fa
 		// Reset status — keep content_url, clear error_message
 		if updateErr := s.repo.UpdateMomentContent(m.ID, m.ContentURL, "pending", "", "", 0, 0, 0); updateErr != nil {
 			failed++
-			slog.Error("BatchReoptimize: failed to reset status", "moment_id", m.ID, "error", updateErr)
+			slog.Warn("BatchReoptimize: failed to reset status", "moment_id", m.ID, "error", updateErr)
 			continue
 		}
 
@@ -349,9 +349,9 @@ func (s *MomentService) BatchReoptimize(ids []uuid.UUID) (succeeded, skipped, fa
 			ForceReoptimize: true,
 		}); sqsErr != nil {
 			failed++
-			slog.Error("BatchReoptimize: SQS publish failed", "moment_id", m.ID, "error", sqsErr)
+			slog.Warn("BatchReoptimize: SQS publish failed", "moment_id", m.ID, "error", sqsErr)
 			// Roll back status to "done" so the moment is not stuck as "pending"
-			_ = s.repo.UpdateMomentContent(m.ID, m.ContentURL, "done", "", "", 0, 0, 0)
+			_ = s.repo.UpdateMomentContent(m.ID, m.ContentURL, "done", "", "", 0, 0, m.OptimizedSizeBytes)
 			continue
 		}
 
