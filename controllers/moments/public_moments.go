@@ -47,7 +47,9 @@ func InitPublicMomentsController(
 
 func getEventByIdentifier(identifier string) (*models.Event, error) {
 	var event models.Event
-	err := configuration.DB.Where("identifier = ?", identifier).First(&event).Error
+	// Accept both slug identifier and UUID so QR codes that embed the UUID
+	// remain valid even if the event's human-readable identifier is later changed.
+	err := configuration.DB.Where("identifier = ? OR CAST(id AS TEXT) = ?", identifier, identifier).First(&event).Error
 	if err != nil {
 		return nil, err
 	}
