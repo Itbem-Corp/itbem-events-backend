@@ -38,6 +38,7 @@ type Guest struct {
 	RSVPAt          *time.Time     `json:"rsvp_at"`
 	RSVPMethod      string         `json:"rsvp_method"` // "web", "app", "host"
 	RSVPTokenID     *uuid.UUID     `json:"rsvp_token_id" gorm:"type:uuid"`
-	RSVPGuestCount      int    `json:"rsvp_guest_count"`
-	DietaryRestrictions string `gorm:"type:varchar(255)" json:"dietary_restrictions"`
+	RSVPGuestCount      int        `json:"rsvp_guest_count"`
+	TableID             *uuid.UUID `gorm:"type:uuid;index" json:"table_id,omitempty"`
+	DietaryRestrictions string     `gorm:"type:varchar(255)" json:"dietary_restrictions"`
 }

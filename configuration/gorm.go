@@ -34,6 +34,7 @@ var modelsWithoutSeed = []interface{}{
 	&models.FontSet{},
 	&models.FontSetPattern{},
 	&models.Guest{},
+	&models.Table{},
 	&models.Resource{},
 	&models.EventSection{},
 	&models.InvitationLog{},
