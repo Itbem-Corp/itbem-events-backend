@@ -116,6 +116,25 @@ func (r *MomentRepo) ListForDashboard(eventID uuid.UUID) ([]models.Moment, error
 	return ListForDashboard(eventID)
 }
 
+// ListReoptimizing returns moments currently being re-optimized by Lambda.
+// Excludes moments still pointing to a raw upload path (/raw/) and moments with no URL,
+// ensuring only moments with a displayable URL are returned.
+func ListReoptimizing(eventID uuid.UUID) ([]models.Moment, error) {
+	var list []models.Moment
+	err := configuration.DB.
+		Where("event_id = ?", eventID).
+		Where("processing_status IN ?", []string{"pending", "processing"}).
+		Where("content_url != ?", "").
+		Where("content_url NOT LIKE ?", "%/raw/%").
+		Order("created_at DESC").
+		Find(&list).Error
+	return list, err
+}
+
+func (r *MomentRepo) ListReoptimizing(eventID uuid.UUID) ([]models.Moment, error) {
+	return ListReoptimizing(eventID)
+}
+
 // ListApprovedForWall returns approved + fully optimized moments for the public wall, paginated.
 // Only shows: is_approved=true AND processing_status IN ('', 'done').
 // Uses a single SQL query with COUNT(*) OVER() window function to avoid a separate COUNT query.
