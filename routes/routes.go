@@ -12,6 +12,7 @@ import (
 	"events-stocks/controllers/eventsection"
 	"events-stocks/controllers/fonts"
 	"events-stocks/controllers/guests"
+	tables "events-stocks/controllers/tables"
 	"events-stocks/controllers/health"
 	"events-stocks/controllers/invitations"
 	"events-stocks/controllers/moments"
@@ -225,6 +226,13 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	protected.PUT("/guests/:id", guests.UpdateGuest)
 	protected.DELETE("/guests/bulk", guests.BulkDeleteGuests) // Bulk delete — must be before /:id
 	protected.DELETE("/guests/:id", guests.DeleteGuest)
+
+	// ── Tables ────────────────────────────────────
+	protected.GET("/events/:id/tables", tables.ListTables)
+	protected.POST("/events/:id/tables", tables.CreateTable)
+	protected.PUT("/events/:id/tables/assign", tables.BatchAssign) // must be before /tables/:id
+	protected.PUT("/tables/:id", tables.UpdateTable)
+	protected.DELETE("/tables/:id", tables.DeleteTable)
 
 	// ── Moments ───────────────────────────────
 	protected.GET("/moments", moments.ListMoments)

@@ -9,6 +9,7 @@ import (
 	eventsectionController "events-stocks/controllers/eventsection"
 	fontsController "events-stocks/controllers/fonts"
 	guestsController "events-stocks/controllers/guests"
+	tablesController "events-stocks/controllers/tables"
 	invitationsController "events-stocks/controllers/invitations"
 	momentsController "events-stocks/controllers/moments"
 	"events-stocks/controllers/resources"
@@ -24,6 +25,7 @@ import (
 	eventsectionrepository "events-stocks/repositories/eventsectionrepository"
 	gormrepository "events-stocks/repositories/gormrepository"
 	guestrepository "events-stocks/repositories/guestrepository"
+	tablerepository "events-stocks/repositories/tablerepository"
 	invitationaccesstokenrepository "events-stocks/repositories/invitationaccesstokenrepository"
 	invitationlogrepository "events-stocks/repositories/invitationlogrepository"
 	invitationrepository "events-stocks/repositories/invitationrepository"
@@ -34,6 +36,7 @@ import (
 	clientsService "events-stocks/services/clients"
 	eventsService "events-stocks/services/events"
 	guestsService "events-stocks/services/guests"
+	tablesService "events-stocks/services/tables"
 	invitationsService "events-stocks/services/invitations"
 	momentsService "events-stocks/services/moments"
 	resourcesService "events-stocks/services/resources"
@@ -150,6 +153,8 @@ func main() {
 	eventConfigRepo  := eventconfigrepository.NewEventConfigRepo()
 	eventSectionRepo := eventsectionrepository.NewEventSectionRepo()
 	guestRepo        := guestrepository.NewGuestRepo()
+	tableRepo        := tablerepository.NewTableRepo()
+	tableSvc         := tablesService.NewTableService(tableRepo)
 	invitationRepo   := invitationrepository.NewInvitationRepo()
 	accessTokenRepo  := invitationaccesstokenrepository.NewAccessTokenRepo()
 	invLogRepo       := invitationlogrepository.NewInvitationLogRepo()
@@ -180,6 +185,7 @@ func main() {
 	eventconfigController.InitEventConfigController(eventConfigSvc)
 	eventsectionController.InitEventSectionController(eventSectSvc)
 	guestsController.InitGuestsController(guestSvc)
+	tablesController.InitTablesController(tableSvc)
 	invitationsController.InitInvitationsController(invitationSvc)
 	momentsController.InitMomentsController(momentSvc)
 	momentsController.InitPublicMomentsController(accessTokenRepo, resourceSvc)
