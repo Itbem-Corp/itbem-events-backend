@@ -119,6 +119,9 @@ func (m *mockMomentRepo) ListForDashboard(eventID uuid.UUID) ([]models.Moment, e
 func (m *mockMomentRepo) ListApprovedForWall(eventID uuid.UUID, page, limit int) ([]models.Moment, int64, error) {
 	return nil, 0, nil
 }
+func (m *mockMomentRepo) ListApprovedForWallCursor(eventID uuid.UUID, afterCreatedAt *time.Time, afterID string, limit int) ([]models.Moment, error) {
+	return nil, nil
+}
 func (m *mockMomentRepo) BulkUpdateApproval(ids []uuid.UUID, isApproved bool) error {
 	return nil
 }

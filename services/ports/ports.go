@@ -114,6 +114,9 @@ type MomentRepository interface {
 	ListInFlight(eventID uuid.UUID) ([]models.Moment, error)
 	// ListApprovedForWall returns approved+optimized moments paginated for the public wall.
 	ListApprovedForWall(eventID uuid.UUID, page, limit int) ([]models.Moment, int64, error)
+	// ListApprovedForWallCursor returns approved+optimized moments using keyset pagination.
+	// Pass afterCreatedAt=nil and afterID="" for the first page.
+	ListApprovedForWallCursor(eventID uuid.UUID, afterCreatedAt *time.Time, afterID string, limit int) ([]models.Moment, error)
 	// BulkUpdateApproval updates is_approved for multiple moments.
 	BulkUpdateApproval(ids []uuid.UUID, isApproved bool) error
 	// GetDistinctEventIDsByMomentIDs returns unique event_id values for the given moment IDs.
