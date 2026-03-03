@@ -186,3 +186,16 @@ func TestGetInFlightMoments_InvalidEventID(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
+
+func TestGetInFlightMoments_ValidEventID_Returns200(t *testing.T) {
+	svc := momentsService.NewMomentService(&mockMomentRepo{}, &mockCacheRepo{})
+	orig := momentSvc
+	momentSvc = svc
+	defer func() { momentSvc = orig }()
+
+	id := uuid.Must(uuid.NewV4())
+	c, rec := newEchoCtx("GET", "/moments/in-flight?event_id="+id.String(), "")
+	err := GetInFlightMoments(c)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
