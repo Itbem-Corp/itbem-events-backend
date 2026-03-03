@@ -46,6 +46,7 @@ func (m *mockMomentRepo) ListApprovedForWall(eventID uuid.UUID, page, limit int)
 func (m *mockMomentRepo) BulkUpdateApproval(ids []uuid.UUID, isApproved bool) error               { return nil }
 func (m *mockMomentRepo) GetDistinctEventIDsByMomentIDs(ids []uuid.UUID) ([]uuid.UUID, error)    { return nil, nil }
 func (m *mockMomentRepo) SummaryByEventIDs(eventIDs []uuid.UUID) ([]models.MomentSummary, error) { return nil, nil }
+func (m *mockMomentRepo) BulkReorder(items []models.MomentOrderItem) error                      { return nil }
 
 var _ ports.MomentRepository = (*mockMomentRepo)(nil)
 
