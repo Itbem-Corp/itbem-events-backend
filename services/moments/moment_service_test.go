@@ -451,3 +451,97 @@ func TestMomentService_UpdateMomentContent_ErrorMessage_ForwardedToRepo(t *testi
 	require.NoError(t, err)
 	assert.Equal(t, "sharp: unsupported format", capturedErrMsg, "error_message must be forwarded to the repo")
 }
+
+
+// ---------------------------------------------------------------------------
+// BatchReoptimize
+// ---------------------------------------------------------------------------
+
+func TestBatchReoptimize_SkipsNonDone(t *testing.T) {
+	eventID := uuid.Must(uuid.NewV4())
+	pending := models.Moment{ID: uuid.Must(uuid.NewV4()), EventID: &eventID, ProcessingStatus: "pending", OptimizedSizeBytes: 200_000}
+	processing := models.Moment{ID: uuid.Must(uuid.NewV4()), EventID: &eventID, ProcessingStatus: "processing", OptimizedSizeBytes: 200_000}
+
+	repo := &mockMomentRepo{
+		GetMomentsByIDsFunc: func(ids []uuid.UUID) ([]models.Moment, error) {
+			return []models.Moment{pending, processing}, nil
+		},
+	}
+	svc := NewMomentService(repo, &mockCacheRepo{})
+	succeeded, skipped, failed, err := svc.BatchReoptimize([]uuid.UUID{pending.ID, processing.ID})
+
+	require.NoError(t, err)
+	assert.Equal(t, 0, succeeded)
+	assert.Equal(t, 2, skipped)
+	assert.Equal(t, 0, failed)
+}
+
+func TestBatchReoptimize_SkipsZeroSize(t *testing.T) {
+	eventID := uuid.Must(uuid.NewV4())
+	m := models.Moment{ID: uuid.Must(uuid.NewV4()), EventID: &eventID, ProcessingStatus: "done", OptimizedSizeBytes: 0}
+
+	repo := &mockMomentRepo{
+		GetMomentsByIDsFunc: func(ids []uuid.UUID) ([]models.Moment, error) {
+			return []models.Moment{m}, nil
+		},
+	}
+	svc := NewMomentService(repo, &mockCacheRepo{})
+	succeeded, skipped, failed, err := svc.BatchReoptimize([]uuid.UUID{m.ID})
+
+	require.NoError(t, err)
+	assert.Equal(t, 0, succeeded)
+	assert.Equal(t, 1, skipped)
+	assert.Equal(t, 0, failed)
+}
+
+func TestBatchReoptimize_DeduplicatesIDs(t *testing.T) {
+	eventID := uuid.Must(uuid.NewV4())
+	id := uuid.Must(uuid.NewV4())
+	m := models.Moment{ID: id, EventID: &eventID, ProcessingStatus: "done", ContentURL: "moments/e/opt/file.jpg", OptimizedSizeBytes: 200_000}
+
+	callCount := 0
+	repo := &mockMomentRepo{
+		GetMomentsByIDsFunc: func(ids []uuid.UUID) ([]models.Moment, error) {
+			assert.Equal(t, 1, len(ids))
+			callCount++
+			return []models.Moment{m}, nil
+		},
+		UpdateMomentContentFunc: func(id uuid.UUID, contentURL, processingStatus, thumbnailURL, errorMessage string, durationMs, originalBytes, optimizedBytes int64) error {
+			return nil
+		},
+	}
+	svc := NewMomentService(repo, &mockCacheRepo{})
+	succeeded, _, _, err := svc.BatchReoptimize([]uuid.UUID{id, id})
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, callCount, "GetMomentsByIDs called once with deduplicated IDs")
+	_ = succeeded
+}
+
+func TestBatchReoptimize_ResetsStatusToPending(t *testing.T) {
+	eventID := uuid.Must(uuid.NewV4())
+	id := uuid.Must(uuid.NewV4())
+	m := models.Moment{
+		ID:                 id,
+		EventID:            &eventID,
+		ProcessingStatus:   "done",
+		ContentURL:         "moments/e/opt/file.jpg",
+		ContentType:        "image/jpeg",
+		OptimizedSizeBytes: 200_000,
+	}
+
+	var capturedStatus string
+	repo := &mockMomentRepo{
+		GetMomentsByIDsFunc: func(ids []uuid.UUID) ([]models.Moment, error) {
+			return []models.Moment{m}, nil
+		},
+		UpdateMomentContentFunc: func(id uuid.UUID, contentURL, processingStatus, thumbnailURL, errorMessage string, durationMs, originalBytes, optimizedBytes int64) error {
+			capturedStatus = processingStatus
+			return nil
+		},
+	}
+	svc := NewMomentService(repo, &mockCacheRepo{})
+	svc.BatchReoptimize([]uuid.UUID{id})
+
+	assert.Equal(t, "pending", capturedStatus, "processing_status must be reset to 'pending'")
+}

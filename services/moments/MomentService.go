@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"mime"
 	"os"
 	"path/filepath"
@@ -265,4 +266,104 @@ func (s *MomentService) BulkUpdateApproval(ids []uuid.UUID, isApproved bool) err
 		s.invalidateWallCache(eid)
 	}
 	return s.cache.Invalidate("moments", "all")
+}
+
+// BatchReoptimize re-queues a set of already-optimized moments for a second
+// Lambda pass with ForceReoptimize=true (Lambda overwrites the file in place).
+//
+// Rules:
+//   - Max 200 IDs (callers must enforce; service enforces as a safety net)
+//   - Only "done" moments with OptimizedSizeBytes > 0 are processed
+//   - Duplicate IDs are collapsed before any DB call
+//   - If processing_status is already "pending" or "processing", the moment is skipped (idempotency)
+//   - SQS failures are non-fatal — counted in `failed`, processing continues
+//
+// Returns: succeeded, skipped, failed counts plus a non-nil error only on
+// catastrophic failure (DB fetch error). Partial SQS failures are reported
+// via the failed count only.
+func (s *MomentService) BatchReoptimize(ids []uuid.UUID) (succeeded, skipped, failed int, err error) {
+	if len(ids) == 0 {
+		return
+	}
+
+	// Deduplicate
+	seen := make(map[uuid.UUID]struct{}, len(ids))
+	unique := make([]uuid.UUID, 0, len(ids))
+	for _, id := range ids {
+		if _, ok := seen[id]; !ok {
+			seen[id] = struct{}{}
+			unique = append(unique, id)
+		}
+	}
+	if len(unique) > 200 {
+		unique = unique[:200]
+	}
+
+	moments, fetchErr := s.repo.GetMomentsByIDs(unique)
+	if fetchErr != nil {
+		return 0, 0, 0, fetchErr
+	}
+
+	for _, m := range moments {
+		// Skip if already in-flight or no size data
+		if m.ProcessingStatus == "pending" || m.ProcessingStatus == "processing" || m.OptimizedSizeBytes == 0 {
+			skipped++
+			continue
+		}
+		// Only re-optimize successfully processed moments
+		if m.ProcessingStatus != "done" {
+			skipped++
+			continue
+		}
+		if m.EventID == nil {
+			skipped++
+			continue
+		}
+
+		// Reset status — keep content_url, clear error_message
+		if updateErr := s.repo.UpdateMomentContent(m.ID, m.ContentURL, "pending", "", "", 0, 0, 0); updateErr != nil {
+			failed++
+			slog.Error("BatchReoptimize: failed to reset status", "moment_id", m.ID, "error", updateErr)
+			continue
+		}
+
+		isVid := strings.HasSuffix(m.ContentURL, ".mp4") ||
+			strings.HasSuffix(m.ContentURL, ".mov") ||
+			strings.HasSuffix(m.ContentURL, ".webm")
+
+		ct := m.ContentType
+		if ct == "" {
+			ct = mime.TypeByExtension(filepath.Ext(m.ContentURL))
+			if ct == "" {
+				ct = "application/octet-stream"
+			}
+		}
+
+		if _, sqsErr := sqsrepository.PublishMediaJob(sqsrepository.MediaProcessMessage{
+			MomentID:        m.ID.String(),
+			EventID:         m.EventID.String(),
+			RawS3Key:        m.ContentURL,
+			Bucket:          os.Getenv("S3_BUCKET_NAME"),
+			ContentType:     ct,
+			IsVideo:         isVid,
+			ForceReoptimize: true,
+		}); sqsErr != nil {
+			failed++
+			slog.Error("BatchReoptimize: SQS publish failed", "moment_id", m.ID, "error", sqsErr)
+			// Roll back status to "done" so the moment is not stuck as "pending"
+			_ = s.repo.UpdateMomentContent(m.ID, m.ContentURL, "done", "", "", 0, 0, 0)
+			continue
+		}
+
+		s.invalidateWallCache(*m.EventID)
+		succeeded++
+	}
+
+	_ = s.cache.Invalidate("moments", "all")
+	return
+}
+
+// Package-level wrapper
+func BatchReoptimize(ids []uuid.UUID) (succeeded, skipped, failed int, err error) {
+	return _momentSvc.BatchReoptimize(ids)
 }
