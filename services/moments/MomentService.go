@@ -237,6 +237,21 @@ func SummaryByEventIDs(eventIDs []uuid.UUID) ([]models.MomentSummary, error) {
 	return _momentSvc.SummaryByEventIDs(eventIDs)
 }
 
+// BulkReorder sets custom display order and busts all wall caches for affected events.
+func (s *MomentService) BulkReorder(items []models.MomentOrderItem) error {
+	if err := s.repo.BulkReorder(items); err != nil {
+		return err
+	}
+	// Bust all wall caches — pattern-delete all wall keys for safety.
+	ctx := context.Background()
+	_ = s.cache.DeleteKeysByPattern(ctx, "moments:wall:*")
+	return nil
+}
+
+func BulkReorder(items []models.MomentOrderItem) error {
+	return _momentSvc.BulkReorder(items)
+}
+
 // BulkUpdateApproval updates is_approved for multiple moments by ID.
 func (s *MomentService) BulkUpdateApproval(ids []uuid.UUID, isApproved bool) error {
 	// Fetch distinct event IDs before updating so we can invalidate per-event wall caches.

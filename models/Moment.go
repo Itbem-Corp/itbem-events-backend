@@ -13,6 +13,12 @@ type MomentSummary struct {
 	PendingCount int64     `json:"pending_count"`
 }
 
+// MomentOrderItem is used by PATCH /moments/reorder to set custom display order.
+type MomentOrderItem struct {
+	ID    uuid.UUID `json:"id"`
+	Order int       `json:"order"`
+}
+
 type Moment struct {
 	ID           uuid.UUID  `gorm:"type:uuid;default:uuid_generate_v4();primaryKey" json:"id"`
 	EventID      *uuid.UUID `gorm:"type:uuid;index" json:"event_id,omitempty"`

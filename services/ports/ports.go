@@ -114,6 +114,8 @@ type MomentRepository interface {
 	GetDistinctEventIDsByMomentIDs(ids []uuid.UUID) ([]uuid.UUID, error)
 	// SummaryByEventIDs returns the pending moment count per event in one query.
 	SummaryByEventIDs(eventIDs []uuid.UUID) ([]models.MomentSummary, error)
+	// BulkReorder sets custom display order for multiple moments.
+	BulkReorder(items []models.MomentOrderItem) error
 }
 
 // UserRepository is the data access contract for User records.

@@ -84,6 +84,23 @@ func SummaryMoments(c echo.Context) error {
 	return utils.Success(c, http.StatusOK, "Summary loaded", summary)
 }
 
+// PATCH /moments/reorder
+// Sets custom display order for multiple moments.
+// Body: [{ "id": "uuid", "order": 1 }, ...]
+func ReorderMoments(c echo.Context) error {
+	var items []models.MomentOrderItem
+	if err := c.Bind(&items); err != nil {
+		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
+	}
+	if len(items) == 0 {
+		return utils.Success(c, http.StatusOK, "Nothing to reorder", nil)
+	}
+	if err := momentSvc.BulkReorder(items); err != nil {
+		return utils.Error(c, http.StatusInternalServerError, "Error reordering moments", err.Error())
+	}
+	return utils.Success(c, http.StatusOK, "Order updated", nil)
+}
+
 // GET /moments/:id
 func GetMoment(c echo.Context) error {
 	idParam := c.Param("id")

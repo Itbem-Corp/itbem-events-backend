@@ -5,6 +5,7 @@ import (
 	"events-stocks/models"
 	"events-stocks/repositories/gormrepository"
 	"github.com/gofrs/uuid"
+	"gorm.io/gorm"
 )
 
 func CreateMoment(m *models.Moment) error {
@@ -125,7 +126,9 @@ func ListApprovedForWall(eventID uuid.UUID, page, limit int) ([]models.Moment, i
 		  AND m.is_approved = true
 		  AND m.processing_status IN ('', 'done')
 		  AND m.deleted_at IS NULL
-		ORDER BY m.created_at DESC
+		ORDER BY
+		  CASE WHEN m."order" > 0 THEN m."order" ELSE 2147483647 END ASC,
+		  m.created_at DESC
 		LIMIT ? OFFSET ?
 	`, eventID, limit, offset).Scan(&rows).Error
 	if err != nil {
@@ -211,4 +214,22 @@ func SummaryByEventIDs(eventIDs []uuid.UUID) ([]models.MomentSummary, error) {
 
 func (r *MomentRepo) SummaryByEventIDs(eventIDs []uuid.UUID) ([]models.MomentSummary, error) {
 	return SummaryByEventIDs(eventIDs)
+}
+
+// BulkReorder updates the "order" field for multiple moments in a single transaction.
+func BulkReorder(items []models.MomentOrderItem) error {
+	return configuration.DB.Transaction(func(tx *gorm.DB) error {
+		for _, item := range items {
+			if err := tx.Model(&models.Moment{}).
+				Where("id = ?", item.ID).
+				Update("order", item.Order).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (r *MomentRepo) BulkReorder(items []models.MomentOrderItem) error {
+	return BulkReorder(items)
 }

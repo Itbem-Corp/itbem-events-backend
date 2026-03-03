@@ -237,6 +237,7 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	// ── Moments ───────────────────────────────
 	protected.GET("/moments", moments.ListMoments)
 	protected.GET("/moments/summary", moments.SummaryMoments)              // batch pending counts — must be before /:id
+	protected.PATCH("/moments/reorder", moments.ReorderMoments)            // bulk order — must be before /:id
 	protected.POST("/moments/bulk-approve", moments.BulkApproveRejectMoments) // must be before /:id
 	protected.GET("/moments/:id", moments.GetMoment)
 	protected.GET("/moments/:id/download", moments.DownloadMomentFile) // proxy S3 file — avoids browser CORS
