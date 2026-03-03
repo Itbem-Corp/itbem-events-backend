@@ -63,6 +63,7 @@ type mockMomentRepo struct {
 	GetMomentsByIDsFunc     func(ids []uuid.UUID) ([]models.Moment, error)
 	ListMomentsFunc         func() ([]models.Moment, error)
 	UpdateMomentContentFunc func(id uuid.UUID, contentURL, processingStatus, thumbnailURL, errorMessage string, durationMs, originalBytes, optimizedBytes int64) error
+	ListReoptimizingFunc    func(eventID uuid.UUID) ([]models.Moment, error)
 }
 
 func (m *mockMomentRepo) CreateMoment(obj *models.Moment) error {
@@ -128,6 +129,12 @@ func (m *mockMomentRepo) SummaryByEventIDs(eventIDs []uuid.UUID) ([]models.Momen
 }
 func (m *mockMomentRepo) BulkReorder(items []models.MomentOrderItem) error {
 	return nil
+}
+func (m *mockMomentRepo) ListReoptimizing(eventID uuid.UUID) ([]models.Moment, error) {
+	if m.ListReoptimizingFunc != nil {
+		return m.ListReoptimizingFunc(eventID)
+	}
+	return nil, nil
 }
 
 var _ ports.MomentRepository = (*mockMomentRepo)(nil)

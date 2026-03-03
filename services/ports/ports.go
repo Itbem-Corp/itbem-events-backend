@@ -108,6 +108,8 @@ type MomentRepository interface {
 	UpdateMomentContent(id uuid.UUID, contentURL, processingStatus, thumbnailURL, errorMessage string, durationMs, originalBytes, optimizedBytes int64) error
 	// ListForDashboard returns moments ready for admin review (excludes pending/processing).
 	ListForDashboard(eventID uuid.UUID) ([]models.Moment, error)
+	// ListReoptimizing returns pending/processing moments with an already-displayable content_url.
+	ListReoptimizing(eventID uuid.UUID) ([]models.Moment, error)
 	// ListApprovedForWall returns approved+optimized moments paginated for the public wall.
 	ListApprovedForWall(eventID uuid.UUID, page, limit int) ([]models.Moment, int64, error)
 	// BulkUpdateApproval updates is_approved for multiple moments.

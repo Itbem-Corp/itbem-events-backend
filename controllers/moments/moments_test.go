@@ -49,6 +49,7 @@ func (m *mockMomentRepo) GetDistinctEventIDsByMomentIDs(ids []uuid.UUID) ([]uuid
 func (m *mockMomentRepo) SummaryByEventIDs(eventIDs []uuid.UUID) ([]models.MomentSummary, error) { return nil, nil }
 func (m *mockMomentRepo) GetMomentsByIDs(ids []uuid.UUID) ([]models.Moment, error)             { return nil, nil }
 func (m *mockMomentRepo) BulkReorder(items []models.MomentOrderItem) error                      { return nil }
+func (m *mockMomentRepo) ListReoptimizing(eventID uuid.UUID) ([]models.Moment, error)               { return nil, nil }
 
 var _ ports.MomentRepository = (*mockMomentRepo)(nil)
 
