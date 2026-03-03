@@ -33,7 +33,8 @@ type MediaProcessMessage struct {
 	RawS3Key    string `json:"raw_s3_key"`   // e.g. "moments/{eventID}/raw/{uuid}.jpg"
 	Bucket      string `json:"bucket"`
 	ContentType string `json:"content_type"` // e.g. "image/jpeg", "video/mp4"
-	IsVideo     bool   `json:"is_video"`
+	IsVideo         bool   `json:"is_video"`
+	ForceReoptimize bool   `json:"force_reoptimize"` // when true, Lambda overwrites output key = input key
 }
 
 // VideoTranscodeMessage is kept as an alias for backward compatibility.
