@@ -333,7 +333,7 @@ func BulkApproveRejectMoments(c echo.Context) error {
 // Returns {succeeded, skipped, failed} counts.
 func BatchReoptimizeMoments(c echo.Context) error {
 	var body struct {
-		IDs []string 
+		IDs []string `json:"ids"`
 	}
 	if err := c.Bind(&body); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
