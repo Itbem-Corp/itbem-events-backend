@@ -33,7 +33,7 @@ func GetMomentsByIDs(ids []uuid.UUID) ([]models.Moment, error) {
 		return nil, nil
 	}
 	var moments []models.Moment
-	err := configuration.DB.Where("id IN ? AND deleted_at IS NULL", ids).Find(&moments).Error
+	err := configuration.DB.Find(&moments, ids).Error
 	return moments, err
 }
 
