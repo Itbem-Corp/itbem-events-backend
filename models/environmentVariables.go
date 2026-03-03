@@ -38,8 +38,10 @@ type Config struct {
 	// Media processing — separate SQS queues for images and videos (Lambda).
 	// Leave empty to disable async processing for that type.
 	// Recommended: route to separate queues for independent concurrency control.
-	SQSImageQueueURL string `required:"false"` // itbem-media-images queue
-	SQSVideoQueueURL string `required:"false"` // itbem-media-videos queue
+	// fieldToEnvVar converts camelCase to UPPER_SNAKE_CASE by inserting _ before uppercase
+	// letters that follow lowercase letters. SqsImageQueueUrl → SQS_IMAGE_QUEUE_URL.
+	SqsImageQueueUrl string `required:"false"` // itbem-media-images queue  → SQS_IMAGE_QUEUE_URL
+	SqsVideoQueueUrl string `required:"false"` // itbem-media-videos queue  → SQS_VIDEO_QUEUE_URL
 
 	// Internal API secret — used by Lambda to call PUT /api/moments/:id/content
 	// Generate with: openssl rand -hex 32

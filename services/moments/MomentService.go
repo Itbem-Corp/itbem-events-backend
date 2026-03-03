@@ -222,15 +222,23 @@ func (s *MomentService) RequeueMoment(moment *models.Moment) error {
 		}
 	}
 
-	if _, err := sqsrepository.PublishMediaJob(sqsrepository.MediaProcessMessage{
+	enqueued, err := sqsrepository.PublishMediaJob(sqsrepository.MediaProcessMessage{
 		MomentID:    moment.ID.String(),
 		EventID:     moment.EventID.String(),
 		RawS3Key:    moment.ContentURL,
 		Bucket:      os.Getenv("S3_BUCKET_NAME"),
 		ContentType: ct,
 		IsVideo:     isVideo,
-	}); err != nil {
+	})
+	if err != nil {
+		// Roll back — don't leave the moment stuck in "pending"
+		_ = s.repo.UpdateMomentContent(moment.ID, moment.ContentURL, "", "", "", 0, 0, 0)
 		return fmt.Errorf("requeue SQS publish failed: %w", err)
+	}
+	if !enqueued {
+		// SQS not configured — roll back so the moment stays visible in the dashboard
+		_ = s.repo.UpdateMomentContent(moment.ID, moment.ContentURL, "", "", "", 0, 0, 0)
+		return fmt.Errorf("requeue failed: SQS queue not configured for this media type")
 	}
 
 	// Invalidate wall cache
@@ -349,7 +357,7 @@ func (s *MomentService) BatchReoptimize(ids []uuid.UUID) (succeeded, skipped, fa
 			}
 		}
 
-		if _, sqsErr := sqsrepository.PublishMediaJob(sqsrepository.MediaProcessMessage{
+		enqueued, sqsErr := sqsrepository.PublishMediaJob(sqsrepository.MediaProcessMessage{
 			MomentID:        m.ID.String(),
 			EventID:         m.EventID.String(),
 			RawS3Key:        m.ContentURL,
@@ -357,9 +365,14 @@ func (s *MomentService) BatchReoptimize(ids []uuid.UUID) (succeeded, skipped, fa
 			ContentType:     ct,
 			IsVideo:         isVid,
 			ForceReoptimize: true,
-		}); sqsErr != nil {
+		})
+		if sqsErr != nil || !enqueued {
 			failed++
-			slog.Warn("BatchReoptimize: SQS publish failed", "moment_id", m.ID, "error", sqsErr)
+			if sqsErr != nil {
+				slog.Warn("BatchReoptimize: SQS publish failed", "moment_id", m.ID, "error", sqsErr)
+			} else {
+				slog.Warn("BatchReoptimize: SQS not configured, rolling back", "moment_id", m.ID)
+			}
 			// Roll back status to "done" so the moment is not stuck as "pending"
 			_ = s.repo.UpdateMomentContent(m.ID, m.ContentURL, "done", "", "", 0, 0, m.OptimizedSizeBytes)
 			continue

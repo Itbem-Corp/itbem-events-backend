@@ -64,7 +64,7 @@ func main() {
 	configuration.SeedBaseData()
 	configuration.InitAwsServices(cfg)
 	sqsrepository.Init(cfg.AwsRegion, cfg.S3ClientId, cfg.S3ClientSecret,
-		cfg.SQSImageQueueURL, cfg.SQSVideoQueueURL)
+		cfg.SqsImageQueueUrl, cfg.SqsVideoQueueUrl)
 
 	e := echo.New()
 	e.HideBanner = true
