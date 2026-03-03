@@ -328,6 +328,44 @@ func BulkApproveRejectMoments(c echo.Context) error {
 	return utils.Success(c, http.StatusOK, "Moments updated", nil)
 }
 
+// POST /moments/batch/reoptimize — admin action to re-queue oversized optimized moments.
+// Accepts up to 200 moment IDs. Only "done" moments with known size are processed.
+// Returns {succeeded, skipped, failed} counts.
+func BatchReoptimizeMoments(c echo.Context) error {
+	var body struct {
+		IDs []string 
+	}
+	if err := c.Bind(&body); err != nil {
+		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
+	}
+	if len(body.IDs) == 0 {
+		return utils.Error(c, http.StatusBadRequest, "No IDs provided", "")
+	}
+	if len(body.IDs) > 200 {
+		return utils.Error(c, http.StatusBadRequest, "Too many IDs (max 200)", "")
+	}
+
+	uuids := make([]uuid.UUID, 0, len(body.IDs))
+	for _, idStr := range body.IDs {
+		id, err := uuid.FromString(idStr)
+		if err != nil {
+			return utils.Error(c, http.StatusBadRequest, "Invalid UUID: "+idStr, err.Error())
+		}
+		uuids = append(uuids, id)
+	}
+
+	succeeded, skipped, failed, err := momentSvc.BatchReoptimize(uuids)
+	if err != nil {
+		return utils.Error(c, http.StatusInternalServerError, "Batch reoptimize failed", err.Error())
+	}
+
+	return utils.Success(c, http.StatusOK, "Batch reoptimize complete", map[string]int{
+		"succeeded": succeeded,
+		"skipped":   skipped,
+		"failed":    failed,
+	})
+}
+
 // presignMomentURL resolves a moment URL for the admin dashboard.
 //
 // When CDN_BASE_URL is configured (production): returns a CDN URL — no expiry,
