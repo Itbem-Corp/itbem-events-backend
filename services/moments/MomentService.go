@@ -140,6 +140,15 @@ func GetReoptimizing(eventID uuid.UUID) ([]models.Moment, error) {
 	return _momentSvc.GetReoptimizing(eventID)
 }
 
+// GetInFlight returns newly-uploaded moments currently queued for first-time Lambda processing.
+func (s *MomentService) GetInFlight(eventID uuid.UUID) ([]models.Moment, error) {
+	return s.repo.ListInFlight(eventID)
+}
+
+func GetInFlight(eventID uuid.UUID) ([]models.Moment, error) {
+	return _momentSvc.GetInFlight(eventID)
+}
+
 // ListApprovedForWall returns approved + optimized moments for the public wall, paginated.
 // Results are cached in Redis for 5 minutes; cache is busted on approval changes or Lambda completion.
 func (s *MomentService) ListApprovedForWall(eventID uuid.UUID, page, limit int) ([]models.Moment, int64, error) {

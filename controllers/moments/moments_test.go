@@ -49,7 +49,8 @@ func (m *mockMomentRepo) GetDistinctEventIDsByMomentIDs(ids []uuid.UUID) ([]uuid
 func (m *mockMomentRepo) SummaryByEventIDs(eventIDs []uuid.UUID) ([]models.MomentSummary, error) { return nil, nil }
 func (m *mockMomentRepo) GetMomentsByIDs(ids []uuid.UUID) ([]models.Moment, error)             { return nil, nil }
 func (m *mockMomentRepo) BulkReorder(items []models.MomentOrderItem) error                      { return nil }
-func (m *mockMomentRepo) ListReoptimizing(eventID uuid.UUID) ([]models.Moment, error)               { return nil, nil }
+func (m *mockMomentRepo) ListReoptimizing(eventID uuid.UUID) ([]models.Moment, error) { return nil, nil }
+func (m *mockMomentRepo) ListInFlight(eventID uuid.UUID) ([]models.Moment, error)    { return nil, nil }
 
 var _ ports.MomentRepository = (*mockMomentRepo)(nil)
 
@@ -168,6 +169,20 @@ func TestGetReoptimizingMoments_MissingEventID(t *testing.T) {
 func TestGetReoptimizingMoments_InvalidEventID(t *testing.T) {
 	c, rec := newEchoCtx("GET", "/moments/reoptimizing?event_id=not-a-uuid", "")
 	err := GetReoptimizingMoments(c)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestGetInFlightMoments_MissingEventID(t *testing.T) {
+	c, rec := newEchoCtx("GET", "/moments/in-flight", "")
+	err := GetInFlightMoments(c)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestGetInFlightMoments_InvalidEventID(t *testing.T) {
+	c, rec := newEchoCtx("GET", "/moments/in-flight?event_id=not-a-uuid", "")
+	err := GetInFlightMoments(c)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }

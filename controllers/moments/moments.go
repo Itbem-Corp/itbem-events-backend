@@ -392,6 +392,32 @@ func GetReoptimizingMoments(c echo.Context) error {
 	return utils.Success(c, http.StatusOK, "Reoptimizing moments loaded", list)
 }
 
+// GET /moments/in-flight?event_id=<uuid>
+// Returns newly-uploaded moments currently being processed by Lambda for the first time.
+// These have a raw S3 key (content_url contains /raw/) and processing_status pending/processing.
+func GetInFlightMoments(c echo.Context) error {
+	eventIDStr := c.QueryParam("event_id")
+	if eventIDStr == "" {
+		return utils.Error(c, http.StatusBadRequest, "event_id required", "")
+	}
+	eventID, err := uuid.FromString(eventIDStr)
+	if err != nil {
+		return utils.Error(c, http.StatusBadRequest, "Invalid event_id", err.Error())
+	}
+	list, err := momentSvc.GetInFlight(eventID)
+	if err != nil {
+		return utils.Error(c, http.StatusInternalServerError, "Error loading in-flight moments", err.Error())
+	}
+	cfg, ok := c.Get("config").(*models.Config)
+	if ok && cfg != nil {
+		for i := range list {
+			list[i].ContentURL = presignMomentURL(list[i].ContentURL, cfg.AwsBucketName)
+			list[i].ThumbnailURL = presignMomentURL(list[i].ThumbnailURL, cfg.AwsBucketName)
+		}
+	}
+	return utils.Success(c, http.StatusOK, "In-flight moments loaded", list)
+}
+
 // presignMomentURL resolves a moment URL for the admin dashboard.
 //
 // When CDN_BASE_URL is configured (production): returns a CDN URL — no expiry,

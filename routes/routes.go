@@ -240,6 +240,7 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	protected.PATCH("/moments/reorder", moments.ReorderMoments)            // bulk order — must be before /:id
 	protected.POST("/moments/batch/reoptimize", moments.BatchReoptimizeMoments) // must be before /:id routes
 	protected.GET("/moments/reoptimizing", moments.GetReoptimizingMoments)  // in-flight re-optimization — must be before /:id
+	protected.GET("/moments/in-flight", moments.GetInFlightMoments)         // new uploads being processed
 	protected.POST("/moments/bulk-approve", moments.BulkApproveRejectMoments) // must be before /:id
 	protected.GET("/moments/:id", moments.GetMoment)
 	protected.GET("/moments/:id/download", moments.DownloadMomentFile) // proxy S3 file — avoids browser CORS
