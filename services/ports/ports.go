@@ -110,6 +110,8 @@ type MomentRepository interface {
 	ListForDashboard(eventID uuid.UUID) ([]models.Moment, error)
 	// ListReoptimizing returns pending/processing moments with an already-displayable content_url.
 	ListReoptimizing(eventID uuid.UUID) ([]models.Moment, error)
+	// ListInFlight returns pending/processing moments that are brand-new uploads (raw S3 key).
+	ListInFlight(eventID uuid.UUID) ([]models.Moment, error)
 	// ListApprovedForWall returns approved+optimized moments paginated for the public wall.
 	ListApprovedForWall(eventID uuid.UUID, page, limit int) ([]models.Moment, int64, error)
 	// BulkUpdateApproval updates is_approved for multiple moments.

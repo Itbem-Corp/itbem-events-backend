@@ -135,6 +135,24 @@ func (r *MomentRepo) ListReoptimizing(eventID uuid.UUID) ([]models.Moment, error
 	return ListReoptimizing(eventID)
 }
 
+// ListInFlight returns newly-uploaded moments currently queued for first-time Lambda
+// processing (processing_status IN ('pending','processing') with a raw S3 key).
+// Distinct from ListReoptimizing which covers already-optimized files being re-run.
+func ListInFlight(eventID uuid.UUID) ([]models.Moment, error) {
+	var list []models.Moment
+	err := configuration.DB.
+		Where("event_id = ?", eventID).
+		Where("processing_status IN ?", []string{"pending", "processing"}).
+		Where("content_url LIKE ?", "%/raw/%").
+		Order("created_at DESC").
+		Find(&list).Error
+	return list, err
+}
+
+func (r *MomentRepo) ListInFlight(eventID uuid.UUID) ([]models.Moment, error) {
+	return ListInFlight(eventID)
+}
+
 // ListApprovedForWall returns approved + fully optimized moments for the public wall, paginated.
 // Only shows: is_approved=true AND processing_status IN ('', 'done').
 // Uses a single SQL query with COUNT(*) OVER() window function to avoid a separate COUNT query.
