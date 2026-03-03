@@ -93,7 +93,7 @@ func publishMediaJob(moment *models.Moment, rawKey, bucket, contentType string) 
 }
 
 const defaultPageLimit = 20
-const maxPageLimit = 50
+const maxPageLimit = 500
 
 // GET /api/events/:identifier/moments?page=1&limit=20
 // Returns only approved + fully optimized moments (processing_status IN ('','done')).
@@ -162,12 +162,13 @@ func ListPublicMoments(c echo.Context) error {
 	}
 
 	return utils.Success(c, http.StatusOK, "Moments loaded", map[string]interface{}{
-		"items":    items,
-		"total":    total,
-		"page":     page,
-		"limit":    limit,
-		"has_more": int64(page*limit) < total,
-		"published": true,
+		"items":      items,
+		"total":      total,
+		"page":       page,
+		"limit":      limit,
+		"has_more":   int64(page*limit) < total,
+		"published":  true,
+		"event_name": event.Name,
 	})
 }
 
