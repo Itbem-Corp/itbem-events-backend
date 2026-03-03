@@ -44,7 +44,7 @@ type Moment struct {
 	// ErrorMessage is populated by Lambda when processing fails.
 	// Empty string means no error or not yet processed.
 	ErrorMessage string         `gorm:"type:varchar(500);default:''" json:"error_message,omitempty"`
-	Order        int            `json:"order,omitempty"`
+	Order        int            `gorm:"default:0" json:"order,omitempty"`
 	CreatedAt    time.Time      `json:"created_at"`
 	UpdatedAt    time.Time      `json:"updated_at"`
 	DeletedAt    gorm.DeletedAt `gorm:"index" json:"-"`

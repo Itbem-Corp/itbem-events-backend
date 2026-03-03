@@ -7,6 +7,7 @@ import (
 	"events-stocks/services/ports"
 	momentsService "events-stocks/services/moments"
 	customValidator "events-stocks/middleware/validator"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -46,6 +47,7 @@ func (m *mockMomentRepo) ListApprovedForWall(eventID uuid.UUID, page, limit int)
 func (m *mockMomentRepo) BulkUpdateApproval(ids []uuid.UUID, isApproved bool) error               { return nil }
 func (m *mockMomentRepo) GetDistinctEventIDsByMomentIDs(ids []uuid.UUID) ([]uuid.UUID, error)    { return nil, nil }
 func (m *mockMomentRepo) SummaryByEventIDs(eventIDs []uuid.UUID) ([]models.MomentSummary, error) { return nil, nil }
+func (m *mockMomentRepo) GetMomentsByIDs(ids []uuid.UUID) ([]models.Moment, error)             { return nil, nil }
 func (m *mockMomentRepo) BulkReorder(items []models.MomentOrderItem) error                      { return nil }
 
 var _ ports.MomentRepository = (*mockMomentRepo)(nil)
@@ -127,5 +129,30 @@ func TestListMoments_Returns200(t *testing.T) {
 
 	c, rec := newEchoCtx(http.MethodGet, "/moments", "")
 	require.NoError(t, ListMoments(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestReorderMoments_EmptyBody_Returns200(t *testing.T) {
+	// Empty array — should succeed immediately without calling repo
+	svc := momentsService.NewMomentService(&mockMomentRepo{}, &mockCacheRepo{})
+	orig := momentSvc; momentSvc = svc; defer func() { momentSvc = orig }()
+	c, rec := newEchoCtx(http.MethodPatch, "/moments/reorder", `[]`)
+	require.NoError(t, ReorderMoments(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestReorderMoments_InvalidBody_Returns400(t *testing.T) {
+	c, rec := newEchoCtx(http.MethodPatch, "/moments/reorder", `{invalid json}`)
+	require.NoError(t, ReorderMoments(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestReorderMoments_ValidBody_Returns200(t *testing.T) {
+	svc := momentsService.NewMomentService(&mockMomentRepo{}, &mockCacheRepo{})
+	orig := momentSvc; momentSvc = svc; defer func() { momentSvc = orig }()
+	id := uuid.Must(uuid.NewV4())
+	body := fmt.Sprintf(`[{"id":%q,"order":1}]`, id.String())
+	c, rec := newEchoCtx(http.MethodPatch, "/moments/reorder", body)
+	require.NoError(t, ReorderMoments(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
