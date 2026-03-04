@@ -28,7 +28,7 @@ func GetEventMeta(c echo.Context) error {
 
 	event, err := eventsrepository.GetEventByIdentifier(identifier)
 	if err != nil {
-		return utils.Error(c, http.StatusNotFound, "Event not found", err.Error())
+		return utils.Error(c, http.StatusNotFound, "Event not found", "")
 	}
 
 	// Resolve cover URL from S3 path to presigned HTTPS URL.
