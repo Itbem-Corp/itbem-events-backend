@@ -34,6 +34,9 @@ func ListEvents(c echo.Context) error {
 		return utils.Error(c, http.StatusUnauthorized, "User not found", err.Error())
 	}
 
+	// Extract config once — used to resolve cover image presigned URLs.
+	cfg, cfgOK := c.Get("config").(*models.Config)
+
 	clientIDStr := c.QueryParam("client_id")
 
 	if clientIDStr != "" {
@@ -52,6 +55,12 @@ func ListEvents(c echo.Context) error {
 		if err != nil {
 			return utils.Error(c, http.StatusInternalServerError, "Error fetching events", err.Error())
 		}
+		if cfgOK && cfg != nil {
+			for i := range events {
+				events[i].CoverImageURL = resolveCoverURL(events[i].CoverImageURL, cfg.AwsBucketName)
+				events[i].CoverImageURL2 = resolveCoverURL(events[i].CoverImageURL2, cfg.AwsBucketName)
+			}
+		}
 		return utils.Success(c, http.StatusOK, "Events loaded", events)
 	}
 
@@ -61,6 +70,12 @@ func ListEvents(c echo.Context) error {
 		if err != nil {
 			return utils.Error(c, http.StatusInternalServerError, "Error fetching events", err.Error())
 		}
+		if cfgOK && cfg != nil {
+			for i := range events {
+				events[i].CoverImageURL = resolveCoverURL(events[i].CoverImageURL, cfg.AwsBucketName)
+				events[i].CoverImageURL2 = resolveCoverURL(events[i].CoverImageURL2, cfg.AwsBucketName)
+			}
+		}
 		return utils.Success(c, http.StatusOK, "Events loaded", events)
 	}
 
@@ -68,6 +83,12 @@ func ListEvents(c echo.Context) error {
 	events, err := eventsrepository.GetEventsForUser(user.ID)
 	if err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Error fetching events", err.Error())
+	}
+	if cfgOK && cfg != nil {
+		for i := range events {
+			events[i].CoverImageURL = resolveCoverURL(events[i].CoverImageURL, cfg.AwsBucketName)
+			events[i].CoverImageURL2 = resolveCoverURL(events[i].CoverImageURL2, cfg.AwsBucketName)
+		}
 	}
 	return utils.Success(c, http.StatusOK, "Events loaded", events)
 }
