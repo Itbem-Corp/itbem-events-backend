@@ -132,6 +132,10 @@ func CreateEvent(c echo.Context) error {
 		return utils.Error(c, http.StatusInternalServerError, "Error creating event", err.Error())
 	}
 
+	cfg := c.Get("config").(*models.Config)
+	event.CoverImageURL = resolveCoverURL(event.CoverImageURL, cfg.AwsBucketName)
+	event.CoverImageURL2 = resolveCoverURL(event.CoverImageURL2, cfg.AwsBucketName)
+
 	return utils.Success(c, http.StatusCreated, "Event created", event)
 }
 
@@ -155,6 +159,10 @@ func UpdateEvent(c echo.Context) error {
 	if err := eventSvc.UpdateEvent(&event); err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Error updating event", err.Error())
 	}
+
+	cfg := c.Get("config").(*models.Config)
+	event.CoverImageURL = resolveCoverURL(event.CoverImageURL, cfg.AwsBucketName)
+	event.CoverImageURL2 = resolveCoverURL(event.CoverImageURL2, cfg.AwsBucketName)
 
 	return utils.Success(c, http.StatusOK, "Event updated", event)
 }
