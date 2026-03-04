@@ -182,6 +182,7 @@ func main() {
 	fontsController.InitFontsController(cfg)
 	eventsController.InitEventsController(eventSvc)
 	eventsController.InitCoverController(resourceSvc)
+	eventsController.InitMetaController(cfg)
 	eventconfigController.InitEventConfigController(eventConfigSvc)
 	eventsectionController.InitEventSectionController(eventSectSvc)
 	guestsController.InitGuestsController(guestSvc)

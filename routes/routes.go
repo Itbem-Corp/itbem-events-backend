@@ -132,6 +132,7 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	public.GET("/events/section/:sectionId/attendees", guests.GetAttendees)    // SDUI: Graduados por sección
 	public.GET("/events/phrases", phrasesCtrl.GetPhrases)                      // Random phrases by event type
 	public.GET("/events/:identifier/page-spec", events.GetPageSpecByIdentifier) // SDUI: PageSpec por identifier (vista previa)
+	public.GET("/events/:identifier/meta", events.GetEventMeta)                 // OG meta tags: name, cover, type, date
 	public.GET("/events/:key", events.GetEvents)
 	public.POST("/events/:identifier/view", events.TrackView)                  // Incrementa contador de vistas
 	public.POST("/events/:identifier/verify-access", events.VerifyEventAccess) // Verifica contraseña
