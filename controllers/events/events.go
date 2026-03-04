@@ -56,10 +56,7 @@ func ListEvents(c echo.Context) error {
 			return utils.Error(c, http.StatusInternalServerError, "Error fetching events", err.Error())
 		}
 		if cfgOK && cfg != nil {
-			for i := range events {
-				events[i].CoverImageURL = resolveCoverURL(events[i].CoverImageURL, cfg.AwsBucketName)
-				events[i].CoverImageURL2 = resolveCoverURL(events[i].CoverImageURL2, cfg.AwsBucketName)
-			}
+			resolveEventListCovers(events, cfg.AwsBucketName)
 		}
 		return utils.Success(c, http.StatusOK, "Events loaded", events)
 	}
@@ -71,10 +68,7 @@ func ListEvents(c echo.Context) error {
 			return utils.Error(c, http.StatusInternalServerError, "Error fetching events", err.Error())
 		}
 		if cfgOK && cfg != nil {
-			for i := range events {
-				events[i].CoverImageURL = resolveCoverURL(events[i].CoverImageURL, cfg.AwsBucketName)
-				events[i].CoverImageURL2 = resolveCoverURL(events[i].CoverImageURL2, cfg.AwsBucketName)
-			}
+			resolveEventListCovers(events, cfg.AwsBucketName)
 		}
 		return utils.Success(c, http.StatusOK, "Events loaded", events)
 	}
@@ -85,10 +79,7 @@ func ListEvents(c echo.Context) error {
 		return utils.Error(c, http.StatusInternalServerError, "Error fetching events", err.Error())
 	}
 	if cfgOK && cfg != nil {
-		for i := range events {
-			events[i].CoverImageURL = resolveCoverURL(events[i].CoverImageURL, cfg.AwsBucketName)
-			events[i].CoverImageURL2 = resolveCoverURL(events[i].CoverImageURL2, cfg.AwsBucketName)
-		}
+		resolveEventListCovers(events, cfg.AwsBucketName)
 	}
 	return utils.Success(c, http.StatusOK, "Events loaded", events)
 }
@@ -132,9 +123,11 @@ func CreateEvent(c echo.Context) error {
 		return utils.Error(c, http.StatusInternalServerError, "Error creating event", err.Error())
 	}
 
-	cfg := c.Get("config").(*models.Config)
-	event.CoverImageURL = resolveCoverURL(event.CoverImageURL, cfg.AwsBucketName)
-	event.CoverImageURL2 = resolveCoverURL(event.CoverImageURL2, cfg.AwsBucketName)
+	cfg, cfgOK := c.Get("config").(*models.Config)
+	if cfgOK && cfg != nil {
+		event.CoverImageURL = resolveCoverURL(event.CoverImageURL, cfg.AwsBucketName)
+		event.CoverImageURL2 = resolveCoverURL(event.CoverImageURL2, cfg.AwsBucketName)
+	}
 
 	return utils.Success(c, http.StatusCreated, "Event created", event)
 }
@@ -160,9 +153,11 @@ func UpdateEvent(c echo.Context) error {
 		return utils.Error(c, http.StatusInternalServerError, "Error updating event", err.Error())
 	}
 
-	cfg := c.Get("config").(*models.Config)
-	event.CoverImageURL = resolveCoverURL(event.CoverImageURL, cfg.AwsBucketName)
-	event.CoverImageURL2 = resolveCoverURL(event.CoverImageURL2, cfg.AwsBucketName)
+	cfg, cfgOK := c.Get("config").(*models.Config)
+	if cfgOK && cfg != nil {
+		event.CoverImageURL = resolveCoverURL(event.CoverImageURL, cfg.AwsBucketName)
+		event.CoverImageURL2 = resolveCoverURL(event.CoverImageURL2, cfg.AwsBucketName)
+	}
 
 	return utils.Success(c, http.StatusOK, "Event updated", event)
 }

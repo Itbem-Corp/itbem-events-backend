@@ -2,6 +2,7 @@ package events
 
 import (
 	"events-stocks/configuration/constants"
+	"events-stocks/models"
 	"events-stocks/repositories/bucketrepository"
 	"strings"
 )
@@ -29,4 +30,12 @@ func resolveCoverURL(rawPath string, bucket string) string {
 		return rawPath
 	}
 	return url
+}
+
+// resolveEventListCovers resolves cover URLs for a slice of events in-place.
+func resolveEventListCovers(events []models.Event, bucket string) {
+	for i := range events {
+		events[i].CoverImageURL = resolveCoverURL(events[i].CoverImageURL, bucket)
+		events[i].CoverImageURL2 = resolveCoverURL(events[i].CoverImageURL2, bucket)
+	}
 }
