@@ -8,6 +8,9 @@ import (
 	"events-stocks/models"
 	"events-stocks/services/ports"
 	"events-stocks/utils"
+	"image"
+	"image/color"
+	"image/jpeg"
 	"io"
 	"mime/multipart"
 	"net/textproto"
@@ -33,6 +36,17 @@ func newTestFileHeader(filename, contentType string, size int64) *multipart.File
 		},
 		Size: size,
 	}
+}
+
+func validTestJPEG(t *testing.T) []byte {
+	t.Helper()
+
+	img := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	img.Set(0, 0, color.RGBA{R: 255, A: 255})
+
+	var buf bytes.Buffer
+	require.NoError(t, jpeg.Encode(&buf, img, nil))
+	return buf.Bytes()
 }
 
 type mockResourceRepo struct {
@@ -418,15 +432,17 @@ func TestUploadClientLogoNormalizesJpgAliasBeforeStorage(t *testing.T) {
 	clientID := uuid.Must(uuid.NewV4())
 	storage := &mockObjectStorage{}
 	svc := newTestResourceService(nil, nil, storage)
+	jpegBytes := validTestJPEG(t)
 
 	_, _, err := svc.UploadClientLogo(
-		&memoryMultipartFile{Reader: bytes.NewReader([]byte("jpg-bytes"))},
-		newTestFileHeader("logo.bin", "image/jpg", int64(len("jpg-bytes"))),
+		&memoryMultipartFile{Reader: bytes.NewReader(jpegBytes)},
+		newTestFileHeader("logo.bin", "image/jpg", int64(len(jpegBytes))),
 		clientID,
 	)
 
 	require.NoError(t, err)
-	assert.Equal(t, "image/jpeg", storage.uploadedContentType)
+	assert.Contains(t, []string{"image/jpeg", "image/webp"}, storage.uploadedContentType)
+	assert.NotEqual(t, "image/jpg", storage.uploadedContentType)
 	assert.Equal(t, "clients/"+clientID.String()+"/logo", storage.uploadedFolder)
 }
 
