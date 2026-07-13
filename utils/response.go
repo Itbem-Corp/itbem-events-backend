@@ -28,3 +28,12 @@ func Error(c echo.Context, status int, message string, err string) error {
 		Error:   err,
 	})
 }
+
+func ErrorWithData(c echo.Context, status int, message string, err string, data interface{}) error {
+	return c.JSON(status, APIResponse{
+		Status:  status,
+		Message: message,
+		Data:    data,
+		Error:   err,
+	})
+}

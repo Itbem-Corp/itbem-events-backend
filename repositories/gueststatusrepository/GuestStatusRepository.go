@@ -42,3 +42,24 @@ func GetGuestStatusByCode(code string) (*models.GuestStatus, error) {
 	}
 	return &status, nil
 }
+
+// GuestStatusRepo implements ports.GuestStatusRepository.
+type GuestStatusRepo struct{}
+
+func NewGuestStatusRepo() *GuestStatusRepo { return &GuestStatusRepo{} }
+
+func (r *GuestStatusRepo) CreateGuestStatus(m *models.GuestStatus) error {
+	return CreateGuestStatus(m)
+}
+func (r *GuestStatusRepo) UpdateGuestStatus(m *models.GuestStatus) error {
+	return UpdateGuestStatus(m)
+}
+func (r *GuestStatusRepo) DeleteGuestStatus(id uuid.UUID) error {
+	return DeleteGuestStatus(id)
+}
+func (r *GuestStatusRepo) GetGuestStatusByID(id uuid.UUID) (*models.GuestStatus, error) {
+	return GetGuestStatusByID(id)
+}
+func (r *GuestStatusRepo) ListGuestStatuss() ([]models.GuestStatus, error) {
+	return ListGuestStatuss()
+}

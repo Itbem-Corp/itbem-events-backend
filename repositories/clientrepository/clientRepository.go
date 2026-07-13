@@ -1,11 +1,79 @@
 package clientrepository
 
 import (
+	"events-stocks/dtos"
 	"events-stocks/models"
 	"events-stocks/repositories/gormrepository"
 	"github.com/gofrs/uuid"
+	"golang.org/x/sync/errgroup"
+	"gorm.io/gorm"
 	"strings"
 )
+
+func ListClientsPaginated(userID *uuid.UUID, query dtos.ClientsListQuery) ([]models.Client, int64, error) {
+	baseQuery := func() *gorm.DB {
+		base := gormrepository.DB().Model(&models.Client{})
+		if userID != nil {
+			// Owners and admins inherit visibility down their organization tree. Other
+			// roles intentionally remain scoped to their direct organization. DISTINCT
+			// ON keeps a direct assignment authoritative when both paths exist.
+			base = base.Joins(`JOIN (
+				WITH RECURSIVE reachable_clients AS (
+					SELECT cm.client_id, cr.code AS role_code, 0 AS depth
+					FROM client_members cm
+					JOIN client_roles cr ON cr.id = cm.client_role_id
+					WHERE cm.user_id = ? AND cm.is_active = true
+					UNION ALL
+					SELECT child.id, reachable_clients.role_code, reachable_clients.depth + 1
+					FROM clients child
+					JOIN reachable_clients ON child.parent_id = reachable_clients.client_id
+					WHERE child.deleted_at IS NULL
+						AND UPPER(reachable_clients.role_code) IN ('OWNER', 'ADMIN')
+				)
+				SELECT DISTINCT ON (client_id)
+					client_id,
+					CASE WHEN depth = 0 THEN role_code ELSE 'INHERITED_' || role_code END AS access_role
+				FROM reachable_clients
+				ORDER BY client_id, depth ASC
+			) scoped_access ON scoped_access.client_id = clients.id`, *userID)
+		}
+		if search := strings.TrimSpace(query.Search); search != "" {
+			pattern := "%" + strings.ToLower(search) + "%"
+			base = base.Where("LOWER(clients.name) LIKE ? OR LOWER(clients.code) LIKE ?", pattern, pattern)
+		}
+		return base
+	}
+
+	var total int64
+	var clients []models.Client
+	group := new(errgroup.Group)
+	group.Go(func() error {
+		return baseQuery().Distinct("clients.id").Count(&total).Error
+	})
+	group.Go(func() error {
+		queryDB := baseQuery()
+		if userID != nil {
+			queryDB = queryDB.Select("clients.*, scoped_access.access_role AS access_role")
+		}
+		return queryDB.Distinct().
+			Joins("ClientType").Joins("Parent").
+			Order("clients.name ASC").
+			Limit(query.PageSize).Offset((query.Page - 1) * query.PageSize).
+			Find(&clients).Error
+	})
+	if err := group.Wait(); err != nil {
+		return nil, 0, err
+	}
+	return clients, total, nil
+}
+
+func CountUserClientStatuses(userID uuid.UUID) (active, inactive int64, err error) {
+	err = gormrepository.DB().Model(&models.Client{}).
+		Joins("JOIN client_members cm ON cm.client_id = clients.id AND cm.user_id = ? AND cm.is_active = true", userID).
+		Select("COUNT(DISTINCT clients.id) FILTER (WHERE clients.is_active = true) AS active, COUNT(DISTINCT clients.id) FILTER (WHERE clients.is_active = false) AS inactive").
+		Row().Scan(&active, &inactive)
+	return
+}
 
 // ... (CreateClient, GetClientByID, UpdateClient, AddMember se quedan igual) ...
 
@@ -35,15 +103,11 @@ func AddMember(member *models.ClientMember) error {
 	return gormrepository.Insert(member)
 }
 
-// GetClientsByUser (Se queda igual, devuelve membresías directas)
+// GetClientsByUser is retained for legacy consumers. It delegates to the
+// scoped paginated projection so Owner/Admin inheritance is identical whether
+// the caller uses the legacy or current endpoint.
 func GetClientsByUser(userID uuid.UUID) ([]models.Client, error) {
-	var clients []models.Client
-	err := gormrepository.DB().
-		Preload("ClientType").
-		Table("clients").
-		Joins("JOIN client_members ON client_members.client_id = clients.id").
-		Where("client_members.user_id = ? AND client_members.is_active = ?", userID, true).
-		Find(&clients).Error
+	clients, _, err := ListClientsPaginated(&userID, dtos.ClientsListQuery{Page: 1, PageSize: 1000})
 	return clients, err
 }
 
@@ -117,7 +181,11 @@ func CheckAccessRecursive(userID, targetClientID uuid.UUID) (bool, string) {
 // Obtiene los sub-clientes (Hijos) de un cliente dado
 func GetChildrenClients(parentID uuid.UUID) ([]models.Client, error) {
 	var clients []models.Client
-	err := gormrepository.DB().Where("parent_id = ?", parentID).Find(&clients).Error
+	err := gormrepository.DB().
+		Preload("ClientType").
+		Preload("Parent").
+		Where("parent_id = ?", parentID).
+		Find(&clients).Error
 	return clients, err
 }
 
@@ -179,10 +247,41 @@ func GetMembers(clientID uuid.UUID) ([]models.ClientMember, error) {
 	return members, err
 }
 
+func ListMembersPage(clientID uuid.UUID, page, pageSize int, search string) ([]models.ClientMember, int64, error) {
+	baseQuery := func() *gorm.DB {
+		query := gormrepository.DB().Model(&models.ClientMember{}).
+			Joins("User").
+			Where("client_members.client_id = ? AND client_members.is_active = ?", clientID, true)
+		if normalized := strings.TrimSpace(search); normalized != "" {
+			like := "%" + strings.ToLower(normalized) + "%"
+			query = query.Where("LOWER(\"User\".first_name) LIKE ? OR LOWER(\"User\".last_name) LIKE ? OR LOWER(\"User\".email) LIKE ?", like, like, like)
+		}
+		return query
+	}
+
+	var total int64
+	var members []models.ClientMember
+	group := new(errgroup.Group)
+	group.Go(func() error {
+		return baseQuery().Count(&total).Error
+	})
+	group.Go(func() error {
+		return baseQuery().Joins("ClientRole").
+			Order("\"User\".first_name ASC, \"User\".last_name ASC").
+			Limit(pageSize).Offset((page - 1) * pageSize).Find(&members).Error
+	})
+	if err := group.Wait(); err != nil {
+		return nil, 0, err
+	}
+	return members, total, nil
+}
+
 func ListClientsByUser(userID uuid.UUID) ([]models.Client, error) {
 	var clients []models.Client
 
 	err := gormrepository.DB().
+		Preload("ClientType").
+		Preload("Parent").
 		Joins("JOIN client_members ON client_members.client_id = clients.id").
 		Where("client_members.user_id = ? AND client_members.is_active = true", userID).
 		Where("clients.deleted_at IS NULL").
@@ -223,12 +322,16 @@ type ClientRepo struct{}
 
 func NewClientRepo() *ClientRepo { return &ClientRepo{} }
 
-func (r *ClientRepo) CreateClient(client *models.Client) error   { return CreateClient(client) }
+func (r *ClientRepo) CreateClient(client *models.Client) error           { return CreateClient(client) }
 func (r *ClientRepo) GetClientByID(id uuid.UUID) (*models.Client, error) { return GetClientByID(id) }
-func (r *ClientRepo) UpdateClient(client *models.Client) error   { return UpdateClient(client) }
-func (r *ClientRepo) DeleteClient(id uuid.UUID) error             { return DeleteClient(id) }
+func (r *ClientRepo) UpdateClient(client *models.Client) error           { return UpdateClient(client) }
+func (r *ClientRepo) DeleteClient(id uuid.UUID) error                    { return DeleteClient(id) }
+func (r *ClientRepo) GetAllClients() ([]models.Client, error)            { return GetAllClients() }
 func (r *ClientRepo) GetClientsByUser(userID uuid.UUID) ([]models.Client, error) {
 	return GetClientsByUser(userID)
+}
+func (r *ClientRepo) ListClientsPaginated(userID *uuid.UUID, query dtos.ClientsListQuery) ([]models.Client, int64, error) {
+	return ListClientsPaginated(userID, query)
 }
 func (r *ClientRepo) GetChildrenClients(parentID uuid.UUID) ([]models.Client, error) {
 	return GetChildrenClients(parentID)
@@ -239,8 +342,10 @@ func (r *ClientRepo) CheckAccessRecursive(userID, targetClientID uuid.UUID) (boo
 func (r *ClientRepo) IsMember(userID, clientID uuid.UUID) (bool, string) {
 	return IsMember(userID, clientID)
 }
-func (r *ClientRepo) AddMember(member *models.ClientMember) error  { return AddMember(member) }
-func (r *ClientRepo) RemoveMember(clientID, userID uuid.UUID) error { return RemoveMember(clientID, userID) }
+func (r *ClientRepo) AddMember(member *models.ClientMember) error { return AddMember(member) }
+func (r *ClientRepo) RemoveMember(clientID, userID uuid.UUID) error {
+	return RemoveMember(clientID, userID)
+}
 func (r *ClientRepo) UpdateMemberRole(clientID, userID, newRoleID uuid.UUID) error {
 	return UpdateMemberRole(clientID, userID, newRoleID)
 }
@@ -249,6 +354,12 @@ func (r *ClientRepo) GetMemberRole(clientID, userID uuid.UUID) (*models.ClientRo
 }
 func (r *ClientRepo) GetMembers(clientID uuid.UUID) ([]models.ClientMember, error) {
 	return GetMembers(clientID)
+}
+func (r *ClientRepo) ListMembersPage(clientID uuid.UUID, page, pageSize int, search string) ([]models.ClientMember, int64, error) {
+	return ListMembersPage(clientID, page, pageSize, search)
+}
+func (r *ClientRepo) CountUserClientStatuses(userID uuid.UUID) (int64, int64, error) {
+	return CountUserClientStatuses(userID)
 }
 func (r *ClientRepo) DeleteAllMembers(clientID uuid.UUID) error { return DeleteAllMembers(clientID) }
 func (r *ClientRepo) ListClientsByUser(userID uuid.UUID) ([]models.Client, error) {

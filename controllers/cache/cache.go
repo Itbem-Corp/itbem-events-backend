@@ -2,19 +2,48 @@ package cache
 
 import (
 	"context"
-	"events-stocks/repositories/redisrepository"
+	"fmt"
+
+	"events-stocks/internal/authz"
 	"events-stocks/utils"
 	"github.com/labstack/echo/v4"
 	"net/http"
 )
 
+type adminCacheStore interface {
+	DeleteKey(ctx context.Context, key string) error
+	FlushAll(ctx context.Context) error
+}
+
+var store adminCacheStore
+
+func InitCacheController(cacheStore adminCacheStore) {
+	store = cacheStore
+}
+
+func requireStore() (adminCacheStore, error) {
+	if store == nil {
+		return nil, fmt.Errorf("cache store not configured")
+	}
+	return store, nil
+}
+
 func FlushKey(c echo.Context) error {
+	if _, err := authz.RequirePrimaryRoot(c); err != nil {
+		return authz.Respond(c, err)
+	}
+
+	cacheStore, err := requireStore()
+	if err != nil {
+		return utils.Error(c, http.StatusInternalServerError, "Cache unavailable", err.Error())
+	}
+
 	key := c.Param("key")
 	if key == "" {
 		return utils.Error(c, http.StatusBadRequest, "Key is required", "")
 	}
 
-	if err := redisrepository.DeleteKey(context.Background(), key); err != nil {
+	if err := cacheStore.DeleteKey(context.Background(), key); err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Failed to delete cache key", err.Error())
 	}
 
@@ -22,7 +51,16 @@ func FlushKey(c echo.Context) error {
 }
 
 func FlushAll(c echo.Context) error {
-	if err := redisrepository.FlushAll(context.Background()); err != nil {
+	if _, err := authz.RequirePrimaryRoot(c); err != nil {
+		return authz.Respond(c, err)
+	}
+
+	cacheStore, err := requireStore()
+	if err != nil {
+		return utils.Error(c, http.StatusInternalServerError, "Cache unavailable", err.Error())
+	}
+
+	if err := cacheStore.FlushAll(context.Background()); err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Failed to flush cache", err.Error())
 	}
 	return utils.Success(c, http.StatusOK, "Cache flushed successfully", nil)

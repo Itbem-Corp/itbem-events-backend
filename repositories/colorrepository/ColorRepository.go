@@ -38,3 +38,19 @@ func ListColors() ([]models.Color, error) {
 func CreateMultipleColors(colors []models.Color) error {
 	return gormrepository.InsertManyBatch(colors, 10)
 }
+
+// ColorRepo implements ports.ColorRepository.
+type ColorRepo struct{}
+
+func NewColorRepo() *ColorRepo { return &ColorRepo{} }
+
+func (r *ColorRepo) GetColorByID(id uuid.UUID) (*models.Color, error) {
+	return GetColorByID(id)
+}
+func (r *ColorRepo) CreateColor(color *models.Color) error { return CreateColor(color) }
+func (r *ColorRepo) UpdateColor(color *models.Color) error { return UpdateColor(color) }
+func (r *ColorRepo) DeleteColor(id uuid.UUID) error        { return DeleteColor(id) }
+func (r *ColorRepo) ListColors() ([]models.Color, error)   { return ListColors() }
+func (r *ColorRepo) CreateMultipleColors(colors []models.Color) error {
+	return CreateMultipleColors(colors)
+}

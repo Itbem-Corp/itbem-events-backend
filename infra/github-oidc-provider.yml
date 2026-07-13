@@ -1,0 +1,20 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Shared GitHub Actions OIDC provider for the EventiApp AWS account.
+
+Resources:
+  GitHubActionsOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      Tags:
+        - Key: Application
+          Value: EventiApp
+        - Key: ManagedBy
+          Value: CloudFormation
+
+Outputs:
+  GitHubOidcProviderArn:
+    Description: Pass this ARN to each repository-specific deploy-role stack.
+    Value: !Ref GitHubActionsOidcProvider

@@ -61,7 +61,7 @@ Then update: **`docs/ROUTES.md`** and **`docs/CODE_INDEX.md`**
 
 ### Step 7: Test
 ```bash
-go run server.go
+go run ./cmd/api
 ```
 
 ---
@@ -99,11 +99,11 @@ Then update: **`docs/ROUTES.md`**
 
 ### Invalidate After Mutations (in service layer)
 ```go
-return redisrepository.Invalidate("resourceType", "all")
+return s.cache.Invalidate("resourceType", "all")
 ```
 
 ### Custom Cache Keys
-See `utils/redisKeys.go` and `repositories/cacheloaderrepository/` for custom patterns.
+See `utils/redisKeys.go` and `services/cacheutil/` for custom patterns.
 
 ---
 
@@ -224,7 +224,7 @@ if s.tx != nil {
 }
 ```
 
-Wire the transactor in `server.go`:
+Wire the transactor in `internal/app/app.go`:
 ```go
 myService := myService.NewMyService(repo, cache, transactor)
 ```

@@ -2,58 +2,99 @@ package fonts
 
 import (
 	"context"
-	"encoding/json"
+	"fmt"
+
 	"events-stocks/models"
-	"events-stocks/repositories/fontrepository"
-	"events-stocks/repositories/redisrepository"
+	"events-stocks/services/cacheutil"
 	"events-stocks/utils"
 	"github.com/gofrs/uuid"
 )
 
+func fontSetPatternsCacheKey(id *uuid.UUID) string {
+	if id == nil {
+		return "all:font_set_patterns"
+	}
+	return fmt.Sprintf("font_set:%s:font_set_patterns", id.String())
+}
+
 func ListFontSetPatterns(id *uuid.UUID) ([]models.FontSetPattern, error) {
-	cacheKey := "all:font_set_patterns"
-	ctx := context.Background()
-
-	cached, err := redisrepository.GetKey(ctx, cacheKey)
-	if err == nil && cached != "" {
-		var result []models.FontSetPattern
-		if err := json.Unmarshal([]byte(cached), &result); err == nil {
-			return result, nil
-		}
+	if _fontSvc == nil {
+		return nil, fontServiceUnavailable()
 	}
-
-	data, err := fontrepository.ListFontPatterns(id)
-	if err != nil {
-		return nil, err
-	}
-
-	jsonStr, _ := json.Marshal(data)
-	_ = redisrepository.SaveKey(ctx, cacheKey, string(jsonStr), utils.CacheTTLs["fonts"])
-
-	return data, nil
+	return _fontSvc.ListFontSetPatterns(id)
 }
 
 func GetFontSetPatternByID(id uuid.UUID) (*models.FontSetPattern, error) {
-	return fontrepository.GetFontPatternByID(id)
+	if _fontSvc == nil {
+		return nil, fontServiceUnavailable()
+	}
+	return _fontSvc.GetFontSetPatternByID(id)
 }
 
 func CreateFontSetPattern(obj *models.FontSetPattern) error {
-	if err := fontrepository.CreateFontPattern(obj); err != nil {
-		return err
+	if _fontSvc == nil {
+		return fontServiceUnavailable()
 	}
-	return redisrepository.Invalidate("font_set_patterns", "all")
+	return _fontSvc.CreateFontSetPattern(obj)
 }
 
 func UpdateFontSetPattern(obj *models.FontSetPattern) error {
-	if err := fontrepository.UpdateFontPattern(obj); err != nil {
-		return err
+	if _fontSvc == nil {
+		return fontServiceUnavailable()
 	}
-	return redisrepository.Invalidate("font_set_patterns", "all")
+	return _fontSvc.UpdateFontSetPattern(obj)
 }
 
 func DeleteFontSetPattern(id uuid.UUID) error {
-	if err := fontrepository.DeleteFontPattern(id); err != nil {
+	if _fontSvc == nil {
+		return fontServiceUnavailable()
+	}
+	return _fontSvc.DeleteFontSetPattern(id)
+}
+
+func (fs *FontService) ListFontSetPatterns(id *uuid.UUID) ([]models.FontSetPattern, error) {
+	return cacheutil.GetOrLoadJSON(
+		context.Background(),
+		fs.cache,
+		fontSetPatternsCacheKey(id),
+		utils.CacheTTLs[utils.RedisFontSetKey],
+		func() ([]models.FontSetPattern, error) {
+			return fs.repo.ListFontPatterns(id)
+		},
+	)
+}
+
+func (fs *FontService) invalidateFontSetPatternCache() error {
+	if fs.cache == nil {
+		return nil
+	}
+	if err := fs.cache.DeleteKeysByPattern(context.Background(), "*font_set_patterns*"); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("font_set_patterns", "all")
+	return fs.invalidateFontSetCache()
+}
+
+func (fs *FontService) GetFontSetPatternByID(id uuid.UUID) (*models.FontSetPattern, error) {
+	return fs.repo.GetFontPatternByID(id)
+}
+
+func (fs *FontService) CreateFontSetPattern(obj *models.FontSetPattern) error {
+	if err := fs.repo.CreateFontPattern(obj); err != nil {
+		return err
+	}
+	return fs.invalidateFontSetPatternCache()
+}
+
+func (fs *FontService) UpdateFontSetPattern(obj *models.FontSetPattern) error {
+	if err := fs.repo.UpdateFontPattern(obj); err != nil {
+		return err
+	}
+	return fs.invalidateFontSetPatternCache()
+}
+
+func (fs *FontService) DeleteFontSetPattern(id uuid.UUID) error {
+	if err := fs.repo.DeleteFontPattern(id); err != nil {
+		return err
+	}
+	return fs.invalidateFontSetPatternCache()
 }

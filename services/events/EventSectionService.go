@@ -2,14 +2,16 @@ package events
 
 import (
 	"context"
-	"encoding/json"
 	"events-stocks/models"
+	"events-stocks/services/cacheutil"
 	"events-stocks/services/ports"
 	"events-stocks/utils"
+	"sort"
+
 	"github.com/gofrs/uuid"
 )
 
-// _eventSectionSvc is the package-level singleton set by server.go.
+// _eventSectionSvc is the package-level singleton set by internal/app.
 var _eventSectionSvc *EventSectionService
 
 // SetDefaultEventSectionService wires the package-level functions to the DI instance.
@@ -26,6 +28,12 @@ func UpdateEventSection(obj *models.EventSection) error {
 	return _eventSectionSvc.UpdateEventSection(obj)
 }
 func DeleteEventSection(id uuid.UUID) error { return _eventSectionSvc.DeleteEventSection(id) }
+func BulkUpdateSectionOrder(eventID uuid.UUID, updates map[uuid.UUID]int) error {
+	return _eventSectionSvc.BulkUpdateSectionOrder(eventID, updates)
+}
+func ListEventSectionsByEventID(eventID uuid.UUID) ([]models.EventSection, error) {
+	return _eventSectionSvc.ListByEventID(eventID)
+}
 
 // EventSectionService is the injectable, struct-based event section service.
 type EventSectionService struct {
@@ -38,22 +46,13 @@ func NewEventSectionService(repo ports.EventSectionRepository, cache ports.Cache
 }
 
 func (s *EventSectionService) ListEventSections() ([]models.EventSection, error) {
-	cacheKey := "all:event_sections"
-	ctx := context.Background()
-	cached, err := s.cache.GetKey(ctx, cacheKey)
-	if err == nil && cached != "" {
-		var result []models.EventSection
-		if err := json.Unmarshal([]byte(cached), &result); err == nil {
-			return result, nil
-		}
-	}
-	data, err := s.repo.ListEventSections()
-	if err != nil {
-		return nil, err
-	}
-	jsonStr, _ := json.Marshal(data)
-	_ = s.cache.SaveKey(ctx, cacheKey, string(jsonStr), utils.CacheTTLs["events"])
-	return data, nil
+	return cacheutil.GetOrLoadJSON(
+		context.Background(),
+		s.cache,
+		"all:"+utils.RedisEventSectionsKey,
+		utils.CacheTTLs[utils.RedisEventSectionsKey],
+		s.repo.ListEventSections,
+	)
 }
 
 func (s *EventSectionService) GetEventSectionByID(id uuid.UUID) (*models.EventSection, error) {
@@ -64,23 +63,55 @@ func (s *EventSectionService) CreateEventSection(obj *models.EventSection) error
 	if err := s.repo.CreateEventSection(obj); err != nil {
 		return err
 	}
-	return s.cache.Invalidate("event_sections", "all")
+	return s.invalidateEventSectionCache()
 }
 
 func (s *EventSectionService) UpdateEventSection(obj *models.EventSection) error {
 	if err := s.repo.UpdateEventSection(obj); err != nil {
 		return err
 	}
-	return s.cache.Invalidate("event_sections", "all")
+	return s.invalidateEventSectionCache()
 }
 
 func (s *EventSectionService) DeleteEventSection(id uuid.UUID) error {
 	if err := s.repo.DeleteEventSection(id); err != nil {
 		return err
 	}
-	return s.cache.Invalidate("event_sections", "all")
+	return s.invalidateEventSectionCache()
+}
+
+func (s *EventSectionService) BulkUpdateSectionOrder(eventID uuid.UUID, updates map[uuid.UUID]int) error {
+	if len(updates) == 0 {
+		return nil
+	}
+	if err := s.repo.BulkUpdateSectionOrder(eventID, updates); err != nil {
+		return err
+	}
+	return s.invalidateEventSectionCache()
 }
 
 func (s *EventSectionService) ListByEventID(eventID uuid.UUID) ([]models.EventSection, error) {
-	return s.repo.ListByEventID(eventID)
+	sections, err := s.repo.ListByEventID(eventID)
+	if err != nil {
+		return nil, err
+	}
+	sortEventSectionsByRenderOrder(sections)
+	return sections, nil
+}
+
+func (s *EventSectionService) invalidateEventSectionCache() error {
+	if s.cache == nil {
+		return nil
+	}
+	_ = s.cache.Invalidate(utils.RedisEventSectionsKey, "all")
+	return nil
+}
+
+func sortEventSectionsByRenderOrder(sections []models.EventSection) {
+	sort.SliceStable(sections, func(i, j int) bool {
+		if sections[i].Order != sections[j].Order {
+			return sections[i].Order < sections[j].Order
+		}
+		return sections[i].ID.String() < sections[j].ID.String()
+	})
 }

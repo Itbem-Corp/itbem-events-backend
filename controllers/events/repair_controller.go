@@ -3,12 +3,18 @@ package events
 import (
 	"net/http"
 
-	"events-stocks/configuration"
+	"events-stocks/internal/authz"
 	eventsService "events-stocks/services/events"
 	"events-stocks/utils"
 	"github.com/gofrs/uuid"
 	"github.com/labstack/echo/v4"
 )
+
+var repairSvc *eventsService.RepairService
+
+func InitRepairController(svc *eventsService.RepairService) {
+	repairSvc = svc
+}
 
 // RepairEvent validates and fixes event data integrity issues.
 // Route: POST /api/events/:id/repair (protected)
@@ -18,8 +24,14 @@ func RepairEvent(c echo.Context) error {
 	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid event ID", err.Error())
 	}
+	if _, _, authErr := authz.RequireEventCapability(c, eventID, authz.CapabilityEventManage); authErr != nil {
+		return authz.Respond(c, authErr)
+	}
 
-	result, err := eventsService.RepairEvent(configuration.DB, eventID)
+	if repairSvc == nil {
+		return utils.Error(c, http.StatusInternalServerError, "Repair service unavailable", "")
+	}
+	result, err := repairSvc.RepairEventByID(eventID)
 	if err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Repair failed", err.Error())
 	}

@@ -27,6 +27,7 @@ func GetDesignTemplateByID(id uuid.UUID) (*models.DesignTemplate, error) {
 		"FontSet",
 		"FontSet.Patterns",
 		"FontSet.Patterns.Font",
+		"FontSet.Patterns.Font.Resource",
 	)
 	return &model, err
 }
@@ -41,10 +42,32 @@ func ListDesignTemplates() ([]models.DesignTemplate, error) {
 			"FontSet",
 			"FontSet.Patterns",
 			"FontSet.Patterns.Font",
+			"FontSet.Patterns.Font.Resource",
 		},
 		OrderBy:  "created_at",
 		OrderDir: "DESC",
 		Filters:  map[string]interface{}{"is_active": true},
 	})
 	return list, err
+}
+
+// DesignTemplateRepo implements ports.DesignTemplateRepository.
+type DesignTemplateRepo struct{}
+
+func NewDesignTemplateRepo() *DesignTemplateRepo { return &DesignTemplateRepo{} }
+
+func (r *DesignTemplateRepo) CreateDesignTemplate(m *models.DesignTemplate) error {
+	return CreateDesignTemplate(m)
+}
+func (r *DesignTemplateRepo) UpdateDesignTemplate(m *models.DesignTemplate) error {
+	return UpdateDesignTemplate(m)
+}
+func (r *DesignTemplateRepo) DeleteDesignTemplate(id uuid.UUID) error {
+	return DeleteDesignTemplate(id)
+}
+func (r *DesignTemplateRepo) GetDesignTemplateByID(id uuid.UUID) (*models.DesignTemplate, error) {
+	return GetDesignTemplateByID(id)
+}
+func (r *DesignTemplateRepo) ListDesignTemplates() ([]models.DesignTemplate, error) {
+	return ListDesignTemplates()
 }

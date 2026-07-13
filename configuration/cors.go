@@ -2,9 +2,11 @@ package configuration
 
 import (
 	"events-stocks/models"
+	"events-stocks/utils"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -20,8 +22,8 @@ func GetCORSConfig(cfg *models.Config) echo.MiddlewareFunc {
 	}
 	if cfg.CorsAllowOrigins != "" {
 		for _, o := range strings.Split(cfg.CorsAllowOrigins, ",") {
-			if trimmed := strings.TrimSpace(o); trimmed != "" {
-				origins = append(origins, trimmed)
+			if origin := normalizeCORSOrigin(o); origin != "" {
+				origins = append(origins, origin)
 			}
 		}
 	}
@@ -33,13 +35,30 @@ func GetCORSConfig(cfg *models.Config) echo.MiddlewareFunc {
 			echo.HeaderContentType,
 			echo.HeaderAccept,
 			echo.HeaderAuthorization,
+			utils.HeaderEventAccessToken,
 		},
 		AllowMethods: []string{
 			http.MethodGet,
 			http.MethodPost,
 			http.MethodPut,
+			http.MethodPatch,
 			http.MethodDelete,
 			http.MethodOptions,
 		},
 	})
+}
+
+func normalizeCORSOrigin(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	if trimmed == "*" {
+		return trimmed
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return strings.TrimRight(trimmed, "/")
+	}
+	return parsed.Scheme + "://" + parsed.Host
 }

@@ -1,0 +1,102 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: EventiApp public API Route53 health alarm in the required us-east-1 metrics region.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [staging, prod]
+  AlertEmail:
+    Type: String
+    NoEcho: true
+    MinLength: 3
+    AllowedPattern: '^[^@\s]+@[^@\s]+\.[^@\s]+$'
+    Description: Monitored operations inbox. Its separate SNS confirmation must be accepted.
+  HealthCheckFQDN:
+    Type: String
+    AllowedPattern: '^[A-Za-z0-9.-]+$'
+    Description: Public API hostname without scheme or path.
+  HealthCheckPath:
+    Type: String
+    Default: /health
+    AllowedPattern: '^/.*$'
+  RunbookURL:
+    Type: String
+    Default: https://github.com/Itbem-Corp/itbem-events-backend/blob/main/docs/OPERATIONS.md
+    AllowedPattern: '^https://.+'
+
+Rules:
+  MustDeployInRoute53MetricsRegion:
+    Assertions:
+      - Assert: !Equals [!Ref AWS::Region, us-east-1]
+        AssertDescription: Route53 health-check metrics and their CloudWatch alarm must be deployed in us-east-1.
+
+Resources:
+  PublicHealthAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'eventiapp-backend-public-health-alerts-${Environment}'
+      DisplayName: !Sub 'EventiApp uptime ${Environment}'
+      Tags:
+        - Key: Application
+          Value: EventiApp
+        - Key: Environment
+          Value: !Ref Environment
+
+  PublicHealthEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref PublicHealthAlertTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  BackendHealthCheck:
+    Type: AWS::Route53::HealthCheck
+    Properties:
+      HealthCheckConfig:
+        Type: HTTPS
+        FullyQualifiedDomainName: !Ref HealthCheckFQDN
+        Port: 443
+        ResourcePath: !Ref HealthCheckPath
+        EnableSNI: true
+        RequestInterval: 30
+        FailureThreshold: 3
+      HealthCheckTags:
+        - Key: Name
+          Value: !Sub 'eventiapp-backend-${Environment}'
+        - Key: Application
+          Value: EventiApp
+        - Key: Environment
+          Value: !Ref Environment
+
+  BackendPublicHealthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'eventiapp-backend-public-health-${Environment}'
+      AlarmDescription: !Sub 'Public API health check is failing. Runbook: ${RunbookURL}#public-api-health-alarm'
+      Namespace: AWS/Route53
+      MetricName: HealthCheckStatus
+      Dimensions:
+        - Name: HealthCheckId
+          Value: !Ref BackendHealthCheck
+      Statistic: Minimum
+      Period: 60
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref PublicHealthAlertTopic]
+      OKActions: [!Ref PublicHealthAlertTopic]
+
+Outputs:
+  MonitoredFQDN:
+    Value: !Ref HealthCheckFQDN
+  AlertTopicArn:
+    Value: !Ref PublicHealthAlertTopic
+  AlertEmailSubscriptionArn:
+    Description: Must be an ARN, never PendingConfirmation, before production deploys.
+    Value: !Ref PublicHealthEmailSubscription
+  HealthCheckId:
+    Value: !Ref BackendHealthCheck
+  PublicHealthAlarmName:
+    Value: !Ref BackendPublicHealthAlarm

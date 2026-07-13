@@ -1,15 +1,11 @@
 # ---------- Etapa de compilación ----------
-FROM debian:bookworm-slim AS build-env
+FROM golang:1.24.3-bookworm AS build-env
 
-RUN apt-get update && apt-get install -y \
-    curl ca-certificates tar libvips libvips-dev pkg-config && \
-    curl -LO https://go.dev/dl/go1.24.3.linux-amd64.tar.gz && \
-    tar -C /usr/local -xzf go1.24.3.linux-amd64.tar.gz && \
-    ln -s /usr/local/go/bin/go /usr/bin/go
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libvips-dev pkg-config && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
-ENV PATH="/usr/local/go/bin:$PATH"
-ENV GOMAXPROCS=1
-ENV GOMEMLIMIT=256MiB
+ENV CGO_ENABLED=1
 
 WORKDIR /app
 
@@ -18,7 +14,7 @@ RUN go mod download
 
 COPY . ./
 
-RUN go build -v -trimpath -ldflags="-s -w" -o main ./server.go | tee /dev/stderr
+RUN go build -v -trimpath -ldflags="-s -w" -o main ./cmd/api | tee /dev/stderr
 
 # ---------- Etapa de ejecución ----------
 FROM debian:bookworm-slim
@@ -32,12 +28,14 @@ WORKDIR /app
 COPY --from=build-env /app/main ./
 COPY bin/sh/entrypoint.sh ./
 
-RUN chmod +x /app/entrypoint.sh
+# Windows checkouts can materialize shell scripts with CRLF. Normalize the
+# runtime copy so the image remains reproducible regardless of git autocrlf.
+RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD curl -sf http://localhost:8080/health || exit 1
+    CMD curl -sf "http://localhost:${PORT:-8080}/health" || exit 1
 
 RUN useradd -u 1000 -m appuser
 USER appuser

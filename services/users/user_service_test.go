@@ -17,16 +17,17 @@ import (
 // ---------------------------------------------------------------------------
 
 type mockUserRepo struct {
-	CreateUserFunc        func(user *models.User) error
-	UpdateUserFunc        func(user *models.User) error
-	DeleteUserFunc        func(id uuid.UUID) error
-	GetUserByIDFunc       func(id uuid.UUID) (*models.User, error)
-	GetUserByCognitoSubFunc func(sub string) (*models.User, error)
-	UpdateUserFieldsFunc  func(userID uuid.UUID, fields map[string]interface{}) error
-	ClearProfileImageFunc func(userID uuid.UUID) error
-	SetUserRootFunc       func(userID uuid.UUID, isRoot bool) error
+	CreateUserFunc            func(user *models.User) error
+	UpdateUserFunc            func(user *models.User) error
+	DeleteUserFunc            func(id uuid.UUID) error
+	GetUserByIDFunc           func(id uuid.UUID) (*models.User, error)
+	GetUserByCognitoSubFunc   func(sub string) (*models.User, error)
+	GetUserByEmailFunc        func(email string) (*models.User, error)
+	UpdateUserFieldsFunc      func(userID uuid.UUID, fields map[string]interface{}) error
+	ClearProfileImageFunc     func(userID uuid.UUID) error
+	SetUserRootFunc           func(userID uuid.UUID, isRoot bool) error
 	ListAllUsersFunc          func() ([]models.User, error)
-	ListAllUsersPaginatedFunc func(page, pageSize int) ([]models.User, int64, error)
+	ListAllUsersPaginatedFunc func(query dtos.AdminUsersListQuery) ([]models.User, int64, error)
 	SetUserActiveFunc         func(userID uuid.UUID, active bool) error
 }
 
@@ -60,6 +61,12 @@ func (m *mockUserRepo) GetUserByCognitoSub(sub string) (*models.User, error) {
 	}
 	return nil, errors.New("record not found")
 }
+func (m *mockUserRepo) GetUserByEmail(email string) (*models.User, error) {
+	if m.GetUserByEmailFunc != nil {
+		return m.GetUserByEmailFunc(email)
+	}
+	return nil, errors.New("record not found")
+}
 func (m *mockUserRepo) UpdateUserFields(userID uuid.UUID, fields map[string]interface{}) error {
 	if m.UpdateUserFieldsFunc != nil {
 		return m.UpdateUserFieldsFunc(userID, fields)
@@ -84,9 +91,9 @@ func (m *mockUserRepo) ListAllUsers() ([]models.User, error) {
 	}
 	return nil, nil
 }
-func (m *mockUserRepo) ListAllUsersPaginated(page, pageSize int) ([]models.User, int64, error) {
+func (m *mockUserRepo) ListAllUsersPaginated(query dtos.AdminUsersListQuery) ([]models.User, int64, error) {
 	if m.ListAllUsersPaginatedFunc != nil {
-		return m.ListAllUsersPaginatedFunc(page, pageSize)
+		return m.ListAllUsersPaginatedFunc(query)
 	}
 	return nil, 0, nil
 }
@@ -250,6 +257,46 @@ func TestSyncUser_ReturnsExistingUser_NoUpdate(t *testing.T) {
 	require.NotNil(t, result)
 	assert.Equal(t, userID, result.ID)
 	assert.False(t, updateFieldsCalled, "UpdateUserFields must NOT be called when data is clean")
+}
+
+func TestSyncUser_ReusesRecentProviderSync(t *testing.T) {
+	sub := "cognito-sub-cached"
+	userID := uuid.Must(uuid.NewV4())
+
+	providerCalls := 0
+	authRepo := &mockAuthRepo{
+		GetUserFunc: func(s, provider string) (*dtos.AuthUser, error) {
+			providerCalls++
+			return &dtos.AuthUser{
+				Sub:       sub,
+				Email:     "cached@example.com",
+				FirstName: "Cached",
+				LastName:  "User",
+			}, nil
+		},
+	}
+
+	userRepo := &mockUserRepo{
+		GetUserByCognitoSubFunc: func(s string) (*models.User, error) {
+			return &models.User{
+				ID:         userID,
+				CognitoSub: sub,
+				Email:      "cached@example.com",
+				FirstName:  "Cached",
+				LastName:   "User",
+			}, nil
+		},
+	}
+
+	svc := newUserService(userRepo, authRepo)
+	first, err := svc.SyncUser(sub)
+	require.NoError(t, err)
+	second, err := svc.SyncUser(sub)
+	require.NoError(t, err)
+
+	assert.Equal(t, userID, first.ID)
+	assert.Equal(t, userID, second.ID)
+	assert.Equal(t, 1, providerCalls, "provider sync should be reused inside the freshness window")
 }
 
 func TestSyncUser_UpdatesDirtyEmail(t *testing.T) {
@@ -475,6 +522,167 @@ func TestUpdateUserInformation_Success(t *testing.T) {
 
 	require.NotNil(t, savedUser)
 	assert.Equal(t, "Alice", savedUser.FirstName)
+}
+
+func TestAdminListAllUsers_NormalizesQueryAndReturnsPage(t *testing.T) {
+	userID := uuid.Must(uuid.NewV4())
+
+	var gotQuery dtos.AdminUsersListQuery
+	userRepo := &mockUserRepo{
+		ListAllUsersPaginatedFunc: func(query dtos.AdminUsersListQuery) ([]models.User, int64, error) {
+			gotQuery = query
+			return []models.User{
+				{
+					ID:        userID,
+					Email:     "ana@example.com",
+					FirstName: "Ana",
+					LastName:  "Lopez",
+					IsActive:  true,
+				},
+			}, 1, nil
+		},
+	}
+
+	svc := NewAdminUserService(userRepo, nil, nil)
+	result, err := svc.ListAllUsers(dtos.AdminUsersListQuery{
+		Page:     -3,
+		PageSize: 500,
+		Search:   "  Ana  ",
+		Status:   "ACTIVE",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, dtos.AdminUsersListQuery{Page: 1, PageSize: 50, Search: "Ana", Status: "active"}, gotQuery)
+	assert.Equal(t, 1, result.Total)
+	assert.Equal(t, 1, result.Page)
+	assert.Equal(t, 50, result.PageSize)
+	assert.Equal(t, 1, result.TotalPages)
+	require.Len(t, result.Data, 1)
+	assert.Equal(t, userID, result.Data[0].ID)
+}
+
+func TestAdminListAllUsers_PreservesNonRootScope(t *testing.T) {
+	var gotQuery dtos.AdminUsersListQuery
+	userRepo := &mockUserRepo{
+		ListAllUsersPaginatedFunc: func(query dtos.AdminUsersListQuery) ([]models.User, int64, error) {
+			gotQuery = query
+			return nil, 0, nil
+		},
+	}
+
+	_, err := NewAdminUserService(userRepo, nil, nil).ListAllUsers(dtos.AdminUsersListQuery{Status: "non_root"})
+	require.NoError(t, err)
+	assert.Equal(t, "non_root", gotQuery.Status)
+}
+
+func TestAdminUpdateUserInformation_Success(t *testing.T) {
+	userID := uuid.Must(uuid.NewV4())
+
+	var cognitoSub string
+	var cognitoAttrs map[string]string
+	authRepo := &mockAuthRepo{
+		UpdateUserFunc: func(sub string, attrs map[string]string, provider string) error {
+			cognitoSub = sub
+			cognitoAttrs = attrs
+			return nil
+		},
+	}
+
+	var savedUser *models.User
+	userRepo := &mockUserRepo{
+		GetUserByIDFunc: func(id uuid.UUID) (*models.User, error) {
+			return &models.User{ID: userID, CognitoSub: "sub", FirstName: "Old", LastName: "Name"}, nil
+		},
+		UpdateUserFunc: func(u *models.User) error {
+			savedUser = u
+			return nil
+		},
+	}
+
+	svc := NewAdminUserService(userRepo, nil, authRepo)
+	result, err := svc.UpdateUserInformation(userID, "Alice", "Smith")
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, "sub", cognitoSub)
+	assert.Equal(t, map[string]string{"given_name": "Alice", "family_name": "Smith"}, cognitoAttrs)
+	require.NotNil(t, savedUser)
+	assert.Equal(t, "Alice", savedUser.FirstName)
+	assert.Equal(t, "Smith", savedUser.LastName)
+}
+
+func TestAdminSetUserActive_ReturnsUpdatedUser(t *testing.T) {
+	userID := uuid.Must(uuid.NewV4())
+
+	var cognitoEnabled bool
+	authRepo := &mockAuthRepo{
+		SetUserEnabledFunc: func(sub string, enabled bool, provider string) error {
+			assert.Equal(t, "cognito-sub", sub)
+			assert.Equal(t, "cognito", provider)
+			cognitoEnabled = enabled
+			return nil
+		},
+	}
+
+	var savedUser *models.User
+	userRepo := &mockUserRepo{
+		GetUserByIDFunc: func(id uuid.UUID) (*models.User, error) {
+			assert.Equal(t, userID, id)
+			return &models.User{
+				ID:         userID,
+				CognitoSub: "cognito-sub",
+				Email:      "ana@example.com",
+				FirstName:  "Ana",
+				LastName:   "Lopez",
+				IsActive:   false,
+			}, nil
+		},
+		UpdateUserFunc: func(user *models.User) error {
+			savedUser = user
+			return nil
+		},
+	}
+
+	svc := NewAdminUserService(userRepo, nil, authRepo)
+	result, err := svc.SetUserActive(userID, true)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.NotNil(t, savedUser)
+	assert.True(t, cognitoEnabled)
+	assert.True(t, result.IsActive)
+	assert.True(t, savedUser.IsActive)
+	assert.Equal(t, "ana@example.com", result.Email)
+}
+
+func TestAdminDeleteUser_Success(t *testing.T) {
+	userID := uuid.Must(uuid.NewV4())
+
+	var deletedSub string
+	authRepo := &mockAuthRepo{
+		DeleteUserFunc: func(sub string, provider string) error {
+			deletedSub = sub
+			return nil
+		},
+	}
+
+	var deletedID uuid.UUID
+	userRepo := &mockUserRepo{
+		GetUserByIDFunc: func(id uuid.UUID) (*models.User, error) {
+			return &models.User{ID: userID, CognitoSub: "sub"}, nil
+		},
+		DeleteUserFunc: func(id uuid.UUID) error {
+			deletedID = id
+			return nil
+		},
+	}
+
+	svc := NewAdminUserService(userRepo, nil, authRepo)
+	err := svc.DeleteUser(userID)
+
+	require.NoError(t, err)
+	assert.Equal(t, "sub", deletedSub)
+	assert.Equal(t, userID, deletedID)
 }
 
 // ---------------------------------------------------------------------------

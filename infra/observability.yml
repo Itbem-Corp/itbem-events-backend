@@ -1,0 +1,97 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: EventiApp backend EC2 host alarms and monitored us-east-2 SNS route.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [staging, prod]
+  AlertEmail:
+    Type: String
+    NoEcho: true
+    MinLength: 3
+    AllowedPattern: '^[^@\s]+@[^@\s]+\.[^@\s]+$'
+    Description: Monitored operations inbox. Its SNS confirmation must be accepted.
+  EC2InstanceId:
+    Type: AWS::EC2::Instance::Id
+    Description: API EC2 instance ID monitored by host status alarms.
+  RunbookURL:
+    Type: String
+    Default: https://github.com/Itbem-Corp/itbem-events-backend/blob/main/docs/OPERATIONS.md
+    AllowedPattern: '^https://.+'
+
+Resources:
+  BackendAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'eventiapp-backend-alerts-${Environment}'
+      DisplayName: !Sub 'EventiApp API ${Environment}'
+      Tags:
+        - Key: Application
+          Value: EventiApp
+        - Key: Environment
+          Value: !Ref Environment
+
+  BackendAlertEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref BackendAlertTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  EC2SystemStatusAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'eventiapp-backend-ec2-system-status-${Environment}'
+      AlarmDescription: !Sub 'EC2 system status checks are failing. Runbook: ${RunbookURL}#ec2-status-alarm'
+      Namespace: AWS/EC2
+      MetricName: StatusCheckFailed_System
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref EC2InstanceId
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: breaching
+
+  EC2InstanceStatusAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'eventiapp-backend-ec2-instance-status-${Environment}'
+      AlarmDescription: !Sub 'EC2 instance status checks are failing. Runbook: ${RunbookURL}#ec2-status-alarm'
+      Namespace: AWS/EC2
+      MetricName: StatusCheckFailed_Instance
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref EC2InstanceId
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: breaching
+
+  BackendHostCompositeAlarm:
+    Type: AWS::CloudWatch::CompositeAlarm
+    Properties:
+      AlarmName: !Sub 'eventiapp-backend-host-${Environment}'
+      AlarmDescription: !Sub 'API host needs intervention. Runbook: ${RunbookURL}#ec2-status-alarm'
+      AlarmRule: !Sub >-
+        ALARM("${EC2SystemStatusAlarm}") OR
+        ALARM("${EC2InstanceStatusAlarm}")
+      AlarmActions: [!Ref BackendAlertTopic]
+      OKActions: [!Ref BackendAlertTopic]
+
+Outputs:
+  MonitoredEC2InstanceId:
+    Value: !Ref EC2InstanceId
+  AlertTopicArn:
+    Value: !Ref BackendAlertTopic
+  AlertEmailSubscriptionArn:
+    Description: Must be an ARN, never PendingConfirmation, before production deploys.
+    Value: !Ref BackendAlertEmailSubscription
+  HostAlarmName:
+    Value: !Ref BackendHostCompositeAlarm

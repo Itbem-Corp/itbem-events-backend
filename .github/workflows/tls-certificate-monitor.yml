@@ -1,0 +1,99 @@
+name: Monitor production TLS certificate
+
+on:
+  schedule:
+    - cron: '17 13 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-tls-certificate-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Test TLS and alert-route monitors
+        env:
+          PYTHONPATH: scripts
+        run: |
+          python -m unittest \
+            scripts/tests/test_check_tls_certificate.py \
+            scripts/tests/test_verify_alerting.py
+
+      - name: Require the isolated monitor boundary
+        env:
+          AWS_TLS_MONITOR_ROLE_ARN: ${{ vars.AWS_TLS_MONITOR_ROLE_ARN }}
+          TLS_MONITOR_TOPIC_ARN: ${{ vars.TLS_MONITOR_TOPIC_ARN }}
+          TLS_MONITOR_ALERT_EMAIL: ${{ secrets.TLS_MONITOR_ALERT_EMAIL }}
+        run: |
+          set -euo pipefail
+          [[ "$AWS_TLS_MONITOR_ROLE_ARN" == arn:aws*:iam::*:role/eventiapp-github-backend-tls-monitor-prod ]] || { echo "Invalid AWS_TLS_MONITOR_ROLE_ARN"; exit 1; }
+          [[ "$TLS_MONITOR_TOPIC_ARN" == arn:aws*:sns:us-east-1:*:eventiapp-backend-public-health-alerts-prod ]] || { echo "Invalid TLS_MONITOR_TOPIC_ARN"; exit 1; }
+          [[ "$TLS_MONITOR_ALERT_EMAIL" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]] || { echo "TLS_MONITOR_ALERT_EMAIL is missing or invalid"; exit 1; }
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_TLS_MONITOR_ROLE_ARN }}
+          role-session-name: eventiapp-backend-tls-monitor-${{ github.run_id }}
+          aws-region: us-east-1
+
+      - name: Require confirmed delivery before monitoring
+        env:
+          TLS_MONITOR_TOPIC_ARN: ${{ vars.TLS_MONITOR_TOPIC_ARN }}
+          TLS_MONITOR_ALERT_EMAIL: ${{ secrets.TLS_MONITOR_ALERT_EMAIL }}
+        run: |
+          set -euo pipefail
+          python3 scripts/verify_alerting.py \
+            --topic-arn "$TLS_MONITOR_TOPIC_ARN" \
+            --expected-topic-name eventiapp-backend-public-health-alerts-prod \
+            --email "$TLS_MONITOR_ALERT_EMAIL" \
+            --subscription-only
+
+      - name: Validate chain, hostname, and renewal window
+        id: tls
+        continue-on-error: true
+        env:
+          RESULT_FILE: ${{ runner.temp }}/eventiapp-production-tls.json
+        run: |
+          set -euo pipefail
+          echo "result_file=$RESULT_FILE" >> "$GITHUB_OUTPUT"
+          python3 scripts/check_tls_certificate.py \
+            --host api.eventiapp.com.mx \
+            --warning-days 30 \
+            --timeout 10 \
+            --output "$RESULT_FILE"
+
+      - name: Publish actionable TLS alert
+        if: steps.tls.outcome == 'failure'
+        env:
+          TLS_MONITOR_TOPIC_ARN: ${{ vars.TLS_MONITOR_TOPIC_ARN }}
+          RESULT_FILE: ${{ steps.tls.outputs.result_file }}
+        run: |
+          set -euo pipefail
+          test -s "$RESULT_FILE" || { echo "TLS result is missing"; exit 1; }
+          aws sns publish \
+            --region us-east-1 \
+            --topic-arn "$TLS_MONITOR_TOPIC_ARN" \
+            --subject "EventiApp production TLS certificate alert" \
+            --message "file://$RESULT_FILE"
+
+      - name: Fail after publishing TLS alert
+        if: always() && steps.tls.outcome == 'failure'
+        run: exit 1

@@ -1,10 +1,9 @@
 package services
 
 import (
-	"encoding/json"
+	"context"
 	"events-stocks/models"
-	"events-stocks/repositories/cacheloaderrepository"
-	"events-stocks/repositories/resourcerepository"
+	"events-stocks/services/cacheutil"
 	"events-stocks/utils"
 	"fmt"
 
@@ -12,35 +11,30 @@ import (
 )
 
 func ListResourceTypes() ([]models.ResourceType, error) {
-	jsonStr, err := cacheloaderrepository.CacheOrLoad(
-		utils.RedisResourceTypeKey,
-		"all",
-		utils.CacheTTLs[utils.RedisResourceTypeKey],
-		func() (string, error) {
-			data, err := resourcerepository.ListResourceTypesRaw()
-			if err != nil {
-				return "", err
-			}
-			return utils.MarshallData(data, nil)
-		},
-	)
+	if _resourceSvc == nil {
+		return nil, resourceServiceUnavailable()
+	}
+	return _resourceSvc.ListResourceTypes()
+}
 
+func (rs *ResourceService) ListResourceTypes() ([]models.ResourceType, error) {
+	repo, err := rs.requireRepo()
 	if err != nil {
-		return resourcerepository.ListResourceTypesRaw()
+		return nil, err
 	}
-
-	var result []models.ResourceType
-	if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
-		return resourcerepository.ListResourceTypesRaw()
-	}
-
-	return result, nil
+	return cacheutil.GetOrLoadJSON(
+		context.Background(),
+		rs.cache,
+		"all:"+utils.RedisResourceTypeKey,
+		utils.CacheTTLs[utils.RedisResourceTypeKey],
+		repo.ListResourceTypesRaw,
+	)
 }
 
 // ResolveResourceTypeByCode looks up a ResourceType by its code (e.g. "image")
 // and returns its UUID. Used when the caller doesn't provide resource_type_id.
 func (rs *ResourceService) ResolveResourceTypeByCode(code string) (uuid.UUID, error) {
-	types, err := ListResourceTypes()
+	types, err := rs.ListResourceTypes()
 	if err != nil {
 		return uuid.UUID{}, fmt.Errorf("failed to list resource types: %w", err)
 	}

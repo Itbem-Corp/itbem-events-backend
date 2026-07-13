@@ -17,7 +17,6 @@
 | `repositories/gormrepository/GormRepository.go` | Generic CRUD: `Insert`, `Update`, `Delete`, `FindByID`, `FindAll` |
 | `repositories/gormrepository/QueryOptions.go` | Query builder helpers (filters, pagination, preloads) |
 | `repositories/redisrepository/RedisRepository.go` | `Get`, `Set`, `Invalidate`, `FlushAll` |
-| `repositories/cacheloaderrepository/CacheLoaderRepository.go` | Auto cache loading for Redis middleware |
 | `repositories/awsrepository/S3Repository.go` | S3 upload, delete, presigned URLs |
 | `repositories/awsrepository/CognitoRepository.go` | Cognito user admin operations |
 | `repositories/bucketrepository/BucketRepository.go` | Bucket-level operations, URL helpers |

@@ -1,5 +1,5 @@
 # Local development infrastructure — PostgreSQL + Redis/Valkey
-# Does NOT run the backend binary (run that with: go run server.go)
+# Does NOT run the backend binary (run that with: go run ./cmd/api)
 #
 # Usage:
 #   docker compose up -d        # start infrastructure

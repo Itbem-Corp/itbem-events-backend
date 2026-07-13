@@ -21,7 +21,7 @@ func CreatePalette(palette *models.ColorPalette) error {
 		return ValidateError(err)
 	}
 
-	pattern := "*" + utils.RedisPaletteServiceKey + "*"
+	pattern := "*" + utils.RedisColorPalettesKey + "*"
 	if delErr := redisrepository.DeleteKeysByPattern(context.Background(), pattern); delErr != nil {
 		return delErr
 	}
@@ -32,7 +32,7 @@ func CreatePalette(palette *models.ColorPalette) error {
 func UpdatePalette(palette *models.ColorPalette) error {
 	err := gormrepository.Update(palette, palette.ID)
 	if err == nil {
-		pattern := "*" + utils.RedisPaletteServiceKey + "*"
+		pattern := "*" + utils.RedisColorPalettesKey + "*"
 		if delErr := redisrepository.DeleteKeysByPattern(context.Background(), pattern); delErr != nil {
 			return delErr
 		}
@@ -43,7 +43,7 @@ func UpdatePalette(palette *models.ColorPalette) error {
 func DeletePalette(id uuid.UUID) error {
 	err := gormrepository.Delete(id, &models.ColorPalette{})
 	if err == nil {
-		pattern := "*" + utils.RedisPaletteServiceKey + "*"
+		pattern := "*" + utils.RedisColorPalettesKey + "*"
 		if delErr := redisrepository.DeleteKeysByPattern(context.Background(), pattern); delErr != nil {
 			return delErr
 		}
@@ -59,4 +59,18 @@ func ListColorPalettes() ([]models.ColorPalette, error) {
 		OrderDir: "asc",
 	})
 	return palettes, err
+}
+
+func (r *ColorRepo) GetColorPaletteByID(id uuid.UUID) (*models.ColorPalette, error) {
+	return GetColorPaletteByID(id)
+}
+func (r *ColorRepo) CreatePalette(palette *models.ColorPalette) error {
+	return CreatePalette(palette)
+}
+func (r *ColorRepo) UpdatePalette(palette *models.ColorPalette) error {
+	return UpdatePalette(palette)
+}
+func (r *ColorRepo) DeletePalette(id uuid.UUID) error { return DeletePalette(id) }
+func (r *ColorRepo) ListColorPalettes() ([]models.ColorPalette, error) {
+	return ListColorPalettes()
 }

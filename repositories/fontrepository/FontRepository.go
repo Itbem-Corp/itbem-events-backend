@@ -10,7 +10,7 @@ const RedisServiceFontsKey = "fonts"
 
 func GetFontByID(id uuid.UUID) (*models.Font, error) {
 	var font models.Font
-	err := gormrepository.GetByID(&font, id)
+	err := gormrepository.GetByID(&font, id, "Resource")
 	return &font, err
 }
 
@@ -42,6 +42,7 @@ func ListFonts(page int, pageSize int, name string) ([]models.Font, error) {
 		Filters:  filters,
 		OrderBy:  "id",
 		OrderDir: "desc",
+		Preload:  []string{"Resource"},
 	}
 
 	if pageSize > 0 {
@@ -55,4 +56,22 @@ func ListFonts(page int, pageSize int, name string) ([]models.Font, error) {
 
 func CreateMultipleFonts(fonts []models.Font) error {
 	return gormrepository.InsertManyBatch(fonts, 10)
+}
+
+// FontRepo implements ports.FontRepository.
+type FontRepo struct{}
+
+func NewFontRepo() *FontRepo { return &FontRepo{} }
+
+func (r *FontRepo) GetFontByID(id uuid.UUID) (*models.Font, error) {
+	return GetFontByID(id)
+}
+func (r *FontRepo) CreateFont(font *models.Font) error { return CreateFont(font) }
+func (r *FontRepo) UpdateFont(font *models.Font) error { return UpdateFont(font) }
+func (r *FontRepo) DeleteFont(id uuid.UUID) error      { return DeleteFont(id) }
+func (r *FontRepo) ListFonts(page int, pageSize int, name string) ([]models.Font, error) {
+	return ListFonts(page, pageSize, name)
+}
+func (r *FontRepo) CreateMultipleFonts(fonts []models.Font) error {
+	return CreateMultipleFonts(fonts)
 }

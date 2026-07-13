@@ -1,7 +1,6 @@
 package services
 
 import (
-	"events-stocks/repositories/bucketrepository"
 	"fmt"
 	"github.com/gofrs/uuid"
 	"mime/multipart"
@@ -21,7 +20,8 @@ func (rs *ResourceService) UploadAvatar(
 
 	// 2. Usamos el nombre original del archivo
 	// (Ya no necesitamos forzar prefijos ni rutas aquí)
-	forcedFilename := header.Filename
+	// A fresh UUID key prevents name collisions and stale cached avatars.
+	forcedFilename := ""
 
 	// 3. Sanitizar y Optimizar
 	// El optimizador convertirá a .webp si es imagen, manteniendo el nombre base
@@ -29,10 +29,17 @@ func (rs *ResourceService) UploadAvatar(
 	if err != nil {
 		return "", fmt.Errorf("avatar processing failed: %w", err)
 	}
+	if err := requireImageUploadContentType(finalType); err != nil {
+		return "", fmt.Errorf("avatar processing failed: %w", err)
+	}
 
 	// 4. Subir a S3
 	// El repositorio concatenará: userFolder + "/" + finalName
-	err = bucketrepository.UploadRawBytesSimple(
+	storage, err := rs.requireStorage()
+	if err != nil {
+		return "", err
+	}
+	err = storage.UploadRawBytesSimple(
 		optimized,
 		finalName,
 		finalType,
@@ -66,5 +73,9 @@ func (rs *ResourceService) GetAvatarPresignedURL(path string) (string, error) {
 	folder := strings.Join(parts[:len(parts)-1], "/")
 
 	// Generamos URL firmada por 720 minutos (12 horas)
-	return bucketrepository.GetPresignedFileURL(filename, folder, rs.Bucket, rs.Provider, 720)
+	storage, err := rs.requireStorage()
+	if err != nil {
+		return "", err
+	}
+	return storage.GetPresignedFileURL(filename, folder, rs.Bucket, rs.Provider, 720)
 }

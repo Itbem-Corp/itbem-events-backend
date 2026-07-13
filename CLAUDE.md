@@ -150,13 +150,13 @@ Go-based events management backend built with Echo framework. Handles event crea
 go mod download
 
 # Run the server (requires .env file)
-go run server.go
+go run ./cmd/api
 
 # Build binary
-go build -o main ./server.go
+go build -o main ./cmd/api
 
 # Build with optimizations (production-like)
-go build -v -trimpath -ldflags="-s -w" -o main ./server.go
+go build -v -trimpath -ldflags="-s -w" -o main ./cmd/api
 ```
 
 ### Docker
@@ -233,10 +233,16 @@ func CreateEvent(obj *models.Event) error {
 **Controller Dependency Injection (`InitXxxController`):**
 Controllers that hold references to services use package-level init functions:
 ```go
-var guestSvc *guestService.GuestService
-func InitGuestsController(svc *guestService.GuestService) { guestSvc = svc }
+var (
+    guestSvc        *guestService.GuestService
+    eventSectionSvc *eventsService.EventSectionService
+)
+func InitGuestsController(svc *guestService.GuestService, sectionSvc *eventsService.EventSectionService) {
+    guestSvc = svc
+    eventSectionSvc = sectionSvc
+}
 ```
-Called in `server.go` after wiring repos → services.
+Called in `internal/app/app.go` after wiring repos → services.
 
 **GuestRepo Struct Pattern (interface implementation):**
 When a controller/service needs DI via an interface, wrap package-level functions in a struct:
@@ -440,7 +446,7 @@ Cache invalidation happens automatically in services after mutations. Use the pa
 return redisrepository.Invalidate("resourceType", "all")
 ```
 
-For custom cache patterns, see `repositories/cacheloaderrepository/` and `utils/redisKeys.go`.
+For custom cache patterns, see `services/cacheutil/` and `utils/redisKeys.go`.
 
 ## Deployment
 
@@ -502,4 +508,4 @@ This repository uses a modular documentation system for optimal token efficiency
   - `GET /api/invitations/ByToken/:token` — invitation data for RSVP (Echo v4 is case-sensitive: **capital B and T**)
 - Protected routes require `Authorization: Bearer <token>` header with valid Cognito JWT
 - Cache is automatically populated by middleware and stored in Echo context
-- Redis test write happens on startup (`server.go:31-34`) - can be removed in production
+- Redis is initialized on startup from `internal/app` - keep production startup free of ad-hoc test writes

@@ -89,46 +89,55 @@ func Get{{ModelName}}sByClientID(clientID uuid.UUID) ([]models.{{ModelName}}, er
 ## Service Template
 
 ```go
-package {{domain}}Service
+package {{domain}}
 
 import (
     "errors"
-    "github.com/gofrs/uuid"
+
     "events-stocks/models"
-    "events-stocks/repositories/{{domain}}repository"
-    "events-stocks/repositories/redisrepository"
+    "events-stocks/services/ports"
+    "github.com/gofrs/uuid"
 )
 
-func Create{{ModelName}}(obj *models.{{ModelName}}) error {
+type {{ModelName}}Service struct {
+    repo  ports.{{ModelName}}Repository
+    cache ports.CacheRepository
+}
+
+func New{{ModelName}}Service(repo ports.{{ModelName}}Repository, cache ports.CacheRepository) *{{ModelName}}Service {
+    return &{{ModelName}}Service{repo: repo, cache: cache}
+}
+
+func (s *{{ModelName}}Service) Create{{ModelName}}(obj *models.{{ModelName}}) error {
     if obj.Name == "" {
         return errors.New("name is required")
     }
-    if err := {{domain}}repository.Create{{ModelName}}(obj); err != nil {
+    if err := s.repo.Create{{ModelName}}(obj); err != nil {
         return err
     }
-    return redisrepository.Invalidate("{{cacheKey}}", "all")
+    return s.cache.Invalidate("{{cacheKey}}", "all")
 }
 
-func Get{{ModelName}}(id uuid.UUID) (*models.{{ModelName}}, error) {
-    return {{domain}}repository.Get{{ModelName}}ByID(id)
+func (s *{{ModelName}}Service) Get{{ModelName}}(id uuid.UUID) (*models.{{ModelName}}, error) {
+    return s.repo.Get{{ModelName}}ByID(id)
 }
 
-func Update{{ModelName}}(id uuid.UUID, obj *models.{{ModelName}}) error {
-    if err := {{domain}}repository.Update{{ModelName}}(id, obj); err != nil {
+func (s *{{ModelName}}Service) Update{{ModelName}}(obj *models.{{ModelName}}) error {
+    if err := s.repo.Update{{ModelName}}(obj); err != nil {
         return err
     }
-    return redisrepository.Invalidate("{{cacheKey}}", "all")
+    return s.cache.Invalidate("{{cacheKey}}", "all")
 }
 
-func Delete{{ModelName}}(id uuid.UUID) error {
-    if err := {{domain}}repository.Delete{{ModelName}}(id); err != nil {
+func (s *{{ModelName}}Service) Delete{{ModelName}}(id uuid.UUID) error {
+    if err := s.repo.Delete{{ModelName}}(id); err != nil {
         return err
     }
-    return redisrepository.Invalidate("{{cacheKey}}", "all")
+    return s.cache.Invalidate("{{cacheKey}}", "all")
 }
 
-func GetAll{{ModelName}}s() ([]models.{{ModelName}}, error) {
-    return {{domain}}repository.GetAll{{ModelName}}s()
+func (s *{{ModelName}}Service) List{{ModelName}}s() ([]models.{{ModelName}}, error) {
+    return s.repo.List{{ModelName}}s()
 }
 ```
 
@@ -317,5 +326,5 @@ return utils.Success(c, http.StatusOK, "message", data)
 return utils.Error(c, http.StatusBadRequest, "message", err.Error())
 
 // Cache invalidation
-return redisrepository.Invalidate("resourceType", "all")
+return s.cache.Invalidate("resourceType", "all")
 ```

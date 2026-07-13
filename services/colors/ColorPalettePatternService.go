@@ -2,58 +2,79 @@ package colors
 
 import (
 	"context"
-	"encoding/json"
+
 	"events-stocks/models"
-	"events-stocks/repositories/colorrepository"
-	"events-stocks/repositories/redisrepository"
+	"events-stocks/services/cacheutil"
 	"events-stocks/utils"
 	"github.com/gofrs/uuid"
 )
 
 func ListColorPalettePatterns() ([]models.ColorPalettePattern, error) {
-	cacheKey := "all:color_palette_patterns"
-	ctx := context.Background()
-
-	cached, err := redisrepository.GetKey(ctx, cacheKey)
-	if err == nil && cached != "" {
-		var result []models.ColorPalettePattern
-		if err := json.Unmarshal([]byte(cached), &result); err == nil {
-			return result, nil
-		}
+	if _colorSvc == nil {
+		return nil, colorServiceUnavailable()
 	}
-
-	data, err := colorrepository.ListAllPatterns()
-	if err != nil {
-		return nil, err
-	}
-
-	jsonStr, _ := json.Marshal(data)
-	_ = redisrepository.SaveKey(ctx, cacheKey, string(jsonStr), utils.CacheTTLs["colors"])
-
-	return data, nil
+	return _colorSvc.ListColorPalettePatterns()
 }
 
 func GetColorPalettePatternByID(id uuid.UUID) (*models.ColorPalettePattern, error) {
-	return colorrepository.GetColorPatternByID(id)
+	if _colorSvc == nil {
+		return nil, colorServiceUnavailable()
+	}
+	return _colorSvc.GetColorPalettePatternByID(id)
 }
 
 func CreateColorPalettePattern(obj *models.ColorPalettePattern) error {
-	if err := colorrepository.CreatePattern(obj); err != nil {
-		return err
+	if _colorSvc == nil {
+		return colorServiceUnavailable()
 	}
-	return redisrepository.Invalidate("color_palette_patterns", "all")
+	return _colorSvc.CreateColorPalettePattern(obj)
 }
 
 func UpdateColorPalettePattern(obj *models.ColorPalettePattern) error {
-	if err := colorrepository.UpdatePattern(obj); err != nil {
-		return err
+	if _colorSvc == nil {
+		return colorServiceUnavailable()
 	}
-	return redisrepository.Invalidate("color_palette_patterns", "all")
+	return _colorSvc.UpdateColorPalettePattern(obj)
 }
 
 func DeleteColorPalettePattern(id uuid.UUID) error {
-	if err := colorrepository.DeletePattern(id); err != nil {
+	if _colorSvc == nil {
+		return colorServiceUnavailable()
+	}
+	return _colorSvc.DeleteColorPalettePattern(id)
+}
+
+func (s *ColorService) ListColorPalettePatterns() ([]models.ColorPalettePattern, error) {
+	return cacheutil.GetOrLoadJSON(
+		context.Background(),
+		s.cache,
+		"all:"+utils.RedisColorPalettePatternsKey,
+		utils.CacheTTLs[utils.RedisColorPalettePatternsKey],
+		s.repo.ListAllPatterns,
+	)
+}
+
+func (s *ColorService) GetColorPalettePatternByID(id uuid.UUID) (*models.ColorPalettePattern, error) {
+	return s.repo.GetColorPatternByID(id)
+}
+
+func (s *ColorService) CreateColorPalettePattern(obj *models.ColorPalettePattern) error {
+	if err := s.repo.CreatePattern(obj); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("color_palette_patterns", "all")
+	return s.invalidatePalettePatternCatalogs()
+}
+
+func (s *ColorService) UpdateColorPalettePattern(obj *models.ColorPalettePattern) error {
+	if err := s.repo.UpdatePattern(obj); err != nil {
+		return err
+	}
+	return s.invalidatePalettePatternCatalogs()
+}
+
+func (s *ColorService) DeleteColorPalettePattern(id uuid.UUID) error {
+	if err := s.repo.DeletePattern(id); err != nil {
+		return err
+	}
+	return s.invalidatePalettePatternCatalogs()
 }

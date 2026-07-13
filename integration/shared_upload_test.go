@@ -29,7 +29,11 @@ import (
 	momentsCtrl "events-stocks/controllers/moments"
 	customValidator "events-stocks/middleware/validator"
 	"events-stocks/models"
+	"events-stocks/repositories/eventconfigrepository"
+	"events-stocks/repositories/eventsrepository"
 	invitationaccesstokenrepository "events-stocks/repositories/invitationaccesstokenrepository"
+	"events-stocks/repositories/invitationrepository"
+	"events-stocks/repositories/redisrepository"
 )
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -41,7 +45,11 @@ func sharedUploadEcho() *echo.Echo {
 	e.HideBanner = true
 	e.Validator = customValidator.New()
 	tokenRepo := invitationaccesstokenrepository.NewAccessTokenRepo()
-	momentsCtrl.InitPublicMomentsController(tokenRepo, nil)
+	eventRepo := eventsrepository.NewEventsRepo()
+	eventConfigRepo := eventconfigrepository.NewEventConfigRepo()
+	invitationRepo := invitationrepository.NewInvitationRepo()
+	uploadCounter := redisrepository.NewRedisRepo()
+	momentsCtrl.InitPublicMomentsController(tokenRepo, eventRepo, eventConfigRepo, invitationRepo, uploadCounter, nil)
 	e.GET("/api/events/:identifier/moments", momentsCtrl.ListPublicMoments)
 	e.POST("/api/events/:identifier/moments/shared", momentsCtrl.CreateSharedMoment)
 	return e
@@ -188,6 +196,16 @@ func TestCreateSharedMoment_AllUploadsDisabled_Returns403(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
 }
 
+func TestCreateSharedMoment_WallPublishedReturns403(t *testing.T) {
+	fx := setupMomentsEvent(t, sharedUploadOpts{shareEnabled: true, allowUploads: true, showWall: true})
+	e := sharedUploadEcho()
+	req := multipartNoFile(t, fmt.Sprintf("/api/events/%s/moments/shared", fx.identifier))
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "moments wall is already published")
+}
+
 func TestCreateSharedMoment_MissingFile_Returns400(t *testing.T) {
 	fx := setupMomentsEvent(t, sharedUploadOpts{shareEnabled: true, allowUploads: true})
 	e := sharedUploadEcho()
@@ -253,13 +271,18 @@ func TestListPublicMoments_WallHidden_ReturnsEmptyUnpublished(t *testing.T) {
 	data, ok := resp["data"].(map[string]interface{})
 	require.True(t, ok, "expected data object in response")
 	assert.Equal(t, false, data["published"])
+	assert.Equal(t, false, data["moments_wall_published"])
+	assert.Equal(t, false, data["allow_uploads"])
+	assert.Equal(t, false, data["share_uploads_enabled"])
 	items, _ := data["items"].([]interface{})
 	assert.Empty(t, items)
 }
 
 func TestListPublicMoments_WallEnabled_ReturnsEmptyList(t *testing.T) {
 	// ShowMomentWall=true, no moments → 200 with published=true, empty items
-	fx := setupMomentsEvent(t, sharedUploadOpts{showWall: true})
+	// Upload flags are effective public gates, so publishing the wall closes uploads
+	// even when the stored upload config is still enabled for later reuse.
+	fx := setupMomentsEvent(t, sharedUploadOpts{showWall: true, allowUploads: true, shareEnabled: true})
 	e := sharedUploadEcho()
 	req := httptest.NewRequest(http.MethodGet,
 		fmt.Sprintf("/api/events/%s/moments?page=1&limit=20", fx.identifier), nil)
@@ -272,6 +295,9 @@ func TestListPublicMoments_WallEnabled_ReturnsEmptyList(t *testing.T) {
 	data, ok := resp["data"].(map[string]interface{})
 	require.True(t, ok, "expected data object in response")
 	assert.Equal(t, true, data["published"])
+	assert.Equal(t, true, data["moments_wall_published"])
+	assert.Equal(t, false, data["allow_uploads"])
+	assert.Equal(t, false, data["share_uploads_enabled"])
 	items, _ := data["items"].([]interface{})
 	assert.Empty(t, items)
 }

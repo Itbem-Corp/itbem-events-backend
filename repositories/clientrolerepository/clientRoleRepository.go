@@ -17,14 +17,13 @@ func GetByID(id uuid.UUID) (*models.ClientRole, error) {
 	return &role, nil
 }
 
-// GetAssignableRoles devuelve roles con jerarquía igual o inferior (número mayor)
+// GetAssignableRoles devuelve roles inferiores al rol actual (número mayor).
 func GetAssignableRoles(myHierarchyLevel int) ([]models.ClientRole, error) {
 	var roles []models.ClientRole
 
-	// Si soy nivel 2 (Admin), traigo todo lo que sea >= 2 (Admin, Member, Guest)
-	// El nivel 1 (Owner) queda excluido.
+	// Un usuario no puede asignar roles de la misma o mayor jerarquía.
 	err := gormrepository.DB().
-		Where("hierarchy >= ?", myHierarchyLevel).
+		Where("hierarchy > ?", myHierarchyLevel).
 		Where("is_active = ?", true).
 		Order("hierarchy asc"). // Para que salgan ordenaditos en el select
 		Find(&roles).Error
@@ -35,7 +34,7 @@ func GetAssignableRoles(myHierarchyLevel int) ([]models.ClientRole, error) {
 // GetByCode sigue siendo necesario para saber MI nivel actual
 func GetByCode(code string) (*models.ClientRole, error) {
 	var role models.ClientRole
-	err := gormrepository.DB().Where("code = ?", code).First(&role).Error
+	err := gormrepository.DB().Where("LOWER(code) = LOWER(?)", code).First(&role).Error
 	return &role, err
 }
 

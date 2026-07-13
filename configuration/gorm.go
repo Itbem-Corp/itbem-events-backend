@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"gorm.io/driver/postgres"
@@ -25,6 +26,7 @@ var modelsWithoutSeed = []interface{}{
 	&models.Event{},
 	&models.Invitation{},
 	&models.Moment{},
+	&models.EventTable{},
 	&models.EventConfig{},
 	&models.DesignTemplate{},
 	&models.Color{},
@@ -39,9 +41,11 @@ var modelsWithoutSeed = []interface{}{
 	&models.InvitationLog{},
 	&models.InvitationAccessToken{},
 	&models.EventAnalytics{},
+	&models.EventAnalyticsRollup{},
 	&models.User{},
 	&models.EventMember{},
 	&models.ClientMember{},
+	&models.EventPhrase{},
 }
 
 var modelSeedList = []ModelSeed{
@@ -68,8 +72,12 @@ func InicializarPostgreSQL(cfg *models.Config) {
 	)
 
 	var err error
+	dbLogLevel, validLogLevel := databaseLogLevel(cfg.DbLogLevel, os.Getenv("ENV"))
+	if !validLogLevel {
+		slog.Warn("invalid DB_LOG_LEVEL; using environment default", "value", cfg.DbLogLevel)
+	}
 	DB, err = gorm.Open(postgres.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Info),
+		Logger: logger.Default.LogMode(dbLogLevel),
 	})
 	if err != nil {
 		slog.Error("postgresql open failed", "error", err)
@@ -94,6 +102,32 @@ func InicializarPostgreSQL(cfg *models.Config) {
 	slog.Info("postgresql connected")
 }
 
+// databaseLogLevel keeps verbose SQL tracing available during local
+// development without paying its formatting and output cost in production.
+// Warn mode still reports slow queries and database errors.
+func databaseLogLevel(configured, environment string) (logger.LogLevel, bool) {
+	switch strings.ToLower(strings.TrimSpace(configured)) {
+	case "silent":
+		return logger.Silent, true
+	case "error":
+		return logger.Error, true
+	case "warn", "warning":
+		return logger.Warn, true
+	case "info":
+		return logger.Info, true
+	case "":
+		if strings.TrimSpace(environment) == "" {
+			return logger.Info, true
+		}
+		return logger.Warn, true
+	default:
+		if strings.TrimSpace(environment) == "" {
+			return logger.Info, false
+		}
+		return logger.Warn, false
+	}
+}
+
 func GetAllModels() []interface{} {
 	models := make([]interface{}, 0, len(modelSeedList)+len(modelsWithoutSeed))
 
@@ -106,15 +140,49 @@ func GetAllModels() []interface{} {
 }
 
 func MigrarModelos() {
-	// Ensure uuid-ossp extension exists for uuid_generate_v4()
-	DB.Exec("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\"")
-	if err := DB.AutoMigrate(GetAllModels()...); err != nil {
+	if err := migrateModels(DB); err != nil {
 		slog.Error("model migration failed", "error", err)
 		os.Exit(1)
 	}
-	// Allow invitation_id to be NULL (needed for shared QR uploads without a personal token)
-	DB.Exec("ALTER TABLE IF EXISTS moments ALTER COLUMN invitation_id DROP NOT NULL")
 	slog.Info("models migrated")
+}
+
+// migrateModels makes startup DDL atomic and bounded. The advisory transaction
+// lock prevents two candidate deployments from migrating the same schema at
+// once, while lock_timeout ensures a busy production table fails the candidate
+// instead of stalling the active service. A failed transaction leaves the
+// previous schema intact for the still-running backend.
+func migrateModels(db *gorm.DB) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		statements := []string{
+			"SET LOCAL lock_timeout = '5s'",
+			"SET LOCAL statement_timeout = '120s'",
+			"SELECT pg_advisory_xact_lock(hashtext('eventiapp-schema-migration'))",
+			"CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\"",
+		}
+		for _, statement := range statements {
+			if err := tx.Exec(statement).Error; err != nil {
+				return fmt.Errorf("migration preflight %q: %w", statement, err)
+			}
+		}
+
+		if err := tx.AutoMigrate(GetAllModels()...); err != nil {
+			return fmt.Errorf("auto migrate: %w", err)
+		}
+		// Early worker prototypes created this table and let Postgres choose the
+		// foreign-key name. The backend now owns the shared schema and GORM creates
+		// fk_event_analytics_rollups_event with the intended update/delete policy.
+		// Remove only the redundant legacy constraint after AutoMigrate has ensured
+		// the canonical one exists; the surrounding transaction keeps this atomic.
+		if err := tx.Exec("ALTER TABLE IF EXISTS event_analytics_rollups DROP CONSTRAINT IF EXISTS event_analytics_rollups_event_id_fkey").Error; err != nil {
+			return fmt.Errorf("remove legacy analytics rollup constraint: %w", err)
+		}
+		// Allow invitation_id to be NULL (needed for shared QR uploads without a personal token).
+		if err := tx.Exec("ALTER TABLE IF EXISTS moments ALTER COLUMN invitation_id DROP NOT NULL").Error; err != nil {
+			return fmt.Errorf("relax moments invitation constraint: %w", err)
+		}
+		return nil
+	})
 }
 
 func SeedBaseData() {
@@ -122,6 +190,21 @@ func SeedBaseData() {
 		if item.SeedFunc != nil && isModelEmpty(DB, item.Model) {
 			item.SeedFunc(DB)
 		}
+	}
+	// Authorization roles are policy, not optional catalog data. This seed is
+	// idempotent and must run for existing installations as new roles are added.
+	seeds.SeedClientRoles(DB)
+	// Versioned product catalogs use stable IDs and preserve custom entries.
+	if err := seeds.SeedDesignCatalog(DB); err != nil {
+		slog.Error("required design catalog seed failed", "error", err)
+		os.Exit(1)
+	}
+	// Phrase publication is additive and must run even when production already
+	// contains rows. Gating it behind isModelEmpty would leave a partially
+	// published corpus incomplete forever.
+	if err := seeds.SeedEventPhrases(DB); err != nil {
+		slog.Error("required event phrase seed failed", "error", err)
+		os.Exit(1)
 	}
 	// SDUI: always run — idempotent, only updates sections with empty component_type
 	seeds.SeedEventSectionSDUI(DB)

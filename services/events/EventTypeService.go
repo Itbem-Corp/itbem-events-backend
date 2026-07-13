@@ -2,58 +2,106 @@ package events
 
 import (
 	"context"
-	"encoding/json"
+	"fmt"
+
 	"events-stocks/models"
-	"events-stocks/repositories/eventtyperepository"
-	"events-stocks/repositories/redisrepository"
+	"events-stocks/services/cacheutil"
+	"events-stocks/services/ports"
 	"events-stocks/utils"
 	"github.com/gofrs/uuid"
 )
 
+var _eventTypeSvc *EventTypeService
+
+func SetDefaultEventTypeService(svc *EventTypeService) { _eventTypeSvc = svc }
+
+func eventTypeServiceUnavailable() error {
+	return fmt.Errorf("event type service not initialized")
+}
+
 func ListEventTypes() ([]models.EventType, error) {
-	cacheKey := "all:event_types"
-	ctx := context.Background()
-
-	cached, err := redisrepository.GetKey(ctx, cacheKey)
-	if err == nil && cached != "" {
-		var result []models.EventType
-		if err := json.Unmarshal([]byte(cached), &result); err == nil {
-			return result, nil
-		}
+	if _eventTypeSvc == nil {
+		return nil, eventTypeServiceUnavailable()
 	}
-
-	data, err := eventtyperepository.ListEventTypes()
-	if err != nil {
-		return nil, err
-	}
-
-	jsonStr, _ := json.Marshal(data)
-	_ = redisrepository.SaveKey(ctx, cacheKey, string(jsonStr), utils.CacheTTLs["events"])
-
-	return data, nil
+	return _eventTypeSvc.ListEventTypes()
 }
 
 func GetEventTypeByID(id uuid.UUID) (*models.EventType, error) {
-	return eventtyperepository.GetEventTypeByID(id)
+	if _eventTypeSvc == nil {
+		return nil, eventTypeServiceUnavailable()
+	}
+	return _eventTypeSvc.GetEventTypeByID(id)
 }
 
 func CreateEventType(obj *models.EventType) error {
-	if err := eventtyperepository.CreateEventType(obj); err != nil {
-		return err
+	if _eventTypeSvc == nil {
+		return eventTypeServiceUnavailable()
 	}
-	return redisrepository.Invalidate("event_types", "all")
+	return _eventTypeSvc.CreateEventType(obj)
 }
 
 func UpdateEventType(obj *models.EventType) error {
-	if err := eventtyperepository.UpdateEventType(obj); err != nil {
-		return err
+	if _eventTypeSvc == nil {
+		return eventTypeServiceUnavailable()
 	}
-	return redisrepository.Invalidate("event_types", "all")
+	return _eventTypeSvc.UpdateEventType(obj)
 }
 
 func DeleteEventType(id uuid.UUID) error {
-	if err := eventtyperepository.DeleteEventType(id); err != nil {
+	if _eventTypeSvc == nil {
+		return eventTypeServiceUnavailable()
+	}
+	return _eventTypeSvc.DeleteEventType(id)
+}
+
+type EventTypeService struct {
+	repo  ports.EventTypeRepository
+	cache ports.CacheRepository
+}
+
+func NewEventTypeService(repo ports.EventTypeRepository, cache ports.CacheRepository) *EventTypeService {
+	return &EventTypeService{repo: repo, cache: cache}
+}
+
+func (s *EventTypeService) ListEventTypes() ([]models.EventType, error) {
+	return cacheutil.GetOrLoadJSON(
+		context.Background(),
+		s.cache,
+		"all:"+utils.RedisEventTypesKey,
+		utils.CacheTTLs[utils.RedisEventTypesKey],
+		s.repo.ListEventTypes,
+	)
+}
+
+func (s *EventTypeService) GetEventTypeByID(id uuid.UUID) (*models.EventType, error) {
+	return s.repo.GetEventTypeByID(id)
+}
+
+func (s *EventTypeService) CreateEventType(obj *models.EventType) error {
+	if err := s.repo.CreateEventType(obj); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("event_types", "all")
+	return s.invalidateCache()
+}
+
+func (s *EventTypeService) UpdateEventType(obj *models.EventType) error {
+	if err := s.repo.UpdateEventType(obj); err != nil {
+		return err
+	}
+	return s.invalidateCache()
+}
+
+func (s *EventTypeService) DeleteEventType(id uuid.UUID) error {
+	if err := s.repo.DeleteEventType(id); err != nil {
+		return err
+	}
+	return s.invalidateCache()
+}
+
+func (s *EventTypeService) invalidateCache() error {
+	if s.cache == nil {
+		return nil
+	}
+	_ = s.cache.Invalidate(utils.RedisEventTypesKey, "all")
+	return nil
 }

@@ -48,6 +48,8 @@ func GetInvitationByID(id uuid.UUID) (*models.Invitation, error) {
 		Preload("Event.EventConfig.DesignTemplate").
 		Preload("Event.EventConfig.DesignTemplate.ColorPalette").
 		Preload("Event.EventConfig.DesignTemplate.FontSet").
+		Preload("Event.EventConfig.ColorPalette").
+		Preload("Event.EventConfig.FontSet").
 		Where("id = ?", id).
 		First(&model).Error
 
@@ -66,6 +68,8 @@ func ListInvitations() ([]models.Invitation, error) {
 		Preload("Event.EventConfig.DesignTemplate").
 		Preload("Event.EventConfig.DesignTemplate.ColorPalette").
 		Preload("Event.EventConfig.DesignTemplate.FontSet").
+		Preload("Event.EventConfig.ColorPalette").
+		Preload("Event.EventConfig.FontSet").
 		Find(&list).Error
 	return list, err
 }
@@ -75,9 +79,9 @@ type InvitationRepo struct{}
 
 func NewInvitationRepo() *InvitationRepo { return &InvitationRepo{} }
 
-func (r *InvitationRepo) CreateInvitation(m *models.Invitation) error  { return CreateInvitation(m) }
-func (r *InvitationRepo) UpdateInvitation(m *models.Invitation) error  { return UpdateInvitation(m) }
-func (r *InvitationRepo) DeleteInvitation(id uuid.UUID) error           { return DeleteInvitation(id) }
+func (r *InvitationRepo) CreateInvitation(m *models.Invitation) error { return CreateInvitation(m) }
+func (r *InvitationRepo) UpdateInvitation(m *models.Invitation) error { return UpdateInvitation(m) }
+func (r *InvitationRepo) DeleteInvitation(id uuid.UUID) error         { return DeleteInvitation(id) }
 func (r *InvitationRepo) GetInvitationByID(id uuid.UUID) (*models.Invitation, error) {
 	return GetInvitationByID(id)
 }

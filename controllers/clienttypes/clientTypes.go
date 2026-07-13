@@ -1,6 +1,7 @@
 package clienttypes
 
 import (
+	"events-stocks/dtos"
 	"events-stocks/services/clienttypes"
 	"events-stocks/utils"
 	"github.com/labstack/echo/v4"
@@ -25,5 +26,5 @@ func ListClientTypes(c echo.Context) error {
 		return utils.Error(c, http.StatusInternalServerError, "Error fetching client types", err.Error())
 	}
 
-	return utils.Success(c, http.StatusOK, "Allowed client types", types)
+	return utils.Success(c, http.StatusOK, "Allowed client types", dtos.NewClientTypeResponses(types))
 }

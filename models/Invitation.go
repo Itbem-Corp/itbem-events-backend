@@ -10,7 +10,7 @@ type Invitation struct {
 	ID                      uuid.UUID      `gorm:"type:uuid;default:uuid_generate_v4();primaryKey" json:"id"`
 	EventID                 uuid.UUID      `gorm:"type:uuid;index" json:"event_id"`
 	Event                   Event          `gorm:"foreignKey:EventID" json:"event,omitempty" validate:"-"`
-	Type                    string         `json:"type"`    // e.g., "formal", "casual", etc.
+	Type                    string         `json:"type"`     // e.g., "formal", "casual", etc.
 	SubType                 string         `json:"sub_type"` // e.g., "family", "friend", "vip"
 	InvitationEmailSent     bool           `json:"invitation_email_sent"`
 	InvitationWhatsAppSent  bool           `json:"invitation_whatsapp_sent"`

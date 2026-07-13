@@ -1,9 +1,9 @@
 package services
 
 import (
-	"events-stocks/repositories/bucketrepository"
 	"fmt"
 	"github.com/gofrs/uuid"
+	"log/slog"
 	"mime/multipart"
 )
 
@@ -16,15 +16,25 @@ func (rs *ResourceService) UploadClientLogo(file multipart.File, header *multipa
 	if err != nil {
 		return "", "", err
 	}
+	if err := requireImageUploadContentType(contentType); err != nil {
+		return "", "", err
+	}
 
 	// Subida física al bucket
-	err = bucketrepository.UploadRawBytesSimple(content, filename, contentType, folder, rs.Bucket, rs.Provider)
+	storage, err := rs.requireStorage()
 	if err != nil {
+		return "", "", err
+	}
+	err = storage.UploadRawBytesSimple(content, filename, contentType, folder, rs.Bucket, rs.Provider)
+	if err != nil {
+		if cleanupErr := storage.DeleteFile(filename, folder, rs.Bucket, rs.Provider); cleanupErr != nil {
+			slog.Error("client logo upload rollback failed", "client_id", clientID, "filename", filename, "error", cleanupErr)
+		}
 		return "", "", err
 	}
 
 	// Generamos URL firmada para respuesta inmediata
-	url, _ := bucketrepository.GetPresignedFileURL(filename, folder, rs.Bucket, rs.Provider, 720)
+	url, _ := storage.GetPresignedFileURL(filename, folder, rs.Bucket, rs.Provider, 720)
 
 	// Retornamos el NOMBRE (ej: "ad9e2e0c...webp") y la URL
 	return filename, url, nil
@@ -36,6 +46,10 @@ func (rs *ResourceService) GetClientLogoURL(clientID uuid.UUID, logoName string)
 		return ""
 	}
 	folder := fmt.Sprintf("clients/%s/logo", clientID)
-	url, _ := bucketrepository.GetPresignedFileURL(logoName, folder, rs.Bucket, rs.Provider, 720)
+	storage, err := rs.requireStorage()
+	if err != nil {
+		return ""
+	}
+	url, _ := storage.GetPresignedFileURL(logoName, folder, rs.Bucket, rs.Provider, 720)
 	return url
 }

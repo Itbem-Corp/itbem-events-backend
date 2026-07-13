@@ -1,0 +1,200 @@
+name: Provision backend observability
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment-scoped deploy role and alert recipient
+        required: true
+        type: choice
+        options: [staging, prod]
+      health_check_fqdn:
+        description: Public API hostname without scheme or path
+        required: true
+        type: string
+      ec2_instance_id:
+        description: API EC2 instance ID for us-east-2 host status alarms
+        required: true
+        type: string
+      confirm:
+        description: Create or update host and public-health alerting stacks
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-observability-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Test fail-closed alert verifier
+        env:
+          PYTHONPATH: scripts
+        run: |
+          python -m unittest \
+            scripts/tests/test_verify_alerting.py \
+            scripts/tests/test_check_existing_observability_routes.py
+
+  provision:
+    needs: validate
+    if: inputs.confirm == true && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Require the environment observability boundary
+        env:
+          AWS_OBSERVABILITY_DEPLOY_ROLE_ARN: ${{ vars.AWS_OBSERVABILITY_DEPLOY_ROLE_ARN }}
+          AWS_OBSERVABILITY_CLOUDFORMATION_ROLE_ARN: ${{ vars.AWS_OBSERVABILITY_CLOUDFORMATION_ROLE_ARN }}
+          DEPLOYMENT_ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$AWS_OBSERVABILITY_DEPLOY_ROLE_ARN" == arn:aws*:iam::*:role/eventiapp-github-backend-obs-${DEPLOYMENT_ENVIRONMENT} ]] || {
+            echo "Invalid AWS_OBSERVABILITY_DEPLOY_ROLE_ARN" >&2
+            exit 1
+          }
+          [[ "$AWS_OBSERVABILITY_CLOUDFORMATION_ROLE_ARN" == arn:aws*:iam::*:role/eventiapp-cfn-backend-obs-${DEPLOYMENT_ENVIRONMENT} ]] || {
+            echo "Invalid AWS_OBSERVABILITY_CLOUDFORMATION_ROLE_ARN" >&2
+            exit 1
+          }
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_OBSERVABILITY_DEPLOY_ROLE_ARN }}
+          role-session-name: eventiapp-backend-observability-${{ github.run_id }}
+          aws-region: us-east-2
+
+      - name: Require an explicit monitored recipient
+        env:
+          BACKEND_ALERT_EMAIL: ${{ secrets.BACKEND_ALERT_EMAIL }}
+          HEALTH_CHECK_FQDN: ${{ inputs.health_check_fqdn }}
+          EC2_INSTANCE_ID: ${{ inputs.ec2_instance_id }}
+        run: |
+          set -euo pipefail
+          [[ "$BACKEND_ALERT_EMAIL" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]] || {
+            echo "BACKEND_ALERT_EMAIL must be a monitored environment secret" >&2
+            exit 1
+          }
+          [[ "$HEALTH_CHECK_FQDN" != http* && "$HEALTH_CHECK_FQDN" != */* ]] || {
+            echo "health_check_fqdn must contain only the public hostname" >&2
+            exit 1
+          }
+          [[ "$EC2_INSTANCE_ID" =~ ^i-[0-9a-f]{8,17}$ ]] || {
+            echo "ec2_instance_id must be an explicit EC2 instance ID" >&2
+            exit 1
+          }
+
+      - name: Refuse replacement of an existing confirmed route
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          BACKEND_ALERT_EMAIL: ${{ secrets.BACKEND_ALERT_EMAIL }}
+        run: |
+          set -euo pipefail
+          python3 scripts/check_existing_observability_routes.py \
+            --environment "$ENVIRONMENT" \
+            --email "$BACKEND_ALERT_EMAIL"
+
+      - name: Provision us-east-2 host alarm route
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          BACKEND_ALERT_EMAIL: ${{ secrets.BACKEND_ALERT_EMAIL }}
+          EC2_INSTANCE_ID: ${{ inputs.ec2_instance_id }}
+          CLOUDFORMATION_ROLE_ARN: ${{ vars.AWS_OBSERVABILITY_CLOUDFORMATION_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          aws cloudformation deploy \
+            --stack-name "eventiapp-backend-${ENVIRONMENT}-observability" \
+            --template-file infra/observability.yml \
+            --role-arn "${CLOUDFORMATION_ROLE_ARN}" \
+            --region us-east-2 \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              Environment="${ENVIRONMENT}" \
+              AlertEmail="${BACKEND_ALERT_EMAIL}" \
+              EC2InstanceId="${EC2_INSTANCE_ID}"
+
+      - name: Provision us-east-1 public API health route
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          BACKEND_ALERT_EMAIL: ${{ secrets.BACKEND_ALERT_EMAIL }}
+          HEALTH_CHECK_FQDN: ${{ inputs.health_check_fqdn }}
+          CLOUDFORMATION_ROLE_ARN: ${{ vars.AWS_OBSERVABILITY_CLOUDFORMATION_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          aws cloudformation deploy \
+            --stack-name "eventiapp-backend-${ENVIRONMENT}-public-health-observability" \
+            --template-file infra/public-health-observability.yml \
+            --role-arn "${CLOUDFORMATION_ROLE_ARN}" \
+            --region us-east-1 \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              Environment="${ENVIRONMENT}" \
+              AlertEmail="${BACKEND_ALERT_EMAIL}" \
+              HealthCheckFQDN="${HEALTH_CHECK_FQDN}"
+
+      - name: Verify both confirmed delivery routes and enabled alarms
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          BACKEND_ALERT_EMAIL: ${{ secrets.BACKEND_ALERT_EMAIL }}
+        run: |
+          set -euo pipefail
+          HOST_STACK="eventiapp-backend-${ENVIRONMENT}-observability"
+          HOST_TOPIC_ARN="$(aws cloudformation describe-stacks \
+            --stack-name "$HOST_STACK" \
+            --region us-east-2 \
+            --query "Stacks[0].Outputs[?OutputKey=='AlertTopicArn'].OutputValue" \
+            --output text)"
+          AWS_REGION=us-east-2 AWS_DEFAULT_REGION=us-east-2 python3 scripts/verify_alerting.py \
+            --topic-arn "$HOST_TOPIC_ARN" \
+            --email "$BACKEND_ALERT_EMAIL" \
+            --alarm-prefix "eventiapp-backend-" \
+            --alarm-suffix="-${ENVIRONMENT}" \
+            --expected-alarm "eventiapp-backend-ec2-system-status-${ENVIRONMENT}" \
+            --expected-alarm "eventiapp-backend-ec2-instance-status-${ENVIRONMENT}" \
+            --expected-alarm "eventiapp-backend-host-${ENVIRONMENT}" \
+            --routed-alarm "eventiapp-backend-host-${ENVIRONMENT}"
+
+          PUBLIC_STACK="eventiapp-backend-${ENVIRONMENT}-public-health-observability"
+          PUBLIC_TOPIC_ARN="$(aws cloudformation describe-stacks \
+            --stack-name "$PUBLIC_STACK" \
+            --region us-east-1 \
+            --query "Stacks[0].Outputs[?OutputKey=='AlertTopicArn'].OutputValue" \
+            --output text)"
+          AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 python3 scripts/verify_alerting.py \
+            --topic-arn "$PUBLIC_TOPIC_ARN" \
+            --email "$BACKEND_ALERT_EMAIL" \
+            --alarm-prefix "eventiapp-backend-public-health-" \
+            --alarm-suffix="-${ENVIRONMENT}" \
+            --expected-alarm "eventiapp-backend-public-health-${ENVIRONMENT}" \
+            --routed-alarm "eventiapp-backend-public-health-${ENVIRONMENT}"
+
+      - name: Explain first-run subscription gate
+        if: failure()
+        run: |
+          {
+            echo "### Alert route is not ready"
+            echo "Accept both AWS SNS confirmations (host/us-east-2 and public-health/us-east-1), then rerun this exact revision."
+            echo "Do not deploy production while either subscription is PendingConfirmation."
+          } >> "$GITHUB_STEP_SUMMARY"

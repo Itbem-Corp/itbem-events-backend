@@ -1,0 +1,110 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Least-privilege GitHub OIDC role for the EventiApp backend production workflow.
+
+Parameters:
+  GitHubOidcProviderArn:
+    Type: String
+    AllowedPattern: '^arn:aws[a-zA-Z-]*:iam::[0-9]{12}:oidc-provider/token\.actions\.githubusercontent\.com$'
+  GitHubOrganization:
+    Type: String
+    Default: Itbem-Corp
+    AllowedPattern: '^[A-Za-z0-9_.-]+$'
+  GitHubRepository:
+    Type: String
+    Default: itbem-events-backend
+    AllowedPattern: '^[A-Za-z0-9_.-]+$'
+  GitHubEnvironment:
+    Type: String
+    Default: production
+    AllowedPattern: '^[A-Za-z0-9_.-]+$'
+  BackendDbInstanceId:
+    Type: String
+    AllowedPattern: '^[a-zA-Z][a-zA-Z0-9-]{0,62}$'
+    Description: Exact RDS DB instance identifier snapshotted by the workflow.
+  BackendEc2InstanceId:
+    Type: AWS::EC2::Instance::Id
+    Description: Exact EC2 instance that accepts the ephemeral Instance Connect key.
+  BackendEc2User:
+    Type: String
+    Default: ec2-user
+    AllowedPattern: '^[A-Za-z_][A-Za-z0-9_-]{0,31}$'
+
+Resources:
+  BackendProductionDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: eventiapp-github-backend-production
+      Description: GitHub OIDC deploy role for the backend production environment only.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: GitHubProductionEnvironmentOnly
+            Effect: Allow
+            Principal:
+              Federated: !Ref GitHubOidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub 'repo:${GitHubOrganization}/${GitHubRepository}:environment:${GitHubEnvironment}'
+      Policies:
+        - PolicyName: BackendProductionDeployment
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CreatePredeploySnapshot
+                Effect: Allow
+                Action:
+                  - rds:CreateDBSnapshot
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:db:${BackendDbInstanceId}'
+                  - !Sub 'arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:snapshot:eventiapp-predeploy-*'
+              - Sid: TagPredeploySnapshot
+                Effect: Allow
+                Action:
+                  - rds:AddTagsToResource
+                Resource: !Sub 'arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:snapshot:eventiapp-predeploy-*'
+              - Sid: WaitForPredeploySnapshot
+                Effect: Allow
+                Action:
+                  - rds:DescribeDBSnapshots
+                Resource: '*'
+              - Sid: EphemeralEc2InstanceConnectKey
+                Effect: Allow
+                Action:
+                  - ec2-instance-connect:SendSSHPublicKey
+                Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/${BackendEc2InstanceId}'
+                Condition:
+                  StringEquals:
+                    ec2:osuser: !Ref BackendEc2User
+              - Sid: VerifyProductionObservabilityStack
+                Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:cloudformation:us-east-2:${AWS::AccountId}:stack/eventiapp-backend-prod-observability/*'
+                  - !Sub 'arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:stack/eventiapp-backend-prod-public-health-observability/*'
+              - Sid: VerifyProductionAlertSubscription
+                Effect: Allow
+                Action:
+                  - sns:GetTopicAttributes
+                  - sns:ListSubscriptionsByTopic
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:sns:us-east-2:${AWS::AccountId}:eventiapp-backend-alerts-prod'
+                  - !Sub 'arn:${AWS::Partition}:sns:us-east-1:${AWS::AccountId}:eventiapp-backend-public-health-alerts-prod'
+              - Sid: VerifyProductionAlarms
+                Effect: Allow
+                Action: cloudwatch:DescribeAlarms
+                Resource: '*'
+      Tags:
+        - Key: Application
+          Value: EventiApp
+        - Key: Repository
+          Value: !Sub '${GitHubOrganization}/${GitHubRepository}'
+        - Key: Environment
+          Value: !Ref GitHubEnvironment
+
+Outputs:
+  BackendDeployRoleArn:
+    Description: Configure as the production GitHub Environment variable AWS_DEPLOY_ROLE_ARN.
+    Value: !GetAtt BackendProductionDeployRole.Arn

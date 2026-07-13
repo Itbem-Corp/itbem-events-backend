@@ -1,0 +1,173 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: GitHub OIDC and CloudFormation execution roles for one backend observability environment.
+
+Parameters:
+  GitHubOidcProviderArn:
+    Type: String
+    AllowedPattern: '^arn:aws[a-zA-Z-]*:iam::[0-9]{12}:oidc-provider/token\.actions\.githubusercontent\.com$'
+  GitHubOrganization:
+    Type: String
+    Default: Itbem-Corp
+    AllowedPattern: '^[A-Za-z0-9_.-]+$'
+  GitHubRepository:
+    Type: String
+    Default: itbem-events-backend
+    AllowedPattern: '^[A-Za-z0-9_.-]+$'
+  DeploymentEnvironment:
+    Type: String
+    AllowedValues: [staging, prod]
+
+Resources:
+  ObservabilityCloudFormationExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'eventiapp-cfn-backend-obs-${DeploymentEnvironment}'
+      Description: Executes only the backend observability resources for this environment.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ManageBackendObservabilityResources
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ManageEnvironmentAlertTopic
+                Effect: Allow
+                Action:
+                  - sns:CreateTopic
+                  - sns:DeleteTopic
+                  - sns:GetTopicAttributes
+                  - sns:ListSubscriptionsByTopic
+                  - sns:SetTopicAttributes
+                  - sns:Subscribe
+                  - sns:TagResource
+                  - sns:UntagResource
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:sns:us-east-2:${AWS::AccountId}:eventiapp-backend-alerts-${DeploymentEnvironment}'
+                  - !Sub 'arn:${AWS::Partition}:sns:us-east-1:${AWS::AccountId}:eventiapp-backend-public-health-alerts-${DeploymentEnvironment}'
+              - Sid: RemoveEnvironmentEmailSubscription
+                Effect: Allow
+                Action: sns:Unsubscribe
+                Resource: '*'
+              - Sid: ManageEnvironmentAlarms
+                Effect: Allow
+                Action:
+                  - cloudwatch:DeleteAlarms
+                  - cloudwatch:PutMetricAlarm
+                  - cloudwatch:TagResource
+                  - cloudwatch:UntagResource
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:cloudwatch:us-east-2:${AWS::AccountId}:alarm:eventiapp-backend-*-${DeploymentEnvironment}'
+                  - !Sub 'arn:${AWS::Partition}:cloudwatch:us-east-1:${AWS::AccountId}:alarm:eventiapp-backend-*-${DeploymentEnvironment}'
+              # CloudWatch authorizes PutCompositeAlarm against alarm:* during
+              # creation, even when the final alarm has a concrete name.
+              - Sid: CreateCompositeAlarm
+                Effect: Allow
+                Action: cloudwatch:PutCompositeAlarm
+                Resource: '*'
+              - Sid: ReadEnvironmentAlarmsForCloudFormation
+                Effect: Allow
+                Action: cloudwatch:DescribeAlarms
+                Resource: '*'
+              # AWS::EC2::Instance::Id parameters are validated by the
+              # CloudFormation execution role before resource creation.
+              - Sid: ValidateMonitoredEC2Instance
+                Effect: Allow
+                Action: ec2:DescribeInstances
+                Resource: '*'
+              - Sid: ManageStackHealthCheck
+                Effect: Allow
+                Action:
+                  - route53:ChangeTagsForResource
+                  - route53:CreateHealthCheck
+                  - route53:DeleteHealthCheck
+                  - route53:GetHealthCheck
+                  - route53:ListTagsForResource
+                  - route53:UpdateHealthCheck
+                Resource: '*'
+      Tags:
+        - Key: Application
+          Value: EventiApp
+        - Key: Environment
+          Value: !Ref DeploymentEnvironment
+
+  ObservabilityGitHubDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'eventiapp-github-backend-obs-${DeploymentEnvironment}'
+      Description: GitHub OIDC role for one backend observability stack.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: GitHubEnvironmentOnly
+            Effect: Allow
+            Principal:
+              Federated: !Ref GitHubOidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub 'repo:${GitHubOrganization}/${GitHubRepository}:environment:${DeploymentEnvironment}'
+      Policies:
+        - PolicyName: DeployAndVerifyBackendObservability
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: DeployOnlyEnvironmentObservabilityStack
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStacks
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:GetTemplate
+                  - cloudformation:ListStackResources
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:cloudformation:us-east-2:${AWS::AccountId}:stack/eventiapp-backend-${DeploymentEnvironment}-observability/*'
+                  - !Sub 'arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:stack/eventiapp-backend-${DeploymentEnvironment}-public-health-observability/*'
+              - Sid: ValidateObservabilityTemplate
+                Effect: Allow
+                Action: cloudformation:GetTemplateSummary
+                Resource: '*'
+              - Sid: PassOnlyObservabilityExecutionRole
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt ObservabilityCloudFormationExecutionRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: cloudformation.amazonaws.com
+              - Sid: VerifyEnvironmentSubscription
+                Effect: Allow
+                Action:
+                  - sns:GetTopicAttributes
+                  - sns:ListSubscriptionsByTopic
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:sns:us-east-2:${AWS::AccountId}:eventiapp-backend-alerts-${DeploymentEnvironment}'
+                  - !Sub 'arn:${AWS::Partition}:sns:us-east-1:${AWS::AccountId}:eventiapp-backend-public-health-alerts-${DeploymentEnvironment}'
+              - Sid: VerifyEnvironmentAlarms
+                Effect: Allow
+                Action: cloudwatch:DescribeAlarms
+                Resource: '*'
+      Tags:
+        - Key: Application
+          Value: EventiApp
+        - Key: Repository
+          Value: !Sub '${GitHubOrganization}/${GitHubRepository}'
+        - Key: Environment
+          Value: !Ref DeploymentEnvironment
+
+Outputs:
+  GitHubDeployRoleArn:
+    Description: Configure as AWS_OBSERVABILITY_DEPLOY_ROLE_ARN in the matching GitHub Environment.
+    Value: !GetAtt ObservabilityGitHubDeployRole.Arn
+  CloudFormationExecutionRoleArn:
+    Description: Configure as AWS_OBSERVABILITY_CLOUDFORMATION_ROLE_ARN in the matching GitHub Environment.
+    Value: !GetAtt ObservabilityCloudFormationExecutionRole.Arn

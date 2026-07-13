@@ -8,7 +8,7 @@ import (
 
 func GetFontPatternByID(id uuid.UUID) (*models.FontSetPattern, error) {
 	var pattern models.FontSetPattern
-	err := gormrepository.GetByID(&pattern, id, "Font")
+	err := gormrepository.GetByID(&pattern, id, "Font", "Font.Resource")
 	return &pattern, err
 }
 
@@ -38,8 +38,23 @@ func ListFontPatterns(fontSetID *uuid.UUID) ([]models.FontSetPattern, error) {
 		Filters:  filters,
 		OrderBy:  "order",
 		OrderDir: "asc",
+		Preload:  []string{"Font", "Font.Resource"},
 	}
 
 	err := gormrepository.GetList(&patterns, opts)
 	return patterns, err
+}
+
+func (r *FontRepo) GetFontPatternByID(id uuid.UUID) (*models.FontSetPattern, error) {
+	return GetFontPatternByID(id)
+}
+func (r *FontRepo) CreateFontPattern(pattern *models.FontSetPattern) error {
+	return CreateFontPattern(pattern)
+}
+func (r *FontRepo) UpdateFontPattern(pattern *models.FontSetPattern) error {
+	return UpdateFontPattern(pattern)
+}
+func (r *FontRepo) DeleteFontPattern(id uuid.UUID) error { return DeleteFontPattern(id) }
+func (r *FontRepo) ListFontPatterns(fontSetID *uuid.UUID) ([]models.FontSetPattern, error) {
+	return ListFontPatterns(fontSetID)
 }

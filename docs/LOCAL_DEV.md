@@ -6,9 +6,9 @@ Three services work together:
 
 | Project | Repo | Port | Start command |
 |---------|------|------|---------------|
-| **Backend** (Go/Echo) | `itbem-events-backend` | 8080 | `go run server.go` |
+| **Backend** (Go/Echo) | `itbem-events-backend` | 8080 | `go run ./cmd/api` |
 | **Dashboard** (Next.js) | `dashboard-ts` | 3000 | `npm run dev` |
-| **Public site** (Astro) | `itbem-landing-frontend` | 4321 | `yarn dev` |
+| **Public site** (Astro) | `cafetton-casero` | 4321 | `npm run dev` |
 
 Infrastructure (PostgreSQL + Redis) is managed by Docker Compose.
 
@@ -20,7 +20,7 @@ Infrastructure (PostgreSQL + Redis) is managed by Docker Compose.
 
 ```bash
 # From the backend repo root
-docker compose up -d
+docker compose up -d --wait
 ```
 
 Wait for healthy status:
@@ -32,23 +32,35 @@ docker compose ps
 
 ```bash
 cp .env.example .env
-# Fill in your AWS/Cognito/Google credentials — DB and Redis can use defaults below
+# Set the Cognito region/user pool and S3 bucket for cloud-backed features.
 
-# Default values that match docker-compose.yml:
+# Local defaults that match docker-compose.yml:
 # DB_HOST=localhost  DB_USER=postgres  DB_PASSWORD=postgres  DB_NAME=events_db  DB_PORT=5432
 # REDIS_HOST=localhost:6379  REDIS_PASSWORD=  REDIS_DB=0  REDIS_TLS=false
+# AWS authentication uses the standard SDK credential chain (profile, SSO,
+# environment credentials, workload identity, or instance/container role).
 
-go run server.go
+go run ./cmd/api
 # → http://localhost:8080
 ```
+
+The backend does not need a Cognito App Client ID or secret to validate JWTs.
+Those App Client values belong in `dashboard-ts/.env.local`. The backend only
+needs `COGNITO_AWS_REGION` and `COGNITO_USER_POOL_ID`, plus AWS IAM credentials
+from the standard SDK chain when it performs Cognito Admin API operations.
+
+`COGNITO_CLIENT_ID`/`COGNITO_CLIENT_SECRET` and
+`S3_CLIENT_ID`/`S3_CLIENT_SECRET` are deprecated static AWS credential aliases.
+Leave them empty in new environments. A legacy pair is used only when both
+members are defined; a partial pair falls back to the standard SDK chain.
 
 ### 3. Set up dashboard
 
 ```bash
 cd /path/to/dashboard-ts
-cp .env.example .env
+cp .env.example .env.local
 # Set NEXT_PUBLIC_BACKEND_URL=http://localhost:8080
-# Fill in COGNITO_* credentials
+# Fill in the Cognito User Pool, App Client, hosted UI, and callback values.
 
 npm install
 npm run dev
@@ -58,12 +70,12 @@ npm run dev
 ### 4. Set up public site
 
 ```bash
-cd /path/to/itbem-landing-frontend
+cd /path/to/cafetton-casero
 cp .env.example .env
-# PUBLIC_BACKEND_URL=http://localhost:8080  (only needed if Astro makes API calls)
+# PUBLIC_EVENTS_URL=http://localhost:8080/
 
-yarn install
-yarn dev
+npm install
+npm run dev
 # → http://localhost:4321
 ```
 

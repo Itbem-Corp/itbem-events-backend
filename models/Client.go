@@ -16,6 +16,9 @@ type Client struct {
 
 	Logo     string `gorm:"text" json:"logo"`
 	IsActive bool   `gorm:"default:true" json:"is_active"`
+	// AccessRole is a read-only projection for the current session. It is
+	// populated by scoped list queries and is never persisted on clients.
+	AccessRole string `gorm:"-" json:"access_role,omitempty"`
 
 	ParentID *uuid.UUID `gorm:"type:uuid;index" json:"parent_id,omitempty"`
 	Parent   *Client    `gorm:"foreignKey:ParentID" json:"parent,omitempty"`

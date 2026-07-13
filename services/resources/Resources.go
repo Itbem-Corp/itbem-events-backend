@@ -1,28 +1,36 @@
 package services
 
 import (
+	"context"
+	"errors"
 	"events-stocks/configuration/constants"
 	"events-stocks/dtos"
 	"events-stocks/models"
-	"events-stocks/repositories/bucketrepository"
-	"events-stocks/repositories/cacheloaderrepository"
-	"events-stocks/repositories/redisrepository"
-	"events-stocks/repositories/resourcerepository"
+	"events-stocks/services/cacheutil"
+	"events-stocks/services/ports"
 	services "events-stocks/services/validations"
 	"events-stocks/utils"
 	"fmt"
 	"github.com/gofrs/uuid"
 	"io"
+	"log/slog"
 	"mime/multipart"
+	"net/http"
+	"sort"
 	"strings"
+	"time"
 )
 
 const (
-	MaxFileSizeMB        = 10                           // general resources: images, fonts
-	MaxFileSizeBytes     = MaxFileSizeMB * 1024 * 1024
-	MaxVideoFileSizeMB   = 200                          // moment video uploads
-	MaxVideoFileSizeBytes = MaxVideoFileSizeMB * 1024 * 1024
-	ErrPrefixValidate    = "validation_error:"
+	MaxFileSizeMB                 = 10 // general resources: images, fonts
+	MaxFileSizeBytes              = MaxFileSizeMB * 1024 * 1024
+	MaxMomentImageFileSizeMB      = 25 // public moment image uploads
+	MaxMomentImageFileSizeBytes   = MaxMomentImageFileSizeMB * 1024 * 1024
+	MaxVideoFileSizeMB            = 200 // moment video uploads
+	MaxVideoFileSizeBytes         = MaxVideoFileSizeMB * 1024 * 1024
+	ErrPrefixValidate             = "validation_error:"
+	ResourceViewURLTTLMinutes     = 720
+	ResourceMutationURLTTLMinutes = 60
 )
 
 var AllowedMimeTypes = map[string]bool{
@@ -49,6 +57,10 @@ var AllowedMimeTypes = map[string]bool{
 	"audio/aac":  true,
 	"audio/flac": true,
 
+	"image/avif":  true,
+	"video/x-m4v": true,
+	"video/3gpp":  true,
+
 	// Fonts
 	"font/ttf":                      true,
 	"font/otf":                      true,
@@ -58,37 +70,109 @@ var AllowedMimeTypes = map[string]bool{
 	"font/sfnt":                     true,
 }
 
+var momentUploadAllowedMimeTypes = map[string]bool{
+	"image/jpeg":       true,
+	"image/png":        true,
+	"image/gif":        true,
+	"image/webp":       true,
+	"image/heic":       true,
+	"image/heif":       true,
+	"image/avif":       true,
+	"video/mp4":        true,
+	"video/webm":       true,
+	"video/quicktime":  true,
+	"video/x-m4v":      true,
+	"video/3gpp":       true,
+	"video/x-msvideo":  true,
+	"video/x-matroska": true,
+}
+
 type ResourceService struct {
 	Bucket     string
 	Provider   string
 	UploadPath string // e.g. "resources"
 	Optimizer  *ImageOptimizerService
+	repo       ports.ResourceRepository
+	cache      ports.CacheRepository
+	storage    ports.ObjectStorageRepository
 }
 
-func NewResourceService(c *models.Config) *ResourceService {
+type ResourceServiceDeps struct {
+	Repo    ports.ResourceRepository
+	Cache   ports.CacheRepository
+	Storage ports.ObjectStorageRepository
+}
+
+type resourceSectionVersionedDeleter interface {
+	DeleteResourceAndTouchSection(resourceID uuid.UUID, sectionID uuid.UUID, updatedAt time.Time) error
+}
+
+var _resourceSvc *ResourceService
+
+func SetDefaultResourceService(svc *ResourceService) {
+	_resourceSvc = svc
+}
+
+func NewResourceService(c *models.Config, deps ...ResourceServiceDeps) *ResourceService {
+	var dep ResourceServiceDeps
+	if len(deps) > 0 {
+		dep = deps[0]
+	}
 	return &ResourceService{
 		Bucket:     c.AwsBucketName,
 		Provider:   constants.DefaultCloudProvider,
 		UploadPath: constants.EventsBucketFolder,
 		Optimizer:  NewImageOptimizerService(),
+		repo:       dep.Repo,
+		cache:      dep.Cache,
+		storage:    dep.Storage,
 	}
 }
 
+func resourceServiceUnavailable() error {
+	return fmt.Errorf("resource service not initialized")
+}
+
+func (rs *ResourceService) requireRepo() (ports.ResourceRepository, error) {
+	if rs == nil || rs.repo == nil {
+		return nil, fmt.Errorf("resource repository not configured")
+	}
+	return rs.repo, nil
+}
+
+func (rs *ResourceService) requireStorage() (ports.ObjectStorageRepository, error) {
+	if rs == nil || rs.storage == nil {
+		return nil, fmt.Errorf("object storage repository not configured")
+	}
+	return rs.storage, nil
+}
+
 func (rs *ResourceService) GetResourceByID(id uuid.UUID) (*models.Resource, string, error) {
-	resource, err := resourcerepository.GetResourceByID(id)
+	resource, err := rs.GetResourceRecordByID(id)
 	if err != nil {
-		return nil, "", fmt.Errorf("resource not found: %w", err)
+		return nil, "", err
+	}
+
+	trimmedPath := strings.TrimSpace(resource.Path)
+	if trimmedPath == "" {
+		return nil, "", fmt.Errorf("resource has no path assigned")
+	}
+	if utils.IsAbsoluteURLLike(trimmedPath) {
+		return resource, trimmedPath, nil
+	}
+
+	storage, err := rs.requireStorage()
+	if err != nil {
+		return nil, "", err
 	}
 
 	// Asegúrate de que resource.Path exista
-	if strings.TrimSpace(resource.Path) == "" {
+	folder, filename := resourceStoragePathParts(trimmedPath, rs.UploadPath)
+	if filename == "" {
 		return nil, "", fmt.Errorf("resource has no path assigned")
 	}
 
-	parts := strings.Split(resource.Path, "/")
-	filename := parts[len(parts)-1]
-
-	exists, _, err := bucketrepository.FileExists(filename, rs.UploadPath, rs.Bucket, rs.Provider)
+	exists, _, err := storage.FileExists(filename, folder, rs.Bucket, rs.Provider)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to verify file existence: %w", err)
 	}
@@ -96,7 +180,7 @@ func (rs *ResourceService) GetResourceByID(id uuid.UUID) (*models.Resource, stri
 		return nil, "", fmt.Errorf("file associated with resource not found in bucket")
 	}
 
-	viewURL, err := bucketrepository.GetPresignedFileURL(filename, rs.UploadPath, rs.Bucket, rs.Provider, 720)
+	viewURL, err := storage.GetPresignedFileURL(filename, folder, rs.Bucket, rs.Provider, ResourceViewURLTTLMinutes)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to generate presigned URL: %w", err)
 	}
@@ -104,24 +188,167 @@ func (rs *ResourceService) GetResourceByID(id uuid.UUID) (*models.Resource, stri
 	return resource, viewURL, nil
 }
 
+func (rs *ResourceService) GetResourceRecordByID(id uuid.UUID) (*models.Resource, error) {
+	repo, err := rs.requireRepo()
+	if err != nil {
+		return nil, err
+	}
+
+	resource, err := repo.GetResourceByID(id)
+	if err != nil {
+		return nil, fmt.Errorf("resource not found: %w", err)
+	}
+	return resource, nil
+}
+
 func (rs *ResourceService) GetResourcesBySectionID(sectionID uuid.UUID) ([]dtos.ResourceResponse, error) {
-	return cacheloaderrepository.GetResourcesBySectionID(&sectionID, rs.UploadPath, rs.Bucket, rs.Provider)
+	return cacheutil.GetOrLoadJSON(
+		context.Background(),
+		rs.cache,
+		rs.sectionResourcesCacheKey(sectionID),
+		utils.CacheTTLs[utils.RedisResourcesKey],
+		func() ([]dtos.ResourceResponse, error) {
+			return rs.loadResourcesBySectionID(sectionID)
+		},
+	)
 }
 
-func (rs *ResourceService) FileExists(filename string) (bool, string, error) {
-	return bucketrepository.FileExists(filename, rs.UploadPath, rs.Bucket, rs.Provider)
+func (rs *ResourceService) GetAdminResourcesBySectionID(sectionID uuid.UUID) ([]dtos.AdminResourceResponse, error) {
+	return rs.loadAdminResourcesBySectionID(sectionID)
 }
 
-func (rs *ResourceService) DeleteFileIfExists(filename string) error {
-	exists, _, err := bucketrepository.FileExists(filename, rs.UploadPath, rs.Bucket, rs.Provider)
+func (rs *ResourceService) sectionResourcesCacheKey(sectionID uuid.UUID) string {
+	return sectionID.String() + ":" + utils.RedisResourcesKey
+}
+
+func (rs *ResourceService) loadResourcesBySectionID(sectionID uuid.UUID) ([]dtos.ResourceResponse, error) {
+	resources, storage, err := rs.listResourcesBySectionWithStorage(sectionID)
+	if err != nil {
+		return nil, err
+	}
+
+	result := dtos.NewResourceResponses(resources, func(resource models.Resource) (string, *time.Time, bool) {
+		return rs.resourceViewURLFor(storage, resource, ResourceViewURLTTLMinutes)
+	})
+	return result, nil
+}
+
+func (rs *ResourceService) loadAdminResourcesBySectionID(sectionID uuid.UUID) ([]dtos.AdminResourceResponse, error) {
+	resources, storage, err := rs.listResourcesBySectionWithStorage(sectionID)
+	if err != nil {
+		return nil, err
+	}
+
+	result := dtos.NewAdminResourceResponses(resources, func(resource models.Resource) (string, *time.Time, bool) {
+		return rs.resourceViewURLFor(storage, resource, ResourceViewURLTTLMinutes)
+	})
+	return result, nil
+}
+
+func (rs *ResourceService) listResourcesBySectionWithStorage(sectionID uuid.UUID) ([]models.Resource, ports.ObjectStorageRepository, error) {
+	repo, err := rs.requireRepo()
+	if err != nil {
+		return nil, nil, err
+	}
+	storage, err := rs.requireStorage()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	resources, err := repo.ListResourcesBySection(&sectionID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to list resources: %w", err)
+	}
+	sortResourcesByRenderOrder(resources)
+
+	return resources, storage, nil
+}
+
+func sortResourcesByRenderOrder(resources []models.Resource) {
+	sort.SliceStable(resources, func(i, j int) bool {
+		leftPosition := resourcePositionValue(resources[i])
+		rightPosition := resourcePositionValue(resources[j])
+		if leftPosition != rightPosition {
+			return leftPosition < rightPosition
+		}
+		return resources[i].ID.String() < resources[j].ID.String()
+	})
+}
+
+func resourcePositionValue(resource models.Resource) int {
+	if resource.Position == nil {
+		return 0
+	}
+	return *resource.Position
+}
+
+func (rs *ResourceService) resourceViewURLFor(storage ports.ObjectStorageRepository, resource models.Resource, ttlMinutes int) (string, *time.Time, bool) {
+	trimmedPath := strings.TrimSpace(resource.Path)
+	if trimmedPath == "" {
+		return "", nil, false
+	}
+	if utils.IsAbsoluteURLLike(trimmedPath) {
+		return trimmedPath, nil, true
+	}
+
+	folder, filename := resourceStoragePathParts(trimmedPath, rs.UploadPath)
+	if filename == "" {
+		return "", nil, false
+	}
+
+	viewURL, err := storage.GetPresignedFileURL(filename, folder, rs.Bucket, rs.Provider, ttlMinutes)
+	if err != nil {
+		return "", nil, false
+	}
+
+	expiresAt := resourceViewURLExpiresAt(ttlMinutes)
+	return viewURL, &expiresAt, true
+}
+
+func resourceViewURLExpiresAt(ttlMinutes int) time.Time {
+	return time.Now().UTC().Add(time.Duration(ttlMinutes) * time.Minute)
+}
+
+func resourceStoragePathParts(path string, defaultFolder string) (string, string) {
+	cleanPath := strings.Trim(strings.TrimSpace(path), "/")
+	cleanDefaultFolder := strings.Trim(strings.TrimSpace(defaultFolder), "/")
+	if cleanPath == "" {
+		return cleanDefaultFolder, ""
+	}
+	parts := strings.Split(cleanPath, "/")
+	if len(parts) == 1 {
+		return cleanDefaultFolder, parts[0]
+	}
+	return strings.Join(parts[:len(parts)-1], "/"), parts[len(parts)-1]
+}
+
+func (rs *ResourceService) FileExists(path string) (bool, string, error) {
+	storage, err := rs.requireStorage()
+	if err != nil {
+		return false, "", err
+	}
+	folder, filename := resourceStoragePathParts(path, rs.UploadPath)
+	return storage.FileExists(filename, folder, rs.Bucket, rs.Provider)
+}
+
+func (rs *ResourceService) DeleteFileIfExists(path string) error {
+	storage, err := rs.requireStorage()
+	if err != nil {
+		return err
+	}
+	folder, filename := resourceStoragePathParts(path, rs.UploadPath)
+	if filename == "" {
+		return nil
+	}
+	exists, _, err := storage.FileExists(filename, folder, rs.Bucket, rs.Provider)
 	if err != nil {
 		return fmt.Errorf("error checking file: %w", err)
 	}
 	if !exists {
-		return fmt.Errorf("file does not exist")
+		return nil
 	}
 
-	if err := bucketrepository.DeleteFile(filename, rs.UploadPath, rs.Bucket, rs.Provider); err != nil {
+	if err := storage.DeleteFile(filename, folder, rs.Bucket, rs.Provider); err != nil {
 		return fmt.Errorf("failed to delete file: %w", err)
 	}
 
@@ -129,83 +356,119 @@ func (rs *ResourceService) DeleteFileIfExists(filename string) error {
 }
 
 func (rs *ResourceService) DeleteResource(id uuid.UUID) error {
+	repo, err := rs.requireRepo()
+	if err != nil {
+		return err
+	}
+
 	// 🔍 Obtener el recurso desde DB
-	resource, err := resourcerepository.GetResourceByID(id)
+	resource, err := repo.GetResourceByID(id)
 	if err != nil {
 		return fmt.Errorf("resource not found: %w", err)
 	}
 
-	// 📦 Eliminar archivo del bucket
-	parts := strings.Split(resource.Path, "/")
-	filename := parts[len(parts)-1]
-
-	if err := rs.DeleteFileIfExists(filename); err != nil {
-		return fmt.Errorf("failed to delete file from bucket: %w", err)
-	}
-
 	// 🗑️ Eliminar registro en DB
-	if err := DeleteResource(id, resource.EventSectionID); err != nil {
+	if err := rs.deleteResourceRecord(id, resource.EventSectionID); err != nil {
 		return fmt.Errorf("failed to delete resource from DB: %w", err)
 	}
-
-	// 🔁 Reordenar posiciones de la misma sección
-	resources, err := resourcerepository.ListResourcesBySection(resource.EventSectionID)
-	if err == nil {
-		for i, r := range resources {
-			r.Position = utils.PtrInt(i)
-			_ = UpdateResource(&r)
-		}
-	}
+	_ = rs.DeleteFileIfExists(resource.Path)
 
 	return nil
 }
 
 func (rs *ResourceService) UpdateResource(resource *models.Resource) error {
-	return UpdateResource(resource)
+	repo, err := rs.requireRepo()
+	if err != nil {
+		return err
+	}
+
+	if err := repo.UpdateResource(resource); err != nil {
+		return err
+	}
+
+	return rs.InvalidateSectionResourceCache(resource.EventSectionID)
+}
+
+func (rs *ResourceService) TouchResourceUpdatedAt(resource *models.Resource, updatedAt time.Time) error {
+	if resource == nil || resource.ID == uuid.Nil {
+		return fmt.Errorf("resource missing")
+	}
+
+	repo, err := rs.requireRepo()
+	if err != nil {
+		return err
+	}
+
+	if err := repo.TouchResourceUpdatedAt(resource.ID, updatedAt); err != nil {
+		return err
+	}
+
+	return rs.InvalidateSectionResourceCache(resource.EventSectionID)
+}
+
+func (rs *ResourceService) InvalidateSectionResourceCache(sectionID *uuid.UUID) error {
+	if rs == nil || sectionID == nil || rs.cache == nil {
+		return nil
+	}
+	_ = rs.cache.Invalidate("resources", sectionID.String())
+	return nil
 }
 
 func (rs *ResourceService) UpdateFileContent(
 	file multipart.File,
-	filename string,
+	path string,
 	header *multipart.FileHeader,
 ) (string, error) {
+	folder, filename := resourceStoragePathParts(path, rs.UploadPath)
+	if filename == "" {
+		return "", fmt.Errorf("resource path missing")
+	}
 	optimized, newFilename, contentType, err := rs.sanitizeAndOptimizeUpload(file, header, filename)
 	if err != nil {
 		return "", err
 	}
 
-	_, err = bucketrepository.UpdateFile(optimized, newFilename, contentType, rs.UploadPath, rs.Bucket, rs.Provider)
+	storage, err := rs.requireStorage()
+	if err != nil {
+		return "", err
+	}
+	_, err = storage.UpdateFile(optimized, newFilename, contentType, folder, rs.Bucket, rs.Provider)
 	if err != nil {
 		return "", fmt.Errorf("failed to update file: %w", err)
 	}
 
-	return fmt.Sprintf("%s/%s", rs.UploadPath, newFilename), nil
+	return fmt.Sprintf("%s/%s", folder, newFilename), nil
 }
 
 func (rs *ResourceService) ListResourcesBySection(sectionID *uuid.UUID) ([]models.Resource, error) {
-	return resourcerepository.ListResourcesBySection(sectionID)
+	repo, err := rs.requireRepo()
+	if err != nil {
+		return nil, err
+	}
+	return repo.ListResourcesBySection(sectionID)
 }
 
 func (rs *ResourceService) ReplaceFile(
-	oldFilename string,
+	oldPath string,
 	file multipart.File,
 	header *multipart.FileHeader,
 ) (string, error) {
-	if err := rs.DeleteFileIfExists(oldFilename); err != nil {
-		return "", fmt.Errorf("failed to delete existing file: %w", err)
-	}
-
-	optimized, newFilename, contentType, err := rs.sanitizeAndOptimizeUpload(file, header, oldFilename)
+	folder, _ := resourceStoragePathParts(oldPath, rs.UploadPath)
+	optimized, newFilename, contentType, err := rs.sanitizeAndOptimizeUpload(file, header, "")
 	if err != nil {
 		return "", err
 	}
 
-	err = bucketrepository.UploadRawBytesSimple(optimized, newFilename, contentType, rs.UploadPath, rs.Bucket, rs.Provider)
+	storage, err := rs.requireStorage()
+	if err != nil {
+		return "", err
+	}
+	err = storage.UploadRawBytesSimple(optimized, newFilename, contentType, folder, rs.Bucket, rs.Provider)
 	if err != nil {
 		return "", fmt.Errorf("failed to upload replacement: %w", err)
 	}
 
-	return fmt.Sprintf("%s/%s", rs.UploadPath, newFilename), nil
+	return fmt.Sprintf("%s/%s", folder, newFilename), nil
 }
 
 func (rs *ResourceService) UploadAndCreateResource(
@@ -214,16 +477,30 @@ func (rs *ResourceService) UploadAndCreateResource(
 	sectionID *uuid.UUID,
 	resourceTypeID uuid.UUID,
 	altText, title string,
+	requestedPosition *int,
 ) (*models.Resource, error) {
-	existing, err := resourcerepository.ListResourcesBySection(sectionID)
+	repo, err := rs.requireRepo()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get existing resources: %w", err)
+		return nil, err
+	}
+	storage, err := rs.requireStorage()
+	if err != nil {
+		return nil, err
 	}
 
 	position := 0
-	for _, r := range existing {
-		if r.Position != nil && *r.Position >= position {
-			position = *r.Position + 1
+	if requestedPosition != nil {
+		position = *requestedPosition
+	} else {
+		existing, err := repo.ListResourcesBySection(sectionID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get existing resources: %w", err)
+		}
+
+		for _, r := range existing {
+			if r.Position != nil && *r.Position >= position {
+				position = *r.Position + 1
+			}
 		}
 	}
 
@@ -232,7 +509,7 @@ func (rs *ResourceService) UploadAndCreateResource(
 		return nil, err
 	}
 
-	err = bucketrepository.UploadRawBytesSimple(optimized, filename, contentType, rs.UploadPath, rs.Bucket, rs.Provider)
+	err = storage.UploadRawBytesSimple(optimized, filename, contentType, rs.UploadPath, rs.Bucket, rs.Provider)
 	if err != nil {
 		return nil, fmt.Errorf("failed to upload resource: %w", err)
 	}
@@ -246,13 +523,13 @@ func (rs *ResourceService) UploadAndCreateResource(
 		Position:       utils.PtrInt(position),
 	}
 
-	if err := CreateResource(resource); err != nil {
+	if err := rs.CreateResource(resource); err != nil {
+		_ = storage.DeleteFile(filename, rs.UploadPath, rs.Bucket, rs.Provider)
 		return nil, fmt.Errorf("failed to create resource in DB: %w", err)
 	}
 
 	return resource, nil
 }
-
 
 // UploadEventCover uploads and optimizes a cover image to the events/ S3 folder.
 // Returns the S3 key ("events/{uuid}.webp") to store in Event.CoverImageURL.
@@ -264,7 +541,14 @@ func (rs *ResourceService) UploadEventCover(
 	if err != nil {
 		return "", err
 	}
-	err = bucketrepository.UploadRawBytesSimple(optimized, filename, contentType, rs.UploadPath, rs.Bucket, rs.Provider)
+	if err := requireImageUploadContentType(contentType); err != nil {
+		return "", err
+	}
+	storage, err := rs.requireStorage()
+	if err != nil {
+		return "", err
+	}
+	err = storage.UploadRawBytesSimple(optimized, filename, contentType, rs.UploadPath, rs.Bucket, rs.Provider)
 	if err != nil {
 		return "", fmt.Errorf("failed to upload cover image: %w", err)
 	}
@@ -280,29 +564,22 @@ func (rs *ResourceService) UploadRawToMomentsFolder(
 	header *multipart.FileHeader,
 	eventID string,
 ) (s3Key string, contentType string, err error) {
-	ct := header.Header.Get("Content-Type")
-	if ct == "" {
-		ext := ""
-		if idx := strings.LastIndex(header.Filename, "."); idx != -1 {
-			ext = strings.ToLower(header.Filename[idx+1:])
-		}
-		ct = guessMimeType(ext)
+	ct, err := normalizeMomentUploadContentType(header.Filename, header.Header.Get("Content-Type"))
+	if err != nil {
+		return "", "", err
 	}
-
-	// Allow only image and video types for moments
-	isImg := strings.HasPrefix(ct, "image/")
 	isVid := strings.HasPrefix(ct, "video/")
-	if !isImg && !isVid {
-		return "", "", services.ValidationError{Msg: fmt.Sprintf("unsupported file type for moments: %s", ct)}
-	}
 
-	// Enforce per-type size limits
-	maxBytes := int64(MaxFileSizeBytes) // 25 MB for images
+	// Enforce per-type byte limits before any upload. The browser also rejects
+	// oversized/overlong videos for immediate UX feedback, while the media
+	// processor remains authoritative: it uses ffprobe to enforce duration,
+	// dimensions, and the same 200 MiB input ceiling before transcoding.
+	maxBytes := int64(MaxMomentImageFileSizeBytes) // 25 MB for images
 	if isVid {
 		maxBytes = int64(MaxVideoFileSizeBytes) // 200 MB for videos
 	}
 	if header.Size > maxBytes {
-		limitMB := MaxFileSizeMB
+		limitMB := MaxMomentImageFileSizeMB
 		if isVid {
 			limitMB = MaxVideoFileSizeMB
 		}
@@ -310,9 +587,16 @@ func (rs *ResourceService) UploadRawToMomentsFolder(
 	}
 
 	// Read raw bytes without optimization
-	raw, err := io.ReadAll(file)
+	raw, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
 	if err != nil {
 		return "", "", fmt.Errorf("failed to read uploaded file: %w", err)
+	}
+	if int64(len(raw)) > maxBytes {
+		limitMB := MaxMomentImageFileSizeMB
+		if isVid {
+			limitMB = MaxVideoFileSizeMB
+		}
+		return "", "", services.ValidationError{Msg: fmt.Sprintf("file size exceeds %d MB", limitMB)}
 	}
 
 	// Build a UUID-based filename preserving extension
@@ -325,11 +609,224 @@ func (rs *ResourceService) UploadRawToMomentsFolder(
 
 	// Organize: moments/{eventID}/raw/{uuid}.ext
 	folder := fmt.Sprintf("moments/%s/raw", eventID)
-	if err := bucketrepository.UploadRawBytesSimple(raw, filename, ct, folder, rs.Bucket, rs.Provider); err != nil {
+	storage, err := rs.requireStorage()
+	if err != nil {
+		return "", "", err
+	}
+	if err := storage.UploadRawBytesSimple(raw, filename, ct, folder, rs.Bucket, rs.Provider); err != nil {
 		return "", "", fmt.Errorf("failed to upload raw moment: %w", err)
 	}
 
 	return fmt.Sprintf("%s/%s", folder, filename), ct, nil
+}
+
+func (rs *ResourceService) PrepareMomentUploadURL(eventID, filename, contentType string) (s3Key, uploadURL, normalizedContentType string, err error) {
+	ct, err := normalizeMomentUploadContentType(filename, contentType)
+	if err != nil {
+		return "", "", "", err
+	}
+	key := buildMomentRawKey(eventID, filename)
+	storage, err := rs.requireStorage()
+	if err != nil {
+		return "", "", "", err
+	}
+	url, err := storage.GetPresignedPutURL(key, rs.Bucket, rs.Provider, ct, 15)
+	if err != nil {
+		return "", "", "", err
+	}
+	return key, url, ct, nil
+}
+
+func (rs *ResourceService) PrepareMomentMultipartUpload(eventID, filename, contentType string, partCount int) (s3Key, uploadID string, partURLs []dtos.PresignedUploadPart, normalizedContentType string, err error) {
+	if partCount <= 0 {
+		return "", "", nil, "", services.ValidationError{Msg: "part_count must be greater than zero"}
+	}
+	if partCount > 10000 {
+		return "", "", nil, "", services.ValidationError{Msg: "too many multipart parts"}
+	}
+	ct, err := normalizeMomentUploadContentType(filename, contentType)
+	if err != nil {
+		return "", "", nil, "", err
+	}
+	key := buildMomentRawKey(eventID, filename)
+	storage, err := rs.requireStorage()
+	if err != nil {
+		return "", "", nil, "", err
+	}
+	uploadID, err = storage.CreateMultipartUpload(key, rs.Bucket, rs.Provider, ct)
+	if err != nil {
+		return "", "", nil, "", err
+	}
+	partURLs = make([]dtos.PresignedUploadPart, 0, partCount)
+	for partNumber := 1; partNumber <= partCount; partNumber++ {
+		url, partErr := storage.GetPresignedUploadPartURL(key, rs.Bucket, rs.Provider, uploadID, partNumber, 60)
+		if partErr != nil {
+			_ = storage.AbortMultipartUpload(key, rs.Bucket, rs.Provider, uploadID)
+			return "", "", nil, "", partErr
+		}
+		partURLs = append(partURLs, dtos.PresignedUploadPart{
+			PartNumber: partNumber,
+			URL:        url,
+		})
+	}
+	return key, uploadID, partURLs, ct, nil
+}
+
+func (rs *ResourceService) CompleteMomentMultipartUpload(s3Key, uploadID string, parts []dtos.CompletedUploadPart) error {
+	normalizedParts := dtos.NormalizeCompletedUploadParts(parts)
+	if len(normalizedParts) == 0 {
+		return services.ValidationError{Msg: "parts are required"}
+	}
+	if len(normalizedParts) != len(parts) {
+		return services.ValidationError{Msg: "invalid multipart parts"}
+	}
+	storage, err := rs.requireStorage()
+	if err != nil {
+		return err
+	}
+	err = storage.CompleteMultipartUpload(s3Key, rs.Bucket, rs.Provider, uploadID, normalizedParts)
+	if !errors.Is(err, ports.ErrMultipartUploadNotFound) {
+		return err
+	}
+
+	// S3 removes an upload ID after a successful CompleteMultipartUpload. If
+	// the response was lost, a safe client retry receives NoSuchUpload even
+	// though the completed object already exists. Treat only that state as a
+	// successful idempotent completion.
+	folder, filename := resourceStoragePathParts(s3Key, "moments")
+	exists, _, existsErr := storage.FileExists(filename, folder, rs.Bucket, rs.Provider)
+	if existsErr != nil {
+		return fmt.Errorf("verify previously completed multipart object: %w", existsErr)
+	}
+	if exists {
+		return nil
+	}
+	return err
+}
+
+func (rs *ResourceService) AbortMomentMultipartUpload(s3Key, uploadID string) error {
+	storage, err := rs.requireStorage()
+	if err != nil {
+		return err
+	}
+	return storage.AbortMultipartUpload(s3Key, rs.Bucket, rs.Provider, uploadID)
+}
+
+func (rs *ResourceService) ValidateMomentRawKey(eventID, s3Key string) error {
+	expectedPrefix := fmt.Sprintf("moments/%s/raw/", eventID)
+	if !strings.HasPrefix(s3Key, expectedPrefix) {
+		return services.ValidationError{Msg: "invalid upload key for event"}
+	}
+	if strings.Contains(s3Key, "..") || strings.Contains(s3Key, "\\") {
+		return services.ValidationError{Msg: "invalid upload key"}
+	}
+	return nil
+}
+
+// VerifyMomentUpload confirms that a presigned upload reached storage before a
+// Moment record is created. Real storage implementations additionally expose
+// object size and Content-Type; lightweight test adapters fall back to exists.
+func (rs *ResourceService) VerifyMomentUpload(s3Key, requestedContentType string) (string, error) {
+	contentType, err := normalizeMomentUploadContentType(s3Key, requestedContentType)
+	if err != nil {
+		return "", err
+	}
+	storage, err := rs.requireStorage()
+	if err != nil {
+		return "", err
+	}
+	folder, filename := resourceStoragePathParts(s3Key, "moments")
+	if filename == "" {
+		return "", services.ValidationError{Msg: "invalid upload key"}
+	}
+
+	if metadataReader, ok := storage.(ports.ObjectStorageMetadataReader); ok {
+		metadata, metadataErr := metadataReader.GetObjectMetadata(filename, folder, rs.Bucket, rs.Provider)
+		if metadataErr != nil {
+			return "", fmt.Errorf("failed to verify uploaded object: %w", metadataErr)
+		}
+		if metadata.Size <= 0 {
+			return "", services.ValidationError{Msg: "uploaded file is empty"}
+		}
+		storedType := canonicalUploadContentType(metadata.ContentType)
+		if storedType != "" && storedType != "application/octet-stream" {
+			storedType, err = normalizeMomentUploadContentType(s3Key, storedType)
+			if err != nil {
+				return "", err
+			}
+			if storedType != contentType {
+				return "", services.ValidationError{Msg: "uploaded file content type does not match the upload request"}
+			}
+		}
+		maxBytes, maxMB := momentUploadLimit(contentType)
+		if metadata.Size > maxBytes {
+			return "", services.ValidationError{Msg: fmt.Sprintf("file size exceeds %d MB", maxMB)}
+		}
+		return contentType, nil
+	}
+
+	exists, _, existsErr := storage.FileExists(filename, folder, rs.Bucket, rs.Provider)
+	if existsErr != nil {
+		return "", fmt.Errorf("failed to verify uploaded object: %w", existsErr)
+	}
+	if !exists {
+		return "", services.ValidationError{Msg: "uploaded file was not found; wait for the upload to finish and retry"}
+	}
+	return contentType, nil
+}
+
+// DeleteMomentUpload removes a raw moment object without issuing a separate
+// HEAD request. S3 DeleteObject is idempotent, which makes this suitable for
+// compensating failed confirmation requests and retry races.
+func (rs *ResourceService) DeleteMomentUpload(s3Key string) error {
+	storage, err := rs.requireStorage()
+	if err != nil {
+		return err
+	}
+	folder, filename := resourceStoragePathParts(s3Key, "moments")
+	if filename == "" {
+		return services.ValidationError{Msg: "invalid upload key"}
+	}
+	return storage.DeleteFile(filename, folder, rs.Bucket, rs.Provider)
+}
+
+func momentUploadLimit(contentType string) (int64, int) {
+	if strings.HasPrefix(contentType, "video/") {
+		return int64(MaxVideoFileSizeBytes), MaxVideoFileSizeMB
+	}
+	return int64(MaxMomentImageFileSizeBytes), MaxMomentImageFileSizeMB
+}
+
+func buildMomentRawKey(eventID, filename string) string {
+	u, _ := uuid.NewV4()
+	ext := ""
+	if idx := strings.LastIndex(filename, "."); idx != -1 {
+		ext = strings.ToLower(filename[idx:])
+	}
+	return fmt.Sprintf("moments/%s/raw/%s%s", eventID, u.String(), ext)
+}
+
+func normalizeMomentUploadContentType(filename, contentType string) (string, error) {
+	ct := canonicalUploadContentType(contentType)
+	if ct == "" || ct == "application/octet-stream" {
+		ext := ""
+		if idx := strings.LastIndex(filename, "."); idx != -1 {
+			ext = strings.ToLower(filename[idx+1:])
+		}
+		ct = canonicalUploadContentType(guessMimeType(ext))
+	}
+	if !momentUploadAllowedMimeTypes[ct] {
+		return "", services.ValidationError{Msg: fmt.Sprintf("unsupported file type for moments: %s", ct)}
+	}
+	return ct, nil
+}
+
+func canonicalUploadContentType(contentType string) string {
+	ct := strings.TrimSpace(strings.ToLower(contentType))
+	if ct == "image/jpg" {
+		return "image/jpeg"
+	}
+	return ct
 }
 
 // UploadToMomentsFolder is kept for backward compatibility.
@@ -344,7 +841,11 @@ func (rs *ResourceService) UploadToMomentsFolder(
 	}
 
 	momentsPath := "moments"
-	err = bucketrepository.UploadRawBytesSimple(optimized, filename, contentType, momentsPath, rs.Bucket, rs.Provider)
+	storage, err := rs.requireStorage()
+	if err != nil {
+		return "", err
+	}
+	err = storage.UploadRawBytesSimple(optimized, filename, contentType, momentsPath, rs.Bucket, rs.Provider)
 	if err != nil {
 		return "", fmt.Errorf("failed to upload moment: %w", err)
 	}
@@ -358,25 +859,39 @@ func (rs *ResourceService) UploadMultipleResources(
 	resourceTypeID uuid.UUID,
 ) ([]*models.Resource, error) {
 	var uploaded []*models.Resource
+	storage, err := rs.requireStorage()
+	if err != nil {
+		return nil, err
+	}
+	created := make([]*models.Resource, 0, len(files))
+	uploadedNames := make([]string, 0, len(files))
+	cleanup := func() { rs.cleanupBatchUploads(storage, created, uploadedNames, rs.UploadPath) }
 
 	for i, header := range files {
 		file, err := header.Open()
 		if err != nil {
+			cleanup()
 			return nil, fmt.Errorf("error opening file %d: %w", i+1, err)
 		}
-		defer file.Close()
 
-		forcedFilename := fmt.Sprintf("resource-%s-%d%s", sectionID.String(), i+1, header.Filename)
+		sectionPart := "unscoped"
+		if sectionID != nil {
+			sectionPart = sectionID.String()
+		}
+		forcedFilename := fmt.Sprintf("resource-%s-%d%s", sectionPart, i+1, header.Filename)
 
 		content, finalName, finalType, err := rs.sanitizeAndOptimizeUpload(file, header, forcedFilename)
+		file.Close()
 		if err != nil {
+			cleanup()
 			return nil, fmt.Errorf("failed to process file %d: %w", i+1, err)
 		}
-
-		err = bucketrepository.UploadRawBytesSimple(content, finalName, finalType, rs.UploadPath, rs.Bucket, rs.Provider)
+		err = storage.UploadRawBytesSimple(content, finalName, finalType, rs.UploadPath, rs.Bucket, rs.Provider)
 		if err != nil {
+			cleanup()
 			return nil, fmt.Errorf("upload failed for file %d: %w", i+1, err)
 		}
+		uploadedNames = append(uploadedNames, finalName)
 
 		resource := &models.Resource{
 			EventSectionID: sectionID,
@@ -387,10 +902,12 @@ func (rs *ResourceService) UploadMultipleResources(
 			Position:       utils.PtrInt(i),
 		}
 
-		if err := CreateResource(resource); err != nil {
+		if err := rs.CreateResource(resource); err != nil {
+			cleanup()
 			return nil, fmt.Errorf("failed to save resource for file %d: %w", i+1, err)
 		}
 
+		created = append(created, resource)
 		uploaded = append(uploaded, resource)
 	}
 
@@ -403,7 +920,7 @@ func (rs *ResourceService) UploadBaseResources(
 	resourceTypeName string,
 ) ([]*models.Resource, error) {
 	// 1. Obtener resourceTypeID por nombre
-	resourceTypes, err := ListResourceTypes()
+	resourceTypes, err := rs.ListResourceTypes()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load resource types: %w", err)
 	}
@@ -421,9 +938,17 @@ func (rs *ResourceService) UploadBaseResources(
 
 	// 2. Iniciar uploads
 	var uploaded []*models.Resource
+	storage, err := rs.requireStorage()
+	if err != nil {
+		return nil, err
+	}
+	created := make([]*models.Resource, 0, len(files))
+	uploadedNames := make([]string, 0, len(files))
+	cleanup := func() { rs.cleanupBatchUploads(storage, created, uploadedNames, subfolder) }
 	for i, header := range files {
 		file, err := header.Open()
 		if err != nil {
+			cleanup()
 			return nil, fmt.Errorf("error opening file %d: %w", i+1, err)
 		}
 
@@ -434,15 +959,22 @@ func (rs *ResourceService) UploadBaseResources(
 		content, finalName, finalType, err := rs.sanitizeAndOptimizeUpload(file, header, forcedFilename)
 		file.Close()
 		if err != nil {
+			cleanup()
 			return nil, fmt.Errorf("failed to process file %d: %w", i+1, err)
+		}
+		if strings.EqualFold(resourceTypeName, "font") && !isFontUploadContentType(finalType) {
+			cleanup()
+			return nil, fmt.Errorf("failed to process file %d: %w", i+1, services.ValidationError{Msg: fmt.Sprintf("unsupported font type: %s", finalType)})
 		}
 
 		// 4. Upload en subfolder
 		finalPath := fmt.Sprintf("%s/%s", subfolder, finalName)
-		err = bucketrepository.UploadRawBytesSimple(content, finalName, finalType, subfolder, rs.Bucket, rs.Provider)
+		err = storage.UploadRawBytesSimple(content, finalName, finalType, subfolder, rs.Bucket, rs.Provider)
 		if err != nil {
+			cleanup()
 			return nil, fmt.Errorf("upload failed for file %d: %w", i+1, err)
 		}
+		uploadedNames = append(uploadedNames, finalName)
 
 		// 5. Crear modelo sin section
 		resource := &models.Resource{
@@ -452,22 +984,89 @@ func (rs *ResourceService) UploadBaseResources(
 			Title:          finalName,
 		}
 
-		if err := CreateResource(resource); err != nil {
+		if err := rs.CreateResource(resource); err != nil {
+			cleanup()
 			return nil, fmt.Errorf("failed to save resource for file %d: %w", i+1, err)
 		}
 
+		created = append(created, resource)
 		uploaded = append(uploaded, resource)
 	}
 
 	return uploaded, nil
 }
 
+func (rs *ResourceService) cleanupBatchUploads(storage ports.ObjectStorageRepository, created []*models.Resource, uploadedNames []string, folder string) {
+	for i := len(created) - 1; i >= 0; i-- {
+		if created[i] != nil {
+			if err := rs.deleteResourceRecord(created[i].ID, created[i].EventSectionID); err != nil {
+				slog.Error("upload rollback failed to delete resource record", "resource_id", created[i].ID, "error", err)
+			}
+		}
+	}
+	for i := len(uploadedNames) - 1; i >= 0; i-- {
+		if err := storage.DeleteFile(uploadedNames[i], folder, rs.Bucket, rs.Provider); err != nil {
+			slog.Error("upload rollback failed to delete object", "folder", folder, "filename", uploadedNames[i], "error", err)
+		}
+	}
+}
+
+// RollbackUploadedResources compensates a downstream batch mutation (for
+// example Font creation) after Resource records and objects were committed.
+func (rs *ResourceService) RollbackUploadedResources(resources []*models.Resource) {
+	if rs == nil || len(resources) == 0 {
+		return
+	}
+	storage, storageErr := rs.requireStorage()
+	if storageErr != nil {
+		slog.Error("upload rollback could not access object storage", "error", storageErr)
+	}
+	for i := len(resources) - 1; i >= 0; i-- {
+		resource := resources[i]
+		if resource == nil {
+			continue
+		}
+		if err := rs.deleteResourceRecord(resource.ID, resource.EventSectionID); err != nil {
+			slog.Error("upload rollback failed to delete resource record", "resource_id", resource.ID, "error", err)
+		}
+		if storageErr == nil {
+			folder, filename := resourceStoragePathParts(resource.Path, rs.UploadPath)
+			if filename != "" {
+				if err := storage.DeleteFile(filename, folder, rs.Bucket, rs.Provider); err != nil {
+					slog.Error("upload rollback failed to delete object", "resource_id", resource.ID, "path", resource.Path, "error", err)
+				}
+			}
+		}
+	}
+}
+
+func isFontUploadContentType(contentType string) bool {
+	switch canonicalUploadContentType(contentType) {
+	case "font/ttf", "font/otf", "font/woff", "font/woff2", "font/sfnt", "application/vnd.ms-fontobject":
+		return true
+	default:
+		return false
+	}
+}
+
 func (rs *ResourceService) DownloadFile(filename string) (io.ReadCloser, error) {
-	return bucketrepository.GetFileStream(filename, rs.UploadPath, rs.Bucket, rs.Provider)
+	storage, err := rs.requireStorage()
+	if err != nil {
+		return nil, err
+	}
+	return storage.GetFileStream(filename, rs.UploadPath, rs.Bucket, rs.Provider)
 }
 
 func isAllowed(contentType string) bool {
-	return AllowedMimeTypes[contentType]
+	return AllowedMimeTypes[canonicalUploadContentType(contentType)]
+}
+
+func requireImageUploadContentType(contentType string) error {
+	normalized := canonicalUploadContentType(contentType)
+	if strings.HasPrefix(normalized, "image/") {
+		return nil
+	}
+	return services.ValidationError{Msg: fmt.Sprintf("unsupported image type: %s", contentType)}
 }
 
 func (rs *ResourceService) sanitizeAndOptimizeUpload(
@@ -476,10 +1075,9 @@ func (rs *ResourceService) sanitizeAndOptimizeUpload(
 	forcedName string,
 ) (optimized []byte, finalName string, finalType string, err error) {
 
-	contentType := header.Header.Get("Content-Type")
-	if contentType == "" {
-		ext := strings.ToLower(header.Filename[strings.LastIndex(header.Filename, ".")+1:])
-		contentType = guessMimeType(ext)
+	contentType, err := detectUploadContentType(file, header)
+	if err != nil {
+		return nil, "", "", err
 	}
 
 	if !AllowedMimeTypes[contentType] {
@@ -505,40 +1103,97 @@ func (rs *ResourceService) sanitizeAndOptimizeUpload(
 	return optimized, finalName, newContentType, nil
 }
 
-func UpdateResource(resource *models.Resource) error {
-	err := resourcerepository.UpdateResource(resource)
+func detectUploadContentType(file multipart.File, header *multipart.FileHeader) (string, error) {
+	if file == nil || header == nil {
+		return "", services.ValidationError{Msg: "uploaded file is required"}
+	}
+	declared := canonicalUploadContentType(header.Header.Get("Content-Type"))
+	ext := ""
+	if index := strings.LastIndex(header.Filename, "."); index >= 0 {
+		ext = strings.ToLower(header.Filename[index+1:])
+	}
+	if declared == "" || declared == "application/octet-stream" {
+		declared = canonicalUploadContentType(guessMimeType(ext))
+	}
+
+	probe := make([]byte, 512)
+	read, readErr := file.Read(probe)
+	if readErr != nil && readErr != io.EOF {
+		return "", fmt.Errorf("failed to inspect uploaded file: %w", readErr)
+	}
+	if _, seekErr := file.Seek(0, io.SeekStart); seekErr != nil {
+		return "", fmt.Errorf("failed to rewind uploaded file: %w", seekErr)
+	}
+	detected := canonicalUploadContentType(http.DetectContentType(probe[:read]))
+
+	// DetectContentType cannot identify every modern camera/font format. Keep a
+	// declared, allowlisted type only when the probe is generic. For recognized
+	// payloads, the bytes win over a spoofable multipart header.
+	if detected != "" && detected != "application/octet-stream" {
+		if detected == "text/plain" && declared == "image/svg+xml" && ext == "svg" {
+			return declared, nil
+		}
+		if AllowedMimeTypes[detected] || detected == "text/html; charset=utf-8" || detected == "text/html" {
+			return detected, nil
+		}
+	}
+	return declared, nil
+}
+
+func (rs *ResourceService) CreateResource(resource *models.Resource) error {
+	repo, err := rs.requireRepo()
 	if err != nil {
 		return err
 	}
 
-	if resource.EventSectionID != nil {
-		return redisrepository.Invalidate("resources", resource.EventSectionID.String())
-	}
-	return nil
-}
-
-func CreateResource(resource *models.Resource) error {
-	err := resourcerepository.CreateResource(resource)
-	if err != nil {
+	if err := repo.CreateResource(resource); err != nil {
 		return err
 	}
 
-	if resource.EventSectionID != nil {
-		return redisrepository.Invalidate("resources", resource.EventSectionID.String())
-	}
-	return nil
+	return rs.InvalidateSectionResourceCache(resource.EventSectionID)
 }
 
-func DeleteResource(resourceID uuid.UUID, sectionID *uuid.UUID) error {
-	err := resourcerepository.DeleteResource(resourceID)
+func (rs *ResourceService) deleteResourceRecord(resourceID uuid.UUID, sectionID *uuid.UUID) error {
+	repo, err := rs.requireRepo()
 	if err != nil {
 		return err
 	}
 
 	if sectionID != nil {
-		return redisrepository.Invalidate("resources", sectionID.String())
+		if versionedRepo, ok := repo.(resourceSectionVersionedDeleter); ok {
+			if err := versionedRepo.DeleteResourceAndTouchSection(resourceID, *sectionID, time.Now().UTC()); err != nil {
+				return err
+			}
+			return rs.InvalidateSectionResourceCache(sectionID)
+		}
 	}
-	return nil
+
+	if err := repo.DeleteResource(resourceID); err != nil {
+		return err
+	}
+
+	return rs.InvalidateSectionResourceCache(sectionID)
+}
+
+func UpdateResource(resource *models.Resource) error {
+	if _resourceSvc == nil {
+		return resourceServiceUnavailable()
+	}
+	return _resourceSvc.UpdateResource(resource)
+}
+
+func CreateResource(resource *models.Resource) error {
+	if _resourceSvc == nil {
+		return resourceServiceUnavailable()
+	}
+	return _resourceSvc.CreateResource(resource)
+}
+
+func DeleteResource(resourceID uuid.UUID, sectionID *uuid.UUID) error {
+	if _resourceSvc == nil {
+		return resourceServiceUnavailable()
+	}
+	return _resourceSvc.deleteResourceRecord(resourceID, sectionID)
 }
 
 func guessMimeType(ext string) string {
@@ -553,8 +1208,12 @@ func guessMimeType(ext string) string {
 		return "image/svg+xml"
 	case "webp":
 		return "image/webp"
-	case "heic", "heif":
+	case "heic":
 		return "image/heic"
+	case "heif":
+		return "image/heif"
+	case "avif":
+		return "image/avif"
 
 	case "mp4":
 		return "video/mp4"
@@ -562,6 +1221,10 @@ func guessMimeType(ext string) string {
 		return "video/webm"
 	case "mov":
 		return "video/quicktime"
+	case "m4v":
+		return "video/x-m4v"
+	case "3gp":
+		return "video/3gpp"
 	case "avi":
 		return "video/x-msvideo"
 	case "mkv":
@@ -610,6 +1273,12 @@ func updateFilenameExtension(filename, newContentType string) string {
 		ext = ".gif"
 	case "image/svg+xml":
 		ext = ".svg"
+	case "image/heic":
+		ext = ".heic"
+	case "image/heif":
+		ext = ".heif"
+	case "image/avif":
+		ext = ".avif"
 
 	case "video/mp4":
 		ext = ".mp4"
@@ -617,10 +1286,25 @@ func updateFilenameExtension(filename, newContentType string) string {
 		ext = ".webm"
 	case "video/quicktime":
 		ext = ".mov"
+	case "video/x-m4v":
+		ext = ".m4v"
+	case "video/3gpp":
+		ext = ".3gp"
 	case "video/x-msvideo":
 		ext = ".avi"
 	case "video/x-matroska":
 		ext = ".mkv"
+
+	case "audio/mpeg":
+		ext = ".mp3"
+	case "audio/ogg":
+		ext = ".ogg"
+	case "audio/wav":
+		ext = ".wav"
+	case "audio/aac":
+		ext = ".aac"
+	case "audio/flac":
+		ext = ".flac"
 
 	case "font/woff2":
 		ext = ".woff2"
@@ -649,8 +1333,23 @@ func updateFilenameExtension(filename, newContentType string) string {
 }
 
 func GetPresignedURL(path string, bucket string, provider string) (string, error) {
+	return GetPresignedURLWithTTL(path, bucket, provider, 720)
+}
+
+func GetPresignedURLWithTTL(path string, bucket string, provider string, ttlMinutes int64) (string, error) {
+	if _resourceSvc == nil {
+		return "", resourceServiceUnavailable()
+	}
+	return _resourceSvc.getPresignedURLWithTTL(path, bucket, provider, ttlMinutes)
+}
+
+func (rs *ResourceService) getPresignedURLWithTTL(path string, bucket string, provider string, ttlMinutes int64) (string, error) {
 	if path == "" {
 		return "", nil
+	}
+	storage, err := rs.requireStorage()
+	if err != nil {
+		return "", err
 	}
 
 	parts := strings.Split(path, "/")
@@ -661,12 +1360,20 @@ func GetPresignedURL(path string, bucket string, provider string) (string, error
 	filename := parts[len(parts)-1]
 	folder := strings.Join(parts[:len(parts)-1], "/")
 
-	return bucketrepository.GetPresignedFileURL(filename, folder, bucket, provider, 720)
+	return storage.GetPresignedFileURL(filename, folder, bucket, provider, int(ttlMinutes))
 }
 
 // DeleteObjectByPath elimina cualquier archivo del bucket basándose en su path completo.
 // Útil para limpiar logos, archivos de recursos, o cualquier otro objeto.
 // DeleteObjectByPath elimina cualquier archivo del bucket basándose en su path completo.
+func (rs *ResourceService) GetPresignedURL(path string) (string, error) {
+	return rs.getPresignedURLWithTTL(path, rs.Bucket, rs.Provider, 720)
+}
+
+func (rs *ResourceService) GetPresignedURLWithTTL(path string, ttlMinutes int64) (string, error) {
+	return rs.getPresignedURLWithTTL(path, rs.Bucket, rs.Provider, ttlMinutes)
+}
+
 func (rs *ResourceService) DeleteObjectByPath(fullPath string) error {
 	if fullPath == "" {
 		return nil
@@ -687,8 +1394,12 @@ func (rs *ResourceService) DeleteObjectByPath(fullPath string) error {
 		folder = strings.Join(parts[:len(parts)-1], "/")
 	}
 
+	storage, err := rs.requireStorage()
+	if err != nil {
+		return err
+	}
 	// 1. Verificar existencia antes de borrar
-	exists, _, err := bucketrepository.FileExists(filename, folder, rs.Bucket, rs.Provider)
+	exists, _, err := storage.FileExists(filename, folder, rs.Bucket, rs.Provider)
 	if err != nil {
 		return fmt.Errorf("error verifying file: %w", err)
 	}
@@ -698,7 +1409,7 @@ func (rs *ResourceService) DeleteObjectByPath(fullPath string) error {
 	}
 
 	// 2. Borrado físico en S3/Cloud
-	if err := bucketrepository.DeleteFile(filename, folder, rs.Bucket, rs.Provider); err != nil {
+	if err := storage.DeleteFile(filename, folder, rs.Bucket, rs.Provider); err != nil {
 		return fmt.Errorf("failed to remove object from bucket: %w", err)
 	}
 

@@ -1,130 +1,15 @@
 package users
 
 import (
+	"events-stocks/dtos"
 	"events-stocks/models"
-	"events-stocks/repositories/authproviderrepository"
-	"events-stocks/repositories/clientrepository"
-	"events-stocks/repositories/userrepository"
 	"events-stocks/services/ports"
 	"fmt"
+	"strings"
+
 	"github.com/gofrs/uuid"
+	"golang.org/x/sync/errgroup"
 )
-
-func ListAllUsers() (interface{}, error) {
-	users, err := userrepository.ListAllUsers()
-	if err != nil {
-		return nil, err
-	}
-
-	userIDs := make([]uuid.UUID, len(users))
-	for i, u := range users {
-		userIDs[i] = u.ID
-	}
-	clientCounts, _ := clientrepository.CountClientsByUsers(userIDs)
-
-	response := make([]map[string]interface{}, 0, len(users))
-	for _, u := range users {
-		response = append(response, map[string]interface{}{
-			"id":         u.ID,
-			"email":      u.Email,
-			"first_name": u.FirstName,
-			"last_name":  u.LastName,
-			"is_active":  u.IsActive,
-			"is_root":    u.IsRoot,
-			"clients":    clientCounts[u.ID],
-			"created_at": u.CreatedAt,
-		})
-	}
-
-	return response, nil
-}
-
-func GetUserDetail(userID uuid.UUID) (interface{}, error) {
-	user, err := userrepository.GetUserByID(userID)
-	if err != nil {
-		return nil, fmt.Errorf("usuario no encontrado")
-	}
-
-	clients, _ := clientrepository.ListClientsByUser(userID)
-
-	return map[string]interface{}{
-		"id":         user.ID,
-		"email":      user.Email,
-		"first_name": user.FirstName,
-		"last_name":  user.LastName,
-		"is_active":  user.IsActive,
-		"is_root":    user.IsRoot,
-		"clients":    clients,
-		"created_at": user.CreatedAt,
-	}, nil
-}
-
-func ListUserClients(userID uuid.UUID) (interface{}, error) {
-	clients, err := clientrepository.ListClientsByUser(userID)
-	if err != nil {
-		return nil, err
-	}
-
-	return clients, nil
-}
-
-func SetUserActive(userID uuid.UUID, active bool) error {
-	user, err := userrepository.GetUserByID(userID)
-	if err != nil {
-		return fmt.Errorf("usuario no encontrado")
-	}
-
-	// 🔐 1. Cognito es la fuente de verdad
-	if err := authproviderrepository.SetUserEnabled(
-		user.CognitoSub,
-		active,
-		"cognito",
-	); err != nil {
-		return fmt.Errorf("error actualizando estado en cognito: %w", err)
-	}
-
-	// 🪞 2. DB es espejo
-	user.IsActive = active
-	return userrepository.UpdateUser(user)
-}
-
-func InviteUser(email, firstName, lastName string) (*models.User, error) {
-
-	authUser, err := authproviderrepository.InviteUser(
-		email,
-		firstName,
-		lastName,
-		"cognito",
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	user := &models.User{
-		CognitoSub: authUser.Sub,
-		Email:      authUser.Email,
-		FirstName:  authUser.FirstName,
-		LastName:   authUser.LastName,
-		IsActive:   true,
-		IsRoot:     false,
-	}
-
-	if err := userrepository.CreateUser(user); err != nil {
-		_ = authproviderrepository.DeleteUser(authUser.Sub, "cognito")
-		return nil, err
-	}
-
-	return user, nil
-}
-
-// PaginatedResult wraps a paginated list response with metadata.
-type PaginatedResult struct {
-	Data       interface{} `json:"data"`
-	Total      int         `json:"total"`
-	Page       int         `json:"page"`
-	PageSize   int         `json:"page_size"`
-	TotalPages int         `json:"total_pages"`
-}
 
 // AdminUserService is the injectable, struct-based admin user service.
 type AdminUserService struct {
@@ -137,72 +22,66 @@ func NewAdminUserService(userRepo ports.UserRepository, clientRepo ports.ClientR
 	return &AdminUserService{userRepo: userRepo, clientRepo: clientRepo, authRepo: authRepo}
 }
 
-func (s *AdminUserService) ListAllUsers(page, pageSize int) (interface{}, error) {
-	if pageSize <= 0 || pageSize > 200 {
-		pageSize = 50
+func normalizeAdminUsersListQuery(query dtos.AdminUsersListQuery) dtos.AdminUsersListQuery {
+	if query.PageSize <= 0 || query.PageSize > 200 {
+		query.PageSize = 50
 	}
-	if page < 1 {
-		page = 1
+	if query.Page < 1 {
+		query.Page = 1
 	}
 
-	paged, total, err := s.userRepo.ListAllUsersPaginated(page, pageSize)
+	query.Search = strings.TrimSpace(query.Search)
+	query.Status = strings.ToLower(strings.TrimSpace(query.Status))
+	switch query.Status {
+	case "", "all", "active", "inactive", "root", "non_root":
+	default:
+		query.Status = ""
+	}
+
+	return query
+}
+
+func (s *AdminUserService) ListAllUsers(query dtos.AdminUsersListQuery) (dtos.AdminUsersPageResponse, error) {
+	query = normalizeAdminUsersListQuery(query)
+
+	paged, total, err := s.userRepo.ListAllUsersPaginated(query)
 	if err != nil {
-		return nil, err
-	}
-
-	totalPages := 0
-	if total > 0 {
-		totalPages = (int(total) + pageSize - 1) / pageSize
+		return dtos.AdminUsersPageResponse{}, err
 	}
 
 	userIDs := make([]uuid.UUID, len(paged))
 	for i, u := range paged {
 		userIDs[i] = u.ID
 	}
-	clientCounts, _ := s.clientRepo.CountClientsByUsers(userIDs)
-
-	data := make([]map[string]interface{}, 0, len(paged))
-	for _, u := range paged {
-		data = append(data, map[string]interface{}{
-			"id":         u.ID,
-			"email":      u.Email,
-			"first_name": u.FirstName,
-			"last_name":  u.LastName,
-			"is_active":  u.IsActive,
-			"is_root":    u.IsRoot,
-			"clients":    clientCounts[u.ID],
-			"created_at": u.CreatedAt,
-		})
+	clientCounts := map[uuid.UUID]int64{}
+	if s.clientRepo != nil && len(userIDs) > 0 {
+		clientCounts, _ = s.clientRepo.CountClientsByUsers(userIDs)
 	}
 
-	return PaginatedResult{
-		Data:       data,
-		Total:      int(total),
-		Page:       page,
-		PageSize:   pageSize,
-		TotalPages: totalPages,
-	}, nil
+	return dtos.NewAdminUsersPageResponse(paged, clientCounts, total, query.Page, query.PageSize), nil
 }
 
-func (s *AdminUserService) GetUserDetail(userID uuid.UUID) (interface{}, error) {
+func (s *AdminUserService) GetUserDetail(userID uuid.UUID) (dtos.AdminUserDetailResponse, error) {
 	user, err := s.userRepo.GetUserByID(userID)
 	if err != nil {
-		return nil, fmt.Errorf("usuario no encontrado")
+		return dtos.AdminUserDetailResponse{}, fmt.Errorf("usuario no encontrado")
 	}
-	clients, _ := s.clientRepo.ListClientsByUser(userID)
-	return map[string]interface{}{
-		"id":         user.ID,
-		"email":      user.Email,
-		"first_name": user.FirstName,
-		"last_name":  user.LastName,
-		"is_active":  user.IsActive,
-		"is_root":    user.IsRoot,
-		"clients":    clients,
-		"created_at": user.CreatedAt,
-	}, nil
+	clients := []models.Client{}
+	if s.clientRepo != nil {
+		clients, _ = s.clientRepo.ListClientsByUser(userID)
+	}
+	return dtos.NewAdminUserDetailResponse(user, clients), nil
 }
 
-func (s *AdminUserService) ListUserClients(userID uuid.UUID) (interface{}, error) {
+func (s *AdminUserService) GetUserSummary(userID uuid.UUID) (dtos.AdminUserDetailResponse, error) {
+	user, err := s.userRepo.GetUserByID(userID)
+	if err != nil {
+		return dtos.AdminUserDetailResponse{}, fmt.Errorf("usuario no encontrado")
+	}
+	return dtos.NewAdminUserDetailResponse(user, nil), nil
+}
+
+func (s *AdminUserService) ListUserClients(userID uuid.UUID) ([]models.Client, error) {
 	clients, err := s.clientRepo.ListClientsByUser(userID)
 	if err != nil {
 		return nil, err
@@ -210,16 +89,100 @@ func (s *AdminUserService) ListUserClients(userID uuid.UUID) (interface{}, error
 	return clients, nil
 }
 
-func (s *AdminUserService) SetUserActive(userID uuid.UUID, active bool) error {
+func (s *AdminUserService) ListUserClientsPage(userID uuid.UUID, query dtos.ClientsListQuery) (dtos.ClientsPageResponse, error) {
+	var clients []models.Client
+	var total int64
+	var active int64
+	var inactive int64
+	group := new(errgroup.Group)
+	group.Go(func() error {
+		loaded, count, err := s.clientRepo.ListClientsPaginated(&userID, query)
+		clients, total = loaded, count
+		return err
+	})
+	if stats, ok := s.clientRepo.(ports.UserClientStatusRepository); ok {
+		group.Go(func() error {
+			active, inactive, _ = stats.CountUserClientStatuses(userID)
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return dtos.ClientsPageResponse{}, err
+	}
+	response := dtos.ClientsPageResponse{Data: dtos.NewClientResponses(clients), Total: total, Active: active, Inactive: inactive, Page: query.Page, PageSize: query.PageSize, TotalPages: int((total + int64(query.PageSize) - 1) / int64(query.PageSize))}
+	return response, nil
+}
+
+func (s *AdminUserService) GetUserClientsPage(userID uuid.UUID, query dtos.ClientsListQuery) (dtos.UserClientsPageResponse, error) {
+	var user *models.User
+	var clientsPage dtos.ClientsPageResponse
+	group := new(errgroup.Group)
+	group.Go(func() error {
+		loaded, err := s.userRepo.GetUserByID(userID)
+		user = loaded
+		return err
+	})
+	group.Go(func() error {
+		loaded, err := s.ListUserClientsPage(userID, query)
+		clientsPage = loaded
+		return err
+	})
+	if err := group.Wait(); err != nil {
+		return dtos.UserClientsPageResponse{}, err
+	}
+	return dtos.UserClientsPageResponse{ClientsPageResponse: clientsPage, User: dtos.NewAdminUserResponse(user)}, nil
+}
+
+func (s *AdminUserService) SetUserActive(userID uuid.UUID, active bool) (*models.User, error) {
+	user, err := s.userRepo.GetUserByID(userID)
+	if err != nil {
+		return nil, fmt.Errorf("usuario no encontrado")
+	}
+	if err := s.authRepo.SetUserEnabled(user.CognitoSub, active, "cognito"); err != nil {
+		return nil, fmt.Errorf("error actualizando estado en cognito: %w", err)
+	}
+	user.IsActive = active
+	if err := s.userRepo.UpdateUser(user); err != nil {
+		return nil, err
+	}
+	return user, nil
+}
+
+func (s *AdminUserService) UpdateUserInformation(userID uuid.UUID, firstName, lastName string) (*models.User, error) {
+	user, err := s.userRepo.GetUserByID(userID)
+	if err != nil {
+		return nil, fmt.Errorf("usuario no encontrado")
+	}
+	if firstName == "" || lastName == "" {
+		return nil, fmt.Errorf("nombre y apellido son requeridos")
+	}
+	attrs := map[string]string{
+		"given_name":  firstName,
+		"family_name": lastName,
+	}
+	if err := s.authRepo.UpdateUser(user.CognitoSub, attrs, "cognito"); err != nil {
+		return nil, fmt.Errorf("error actualizando cognito: %w", err)
+	}
+	user.FirstName = firstName
+	user.LastName = lastName
+	if err := s.userRepo.UpdateUser(user); err != nil {
+		return nil, fmt.Errorf("error actualizando base de datos local: %w", err)
+	}
+	return user, nil
+}
+
+func (s *AdminUserService) DeleteUser(userID uuid.UUID) error {
 	user, err := s.userRepo.GetUserByID(userID)
 	if err != nil {
 		return fmt.Errorf("usuario no encontrado")
 	}
-	if err := s.authRepo.SetUserEnabled(user.CognitoSub, active, "cognito"); err != nil {
-		return fmt.Errorf("error actualizando estado en cognito: %w", err)
+	if err := s.authRepo.DeleteUser(user.CognitoSub, "cognito"); err != nil {
+		return fmt.Errorf("error eliminando usuario en cognito: %w", err)
 	}
-	user.IsActive = active
-	return s.userRepo.UpdateUser(user)
+	if err := s.userRepo.DeleteUser(userID); err != nil {
+		return fmt.Errorf("error eliminando usuario local: %w", err)
+	}
+	return nil
 }
 
 func (s *AdminUserService) InviteUser(email, firstName, lastName string) (*models.User, error) {

@@ -3,7 +3,9 @@ package bucketrepository
 import (
 	"bytes"
 	"context"
+	"events-stocks/dtos"
 	"events-stocks/repositories/awsrepository"
+	"events-stocks/services/ports"
 	"fmt"
 	"github.com/google/uuid"
 	"io"
@@ -23,6 +25,56 @@ func GetPresignedFileURL(filename string, folder string, bucket string, provider
 		return awsrepository.GeneratePresignedURL(ctx, objectKey, bucket, minutes)
 	default:
 		return "", fmt.Errorf("unsupported provider: %s", provider)
+	}
+}
+
+func GetPresignedPutURL(objectKey, bucket, provider, contentType string, minutes int) (string, error) {
+	ctx := context.Background()
+	switch strings.ToLower(provider) {
+	case "aws":
+		return awsrepository.GeneratePresignedPutURL(ctx, objectKey, bucket, contentType, minutes)
+	default:
+		return "", fmt.Errorf("unsupported provider: %s", provider)
+	}
+}
+
+func CreateMultipartUpload(objectKey, bucket, provider, contentType string) (string, error) {
+	ctx := context.Background()
+	switch strings.ToLower(provider) {
+	case "aws":
+		return awsrepository.CreateMultipartUpload(ctx, objectKey, bucket, contentType)
+	default:
+		return "", fmt.Errorf("unsupported provider: %s", provider)
+	}
+}
+
+func GetPresignedUploadPartURL(objectKey, bucket, provider, uploadID string, partNumber, minutes int) (string, error) {
+	ctx := context.Background()
+	switch strings.ToLower(provider) {
+	case "aws":
+		return awsrepository.GeneratePresignedUploadPartURL(ctx, objectKey, bucket, uploadID, partNumber, minutes)
+	default:
+		return "", fmt.Errorf("unsupported provider: %s", provider)
+	}
+}
+
+func CompleteMultipartUpload(objectKey, bucket, provider, uploadID string, parts []dtos.CompletedUploadPart) error {
+	ctx := context.Background()
+	switch strings.ToLower(provider) {
+	case "aws":
+		return awsrepository.CompleteMultipartUpload(ctx, objectKey, bucket, uploadID, parts)
+	default:
+		return fmt.Errorf("unsupported provider: %s", provider)
+	}
+}
+
+func AbortMultipartUpload(objectKey, bucket, provider, uploadID string) error {
+	ctx := context.Background()
+	switch strings.ToLower(provider) {
+	case "aws":
+		return awsrepository.AbortMultipartUpload(ctx, objectKey, bucket, uploadID)
+	default:
+		return fmt.Errorf("unsupported provider: %s", provider)
 	}
 }
 
@@ -89,6 +141,18 @@ func FileExists(filename string, folder string, bucket string, provider string) 
 	}
 }
 
+func GetObjectMetadata(filename, folder, bucket, provider string) (ports.ObjectStorageMetadata, error) {
+	ctx := context.Background()
+	objectKey := fmt.Sprintf("%s/%s", folder, filename)
+	switch strings.ToLower(provider) {
+	case "aws":
+		size, contentType, err := awsrepository.GetS3ObjectMetadata(ctx, objectKey, bucket)
+		return ports.ObjectStorageMetadata{Size: size, ContentType: contentType}, err
+	default:
+		return ports.ObjectStorageMetadata{}, fmt.Errorf("unsupported provider: %s", provider)
+	}
+}
+
 // UpdateFile replaces the content of a file in the selected cloud provider
 func UpdateFile(content []byte, filename string, contentType string, folder string, bucket string, provider string) (string, error) {
 	ctx := context.Background()
@@ -152,4 +216,45 @@ func UploadRawBytesSimple(content []byte, filename, contentType, folder, bucket,
 	default:
 		return fmt.Errorf("unsupported provider: %s", provider)
 	}
+}
+
+type BucketRepo struct{}
+
+func NewBucketRepo() *BucketRepo { return &BucketRepo{} }
+
+func (r *BucketRepo) FileExists(filename, folder, bucket, provider string) (bool, string, error) {
+	return FileExists(filename, folder, bucket, provider)
+}
+func (r *BucketRepo) GetObjectMetadata(filename, folder, bucket, provider string) (ports.ObjectStorageMetadata, error) {
+	return GetObjectMetadata(filename, folder, bucket, provider)
+}
+func (r *BucketRepo) GetPresignedFileURL(filename, folder, bucket, provider string, minutes int) (string, error) {
+	return GetPresignedFileURL(filename, folder, bucket, provider, minutes)
+}
+func (r *BucketRepo) GetPresignedPutURL(objectKey, bucket, provider, contentType string, minutes int) (string, error) {
+	return GetPresignedPutURL(objectKey, bucket, provider, contentType, minutes)
+}
+func (r *BucketRepo) CreateMultipartUpload(objectKey, bucket, provider, contentType string) (string, error) {
+	return CreateMultipartUpload(objectKey, bucket, provider, contentType)
+}
+func (r *BucketRepo) GetPresignedUploadPartURL(objectKey, bucket, provider, uploadID string, partNumber, minutes int) (string, error) {
+	return GetPresignedUploadPartURL(objectKey, bucket, provider, uploadID, partNumber, minutes)
+}
+func (r *BucketRepo) CompleteMultipartUpload(objectKey, bucket, provider, uploadID string, parts []dtos.CompletedUploadPart) error {
+	return CompleteMultipartUpload(objectKey, bucket, provider, uploadID, parts)
+}
+func (r *BucketRepo) AbortMultipartUpload(objectKey, bucket, provider, uploadID string) error {
+	return AbortMultipartUpload(objectKey, bucket, provider, uploadID)
+}
+func (r *BucketRepo) UpdateFile(content []byte, filename, contentType, folder, bucket, provider string) (string, error) {
+	return UpdateFile(content, filename, contentType, folder, bucket, provider)
+}
+func (r *BucketRepo) UploadRawBytesSimple(content []byte, filename, contentType, folder, bucket, provider string) error {
+	return UploadRawBytesSimple(content, filename, contentType, folder, bucket, provider)
+}
+func (r *BucketRepo) DeleteFile(filename, folder, bucket, provider string) error {
+	return DeleteFile(filename, folder, bucket, provider)
+}
+func (r *BucketRepo) GetFileStream(filename, folder, bucket, provider string) (io.ReadCloser, error) {
+	return GetFileStream(filename, folder, bucket, provider)
 }

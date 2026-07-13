@@ -1,10 +1,19 @@
 package clients
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"events-stocks/dtos"
 	"events-stocks/models"
 	"events-stocks/services/ports"
+	resourcesService "events-stocks/services/resources"
+	"image"
+	"image/color"
+	"image/png"
+	"io"
+	"mime/multipart"
+	"net/textproto"
 	"testing"
 	"time"
 
@@ -13,27 +22,75 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type clientTestMultipartFile struct{ *bytes.Reader }
+
+func (f *clientTestMultipartFile) Close() error { return nil }
+
+type clientTestLogoStorage struct {
+	uploadErr error
+	deleted   []string
+}
+
+func (s *clientTestLogoStorage) FileExists(string, string, string, string) (bool, string, error) {
+	return true, "", nil
+}
+func (s *clientTestLogoStorage) GetPresignedFileURL(filename, folder, _, _ string, _ int) (string, error) {
+	return "https://signed.example/" + folder + "/" + filename, nil
+}
+func (s *clientTestLogoStorage) GetPresignedPutURL(string, string, string, string, int) (string, error) {
+	return "", nil
+}
+func (s *clientTestLogoStorage) CreateMultipartUpload(string, string, string, string) (string, error) {
+	return "", nil
+}
+func (s *clientTestLogoStorage) GetPresignedUploadPartURL(string, string, string, string, int, int) (string, error) {
+	return "", nil
+}
+func (s *clientTestLogoStorage) CompleteMultipartUpload(string, string, string, string, []dtos.CompletedUploadPart) error {
+	return nil
+}
+func (s *clientTestLogoStorage) AbortMultipartUpload(string, string, string, string) error {
+	return nil
+}
+func (s *clientTestLogoStorage) UpdateFile([]byte, string, string, string, string, string) (string, error) {
+	return "", nil
+}
+func (s *clientTestLogoStorage) UploadRawBytesSimple([]byte, string, string, string, string, string) error {
+	return s.uploadErr
+}
+func (s *clientTestLogoStorage) DeleteFile(filename, folder, _, _ string) error {
+	s.deleted = append(s.deleted, folder+"/"+filename)
+	return nil
+}
+func (s *clientTestLogoStorage) GetFileStream(string, string, string, string) (io.ReadCloser, error) {
+	return io.NopCloser(bytes.NewReader(nil)), nil
+}
+
+var _ ports.ObjectStorageRepository = (*clientTestLogoStorage)(nil)
+
 // ---------------------------------------------------------------------------
 // Mock implementations
 // ---------------------------------------------------------------------------
 
 type mockClientRepo struct {
-	CreateClientFunc        func(client *models.Client) error
-	GetClientByIDFunc       func(id uuid.UUID) (*models.Client, error)
-	UpdateClientFunc        func(client *models.Client) error
-	DeleteClientFunc        func(id uuid.UUID) error
-	GetClientsByUserFunc    func(userID uuid.UUID) ([]models.Client, error)
-	GetChildrenClientsFunc  func(parentID uuid.UUID) ([]models.Client, error)
+	CreateClientFunc         func(client *models.Client) error
+	GetClientByIDFunc        func(id uuid.UUID) (*models.Client, error)
+	UpdateClientFunc         func(client *models.Client) error
+	DeleteClientFunc         func(id uuid.UUID) error
+	GetAllClientsFunc        func() ([]models.Client, error)
+	ListClientsPaginatedFunc func(userID *uuid.UUID, query dtos.ClientsListQuery) ([]models.Client, int64, error)
+	GetClientsByUserFunc     func(userID uuid.UUID) ([]models.Client, error)
+	GetChildrenClientsFunc   func(parentID uuid.UUID) ([]models.Client, error)
 	CheckAccessRecursiveFunc func(userID, targetClientID uuid.UUID) (bool, string)
-	IsMemberFunc            func(userID, clientID uuid.UUID) (bool, string)
-	AddMemberFunc           func(member *models.ClientMember) error
-	RemoveMemberFunc        func(clientID, userID uuid.UUID) error
-	UpdateMemberRoleFunc    func(clientID, userID, newRoleID uuid.UUID) error
-	GetMemberRoleFunc       func(clientID, userID uuid.UUID) (*models.ClientRole, error)
-	GetMembersFunc          func(clientID uuid.UUID) ([]models.ClientMember, error)
-	DeleteAllMembersFunc    func(clientID uuid.UUID) error
-	ListClientsByUserFunc   func(userID uuid.UUID) ([]models.Client, error)
-	CountClientsByUsersFunc func(userIDs []uuid.UUID) (map[uuid.UUID]int64, error)
+	IsMemberFunc             func(userID, clientID uuid.UUID) (bool, string)
+	AddMemberFunc            func(member *models.ClientMember) error
+	RemoveMemberFunc         func(clientID, userID uuid.UUID) error
+	UpdateMemberRoleFunc     func(clientID, userID, newRoleID uuid.UUID) error
+	GetMemberRoleFunc        func(clientID, userID uuid.UUID) (*models.ClientRole, error)
+	GetMembersFunc           func(clientID uuid.UUID) ([]models.ClientMember, error)
+	DeleteAllMembersFunc     func(clientID uuid.UUID) error
+	ListClientsByUserFunc    func(userID uuid.UUID) ([]models.Client, error)
+	CountClientsByUsersFunc  func(userIDs []uuid.UUID) (map[uuid.UUID]int64, error)
 }
 
 func (m *mockClientRepo) CreateClient(client *models.Client) error {
@@ -59,6 +116,18 @@ func (m *mockClientRepo) DeleteClient(id uuid.UUID) error {
 		return m.DeleteClientFunc(id)
 	}
 	return nil
+}
+func (m *mockClientRepo) GetAllClients() ([]models.Client, error) {
+	if m.GetAllClientsFunc != nil {
+		return m.GetAllClientsFunc()
+	}
+	return nil, nil
+}
+func (m *mockClientRepo) ListClientsPaginated(userID *uuid.UUID, query dtos.ClientsListQuery) ([]models.Client, int64, error) {
+	if m.ListClientsPaginatedFunc != nil {
+		return m.ListClientsPaginatedFunc(userID, query)
+	}
+	return nil, 0, nil
 }
 func (m *mockClientRepo) GetClientsByUser(userID uuid.UUID) ([]models.Client, error) {
 	if m.GetClientsByUserFunc != nil {
@@ -138,9 +207,9 @@ var _ ports.ClientRepository = (*mockClientRepo)(nil)
 // ---------------------------------------------------------------------------
 
 type mockClientRoleRepo struct {
-	GetByCodeFunc            func(code string) (*models.ClientRole, error)
-	GetByIDFunc              func(id uuid.UUID) (*models.ClientRole, error)
-	GetAssignableRolesFunc   func(myHierarchyLevel int) ([]models.ClientRole, error)
+	GetByCodeFunc          func(code string) (*models.ClientRole, error)
+	GetByIDFunc            func(id uuid.UUID) (*models.ClientRole, error)
+	GetAssignableRolesFunc func(myHierarchyLevel int) ([]models.ClientRole, error)
 }
 
 func (m *mockClientRoleRepo) GetByCode(code string) (*models.ClientRole, error) {
@@ -167,10 +236,10 @@ var _ ports.ClientRoleRepository = (*mockClientRoleRepo)(nil)
 // ---------------------------------------------------------------------------
 
 type mockClientTypeRepo struct {
-	GetByIDFunc        func(id uuid.UUID) (*models.ClientType, error)
-	GetByCodeFunc      func(code string) (*models.ClientType, error)
-	GetChildTypesFunc  func(parentLevel int) ([]models.ClientType, error)
-	GetRootTypeFunc    func() ([]models.ClientType, error)
+	GetByIDFunc       func(id uuid.UUID) (*models.ClientType, error)
+	GetByCodeFunc     func(code string) (*models.ClientType, error)
+	GetChildTypesFunc func(parentLevel int) ([]models.ClientType, error)
+	GetRootTypeFunc   func() ([]models.ClientType, error)
 }
 
 func (m *mockClientTypeRepo) GetByID(id uuid.UUID) (*models.ClientType, error) {
@@ -300,7 +369,9 @@ func TestCreateClient_Root_Platform_Success(t *testing.T) {
 	require.NotNil(t, client)
 	assert.Equal(t, "My Platform", client.Name)
 	assert.Equal(t, "my-platform", client.Code)
+	assert.NotEqual(t, uuid.Nil, client.ID)
 	require.NotNil(t, capturedMember)
+	assert.Equal(t, client.ID, capturedMember.ClientID)
 	assert.Equal(t, ownerUserID, capturedMember.UserID)
 	assert.Equal(t, ownerRoleID, capturedMember.ClientRoleID)
 }
@@ -381,6 +452,68 @@ func TestCreateClient_AgencyParent_CanOnlyCreateCustomer(t *testing.T) {
 	assert.Nil(t, client)
 }
 
+func TestCreateClient_PlatformParent_CanOnlyCreateAgency(t *testing.T) {
+	typeID := uuid.Must(uuid.NewV4())
+	parentID := uuid.Must(uuid.NewV4())
+
+	ctr := &mockClientTypeRepo{
+		GetByIDFunc: func(id uuid.UUID) (*models.ClientType, error) {
+			return &models.ClientType{Code: "CUSTOMER"}, nil
+		},
+	}
+	cr := &mockClientRepo{
+		CheckAccessRecursiveFunc: func(userID, targetClientID uuid.UUID) (bool, string) {
+			return true, "OWNER"
+		},
+		GetClientByIDFunc: func(id uuid.UUID) (*models.Client, error) {
+			return &models.Client{ClientType: models.ClientType{Code: "PLATFORM"}}, nil
+		},
+	}
+
+	svc := newClientService(cr, nil, ctr)
+	client, err := svc.CreateClient("Invalid child", typeID, uuid.Must(uuid.NewV4()), &parentID)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "platforms can only create agencies")
+	assert.Nil(t, client)
+}
+
+func TestCreateClient_PrimaryRootCanProvisionAgencyWithoutParentMembership(t *testing.T) {
+	typeID := uuid.Must(uuid.NewV4())
+	parentID := uuid.Must(uuid.NewV4())
+	rootUserID := uuid.Must(uuid.NewV4())
+	ownerRoleID := uuid.Must(uuid.NewV4())
+
+	ctr := &mockClientTypeRepo{
+		GetByIDFunc: func(id uuid.UUID) (*models.ClientType, error) {
+			return &models.ClientType{Code: "AGENCY"}, nil
+		},
+	}
+	cr := &mockClientRepo{
+		CheckAccessRecursiveFunc: func(userID, targetClientID uuid.UUID) (bool, string) {
+			return false, ""
+		},
+		GetClientByIDFunc: func(id uuid.UUID) (*models.Client, error) {
+			return &models.Client{ClientType: models.ClientType{Code: "PLATFORM"}}, nil
+		},
+		CreateClientFunc: func(client *models.Client) error { return nil },
+		AddMemberFunc:    func(member *models.ClientMember) error { return nil },
+	}
+	crr := &mockClientRoleRepo{
+		GetByCodeFunc: func(code string) (*models.ClientRole, error) {
+			return &models.ClientRole{ID: ownerRoleID, Code: "Owner"}, nil
+		},
+	}
+
+	svc := newClientService(cr, crr, ctr)
+	client, err := svc.CreateClientAsPrimaryRoot("Nueva agencia", typeID, rootUserID, &parentID)
+
+	require.NoError(t, err)
+	require.NotNil(t, client)
+	assert.Equal(t, parentID, *client.ParentID)
+	assert.Equal(t, typeID, client.ClientTypeID)
+}
+
 func TestCreateClient_CustomerParent_CannotHaveSubClients(t *testing.T) {
 	typeID := uuid.Must(uuid.NewV4())
 	parentID := uuid.Must(uuid.NewV4())
@@ -456,6 +589,105 @@ func TestAddUserToClient_Success(t *testing.T) {
 	assert.Equal(t, userID, capturedMember.UserID)
 	assert.Equal(t, roleID, capturedMember.ClientRoleID)
 	assert.True(t, capturedMember.IsActive)
+}
+
+func TestCanAssignClientRole_OwnerCanAssignAdmin(t *testing.T) {
+	clientID := uuid.Must(uuid.NewV4())
+	requesterID := uuid.Must(uuid.NewV4())
+	adminRoleID := uuid.Must(uuid.NewV4())
+
+	cr := &mockClientRepo{
+		CheckAccessRecursiveFunc: func(userID, targetClientID uuid.UUID) (bool, string) {
+			return true, "Owner"
+		},
+	}
+	crr := &mockClientRoleRepo{
+		GetByCodeFunc: func(code string) (*models.ClientRole, error) {
+			assert.Equal(t, "OWNER", code)
+			return ownerRole(), nil
+		},
+		GetByIDFunc: func(id uuid.UUID) (*models.ClientRole, error) {
+			assert.Equal(t, adminRoleID, id)
+			return adminRole(), nil
+		},
+	}
+
+	svc := newClientService(cr, crr, nil)
+	err := svc.CanAssignClientRole(clientID, requesterID, adminRoleID)
+
+	require.NoError(t, err)
+}
+
+func TestCanAssignClientRole_InheritedOwnerCanAssignAdmin(t *testing.T) {
+	clientID := uuid.Must(uuid.NewV4())
+	requesterID := uuid.Must(uuid.NewV4())
+	adminRoleID := uuid.Must(uuid.NewV4())
+
+	cr := &mockClientRepo{
+		CheckAccessRecursiveFunc: func(userID, targetClientID uuid.UUID) (bool, string) {
+			return true, "INHERITED_OWNER"
+		},
+	}
+	crr := &mockClientRoleRepo{
+		GetByCodeFunc: func(code string) (*models.ClientRole, error) {
+			assert.Equal(t, "OWNER", code)
+			return ownerRole(), nil
+		},
+		GetByIDFunc: func(id uuid.UUID) (*models.ClientRole, error) {
+			assert.Equal(t, adminRoleID, id)
+			return adminRole(), nil
+		},
+	}
+
+	svc := newClientService(cr, crr, nil)
+	err := svc.CanAssignClientRole(clientID, requesterID, adminRoleID)
+
+	require.NoError(t, err)
+}
+
+func TestCanAssignClientRole_AdminCannotAssignAdmin(t *testing.T) {
+	clientID := uuid.Must(uuid.NewV4())
+	requesterID := uuid.Must(uuid.NewV4())
+	adminRoleID := uuid.Must(uuid.NewV4())
+
+	cr := &mockClientRepo{
+		CheckAccessRecursiveFunc: func(userID, targetClientID uuid.UUID) (bool, string) {
+			return true, "Admin"
+		},
+	}
+	crr := &mockClientRoleRepo{
+		GetByCodeFunc: func(code string) (*models.ClientRole, error) {
+			assert.Equal(t, "ADMIN", code)
+			return adminRole(), nil
+		},
+		GetByIDFunc: func(id uuid.UUID) (*models.ClientRole, error) {
+			assert.Equal(t, adminRoleID, id)
+			return adminRole(), nil
+		},
+	}
+
+	svc := newClientService(cr, crr, nil)
+	err := svc.CanAssignClientRole(clientID, requesterID, adminRoleID)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "equal or higher")
+}
+
+func TestCanAssignClientRoleAsRoot_RejectsOwnerAndAllowsLowerRoles(t *testing.T) {
+	ownerRoleID := uuid.Must(uuid.NewV4())
+	memberRoleID := uuid.Must(uuid.NewV4())
+	crr := &mockClientRoleRepo{
+		GetByIDFunc: func(id uuid.UUID) (*models.ClientRole, error) {
+			if id == ownerRoleID {
+				return ownerRole(), nil
+			}
+			return memberRole(), nil
+		},
+	}
+
+	svc := newClientService(nil, crr, nil)
+	require.Error(t, svc.CanAssignClientRoleAsRoot(ownerRoleID))
+	require.NoError(t, svc.CanAssignClientRoleAsRoot(memberRoleID))
 }
 
 // ---------------------------------------------------------------------------
@@ -584,6 +816,56 @@ func TestRemoveClientMember_Success(t *testing.T) {
 	assert.Equal(t, targetID, removedUserID)
 }
 
+func TestRemoveClientMember_AllowsInheritedOwnerForChildOrganization(t *testing.T) {
+	clientID := uuid.Must(uuid.NewV4())
+	requesterID := uuid.Must(uuid.NewV4())
+	targetID := uuid.Must(uuid.NewV4())
+	removed := uuid.Nil
+	cr := &mockClientRepo{
+		CheckAccessRecursiveFunc: func(userID, targetClientID uuid.UUID) (bool, string) {
+			assert.Equal(t, requesterID, userID)
+			assert.Equal(t, clientID, targetClientID)
+			return true, "INHERITED_OWNER"
+		},
+		GetMemberRoleFunc: func(_ uuid.UUID, userID uuid.UUID) (*models.ClientRole, error) {
+			assert.Equal(t, targetID, userID)
+			return adminRole(), nil
+		},
+		RemoveMemberFunc: func(_ uuid.UUID, userID uuid.UUID) error {
+			removed = userID
+			return nil
+		},
+	}
+
+	err := newClientService(cr, nil, nil).RemoveClientMember(clientID, requesterID, targetID)
+	require.NoError(t, err)
+	assert.Equal(t, targetID, removed)
+}
+
+func TestRemoveClientMemberAsRoot_ProtectsOwnerAndRemovesMember(t *testing.T) {
+	clientID := uuid.Must(uuid.NewV4())
+	ownerID := uuid.Must(uuid.NewV4())
+	memberID := uuid.Must(uuid.NewV4())
+	removed := uuid.Nil
+	cr := &mockClientRepo{
+		GetMemberRoleFunc: func(_ uuid.UUID, userID uuid.UUID) (*models.ClientRole, error) {
+			if userID == ownerID {
+				return ownerRole(), nil
+			}
+			return memberRole(), nil
+		},
+		RemoveMemberFunc: func(_ uuid.UUID, userID uuid.UUID) error {
+			removed = userID
+			return nil
+		},
+	}
+
+	svc := newClientService(cr, nil, nil)
+	require.Error(t, svc.RemoveClientMemberAsRoot(clientID, ownerID))
+	require.NoError(t, svc.RemoveClientMemberAsRoot(clientID, memberID))
+	assert.Equal(t, memberID, removed)
+}
+
 // ---------------------------------------------------------------------------
 // UpdateClientMemberRole tests
 // ---------------------------------------------------------------------------
@@ -695,6 +977,32 @@ func TestUpdateClientMemberRole_Success(t *testing.T) {
 	assert.Equal(t, adminRoleID, updatedRoleID)
 }
 
+func TestUpdateClientMemberRoleAsRoot_ProtectsOwnerAndUpdatesMember(t *testing.T) {
+	clientID := uuid.Must(uuid.NewV4())
+	ownerID := uuid.Must(uuid.NewV4())
+	memberID := uuid.Must(uuid.NewV4())
+	adminRoleID := uuid.Must(uuid.NewV4())
+	updated := uuid.Nil
+	cr := &mockClientRepo{
+		GetMemberRoleFunc: func(_ uuid.UUID, userID uuid.UUID) (*models.ClientRole, error) {
+			if userID == ownerID {
+				return ownerRole(), nil
+			}
+			return memberRole(), nil
+		},
+		UpdateMemberRoleFunc: func(_ uuid.UUID, _ uuid.UUID, roleID uuid.UUID) error {
+			updated = roleID
+			return nil
+		},
+	}
+	crr := &mockClientRoleRepo{GetByIDFunc: func(uuid.UUID) (*models.ClientRole, error) { return adminRole(), nil }}
+
+	svc := newClientService(cr, crr, nil)
+	require.Error(t, svc.UpdateClientMemberRoleAsRoot(clientID, ownerID, adminRoleID))
+	require.NoError(t, svc.UpdateClientMemberRoleAsRoot(clientID, memberID, adminRoleID))
+	assert.Equal(t, adminRoleID, updated)
+}
+
 // ---------------------------------------------------------------------------
 // GetClientDetails tests
 // ---------------------------------------------------------------------------
@@ -760,6 +1068,24 @@ func TestGetClientChildren_AccessDenied(t *testing.T) {
 	assert.Nil(t, children)
 }
 
+func TestGetClientChildren_ViewerDoesNotSeeDescendants(t *testing.T) {
+	parentID := uuid.Must(uuid.NewV4())
+	userID := uuid.Must(uuid.NewV4())
+
+	cr := &mockClientRepo{
+		CheckAccessRecursiveFunc: func(uID, cID uuid.UUID) (bool, string) {
+			return true, "VIEWER"
+		},
+	}
+
+	svc := newClientService(cr, nil, nil)
+	children, err := svc.GetClientChildren(parentID, userID)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "access denied")
+	assert.Nil(t, children)
+}
+
 func TestGetClientChildren_Success(t *testing.T) {
 	parentID := uuid.Must(uuid.NewV4())
 	userID := uuid.Must(uuid.NewV4())
@@ -801,7 +1127,7 @@ func TestListClientMembers_AccessDenied(t *testing.T) {
 	members, err := svc.ListClientMembers(clientID, userID)
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "access denied")
+	assert.Contains(t, err.Error(), "permission denied")
 	assert.Nil(t, members)
 }
 
@@ -826,6 +1152,25 @@ func TestListClientMembers_Success(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Len(t, members, 2)
+}
+
+func TestListClientMembers_InheritedAdminCanManageDescendantTeam(t *testing.T) {
+	clientID := uuid.Must(uuid.NewV4())
+	userID := uuid.Must(uuid.NewV4())
+	cr := &mockClientRepo{
+		CheckAccessRecursiveFunc: func(uID, cID uuid.UUID) (bool, string) {
+			return true, "INHERITED_ADMIN"
+		},
+		GetMembersFunc: func(cID uuid.UUID) ([]models.ClientMember, error) {
+			return []models.ClientMember{}, nil
+		},
+	}
+
+	svc := newClientService(cr, nil, nil)
+	members, err := svc.ListClientMembers(clientID, userID)
+
+	require.NoError(t, err)
+	assert.Empty(t, members)
 }
 
 // ---------------------------------------------------------------------------
@@ -858,6 +1203,30 @@ func TestDeleteClient_NotOwner(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "only the owner can delete")
+}
+
+func TestDeleteClient_RejectsOrganizationWithChildren(t *testing.T) {
+	clientID := uuid.Must(uuid.NewV4())
+	deleteCalled := false
+	cr := &mockClientRepo{
+		CheckAccessRecursiveFunc: func(uID, cID uuid.UUID) (bool, string) {
+			return true, "OWNER"
+		},
+		GetChildrenClientsFunc: func(parentID uuid.UUID) ([]models.Client, error) {
+			return []models.Client{{ID: uuid.Must(uuid.NewV4()), Name: "Child"}}, nil
+		},
+		DeleteClientFunc: func(id uuid.UUID) error {
+			deleteCalled = true
+			return nil
+		},
+	}
+
+	svc := newClientService(cr, nil, nil)
+	err := svc.DeleteClient(clientID, uuid.Must(uuid.NewV4()))
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sub-organizations")
+	assert.False(t, deleteCalled)
 }
 
 func TestDeleteClient_Success(t *testing.T) {
@@ -895,9 +1264,9 @@ func TestDeleteClient_Success(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 type mockCacheRepo struct {
-	GetKeyFunc            func(ctx context.Context, key string) (string, error)
-	SaveKeyFunc           func(ctx context.Context, key, value string, ttl time.Duration) error
-	InvalidateFunc        func(resource, key string) error
+	GetKeyFunc              func(ctx context.Context, key string) (string, error)
+	SaveKeyFunc             func(ctx context.Context, key, value string, ttl time.Duration) error
+	InvalidateFunc          func(resource, key string) error
 	DeleteKeysByPatternFunc func(ctx context.Context, pattern string) error
 }
 
@@ -1056,7 +1425,7 @@ func TestAddUserToClient_InvalidatesCache(t *testing.T) {
 		},
 	}
 	cr := &mockClientRepo{
-		IsMemberFunc: func(uid, cid uuid.UUID) (bool, string) { return false, "" },
+		IsMemberFunc:  func(uid, cid uuid.UUID) (bool, string) { return false, "" },
 		AddMemberFunc: func(m *models.ClientMember) error { return nil },
 	}
 
@@ -1123,4 +1492,90 @@ func TestDeleteClient_InvalidatesAllMyClients(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.True(t, patternDeleted, "DeleteClient should invalidate all user caches")
+}
+
+func clientLogoFileHeader(filename, contentType string, size int64) *multipart.FileHeader {
+	return &multipart.FileHeader{
+		Filename: filename,
+		Header: textproto.MIMEHeader{
+			"Content-Type": []string{contentType},
+		},
+		Size: size,
+	}
+}
+
+func validClientLogoPNG(t *testing.T) []byte {
+	t.Helper()
+	var payload bytes.Buffer
+	img := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	img.Set(0, 0, color.RGBA{R: 255, A: 255})
+	require.NoError(t, png.Encode(&payload, img))
+	return payload.Bytes()
+}
+
+func newClientCreateWithLogoService(repo *mockClientRepo, storage ports.ObjectStorageRepository) *ClientService {
+	roleRepo := &mockClientRoleRepo{GetByCodeFunc: func(string) (*models.ClientRole, error) {
+		return ownerRole(), nil
+	}}
+	typeRepo := &mockClientTypeRepo{GetByIDFunc: func(id uuid.UUID) (*models.ClientType, error) {
+		return &models.ClientType{ID: id, Code: "PLATFORM"}, nil
+	}}
+	resourceSvc := resourcesService.NewResourceService(
+		&models.Config{AwsBucketName: "events-bucket"},
+		resourcesService.ResourceServiceDeps{Storage: storage},
+	)
+	return NewClientService(repo, roleRepo, typeRepo, resourceSvc, nil, nil)
+}
+
+func TestCreateClientWithLogoRollsBackClientWhenLogoUploadFails(t *testing.T) {
+	var deletedClientID uuid.UUID
+	repo := &mockClientRepo{DeleteClientFunc: func(id uuid.UUID) error {
+		deletedClientID = id
+		return nil
+	}}
+	storage := &clientTestLogoStorage{uploadErr: errors.New("storage unavailable")}
+	svc := newClientCreateWithLogoService(repo, storage)
+	payload := validClientLogoPNG(t)
+
+	client, err := svc.CreateClientWithLogo(
+		"Platform",
+		uuid.Must(uuid.NewV4()),
+		uuid.Must(uuid.NewV4()),
+		nil,
+		&clientTestMultipartFile{Reader: bytes.NewReader(payload)},
+		clientLogoFileHeader("logo.png", "image/png", int64(len(payload))),
+	)
+
+	require.Error(t, err)
+	assert.Nil(t, client)
+	assert.NotEqual(t, uuid.Nil, deletedClientID)
+}
+
+func TestCreateClientWithLogoRollsBackObjectAndClientWhenLogoPathSaveFails(t *testing.T) {
+	var deletedClientID uuid.UUID
+	repo := &mockClientRepo{
+		UpdateClientFunc: func(*models.Client) error { return errors.New("database unavailable") },
+		DeleteClientFunc: func(id uuid.UUID) error {
+			deletedClientID = id
+			return nil
+		},
+	}
+	storage := &clientTestLogoStorage{}
+	svc := newClientCreateWithLogoService(repo, storage)
+	payload := validClientLogoPNG(t)
+
+	client, err := svc.CreateClientWithLogo(
+		"Platform",
+		uuid.Must(uuid.NewV4()),
+		uuid.Must(uuid.NewV4()),
+		nil,
+		&clientTestMultipartFile{Reader: bytes.NewReader(payload)},
+		clientLogoFileHeader("logo.png", "image/png", int64(len(payload))),
+	)
+
+	require.Error(t, err)
+	assert.Nil(t, client)
+	assert.NotEqual(t, uuid.Nil, deletedClientID)
+	require.Len(t, storage.deleted, 1)
+	assert.Contains(t, storage.deleted[0], "clients/"+deletedClientID.String()+"/logo/")
 }

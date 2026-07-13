@@ -21,6 +21,8 @@
 | `EventConfigService.go` | Per-event configuration management |
 | `EventSectionService.go` | Event section ordering and management |
 | `EventAnalyticsService.go` | Analytics tracking and aggregation |
+| `PageSpecService.go` | Public SDUI page spec assembly by token or event identifier |
+| `RepairService.go` | Event integrity repair workflow |
 
 ### Guests Domain (`services/guests/`)
 
@@ -34,8 +36,6 @@
 | File | Purpose |
 |------|---------|
 | `InvitationService.go` | Send/track invitations, RSVP logic |
-| `InvitationLogService.go` | Log status change events |
-| `InvitationAccessTokenService.go` | Generate/validate public access tokens |
 
 ### Clients Domain (`services/clients/`)
 
@@ -72,7 +72,7 @@
 | File | Purpose |
 |------|---------|
 | `services/templates/DesignTemplateService.go` | Design template CRUD |
-| `services/moments/MomentService.go` | Event moment CRUD |
+| `services/moments/MomentService.go` | Event moment CRUD + async media job enqueue |
 | `services/moments/MomentTypeService.go` | Moment type catalog |
 
 ### Colors Domain (`services/colors/`)
@@ -96,12 +96,13 @@
 | File | Purpose |
 |------|---------|
 | `services/validations/Validations.go` | Shared validation helpers |
+| `services/cacheutil/json_cache.go` | Generic JSON cache-aside helper with concurrent miss coalescing for catalog/read models |
 
 ## Cache Pattern (All Mutation Services)
 
 ```go
 // After CREATE / UPDATE / DELETE:
-return redisrepository.Invalidate("resourceType", "all")
+return s.cache.Invalidate("resourceType", "all")
 ```
 
 ### Per-User Cache (`ClientService.GetMyClients`)
@@ -123,23 +124,35 @@ func (s *ClientService) invalidateAllMyClients() {
 
 ## Injectable Struct Pattern (All Services)
 
-Every service has an injectable struct with a constructor. The structs are used in production via `server.go` and in tests via mock injection.
+Every service has an injectable struct with a constructor. The structs are used in production via `internal/app/app.go` and in tests via mock injection.
 
-> **Singleton delegation pattern**: Every service package exposes `var _svc *XxxService` + `SetDefaultXxx(svc *XxxService)`. The package-level functions (`CreateEvent()`, `DeleteMoment()`, etc.) delegate to this singleton. `server.go` calls all `SetDefaultXxx` functions immediately after the controller `Init` calls. This makes cross-domain calls like `users.SyncUser()` from the clients controller use the fully-injected DI instance instead of raw repo packages.
+> **Singleton delegation pattern**: Every service package exposes `var _svc *XxxService` + `SetDefaultXxx(svc *XxxService)`. The package-level functions (`CreateEvent()`, `DeleteMoment()`, etc.) delegate to this singleton. `internal/app/app.go` calls all `SetDefaultXxx` functions immediately after the controller `Init` calls. This makes cross-domain calls like `users.SyncUser()` from the clients controller use the fully-injected DI instance instead of raw repo packages.
 
 | Service | Constructor | Interface Dependencies |
 |---------|-------------|----------------------|
 | `EventService` | `NewEventService(repo, cache)` | `ports.EventsRepository`, `ports.CacheRepository` |
 | `EventConfigService` | `NewEventConfigService(repo, cache)` | `ports.EventConfigRepository`, `ports.CacheRepository` |
+| `EventAnalyticsService` | `NewEventAnalyticsService(repo, cache)` | `ports.EventAnalyticsRepository`, `ports.CacheRepository` |
 | `EventSectionService` | `NewEventSectionService(repo, cache)` | `ports.EventSectionRepository`, `ports.CacheRepository` |
+| `PageSpecService` | `NewPageSpecService(tokenRepo, invitationRepo, eventRepo, sectionRepo, configRepo)` | `ports.AccessTokenRepository`, `ports.InvitationRepository`, `ports.EventsRepository`, `ports.EventSectionRepository`, `ports.EventConfigRepository` |
+| `RepairService` | `NewRepairService(db, eventRepo)` | `*gorm.DB`, `ports.EventsRepository` |
 | `GuestService` | `NewGuestService(repo, tokenRepo, cache, tx)` | `ports.GuestRepository`, `ports.AccessTokenRepository`, `ports.CacheRepository`, `ports.Transactor` |
+| `GuestStatusService` | `NewGuestStatusService(repo, cache)` | `ports.GuestStatusRepository`, `ports.CacheRepository` |
 | `InvitationService` | `NewInvitationService(repo, guestRepo, tokenRepo, logRepo, cache)` | 5 interfaces |
-| `MomentService` | `NewMomentService(repo, cache)` | `ports.MomentRepository`, `ports.CacheRepository` |
-| `UserService` | `NewUserService(userRepo, authRepo, cfg)` | `ports.UserRepository`, `ports.AuthProviderRepository`, `*models.Config` |
+| `MomentService` | `NewMomentService(repo, cache, mediaPublisher...)` | `ports.MomentRepository`, `ports.CacheRepository`, optional `ports.MediaJobPublisher` |
+| `MomentTypeService` | `NewMomentTypeService(repo, cache)` | `ports.MomentTypeRepository`, `ports.CacheRepository` |
+| `UserService` | `NewUserService(userRepo, authRepo, cfg, objectDeleter...)` | `ports.UserRepository`, `ports.AuthProviderRepository`, `*models.Config`, optional object deleter |
 | `AdminUserService` | `NewAdminUserService(userRepo, clientRepo, authRepo)` | `ports.UserRepository`, `ports.ClientRepository`, `ports.AuthProviderRepository` |
-
-> **`AdminUserService.ListAllUsers(page, pageSize int)`** — accepts pagination params. Returns a `PaginatedResult` struct with `data`, `total`, `page`, `page_size`, `total_pages`. Page defaults to 1, page_size defaults to 50, max 200. Paginates in-memory after fetching all users from the repo.|
 | `ClientService` | `NewClientService(clientRepo, roleRepo, typeRepo, rs, cache, tx)` | `ports.ClientRepository`, `ports.ClientRoleRepository`, `ports.ClientTypeRepository`, `*ResourceService`, `ports.CacheRepository`, `ports.Transactor` |
+| `ClientRoleService` | `NewClientRoleService(roleRepo)` | `ports.ClientRoleRepository` |
+| `ClientTypeService` | `NewClientTypeService(typeRepo)` | `ports.ClientTypeRepository` |
+| `ColorService` | `NewColorService(repo, cache)` | `ports.ColorRepository`, `ports.CacheRepository` |
+| `FontService` | `NewFontService(resourceSvc, deps...)` | `ports.FontRepository`, `ports.CacheRepository`, `*ResourceService` |
+| `DesignTemplateService` | `NewDesignTemplateService(repo, cache)` | `ports.DesignTemplateRepository`, `ports.CacheRepository` |
+| `EventTypeService` | `NewEventTypeService(repo, cache)` | `ports.EventTypeRepository`, `ports.CacheRepository` |
+| `ResourceService` | `NewResourceService(cfg, deps...)` | `ports.ResourceRepository`, `ports.ObjectStorageRepository`, `ports.CacheRepository` |
+
+> **`AdminUserService.ListAllUsers(query dtos.AdminUsersListQuery)`** - accepts pagination plus optional `search` and `status` filters. Returns typed rows with `data`, `total`, `page`, `page_size`, `total_pages`. Page defaults to 1, page_size defaults to 50, max 200, and filtering/pagination happens in the repository query.
 
 All interfaces are defined in `services/ports/ports.go`.
 

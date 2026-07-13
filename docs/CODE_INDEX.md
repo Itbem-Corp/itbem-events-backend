@@ -7,6 +7,9 @@
 
 ```
 itbem-events-backend/
+├── cmd/api/              # API entrypoint
+├── internal/app/         # Composition root, server setup, dependency wiring
+├── internal/authz/       # Shared authorization helpers for protected handlers
 ├── configuration/        # DB, Redis, CORS, env setup
 ├── controllers/          # HTTP handlers (one dir per domain)
 ├── middleware/           # Echo middleware (token, redis)
@@ -17,7 +20,6 @@ itbem-events-backend/
 ├── services/            # Business logic (one dir per domain)
 ├── utils/               # Helpers, response, redis keys
 ├── docs/                # Documentation
-├── server.go            # Entry point
 └── go.mod               # Dependencies (module: events-stocks)
 ```
 
@@ -25,7 +27,9 @@ itbem-events-backend/
 
 | File | Purpose |
 |------|---------|
-| `server.go` | main(), startup, middleware, graceful shutdown |
+| `cmd/api/main.go` | Small executable entrypoint |
+| `internal/app/app.go` | startup, middleware, dependency wiring, graceful shutdown |
+| `internal/authz/authz.go` | Shared user/event/client/resource authorization helpers |
 | `routes/routes.go` | All API routes — `ConfigurarRutas` |
 | `configuration/gorm.go` | GORM setup, auto-migrate, model registration |
 | `configuration/environmentVariables.go` | Env var loading into Config |
@@ -88,11 +92,11 @@ itbem-events-backend/
 | `services/events/EventConfigService.go` | Event config |
 | `services/events/EventSectionService.go` | Event sections |
 | `services/events/EventAnalyticsService.go` | Analytics |
+| `services/events/PageSpecService.go` | Public SDUI page specs |
+| `services/events/RepairService.go` | Event integrity repair |
 | `services/guests/GuestService.go` | Guest CRUD |
 | `services/guests/GuestStatusService.go` | GuestStatus catalog |
 | `services/invitations/InvitationService.go` | Invitation + RSVP |
-| `services/invitations/InvitationLogService.go` | Invitation audit log |
-| `services/invitations/InvitationAccessTokenService.go` | Public tokens |
 | `services/clients/clientService.go` | Client CRUD + hierarchy |
 | `services/clientroles/clientRoleService.go` | ClientRole catalog |
 | `services/clienttypes/clientTypeService.go` | ClientType catalog |
@@ -101,6 +105,7 @@ itbem-events-backend/
 | `services/resources/Resources.go` | Resource CRUD + S3 |
 | `services/resources/ResourceTypes.go` | Resource types |
 | `services/resources/ImageOptimizer.go` | libvips pipeline |
+| `services/resources/ImageOptimizer_fallback.go` | Windows/no-cgo optimizer fallback |
 | `services/resources/ResourcesUsers.go` | User resources (avatar) |
 | `services/resources/ResourcesClients.go` | Client resources (logo) |
 | `services/templates/DesignTemplateService.go` | Design templates |
@@ -112,6 +117,7 @@ itbem-events-backend/
 | `services/fonts/FontService.go` | Fonts |
 | `services/fonts/FontSetService.go` | Font sets |
 | `services/fonts/FontSetPatternService.go` | FontSet patterns |
+| `services/cacheutil/json_cache.go` | Generic JSON cache-aside helper |
 | `services/validations/Validations.go` | Shared validators |
 
 ## Repositories (`repositories/<domain>repository/`)
@@ -121,10 +127,10 @@ itbem-events-backend/
 | `repositories/gormrepository/GormRepository.go` | Generic CRUD |
 | `repositories/gormrepository/QueryOptions.go` | Query helpers |
 | `repositories/redisrepository/RedisRepository.go` | Cache ops |
-| `repositories/cacheloaderrepository/CacheLoaderRepository.go` | Middleware cache loading |
 | `repositories/awsrepository/S3Repository.go` | S3 ops |
 | `repositories/awsrepository/CognitoRepository.go` | Cognito admin |
 | `repositories/bucketrepository/BucketRepository.go` | Bucket/URL helpers |
+| `repositories/sqsrepository/SQSRepository.go` | Async media job publisher |
 | `repositories/authproviderrepository/AuthProviderRepository.go` | Token validation |
 | `repositories/eventsrepository/EventsRepository.go` | Events DB |
 | `repositories/eventconfigrepository/EventConfigRepository.go` | EventConfig DB |
@@ -181,6 +187,15 @@ itbem-events-backend/
 | `utils/helpers.go` | Common utility functions |
 | `utils/marshall.go` | JSON marshal/unmarshal helpers |
 
+## DTOs
+
+| File | Purpose |
+|------|---------|
+| `dtos/AuthUser.go` | Auth provider user DTO |
+| `dtos/PageSpec.go` | SDUI page spec response |
+| `dtos/Resource.go` | Resource response DTOs |
+| `dtos/MediaProcessMessage.go` | Async media processing job payload |
+
 ## Config Files
 
 | File | Purpose |
@@ -205,4 +220,4 @@ itbem-events-backend/
 | Image resize? | `services/resources/ImageOptimizer.go` |
 
 ---
-**Last Updated**: 2026-02-19
+**Last Updated**: 2026-07-04

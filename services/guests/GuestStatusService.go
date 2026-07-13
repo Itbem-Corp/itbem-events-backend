@@ -2,58 +2,105 @@ package guests
 
 import (
 	"context"
-	"encoding/json"
+	"fmt"
+
 	"events-stocks/models"
-	"events-stocks/repositories/gueststatusrepository"
-	"events-stocks/repositories/redisrepository"
+	"events-stocks/services/cacheutil"
+	"events-stocks/services/ports"
 	"events-stocks/utils"
 	"github.com/gofrs/uuid"
 )
 
+var _guestStatusSvc *GuestStatusService
+
+func SetDefaultGuestStatusService(svc *GuestStatusService) { _guestStatusSvc = svc }
+
+func guestStatusServiceUnavailable() error {
+	return fmt.Errorf("guest status service not initialized")
+}
+
 func ListGuestStatuss() ([]models.GuestStatus, error) {
-	cacheKey := "all:guest_statuses"
-	ctx := context.Background()
-
-	cached, err := redisrepository.GetKey(ctx, cacheKey)
-	if err == nil && cached != "" {
-		var result []models.GuestStatus
-		if err := json.Unmarshal([]byte(cached), &result); err == nil {
-			return result, nil
-		}
+	if _guestStatusSvc == nil {
+		return nil, guestStatusServiceUnavailable()
 	}
-
-	data, err := gueststatusrepository.ListGuestStatuss()
-	if err != nil {
-		return nil, err
-	}
-
-	jsonStr, _ := json.Marshal(data)
-	_ = redisrepository.SaveKey(ctx, cacheKey, string(jsonStr), utils.CacheTTLs["guests"])
-
-	return data, nil
+	return _guestStatusSvc.ListGuestStatuss()
 }
 
 func GetGuestStatusByID(id uuid.UUID) (*models.GuestStatus, error) {
-	return gueststatusrepository.GetGuestStatusByID(id)
+	if _guestStatusSvc == nil {
+		return nil, guestStatusServiceUnavailable()
+	}
+	return _guestStatusSvc.GetGuestStatusByID(id)
 }
 
 func CreateGuestStatus(obj *models.GuestStatus) error {
-	if err := gueststatusrepository.CreateGuestStatus(obj); err != nil {
-		return err
+	if _guestStatusSvc == nil {
+		return guestStatusServiceUnavailable()
 	}
-	return redisrepository.Invalidate("guest_statuses", "all")
+	return _guestStatusSvc.CreateGuestStatus(obj)
 }
 
 func UpdateGuestStatus(obj *models.GuestStatus) error {
-	if err := gueststatusrepository.UpdateGuestStatus(obj); err != nil {
-		return err
+	if _guestStatusSvc == nil {
+		return guestStatusServiceUnavailable()
 	}
-	return redisrepository.Invalidate("guest_statuses", "all")
+	return _guestStatusSvc.UpdateGuestStatus(obj)
 }
 
 func DeleteGuestStatus(id uuid.UUID) error {
-	if err := gueststatusrepository.DeleteGuestStatus(id); err != nil {
+	if _guestStatusSvc == nil {
+		return guestStatusServiceUnavailable()
+	}
+	return _guestStatusSvc.DeleteGuestStatus(id)
+}
+
+type GuestStatusService struct {
+	repo  ports.GuestStatusRepository
+	cache ports.CacheRepository
+}
+
+func NewGuestStatusService(repo ports.GuestStatusRepository, cache ports.CacheRepository) *GuestStatusService {
+	return &GuestStatusService{repo: repo, cache: cache}
+}
+
+func (s *GuestStatusService) ListGuestStatuss() ([]models.GuestStatus, error) {
+	return cacheutil.GetOrLoadJSON(
+		context.Background(),
+		s.cache,
+		"all:"+utils.RedisGuestStatussKey,
+		utils.CacheTTLs[utils.RedisGuestStatussKey],
+		s.repo.ListGuestStatuss,
+	)
+}
+
+func (s *GuestStatusService) GetGuestStatusByID(id uuid.UUID) (*models.GuestStatus, error) {
+	return s.repo.GetGuestStatusByID(id)
+}
+
+func (s *GuestStatusService) CreateGuestStatus(obj *models.GuestStatus) error {
+	if err := s.repo.CreateGuestStatus(obj); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("guest_statuses", "all")
+	return s.invalidateGuestStatusCache()
+}
+
+func (s *GuestStatusService) UpdateGuestStatus(obj *models.GuestStatus) error {
+	if err := s.repo.UpdateGuestStatus(obj); err != nil {
+		return err
+	}
+	return s.invalidateGuestStatusCache()
+}
+
+func (s *GuestStatusService) DeleteGuestStatus(id uuid.UUID) error {
+	if err := s.repo.DeleteGuestStatus(id); err != nil {
+		return err
+	}
+	return s.invalidateGuestStatusCache()
+}
+
+func (s *GuestStatusService) invalidateGuestStatusCache() error {
+	if s.cache == nil {
+		return nil
+	}
+	return s.cache.Invalidate(utils.RedisGuestStatussKey, "all")
 }

@@ -38,6 +38,8 @@ import (
 	invitationsSvc "events-stocks/services/invitations"
 )
 
+var testPostgresConnectionString string
+
 // dockerAvailable returns true if the Docker daemon is reachable.
 // On Windows with WSL2, enable Docker Desktop → Settings → Resources → WSL Integration → Ubuntu.
 func dockerAvailable() bool {
@@ -63,6 +65,7 @@ func TestMain(m *testing.M) {
 		tcpostgres.WithDatabase("testdb"),
 		tcpostgres.WithUsername("test"),
 		tcpostgres.WithPassword("test"),
+		tcpostgres.BasicWaitStrategies(),
 	)
 	if err != nil {
 		panic("could not start postgres container: " + err.Error())
@@ -73,6 +76,7 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic("could not get connection string: " + err.Error())
 	}
+	testPostgresConnectionString = connStr
 
 	db, err := gorm.Open(gormpostgres.Open(connStr), &gorm.Config{
 		Logger: gormlogger.Default.LogMode(gormlogger.Silent),
@@ -186,12 +190,12 @@ func TestRSVP_HappyPath_Confirmed(t *testing.T) {
 	})
 
 	// ── Wire minimal Echo server for RSVP (no auth, no global middleware) ─────
-	invRepo   := invitationrepository.NewInvitationRepo()
+	invRepo := invitationrepository.NewInvitationRepo()
 	tokenRepo := invitationaccesstokenrepository.NewAccessTokenRepo()
-	logRepo   := invitationlogrepository.NewInvitationLogRepo()
+	logRepo := invitationlogrepository.NewInvitationLogRepo()
 	guestRepo := guestrepository.NewGuestRepo()
 	redisRepo := redisrepository.NewRedisRepo()
-	svc       := invitationsSvc.NewInvitationService(invRepo, guestRepo, tokenRepo, logRepo, redisRepo)
+	svc := invitationsSvc.NewInvitationService(invRepo, guestRepo, tokenRepo, logRepo, redisRepo)
 	invitationsCtrl.InitInvitationsController(svc)
 
 	e := echo.New()
@@ -201,9 +205,9 @@ func TestRSVP_HappyPath_Confirmed(t *testing.T) {
 
 	// ── HTTP request ──────────────────────────────────────────────────────────
 	body := `{"pretty_token":"` + prettyToken + `","status":"confirmed","guest_count":2}`
-	req  := httptest.NewRequest(http.MethodPost, "/api/invitations/rsvp", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/invitations/rsvp", strings.NewReader(body))
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
-	rec  := httptest.NewRecorder()
+	rec := httptest.NewRecorder()
 	e.ServeHTTP(rec, req)
 
 	// ── Assert HTTP response ──────────────────────────────────────────────────

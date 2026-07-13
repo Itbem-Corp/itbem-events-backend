@@ -1,1 +1,10 @@
 .env
+.git
+.github
+.idea
+.vscode
+docs
+integration
+**/*_test.go
+*.md
+coverage*

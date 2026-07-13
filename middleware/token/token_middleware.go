@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +16,18 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/labstack/echo/v4"
 )
+
+func jwtClockSkew(cfg *models.Config) time.Duration {
+	if cfg == nil || strings.TrimSpace(cfg.JwtClockSkewSeconds) == "" {
+		return 0
+	}
+	seconds, err := strconv.Atoi(strings.TrimSpace(cfg.JwtClockSkewSeconds))
+	if err != nil || seconds < 0 {
+		slog.Warn("invalid JWT clock skew; using strict validation", "value", cfg.JwtClockSkewSeconds)
+		return 0
+	}
+	return time.Duration(seconds) * time.Second
+}
 
 var (
 	jwks   *keyfunc.JWKS
@@ -79,7 +92,7 @@ func Autenticacion(cfg *models.Config) echo.MiddlewareFunc {
 			}
 
 			// Validamos la firma del token con las llaves de AWS
-			token, err := jwt.Parse(tokenString, jwks.Keyfunc)
+			token, err := jwt.Parse(tokenString, jwks.Keyfunc, jwt.WithLeeway(jwtClockSkew(cfg)))
 			if err != nil {
 				return utils.Error(c, http.StatusUnauthorized, "Token inválido", err.Error())
 			}

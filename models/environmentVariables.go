@@ -5,14 +5,28 @@ type Config struct {
 	Port string `required:"false"`
 
 	// AWS
-	AwsRegion           string `required:"true"`
-	CognitoAwsRegion    string `required:"true"`
-	CognitoUserPoolId   string `required:"true"`
-	CognitoClientId     string `required:"true"`
-	CognitoClientSecret string `required:"true"`
-	S3ClientId          string `required:"true"`
-	S3ClientSecret      string `required:"true"`
+	AwsRegion         string `required:"true"`
+	CognitoAwsRegion  string `required:"true"`
+	CognitoUserPoolId string `required:"true"`
+	// Deprecated static-credential aliases. New environments use the AWS SDK
+	// default credential chain; a legacy pair is used only when both values exist.
+	CognitoClientId     string `required:"false"`
+	CognitoClientSecret string `required:"false"`
+	// JwtClockSkewSeconds is an explicit deployment-level JWT leeway. Keep it
+	// empty in production; local environments with a skewed host clock may opt in.
+	JwtClockSkewSeconds string `required:"false"`
+	S3ClientId          string `required:"false"`
+	S3ClientSecret      string `required:"false"`
 	AwsBucketName       string `required:"true"`
+	// S3Region may differ from the region used by Cognito/SQS. When omitted,
+	// startup discovers the bucket region before constructing the S3 client.
+	S3Region       string `required:"false"`
+	S3Endpoint     string `required:"false"`
+	S3UsePathStyle string `required:"false"`
+	// CDNBaseURL identifies legacy object URLs that must be converted back to
+	// canonical S3 keys before private presigning or worker publication. It is
+	// not an authorization boundary and is never used to expose private media.
+	CDNBaseURL string `required:"false"`
 
 	// Base de datos
 	DbHost     string `required:"true"`
@@ -21,6 +35,9 @@ type Config struct {
 	DbName     string `required:"true"`
 	DbPort     string `required:"true"`
 	DbTimezone string `required:"true"`
+	// DbLogLevel accepts silent, error, warn, or info. When empty, local
+	// development uses info and deployed environments use warn.
+	DbLogLevel string `required:"false"`
 
 	// Redis
 	RedisHost     string `required:"true"`
@@ -40,9 +57,12 @@ type Config struct {
 	// Recommended: route to separate queues for independent concurrency control.
 	SQSImageQueueURL string `required:"false"` // itbem-media-images queue
 	SQSVideoQueueURL string `required:"false"` // itbem-media-videos queue
+	// Business/data jobs consumed by itbem-events-workers (never media jobs).
+	SQSWorkerQueueURL string `required:"false"`
 
 	// Internal API secret — used by Lambda to call PUT /api/moments/:id/content
 	// Generate with: openssl rand -hex 32
 	// Must match INTERNAL_API_SECRET in Lambda environment variables.
-	InternalAPISecret string `required:"false"`
+	InternalAPISecret         string `required:"false"`
+	InternalAPISecretPrevious string `required:"false"`
 }

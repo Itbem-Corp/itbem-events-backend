@@ -113,6 +113,30 @@ func TestListUserClients_MissingCognitoSub_Returns401(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
+func TestUpdateUserDetail_MissingCognitoSub_Returns401(t *testing.T) {
+	orig := userSvc
+	userSvc = nil
+	defer func() { userSvc = orig }()
+
+	c, rec := newEchoCtx(http.MethodPut, "/admin/users/some-id", `{"first_name":"Ana","last_name":"Garcia"}`)
+	c.SetParamNames("id")
+	c.SetParamValues("some-id")
+	require.NoError(t, UpdateUserDetail(c))
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestDeleteUserDetail_MissingCognitoSub_Returns401(t *testing.T) {
+	orig := userSvc
+	userSvc = nil
+	defer func() { userSvc = orig }()
+
+	c, rec := newEchoCtx(http.MethodDelete, "/admin/users/some-id", "")
+	c.SetParamNames("id")
+	c.SetParamValues("some-id")
+	require.NoError(t, DeleteUserDetail(c))
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
 func TestInviteUser_MissingCognitoSub_Returns401(t *testing.T) {
 	orig := userSvc
 	userSvc = nil

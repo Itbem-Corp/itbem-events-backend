@@ -1,25 +1,37 @@
 package clientroles
 
 import (
-	"events-stocks/models"
-	"events-stocks/repositories/clientrolerepository"
 	"fmt"
+
+	"events-stocks/models"
+	"events-stocks/services/ports"
 )
 
-func GetAllowedRolesToAssign(myRoleCode string) ([]models.ClientRole, error) {
+var _clientRoleSvc *ClientRoleService
 
-	// 1. Averiguar quién soy y qué nivel tengo
-	myRole, err := clientrolerepository.GetByCode(myRoleCode)
+func SetDefaultClientRoleService(svc *ClientRoleService) { _clientRoleSvc = svc }
+
+func GetAllowedRolesToAssign(myRoleCode string) ([]models.ClientRole, error) {
+	return _clientRoleSvc.GetAllowedRolesToAssign(myRoleCode)
+}
+
+type ClientRoleService struct {
+	repo ports.ClientRoleRepository
+}
+
+func NewClientRoleService(repo ports.ClientRoleRepository) *ClientRoleService {
+	return &ClientRoleService{repo: repo}
+}
+
+func (s *ClientRoleService) GetAllowedRolesToAssign(myRoleCode string) ([]models.ClientRole, error) {
+	myRole, err := s.repo.GetByCode(myRoleCode)
 	if err != nil {
 		return nil, fmt.Errorf("role not found: %s", myRoleCode)
 	}
 
-	// Regla especial (Opcional): Si soy 'Member' o 'Guest', no puedo invitar a nadie.
-	// Podrías controlar esto por jerarquía (ej: > 2 no invita) o por código.
 	if myRole.Hierarchy > 2 {
 		return []models.ClientRole{}, nil
 	}
 
-	// 2. La DB hace el filtro
-	return clientrolerepository.GetAssignableRoles(myRole.Hierarchy)
+	return s.repo.GetAssignableRoles(myRole.Hierarchy)
 }

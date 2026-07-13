@@ -1,0 +1,233 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Receive the EventiApp operations alias and forward it from the verified EventiApp SES identity.
+
+Parameters:
+  DomainName:
+    Type: String
+    Default: eventiapp.com.mx
+    AllowedPattern: '^[a-z0-9.-]+$'
+  AliasLocalPart:
+    Type: String
+    Default: alertas
+    AllowedPattern: '^[a-z0-9._+-]+$'
+  ForwardDestination:
+    Type: String
+    NoEcho: true
+    AllowedPattern: '^[^@\s]+@[^@\s]+\.[^@\s]+$'
+  SendingRegion:
+    Type: String
+    Default: us-east-2
+    AllowedPattern: '^[a-z]{2}-[a-z]+-[0-9]+$'
+
+Resources:
+  InboundMailBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub 'eventiapp-inbound-mail-${AWS::AccountId}-${AWS::Region}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireForwardedMail
+            Status: Enabled
+            ExpirationInDays: 7
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Application
+          Value: EventiApp
+        - Key: Purpose
+          Value: OperationsMailForwarding
+
+  InboundMailBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref InboundMailBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowSESReceiptStorage
+            Effect: Allow
+            Principal:
+              Service: ses.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub '${InboundMailBucket.Arn}/inbound/*'
+            Condition:
+              StringEquals:
+                AWS:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                AWS:SourceArn: !Sub 'arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:receipt-rule-set/*'
+
+  MailForwarderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ForwardEventiAppOperationsMail
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadInboundMessages
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub '${InboundMailBucket.Arn}/inbound/*'
+              - Sid: SendOnlyFromEventiAppAlias
+                Effect: Allow
+                Action: ses:SendRawEmail
+                Resource: !Sub 'arn:${AWS::Partition}:ses:${SendingRegion}:${AWS::AccountId}:identity/${DomainName}'
+                Condition:
+                  StringEquals:
+                    ses:FromAddress: !Sub '${AliasLocalPart}@${DomainName}'
+              - Sid: WriteFunctionLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/eventiapp-operations-mail-forwarder:*'
+
+  MailForwarderLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/lambda/eventiapp-operations-mail-forwarder
+      RetentionInDays: 30
+
+  MailForwarderFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: MailForwarderLogGroup
+    Properties:
+      FunctionName: eventiapp-operations-mail-forwarder
+      Description: Forwards the EventiApp operations alias without creating an open relay.
+      Runtime: python3.13
+      Handler: index.handler
+      MemorySize: 256
+      Timeout: 30
+      Role: !GetAtt MailForwarderRole.Arn
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref InboundMailBucket
+          OBJECT_PREFIX: inbound/
+          FORWARD_DESTINATION: !Ref ForwardDestination
+          FROM_ADDRESS: !Sub '${AliasLocalPart}@${DomainName}'
+          SENDING_REGION: !Ref SendingRegion
+      Code:
+        ZipFile: |
+          import os
+          from email import policy
+          from email.parser import BytesParser
+
+          import boto3
+
+          s3 = boto3.client("s3")
+          ses = boto3.client("ses", region_name=os.environ["SENDING_REGION"])
+
+
+          def _replace_header(message, name, value):
+              while name in message:
+                  del message[name]
+              if value:
+                  message[name] = value
+
+
+          def handler(event, _context):
+              record = event["Records"][0]["ses"]
+              message_id = record["mail"]["messageId"]
+              key = f'{os.environ["OBJECT_PREFIX"]}{message_id}'
+              raw = s3.get_object(Bucket=os.environ["BUCKET_NAME"], Key=key)["Body"].read()
+              message = BytesParser(policy=policy.SMTP).parsebytes(raw)
+
+              original_from = str(message.get("From", ""))
+              original_subject = str(message.get("Subject", "Operational notification"))
+              for header in (
+                  "DKIM-Signature",
+                  "Return-Path",
+                  "Sender",
+                  "To",
+                  "Cc",
+                  "Bcc",
+                  "From",
+                  "Reply-To",
+                  "Message-ID",
+                  "Received",
+                  "Subject",
+              ):
+                  while header in message:
+                      del message[header]
+
+              message["From"] = f'EventiApp Alertas <{os.environ["FROM_ADDRESS"]}>'
+              message["To"] = os.environ["FORWARD_DESTINATION"]
+              message["Subject"] = f"[EventiApp] {original_subject}"
+              if original_from:
+                  message["Reply-To"] = original_from
+
+              ses.send_raw_email(
+                  Source=os.environ["FROM_ADDRESS"],
+                  Destinations=[os.environ["FORWARD_DESTINATION"]],
+                  RawMessage={"Data": message.as_bytes(policy=policy.SMTP)},
+              )
+              return {"forwarded": True, "message_id": message_id}
+
+  AllowSESInvokeForwarder:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref MailForwarderFunction
+      Principal: ses.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Sub 'arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:receipt-rule-set/*'
+
+  OperationsReceiptRuleSet:
+    Type: AWS::SES::ReceiptRuleSet
+    Properties:
+      RuleSetName: eventiapp-operations-mail
+
+  OperationsReceiptRule:
+    Type: AWS::SES::ReceiptRule
+    DependsOn:
+      - AllowSESInvokeForwarder
+      - InboundMailBucketPolicy
+    Properties:
+      RuleSetName: !Ref OperationsReceiptRuleSet
+      Rule:
+        Name: eventiapp-alertas-forwarder
+        Enabled: true
+        Recipients:
+          - !Sub '${AliasLocalPart}@${DomainName}'
+        ScanEnabled: true
+        TlsPolicy: Require
+        Actions:
+          - S3Action:
+              BucketName: !Ref InboundMailBucket
+              ObjectKeyPrefix: inbound/
+          - LambdaAction:
+              FunctionArn: !GetAtt MailForwarderFunction.Arn
+              InvocationType: Event
+
+Outputs:
+  AliasAddress:
+    Value: !Sub '${AliasLocalPart}@${DomainName}'
+  ReceiptRuleSetName:
+    Value: !Ref OperationsReceiptRuleSet
+  InboundMailBucketName:
+    Value: !Ref InboundMailBucket
+  ForwarderFunctionName:
+    Value: !Ref MailForwarderFunction

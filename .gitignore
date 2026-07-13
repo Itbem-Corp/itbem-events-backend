@@ -5,3 +5,7 @@
 
 # Windows NTFS alternate data streams
 *.Zone.Identifier
+
+# Python tooling caches
+__pycache__/
+*.py[cod]

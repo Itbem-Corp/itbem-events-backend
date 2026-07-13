@@ -1,11 +1,13 @@
 package invitationaccesstokenrepository
 
 import (
+	"crypto/rand"
 	"events-stocks/configuration"
 	"events-stocks/models"
 	"events-stocks/repositories/gormrepository"
+	"fmt"
 	"github.com/gofrs/uuid"
-	"math/rand"
+	"math/big"
 )
 
 const rsvpCharset = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -42,9 +44,26 @@ func GetByPrettyToken(code string) (*models.InvitationAccessToken, error) {
 	return &model, nil
 }
 
+func GetByInvitationID(invitationID uuid.UUID) (*models.InvitationAccessToken, error) {
+	var model models.InvitationAccessToken
+	err := configuration.DB.
+		Where("invitation_id = ?", invitationID).
+		First(&model).Error
+	if err != nil {
+		return nil, err
+	}
+	return &model, nil
+}
+
 func GeneratePrettyToken(eventID uuid.UUID, length int) (string, error) {
-	for {
-		code := GenerateRSVPCode(length)
+	if length < 8 || length > 64 {
+		return "", fmt.Errorf("RSVP code length must be between 8 and 64")
+	}
+	for attempt := 0; attempt < 128; attempt++ {
+		code, err := GenerateRSVPCode(length)
+		if err != nil {
+			return "", err
+		}
 		exists, err := ExistsPrettyToken(eventID, code)
 		if err != nil {
 			return "", err
@@ -53,14 +72,22 @@ func GeneratePrettyToken(eventID uuid.UUID, length int) (string, error) {
 			return code, nil
 		}
 	}
+	return "", fmt.Errorf("could not allocate a unique RSVP code")
 }
 
-func GenerateRSVPCode(length int) string {
+func GenerateRSVPCode(length int) (string, error) {
+	if length <= 0 {
+		return "", fmt.Errorf("RSVP code length must be positive")
+	}
 	code := make([]byte, length)
 	for i := range code {
-		code[i] = rsvpCharset[rand.Intn(len(rsvpCharset))]
+		index, err := rand.Int(rand.Reader, big.NewInt(int64(len(rsvpCharset))))
+		if err != nil {
+			return "", fmt.Errorf("generate cryptographically secure RSVP code: %w", err)
+		}
+		code[i] = rsvpCharset[index.Int64()]
 	}
-	return string(code)
+	return string(code), nil
 }
 
 func ExistsPrettyToken(eventID uuid.UUID, code string) (bool, error) {
@@ -109,4 +136,13 @@ func (r *AccessTokenRepo) GetByPrettyToken(code string) (*models.InvitationAcces
 }
 func (r *AccessTokenRepo) GeneratePrettyToken(eventID uuid.UUID, length int) (string, error) {
 	return GeneratePrettyToken(eventID, length)
+}
+func (r *AccessTokenRepo) GetByInvitationID(invitationID uuid.UUID) (*models.InvitationAccessToken, error) {
+	return GetByInvitationID(invitationID)
+}
+func (r *AccessTokenRepo) CreateInvitationAccessToken(token *models.InvitationAccessToken) error {
+	return CreateInvitationAccessToken(token)
+}
+func (r *AccessTokenRepo) UpdateInvitationAccessToken(token *models.InvitationAccessToken) error {
+	return UpdateInvitationAccessToken(token)
 }

@@ -48,19 +48,29 @@ func LoadConfig() *models.Config {
 // Convierte CamelCase -> UPPER_SNAKE_CASE (ej. CognitoClientID -> COGNITO_CLIENT_ID)
 func fieldToEnvVar(fieldName string) string {
 	var env strings.Builder
-	for i, r := range fieldName {
-		// Si es mayúscula y no es el primer carácter
-		if i > 0 && r >= 'A' && r <= 'Z' {
-			// Solo añade "_" si el carácter anterior era minúscula
-			// Esto evita separar A_W_S
-			prev := fieldName[i-1]
-			if !(prev >= 'A' && prev <= 'Z') {
+	runes := []rune(fieldName)
+	for i, r := range runes {
+		if i > 0 && isUpperASCII(r) {
+			prev := runes[i-1]
+			var next rune
+			if i+1 < len(runes) {
+				next = runes[i+1]
+			}
+			if !isUpperASCII(prev) || isLowerASCII(next) {
 				env.WriteRune('_')
 			}
 		}
 		env.WriteRune(r)
 	}
 	return strings.ToUpper(env.String())
+}
+
+func isUpperASCII(r rune) bool {
+	return r >= 'A' && r <= 'Z'
+}
+
+func isLowerASCII(r rune) bool {
+	return r >= 'a' && r <= 'z'
 }
 
 // Context key

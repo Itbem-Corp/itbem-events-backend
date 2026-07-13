@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 
+	"events-stocks/internal/authz"
 	"events-stocks/utils"
 
 	"github.com/gofrs/uuid"
@@ -17,6 +18,9 @@ func ResendInvitation(c echo.Context) error {
 	invitationID, err := uuid.FromString(idStr)
 	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid invitation ID", err.Error())
+	}
+	if _, _, authErr := authz.RequireInvitationCapability(c, invitationID, authz.CapabilityGuestManage); authErr != nil {
+		return authz.Respond(c, authErr)
 	}
 
 	if err := invitationSvc.ResendInvitation(invitationID); err != nil {

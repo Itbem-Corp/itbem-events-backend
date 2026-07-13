@@ -70,7 +70,7 @@ func CreateEvent(c echo.Context) error {
 - Implement complex business rules
 - Handle cache invalidation
 - Validate business constraints
-- No direct database access - use repositories
+- No direct database access - use repositories. Operational repair code is the exception and receives `*gorm.DB` explicitly from the composition root.
 
 **File Pattern**: `services/<domain>/<Domain>Service.go`
 
@@ -82,13 +82,13 @@ func CreateEvent(obj *models.Event) error {
         return errors.New("event date cannot be in the past")
     }
 
-    // Save to database
-    if err := eventsrepository.CreateEvent(obj); err != nil {
+    // Save through injected repository
+    if err := s.repo.CreateEvent(obj); err != nil {
         return err
     }
 
     // Invalidate cache
-    return redisrepository.Invalidate("events", "all")
+    return s.cache.Invalidate("events", "all")
 }
 ```
 
@@ -172,8 +172,8 @@ models/Event.go
 All services and repositories now follow an **interface-based DI pattern** that enables unit testing without a real DB or Redis.
 
 ### Interface definitions — `services/ports/ports.go`
-All repository contracts live here as Go interfaces (15 interfaces total):
-`CacheRepository`, `Transactor`, `EventsRepository`, `EventConfigRepository`, `EventSectionRepository`, `GuestRepository`, `InvitationRepository`, `AccessTokenRepository`, `InvitationLogRepository`, `MomentRepository`, `UserRepository`, `ClientRepository`, `ClientRoleRepository`, `ClientTypeRepository`, `AuthProviderRepository`.
+All repository and integration contracts live here as Go interfaces:
+`CacheRepository`, `MediaJobPublisher`, `ObjectStorageRepository`, `Transactor`, `EventsRepository`, `EventConfigRepository`, `EventAnalyticsRepository`, `EventSectionRepository`, `GuestRepository`, `InvitationRepository`, `AccessTokenRepository`, `InvitationLogRepository`, `MomentRepository`, `ResourceRepository`, `ColorRepository`, `FontRepository`, `DesignTemplateRepository`, `EventTypeRepository`, `GuestStatusRepository`, `MomentTypeRepository`, `UserRepository`, `ClientRepository`, `ClientRoleRepository`, `ClientTypeRepository`, `AuthProviderRepository`.
 
 ### Concrete repository structs
 Each repository file now exports a struct that implements its interface:
@@ -196,23 +196,33 @@ func NewEventService(repo ports.EventsRepository, cache ports.CacheRepository) *
 }
 ```
 
-> **Singleton delegation pattern**: Each service package exposes `var _svc *XxxService` + `SetDefaultXxx(svc)`. The package-level functions (`CreateEvent()`, `DeleteMoment()`, etc.) delegate to this singleton. `server.go` calls `SetDefaultXxx` after each `Init` call, so cross-domain callers (e.g. `users.SyncUser()` from the clients controller) use the fully-injected DI instance.
+> **Singleton delegation pattern**: Each service package exposes `var _svc *XxxService` + `SetDefaultXxx(svc)`. The package-level functions (`CreateEvent()`, `DeleteMoment()`, etc.) delegate to this singleton. `internal/app/app.go` calls `SetDefaultXxx` after each `Init` call, so cross-domain callers (e.g. `users.SyncUser()` from the clients controller) use the fully-injected DI instance.
 
 ### Controller Init pattern
-Each controller exposes a package-level var + `Init` function wired by `server.go`:
+Each controller exposes a package-level var + `Init` function wired by `internal/app/app.go`:
 ```go
-var eventSvc *eventsService.EventService
-func InitEventsController(svc *eventsService.EventService) { eventSvc = svc }
+var (
+    eventSvc       *eventsService.EventService
+    eventConfigSvc *eventsService.EventConfigService
+)
+func InitEventsController(svc *eventsService.EventService, cfgSvc *eventsService.EventConfigService) {
+    eventSvc = svc
+    eventConfigSvc = cfgSvc
+}
 ```
 
-### Composition root — `server.go`
-`server.go` instantiates all repos → services → calls all `Init` functions → calls all `SetDefaultXxx` functions before starting the server. This is the ONLY place where concrete types are wired together.
+### Composition root — `internal/app/app.go`
+`internal/app/app.go` instantiates all repos, integration adapters, and services; configures `internal/authz`; calls all controller `Init` functions; then calls all `SetDefaultXxx` functions before starting the server. This is the ONLY place where concrete types are wired together.
+
+### Authorization boundary — `internal/authz`
+Protected handlers should use `internal/authz` for tenant checks instead of duplicating repository calls. The standard path is user → event → client access, with helpers for event sections, guests, invitations, moments, and resources.
+Production dependencies are provided by `authz.Configure(...)` from `internal/app/app.go`; tests can replace specific hooks with `authz.ReplaceHooksForTest(...)`.
 
 ### Unit testing pattern (for QA agent)
 ```go
 // No DB needed — inject mocks
 svc := invitations.NewInvitationService(mockInvRepo, mockGuestRepo, mockTokenRepo, mockLogRepo, mockCache)
-_, err := svc.ConfirmRSVP("ABC123", "confirmed", "web", 5)
+_, err := svc.ConfirmRSVP("ABC123", "confirmed", "web", 5, "")
 ```
 
 ## Key Design Patterns
@@ -231,7 +241,7 @@ return utils.Error(c, http.StatusBadRequest, "Message", errorDetails)
 Services invalidate cache after mutations:
 ```go
 // After CREATE/UPDATE/DELETE
-return redisrepository.Invalidate("resourceType", "all")
+return s.cache.Invalidate("resourceType", "all")
 ```
 
 ### Authentication Context Pattern
@@ -245,11 +255,13 @@ cfg := c.Get("config").(*models.Config)      // App configuration
 ## Middleware Chain
 
 ### Public Routes (`/api`)
-1. Redis cache middleware (automatic data loading)
+1. Body limit and public rate limiter
+2. Service-level Redis cache only inside handlers/services that explicitly opt in
 
 ### Protected Routes (`/api`)
 1. Token authentication middleware (JWT validation)
-2. Redis cache middleware (automatic data loading)
+2. Dashboard body/rate limits
+3. Service-level Redis cache only inside handlers/services that explicitly opt in
 
 ## Database Strategy
 
@@ -286,8 +298,9 @@ Client hierarchy support:
 AWS S3 integration:
 - Upload logic in `repositories/awsrepository/`
 - `Resource` model tracks uploaded files
-- Image processing via `libvips`
+- Image processing via `libvips` on Linux+cgo; Windows/no-cgo builds use a no-op optimizer fallback so local tests compile without native libvips.
 - S3 credentials from environment variables
+- Async media processing is published through `ports.MediaJobPublisher`; SQS is the current concrete adapter in `repositories/sqsrepository`.
 
 ## Validation Pattern
 
@@ -348,8 +361,8 @@ See `go.mod` for full list. Key dependencies:
 - Middleware-based caching to reduce DB queries
 - S3 presigned URLs generated only for resources with non-empty `Path` (no N+1 HeadObject calls)
 - Gzip compression on responses ≥ 1 KB (level 5) — reduce ancho de banda 60-80%
-- 10s global request timeout — previene goroutine leaks de clientes lentos
-- 2 MB body limit — rechaza payloads grandes antes de leerlos
+- 5m global HTTP request timeout; graceful shutdown uses a separate 10s timeout.
+- Body limits by route group: public 2 MB, protected dashboard 25 MB, public media uploads 225 MB, internal callbacks 2 MB.
 
 ## Security
 
@@ -358,7 +371,7 @@ See `go.mod` for full list. Key dependencies:
 - Client-scoped data access
 - Parameterized queries (GORM prevents SQL injection)
 - CORS configuration in Echo
-- Cache flush endpoints (`/cache/flush/*`) require authentication — protected routes only
+- Cache flush endpoints (`/cache/flush/*`) require root access
 - `middleware.Secure()` — X-Frame-Options, X-XSS-Protection, X-Content-Type-Options headers
 - Rate limiting por IP: público 20 req/s (burst 40), protegido 60 req/s (burst 100)
 - Input validation via `go-playground/validator/v10` — `required`, `email`, `oneof` en campos clave
@@ -412,7 +425,7 @@ if !ok || cfg == nil {
 
 - Health check endpoint: `GET /health`
 - Startup validation: database connection, Redis connection
-- Graceful shutdown on `SIGINT`/`SIGTERM` — 10s timeout before force-stop (`server.go`)
+- Graceful shutdown on `SIGINT`/`SIGTERM` — 10s timeout before force-stop (`internal/app/app.go`)
 
 ## When to Update This File
 

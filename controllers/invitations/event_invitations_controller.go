@@ -3,6 +3,8 @@ package invitations
 import (
 	"net/http"
 
+	"events-stocks/dtos"
+	"events-stocks/internal/authz"
 	"events-stocks/utils"
 
 	"github.com/gofrs/uuid"
@@ -17,10 +19,13 @@ func ListByEvent(c echo.Context) error {
 	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid event ID", err.Error())
 	}
+	if _, _, authErr := authz.RequireEventCapability(c, eventID, authz.CapabilityGuestManage); authErr != nil {
+		return authz.Respond(c, authErr)
+	}
 
 	list, err := invitationSvc.ListInvitationsByEventID(eventID)
 	if err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Error fetching invitations", err.Error())
 	}
-	return utils.Success(c, http.StatusOK, "Invitations loaded", list)
+	return utils.Success(c, http.StatusOK, "Invitations loaded", dtos.NewInvitationResponses(list))
 }

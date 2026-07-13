@@ -44,3 +44,17 @@ func ListPatternsByPalette(paletteID uuid.UUID) ([]models.ColorPalettePattern, e
 	})
 	return patterns, err
 }
+
+func (r *ColorRepo) GetColorPatternByID(id uuid.UUID) (*models.ColorPalettePattern, error) {
+	return GetColorPatternByID(id)
+}
+func (r *ColorRepo) CreatePattern(pattern *models.ColorPalettePattern) error {
+	return CreatePattern(pattern)
+}
+func (r *ColorRepo) UpdatePattern(pattern *models.ColorPalettePattern) error {
+	return UpdatePattern(pattern)
+}
+func (r *ColorRepo) DeletePattern(id uuid.UUID) error { return DeletePattern(id) }
+func (r *ColorRepo) ListAllPatterns() ([]models.ColorPalettePattern, error) {
+	return ListAllPatterns()
+}

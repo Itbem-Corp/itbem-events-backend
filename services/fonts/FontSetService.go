@@ -2,58 +2,93 @@ package fonts
 
 import (
 	"context"
-	"encoding/json"
+
 	"events-stocks/models"
-	"events-stocks/repositories/fontrepository"
-	"events-stocks/repositories/redisrepository"
+	"events-stocks/services/cacheutil"
 	"events-stocks/utils"
 	"github.com/gofrs/uuid"
 )
 
+const legacyFontSetsCacheResource = "font_sets"
+
 func ListFontSets() ([]models.FontSet, error) {
-	cacheKey := "all:font_sets"
-	ctx := context.Background()
-
-	cached, err := redisrepository.GetKey(ctx, cacheKey)
-	if err == nil && cached != "" {
-		var result []models.FontSet
-		if err := json.Unmarshal([]byte(cached), &result); err == nil {
-			return result, nil
-		}
+	if _fontSvc == nil {
+		return nil, fontServiceUnavailable()
 	}
-
-	data, err := fontrepository.ListFontSets(1, 0, "")
-	if err != nil {
-		return nil, err
-	}
-
-	jsonStr, _ := json.Marshal(data)
-	_ = redisrepository.SaveKey(ctx, cacheKey, string(jsonStr), utils.CacheTTLs["fonts"])
-
-	return data, nil
+	return _fontSvc.ListFontSets()
 }
 
 func GetFontSetByID(id uuid.UUID) (*models.FontSet, error) {
-	return fontrepository.GetFontSetByID(id)
+	if _fontSvc == nil {
+		return nil, fontServiceUnavailable()
+	}
+	return _fontSvc.GetFontSetByID(id)
 }
 
 func CreateFontSet(obj *models.FontSet) error {
-	if err := fontrepository.CreateFontSet(obj); err != nil {
-		return err
+	if _fontSvc == nil {
+		return fontServiceUnavailable()
 	}
-	return redisrepository.Invalidate("font_sets", "all")
+	return _fontSvc.CreateFontSet(obj)
 }
 
 func UpdateFontSet(obj *models.FontSet) error {
-	if err := fontrepository.UpdateFontSet(obj); err != nil {
-		return err
+	if _fontSvc == nil {
+		return fontServiceUnavailable()
 	}
-	return redisrepository.Invalidate("font_sets", "all")
+	return _fontSvc.UpdateFontSet(obj)
 }
 
 func DeleteFontSet(id uuid.UUID) error {
-	if err := fontrepository.DeleteFontSet(id); err != nil {
+	if _fontSvc == nil {
+		return fontServiceUnavailable()
+	}
+	return _fontSvc.DeleteFontSet(id)
+}
+
+func (fs *FontService) ListFontSets() ([]models.FontSet, error) {
+	return cacheutil.GetOrLoadJSON(
+		context.Background(),
+		fs.cache,
+		"all:"+utils.RedisFontSetKey,
+		utils.CacheTTLs[utils.RedisFontSetKey],
+		func() ([]models.FontSet, error) {
+			return fs.repo.ListFontSets(1, 0, "")
+		},
+	)
+}
+
+func (fs *FontService) invalidateFontSetCache() error {
+	if fs.cache == nil {
+		return nil
+	}
+	if err := fs.cache.Invalidate(legacyFontSetsCacheResource, "all"); err != nil {
 		return err
 	}
-	return redisrepository.Invalidate("font_sets", "all")
+	return fs.cache.Invalidate(utils.RedisFontSetKey, "all")
+}
+
+func (fs *FontService) GetFontSetByID(id uuid.UUID) (*models.FontSet, error) {
+	return fs.repo.GetFontSetByID(id)
+}
+
+func (fs *FontService) CreateFontSet(obj *models.FontSet) error {
+	if err := fs.repo.CreateFontSet(obj); err != nil {
+		return err
+	}
+	return fs.invalidateFontSetCache()
+}
+
+func (fs *FontService) UpdateFontSet(obj *models.FontSet) error {
+	if err := fs.repo.UpdateFontSet(obj); err != nil {
+		return err
+	}
+	return fs.invalidateFontSetCache()
+}
+
+func (fs *FontService) DeleteFontSet(id uuid.UUID) error {
+	if err := fs.repo.DeleteFontSet(id); err != nil {
+		return err
+	}
+	return fs.invalidateFontSetCache()
 }

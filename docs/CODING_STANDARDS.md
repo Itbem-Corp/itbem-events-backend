@@ -388,7 +388,7 @@ func ProcessRequest(c echo.Context) error {
 #### ✅ MUST HAVE:
 
 ```go
-// In server.go
+// In internal/app/app.go
 func main() {
     e := echo.New()
 
@@ -725,7 +725,7 @@ func DeleteEvent(c echo.Context) error {
 ```go
 // BAD: Hardcoded secrets
 const dbPassword = "mypassword123"  // NEVER!
-apiKey := "sk_live_abc123"  // NEVER!
+apiKey := "hardcoded-payment-key"  // NEVER!
 
 // BAD: Logging secrets
 log.Printf("User password: %s", user.Password)  // NEVER LOG SECRETS!

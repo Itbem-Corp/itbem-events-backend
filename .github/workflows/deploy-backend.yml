@@ -7,20 +7,40 @@ on:
 
   workflow_dispatch:
     inputs:
-      branch:
-        description: 'Branch to deploy'
+      confirm_production:
+        description: Confirm this revision should be deployed to production
         required: true
-        default: 'main'
+        default: false
+        type: boolean
+
+# Production deploys must never race each other. A queued deployment is safer
+# than cancelling a run while it is between candidate validation and promotion.
+concurrency:
+  group: eventiapp-backend-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_REPOSITORY: itbem-events-backend
 
 jobs:
   validate:
     name: Build & test
     runs-on: ubuntu-latest
+    outputs:
+      revision: ${{ steps.revision.outputs.sha }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.branch || github.ref_name }}
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Record validated revision
+        id: revision
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Install libvips
         run: sudo apt-get update && sudo apt-get install -y libvips-dev
@@ -35,105 +55,300 @@ jobs:
         run: go build ./...
 
       - name: Test
-        run: go test ./... -timeout 60s
+        run: go test ./... -timeout 120s
+
+      - name: Test deployment safety gates
+        run: |
+          bash scripts/deploy/deploy-ec2-candidate_test.sh
+          python3 -m unittest scripts/deploy/test_render_docker_env.py
+
+      - name: Test fail-closed alert verifier
+        env:
+          PYTHONPATH: scripts
+        run: python3 -m unittest scripts/tests/test_verify_alerting.py
 
   deploy:
-    name: Deploy to EC2
+    name: Deploy candidate and promote
     needs: validate
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.confirm_production == true
     runs-on: ubuntu-latest
     environment: production
+    permissions:
+      contents: read
+      id-token: write
 
     steps:
+      - name: Checkout validated revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.revision }}
+          persist-credentials: false
+
+      - name: Setup Go for production security preflight
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.3'
+          cache: true
+
+      - name: Validate independent production secrets
+        env:
+          ENV: production
+          EVENT_PREVIEW_SECRET: ${{ secrets.EVENT_PREVIEW_SECRET }}
+          EVENT_ACCESS_SECRET: ${{ secrets.EVENT_ACCESS_SECRET }}
+          INTERNAL_API_SECRET: ${{ secrets.INTERNAL_API_SECRET }}
+          INTERNAL_API_SECRET_PREVIOUS: ${{ secrets.INTERNAL_API_SECRET_PREVIOUS }}
+          COGNITO_CLIENT_SECRET: ${{ secrets.BACKEND_COGNITO_CLIENT_SECRET }}
+        run: go run ./cmd/security-preflight
+
+      # Build the immutable image on the runner. The EC2 host no longer clones
+      # the repository or persists a GitHub PAT in ~/.git-credentials.
+      - name: Build deployment image
+        env:
+          IMAGE_TAG: ${{ env.IMAGE_REPOSITORY }}:${{ needs.validate.outputs.revision }}
+        run: docker build --pull --tag "$IMAGE_TAG" .
+
+      - name: Require the provisioned production deployment boundary
+        env:
+          AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          DB_INSTANCE_ID: ${{ vars.BACKEND_DB_INSTANCE_ID }}
+          EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+          EC2_USER: ${{ vars.EC2_USER }}
+          EC2_HOST: ${{ vars.EC2_HOST }}
+          BACKEND_PORT: ${{ vars.BACKEND_PORT }}
+          BACKEND_CANDIDATE_PORT: ${{ vars.BACKEND_CANDIDATE_PORT || '18080' }}
+        run: |
+          set -euo pipefail
+          test -n "$AWS_DEPLOY_ROLE_ARN" || { echo "AWS_DEPLOY_ROLE_ARN environment variable is required"; exit 1; }
+          [[ "$AWS_DEPLOY_ROLE_ARN" == arn:aws*:iam::*:role/eventiapp-github-backend-production ]] || {
+            echo "AWS_DEPLOY_ROLE_ARN is not the provisioned backend production role"
+            exit 1
+          }
+          test -n "$DB_INSTANCE_ID" || { echo "BACKEND_DB_INSTANCE_ID environment variable is required"; exit 1; }
+          [[ "$EC2_INSTANCE_ID" =~ ^i-[0-9a-f]+$ ]] || { echo "EC2_INSTANCE_ID is invalid"; exit 1; }
+          [[ "$EC2_USER" =~ ^[A-Za-z_][A-Za-z0-9_-]{0,31}$ ]] || { echo "EC2_USER is invalid"; exit 1; }
+          [[ "$EC2_HOST" =~ ^[A-Za-z0-9.-]+$ ]] || { echo "EC2_HOST is invalid"; exit 1; }
+          [[ "$BACKEND_PORT" =~ ^[0-9]{2,5}$ && "$BACKEND_PORT" -le 65535 ]] || { echo "BACKEND_PORT is invalid"; exit 1; }
+          [[ "$BACKEND_CANDIDATE_PORT" =~ ^[0-9]{2,5}$ && "$BACKEND_CANDIDATE_PORT" -le 65535 ]] || { echo "BACKEND_CANDIDATE_PORT is invalid"; exit 1; }
+          [[ "$BACKEND_PORT" != "$BACKEND_CANDIDATE_PORT" ]] || { echo "candidate and production ports must differ"; exit 1; }
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: eventiapp-backend-${{ github.run_id }}
           aws-region: us-east-2
 
-      - name: Setup SSH via EC2 Instance Connect
+      - name: Require confirmed host and public-health alert routes
+        env:
+          BACKEND_ALERT_EMAIL: ${{ secrets.BACKEND_ALERT_EMAIL }}
+          EXPECTED_EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
         run: |
-          # Generate ephemeral SSH key for this deploy run
+          set -euo pipefail
+          HOST_STACK=eventiapp-backend-prod-observability
+          HOST_INSTANCE_ID="$(aws cloudformation describe-stacks \
+            --stack-name "$HOST_STACK" \
+            --region us-east-2 \
+            --query "Stacks[0].Outputs[?OutputKey=='MonitoredEC2InstanceId'].OutputValue" \
+            --output text)"
+          [[ "$HOST_INSTANCE_ID" == "$EXPECTED_EC2_INSTANCE_ID" ]] || {
+            echo "Host alarm monitors ${HOST_INSTANCE_ID:-<missing>}, expected ${EXPECTED_EC2_INSTANCE_ID}" >&2
+            exit 1
+          }
+          HOST_TOPIC_ARN="$(aws cloudformation describe-stacks \
+            --stack-name "$HOST_STACK" \
+            --region us-east-2 \
+            --query "Stacks[0].Outputs[?OutputKey=='AlertTopicArn'].OutputValue" \
+            --output text)"
+          AWS_REGION=us-east-2 AWS_DEFAULT_REGION=us-east-2 python3 scripts/verify_alerting.py \
+            --topic-arn "$HOST_TOPIC_ARN" \
+            --email "$BACKEND_ALERT_EMAIL" \
+            --alarm-prefix "eventiapp-backend-" \
+            --alarm-suffix=-prod \
+            --expected-alarm "eventiapp-backend-ec2-system-status-prod" \
+            --expected-alarm "eventiapp-backend-ec2-instance-status-prod" \
+            --expected-alarm "eventiapp-backend-host-prod" \
+            --routed-alarm "eventiapp-backend-host-prod"
+
+          PUBLIC_STACK=eventiapp-backend-prod-public-health-observability
+          MONITORED_FQDN="$(aws cloudformation describe-stacks \
+            --stack-name "$PUBLIC_STACK" \
+            --region us-east-1 \
+            --query "Stacks[0].Outputs[?OutputKey=='MonitoredFQDN'].OutputValue" \
+            --output text)"
+          [[ "$MONITORED_FQDN" == "api.eventiapp.com.mx" ]] || {
+            echo "Public-health alarm monitors ${MONITORED_FQDN:-<missing>}, expected api.eventiapp.com.mx" >&2
+            exit 1
+          }
+          PUBLIC_TOPIC_ARN="$(aws cloudformation describe-stacks \
+            --stack-name "$PUBLIC_STACK" \
+            --region us-east-1 \
+            --query "Stacks[0].Outputs[?OutputKey=='AlertTopicArn'].OutputValue" \
+            --output text)"
+          AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 python3 scripts/verify_alerting.py \
+            --topic-arn "$PUBLIC_TOPIC_ARN" \
+            --email "$BACKEND_ALERT_EMAIL" \
+            --alarm-prefix "eventiapp-backend-public-health-" \
+            --alarm-suffix=-prod \
+            --expected-alarm "eventiapp-backend-public-health-prod" \
+            --routed-alarm "eventiapp-backend-public-health-prod"
+
+      - name: Snapshot database before startup migrations
+        id: database_snapshot
+        env:
+          DB_INSTANCE_ID: ${{ vars.BACKEND_DB_INSTANCE_ID }}
+          REVISION: ${{ needs.validate.outputs.revision }}
+        run: |
+          set -euo pipefail
+          test -n "$DB_INSTANCE_ID" || { echo "BACKEND_DB_INSTANCE_ID is required"; exit 1; }
+          SNAPSHOT_ID="eventiapp-predeploy-${REVISION:0:12}-${GITHUB_RUN_ID}"
+          aws rds create-db-snapshot \
+            --db-instance-identifier "$DB_INSTANCE_ID" \
+            --db-snapshot-identifier "$SNAPSHOT_ID" \
+            --tags Key=Application,Value=EventiApp Key=Purpose,Value=predeploy-rollback Key=Revision,Value="$REVISION"
+          aws rds wait db-snapshot-available --db-snapshot-identifier "$SNAPSHOT_ID"
+          echo "snapshot_id=$SNAPSHOT_ID" >> "$GITHUB_OUTPUT"
+          echo "Database rollback snapshot: \`$SNAPSHOT_ID\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Render runtime environment without shell interpolation
+        env:
+          PORT: ${{ vars.BACKEND_PORT }}
+          AWS_REGION: ${{ secrets.BACKEND_AWS_REGION }}
+          S3_REGION: ${{ secrets.BACKEND_S3_REGION }}
+          ENV: production
+          COGNITO_USER_POOL_ID: ${{ secrets.BACKEND_COGNITO_USER_POOL_ID }}
+          COGNITO_CLIENT_ID: ${{ secrets.BACKEND_COGNITO_CLIENT_ID }}
+          COGNITO_CLIENT_SECRET: ${{ secrets.BACKEND_COGNITO_CLIENT_SECRET }}
+          COGNITO_AWS_REGION: ${{ secrets.BACKEND_COGNITO_AWS_REGION }}
+          AWS_BUCKET_NAME: ${{ secrets.AWS_BUCKET_NAME }}
+          CDN_BASE_URL: ${{ secrets.CDN_BASE_URL }}
+          S3_CLIENT_ID: ${{ secrets.S3_CLIENT_ID }}
+          S3_CLIENT_SECRET: ${{ secrets.S3_CLIENT_SECRET }}
+          DB_HOST: ${{ secrets.BACKEND_DB_HOST }}
+          DB_USER: ${{ secrets.BACKEND_DB_USER }}
+          DB_PASSWORD: ${{ secrets.BACKEND_DB_PASSWORD }}
+          DB_NAME: ${{ secrets.BACKEND_DB_NAME }}
+          DB_PORT: ${{ secrets.BACKEND_DB_PORT }}
+          DB_TIMEZONE: ${{ secrets.BACKEND_DB_TIMEZONE }}
+          REDIS_HOST: ${{ secrets.BACKEND_REDIS_HOST }}
+          REDIS_PASSWORD: ${{ secrets.BACKEND_REDIS_PASSWORD }}
+          REDIS_DB: ${{ secrets.BACKEND_REDIS_DB }}
+          REDIS_TLS: ${{ secrets.BACKEND_REDIS_TLS }}
+          GOOGLE_CLIENT_ID: ${{ secrets.BACKEND_GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.BACKEND_GOOGLE_CLIENT_SECRET }}
+          CORS_ALLOW_ORIGINS: ${{ secrets.CORS_ALLOW_ORIGINS }}
+          INTERNAL_API_SECRET: ${{ secrets.INTERNAL_API_SECRET }}
+          INTERNAL_API_SECRET_PREVIOUS: ${{ secrets.INTERNAL_API_SECRET_PREVIOUS }}
+          EVENT_PREVIEW_SECRET: ${{ secrets.EVENT_PREVIEW_SECRET }}
+          EVENT_ACCESS_SECRET: ${{ secrets.EVENT_ACCESS_SECRET }}
+          SQS_IMAGE_QUEUE_URL: ${{ secrets.SQS_IMAGE_QUEUE_URL }}
+          SQS_VIDEO_QUEUE_URL: ${{ secrets.SQS_VIDEO_QUEUE_URL }}
+          SQS_WORKER_QUEUE_URL: ${{ secrets.SQS_WORKER_QUEUE_URL }}
+        run: |
+          set -euo pipefail
+          LOCAL_ENV_FILE="${RUNNER_TEMP}/eventiapp-backend-${GITHUB_RUN_ID}.env"
+          python3 scripts/deploy/render_docker_env.py \
+            --output "$LOCAL_ENV_FILE" \
+            --required PORT \
+            --required AWS_REGION \
+            --required S3_REGION \
+            --required ENV \
+            --required COGNITO_USER_POOL_ID \
+            --required COGNITO_AWS_REGION \
+            --required AWS_BUCKET_NAME \
+            --required DB_HOST \
+            --required DB_USER \
+            --required DB_PASSWORD \
+            --required DB_NAME \
+            --required DB_PORT \
+            --required DB_TIMEZONE \
+            --required REDIS_HOST \
+            --required REDIS_PASSWORD \
+            --required REDIS_DB \
+            --required REDIS_TLS \
+            --required GOOGLE_CLIENT_ID \
+            --required GOOGLE_CLIENT_SECRET \
+            --required INTERNAL_API_SECRET \
+            --required EVENT_PREVIEW_SECRET \
+            --required EVENT_ACCESS_SECRET \
+            --required SQS_IMAGE_QUEUE_URL \
+            --required SQS_VIDEO_QUEUE_URL \
+            --optional COGNITO_CLIENT_ID \
+            --optional COGNITO_CLIENT_SECRET \
+            --optional S3_CLIENT_ID \
+            --optional S3_CLIENT_SECRET \
+            --optional CDN_BASE_URL \
+            --optional CORS_ALLOW_ORIGINS \
+            --optional INTERNAL_API_SECRET_PREVIOUS \
+            --optional SQS_WORKER_QUEUE_URL
+
+      - name: Open verified EC2 Instance Connect session
+        env:
+          EC2_HOST_KEY: ${{ secrets.EC2_HOST_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$EC2_HOST_KEY" || { echo "EC2_HOST_KEY secret is required"; exit 1; }
+          install -d -m 700 ~/.ssh
           ssh-keygen -t ed25519 -f ~/.ssh/ec2_deploy -N '' -q
-          # Push public key to EC2 — valid for 60 seconds to initiate connection
+          printf '%s\n' "$EC2_HOST_KEY" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/ec2_deploy ~/.ssh/known_hosts
+
           aws ec2-instance-connect send-ssh-public-key \
-            --instance-id ${{ secrets.EC2_INSTANCE_ID }} \
-            --instance-os-user ${{ secrets.EC2_USER }} \
+            --instance-id '${{ vars.EC2_INSTANCE_ID }}' \
+            --instance-os-user '${{ vars.EC2_USER }}' \
             --ssh-public-key file://~/.ssh/ec2_deploy.pub \
             --region us-east-2
-          # Trust EC2 host key
-          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
-          chmod 600 ~/.ssh/ec2_deploy
 
-      - name: Deploy backend
+          ssh -M -S ~/.ssh/eventiapp-ec2.sock -o ControlPersist=15m -fnNT \
+            -i ~/.ssh/ec2_deploy \
+            -o StrictHostKeyChecking=yes \
+            '${{ vars.EC2_USER }}@${{ vars.EC2_HOST }}'
+
+      - name: Install Docker when needed
         run: |
-          BRANCH=${{ github.event.inputs.branch || github.ref_name }}
-          # IMPORTANT: SSH must initiate within 60s of send-ssh-public-key above
-          ssh -i ~/.ssh/ec2_deploy \
-            -o StrictHostKeyChecking=no \
-            ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << EOF
+          ssh -S ~/.ssh/eventiapp-ec2.sock '${{ vars.EC2_USER }}@${{ vars.EC2_HOST }}' <<'REMOTE'
+          set -euo pipefail
+          missing_packages=()
+          command -v docker >/dev/null 2>&1 || missing_packages+=(docker)
+          command -v curl >/dev/null 2>&1 || missing_packages+=(curl)
+          command -v python3 >/dev/null 2>&1 || missing_packages+=(python3)
+          if ((${#missing_packages[@]})); then
+            sudo yum install -y "${missing_packages[@]}"
+          fi
+          sudo systemctl enable --now docker
+          REMOTE
 
-            # ── First-time: ensure Docker is installed & starts on boot ──────────
-            if ! command -v docker &>/dev/null; then
-              sudo yum update -y
-              sudo yum install -y docker git
-              sudo systemctl enable docker
-              sudo systemctl start docker
-              sudo usermod -aG docker \$(whoami)
-            fi
-            sudo systemctl enable docker
+      - name: Transfer immutable image
+        env:
+          IMAGE_TAG: ${{ env.IMAGE_REPOSITORY }}:${{ needs.validate.outputs.revision }}
+        run: |
+          set -euo pipefail
+          docker save "$IMAGE_TAG" | gzip -1 | \
+            ssh -S ~/.ssh/eventiapp-ec2.sock '${{ vars.EC2_USER }}@${{ vars.EC2_HOST }}' \
+              'gunzip | sudo docker load'
 
-            # ── First-time: clone repo ────────────────────────────────────────────
-            if [ ! -d /opt/itbem-events-backend ]; then
-              sudo git clone \
-                https://x-access-token:${{ secrets.GH_DEPLOY_TOKEN }}@github.com/Itbem-Corp/itbem-events-backend.git \
-                /opt/itbem-events-backend
-              sudo chown -R \$(id -u):\$(id -g) /opt/itbem-events-backend
-            fi
+      - name: Deploy candidate, health-gate promotion, and rollback on failure
+        env:
+          IMAGE_TAG: ${{ env.IMAGE_REPOSITORY }}:${{ needs.validate.outputs.revision }}
+          BACKEND_PORT: ${{ vars.BACKEND_PORT }}
+          BACKEND_CANDIDATE_PORT: ${{ vars.BACKEND_CANDIDATE_PORT || '18080' }}
+        run: |
+          set -euo pipefail
+          LOCAL_ENV_FILE="${RUNNER_TEMP}/eventiapp-backend-${GITHUB_RUN_ID}.env"
+          REMOTE_ENV_FILE=".eventiapp-deploy/eventiapp-backend-${GITHUB_RUN_ID}.env"
+          test -r "$LOCAL_ENV_FILE" || { echo "rendered runtime environment is missing"; exit 1; }
 
-            # ── Pull latest code ──────────────────────────────────────────────────
-            cd /opt/itbem-events-backend
-            git config credential.helper store
-            printf 'https://x-access-token:${{ secrets.GH_DEPLOY_TOKEN }}@github.com\n' > ~/.git-credentials
-            git pull origin $BRANCH
+          ssh -S ~/.ssh/eventiapp-ec2.sock '${{ vars.EC2_USER }}@${{ vars.EC2_HOST }}' \
+            "install -d -m 700 ~/.eventiapp-deploy; umask 077; cat > ~/'$REMOTE_ENV_FILE'" < "$LOCAL_ENV_FILE"
 
-            # ── Build and restart container ───────────────────────────────────────
-            docker stop itbem-events-backend 2>/dev/null || true
-            docker rm   itbem-events-backend 2>/dev/null || true
-            docker rmi  itbem-events-backend 2>/dev/null || true
-            docker build -t itbem-events-backend .
+          ssh -S ~/.ssh/eventiapp-ec2.sock '${{ vars.EC2_USER }}@${{ vars.EC2_HOST }}' \
+            "IMAGE_TAG='$IMAGE_TAG' BACKEND_PORT='$BACKEND_PORT' CANDIDATE_PORT='$BACKEND_CANDIDATE_PORT' DEPLOY_ID='$GITHUB_RUN_ID' ENV_FILE='$REMOTE_ENV_FILE' bash -s" \
+            < scripts/deploy/deploy-ec2-candidate.sh
 
-            docker run -d --name itbem-events-backend \
-              --restart always \
-              -p ${{ secrets.BACKEND_PORT }}:${{ secrets.BACKEND_PORT }} \
-              -e PORT='${{ secrets.BACKEND_PORT }}' \
-              -e AWS_REGION='${{ secrets.BACKEND_AWS_REGION }}' \
-              -e ENV='${{ secrets.ENV }}' \
-              -e COGNITO_USER_POOL_ID='${{ secrets.BACKEND_COGNITO_USER_POOL_ID }}' \
-              -e COGNITO_CLIENT_ID='${{ secrets.BACKEND_COGNITO_CLIENT_ID }}' \
-              -e COGNITO_CLIENT_SECRET='${{ secrets.BACKEND_COGNITO_CLIENT_SECRET }}' \
-              -e COGNITO_AWS_REGION='${{ secrets.BACKEND_COGNITO_AWS_REGION }}' \
-              -e AWS_BUCKET_NAME='${{ secrets.AWS_BUCKET_NAME }}' \
-              -e S3_CLIENT_ID='${{ secrets.S3_CLIENT_ID }}' \
-              -e S3_CLIENT_SECRET='${{ secrets.S3_CLIENT_SECRET }}' \
-              -e DB_HOST='${{ secrets.BACKEND_DB_HOST }}' \
-              -e DB_USER='${{ secrets.BACKEND_DB_USER }}' \
-              -e DB_PASSWORD='${{ secrets.BACKEND_DB_PASSWORD }}' \
-              -e DB_NAME='${{ secrets.BACKEND_DB_NAME }}' \
-              -e DB_PORT='${{ secrets.BACKEND_DB_PORT }}' \
-              -e DB_TIMEZONE='${{ secrets.BACKEND_DB_TIMEZONE }}' \
-              -e REDIS_HOST='${{ secrets.BACKEND_REDIS_HOST }}' \
-              -e REDIS_PASSWORD='${{ secrets.BACKEND_REDIS_PASSWORD }}' \
-              -e REDIS_DB='${{ secrets.BACKEND_REDIS_DB }}' \
-              -e REDIS_TLS='${{ secrets.BACKEND_REDIS_TLS }}' \
-              -e GOOGLE_CLIENT_ID='${{ secrets.BACKEND_GOOGLE_CLIENT_ID }}' \
-              -e GOOGLE_CLIENT_SECRET='${{ secrets.BACKEND_GOOGLE_CLIENT_SECRET }}' \
-              -e CORS_ALLOW_ORIGINS='${{ secrets.CORS_ALLOW_ORIGINS }}' \
-              -e INTERNAL_API_SECRET='${{ secrets.INTERNAL_API_SECRET }}' \
-              -e SQS_IMAGE_QUEUE_URL='${{ secrets.SQS_IMAGE_QUEUE_URL }}' \
-              -e SQS_VIDEO_QUEUE_URL='${{ secrets.SQS_VIDEO_QUEUE_URL }}' \
-              itbem-events-backend
-
-            echo "✅ Deploy complete. Running containers:"
-            docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
-          EOF
+      - name: Close SSH control session
+        if: always()
+        run: |
+          rm -f "${RUNNER_TEMP}/eventiapp-backend-${GITHUB_RUN_ID}.env"
+          ssh -S ~/.ssh/eventiapp-ec2.sock '${{ vars.EC2_USER }}@${{ vars.EC2_HOST }}' \
+            "rm -f ~/.eventiapp-deploy/eventiapp-backend-${GITHUB_RUN_ID}.env" 2>/dev/null || true
+          ssh -S ~/.ssh/eventiapp-ec2.sock -O exit \
+            '${{ vars.EC2_USER }}@${{ vars.EC2_HOST }}' 2>/dev/null || true

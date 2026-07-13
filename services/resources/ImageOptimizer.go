@@ -1,3 +1,5 @@
+//go:build !windows && cgo
+
 package services
 
 import (
@@ -15,10 +17,12 @@ func NewImageOptimizerService() *ImageOptimizerService {
 }
 
 var imageMimeTypes = map[string]bool{
-	"image/jpeg":    true,
-	"image/png":     true,
-	"image/gif":     true,
-	"image/webp":    true,
+	"image/jpeg": true,
+	"image/png":  true,
+	// Preserve animation and avoid a second lossy pass over WebP files that
+	// browsers have already optimized before upload.
+	"image/gif":     false,
+	"image/webp":    false,
 	"image/heic":    true,  // 👈 nuevo
 	"image/heif":    true,  // 👈 nuevo
 	"image/svg+xml": false, // SVG no lo toca (texto)
@@ -41,8 +45,10 @@ func (s *ImageOptimizerService) OptimizeIfImage(file multipart.File, header *mul
 	// Procesar con bimg
 	image := bimg.NewImage(buf)
 	options := bimg.Options{
-		Quality:       75,
-		Compression:   9,
+		// WebP 84 keeps fine detail in event photography while compression 6
+		// avoids the steep CPU/latency cost of the maximum effort setting.
+		Quality:       84,
+		Compression:   6,
 		StripMetadata: true,
 		// Width:         1500,      // si quieres conservar resolución, quítalo
 		Type: bimg.WEBP, // o bimg.JPEG si prefieres

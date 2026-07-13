@@ -32,7 +32,7 @@ Event     Event          `gorm:"foreignKey:EventID" json:"event,omitempty"`
 ### EventConfig
 - **File**: `models/EventConfig.go`
 - **Purpose**: Per-event configuration (design settings, sections order, MomentWall gating)
-- **Key fields**: `show_moment_wall bool` (gates public visibility), `share_uploads_enabled bool` (enables QR-code upload page without personal token), `allow_uploads bool`, `allow_messages bool`, `max_uploads_per_guest int` (per-IP upload limit, default 3; set to 0 for global default), `auto_approve_uploads bool` (auto-approves all incoming moments, default false), `design_template_id *uuid.UUID` (nullable FK to DesignTemplate)
+- **Key fields**: `show_moment_wall bool` (gates public visibility and closes guest uploads when published), `visibility_configured bool` (marks section toggles as explicit so all-false visibility is preserved while legacy all-false configs still receive defaults), `allow_uploads bool` (global uploads gate), `share_uploads_enabled bool` (enables QR-code upload page without personal token when `allow_uploads` is also true and `show_moment_wall` is false), `allow_messages bool`, `active_from time.Time` and `active_until *time.Time` (public page availability window; `active_until` must be after `active_from` when both are set), `max_uploads_per_guest int` (per-IP upload limit, default 30; set to 0 for global default), `auto_approve_uploads bool` (auto-approves all incoming moments, default false), `design_template_id *uuid.UUID` (nullable FK to DesignTemplate)
 - **Relationships**: BelongsTo Event, BelongsTo DesignTemplate (optional — nullable FK)
 - **Auto-create**: `GetEventConfigByID` auto-creates a default config if none exists for the event
 
@@ -147,7 +147,7 @@ Event     Event          `gorm:"foreignKey:EventID" json:"event,omitempty"`
   - `order int` — display order on wall
 - **Dashboard behavior**: `GET /api/moments?event_id=X` only returns moments with `processing_status NOT IN ('pending','processing')` — admins see items only after Lambda finishes.
 - **Public wall behavior**: Only shows `is_approved=true AND processing_status IN ('','done')` moments. Results cached in Redis (key: `moments:wall:{eventID}:p{N}:l{N}`, TTL 5min). Cache is busted on approval changes (including bulk), or Lambda callback.
-- **Upload limits**: Per-IP upload limit per event controlled by `EventConfig.MaxUploadsPerGuest` (default 3 if unset). Redis counter: `moments:upload_count:{eventID}:{ip}`, 30-day TTL. After limit reached: 429 with personalized thank-you message.
+- **Upload limits**: Per-IP upload limit per event controlled by `EventConfig.MaxUploadsPerGuest` (default 30 if unset). Redis counter: `moments:upload_count:{eventID}:{ip}`, 30-day TTL. After limit reached: 429 with personalized thank-you message.
 - **S3 structure**: `moments/{eventID}/raw/{uuid}.ext` (raw) → `moments/{eventID}/{uuid}.webp|.mp4` (optimized)
 - **SQS behavior**: When SQS queues are not configured (local dev without `SQS_IMAGE_QUEUE_URL`/`SQS_VIDEO_QUEUE_URL`), public uploads set `processing_status=""` instead of `"pending"`, making moments visible immediately without Lambda processing.
 - **Relationships**: BelongsTo Event, BelongsTo Invitation (optional)

@@ -1,0 +1,62 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Read-and-publish-only GitHub OIDC role for the daily production TLS certificate monitor.
+
+Parameters:
+  GitHubOidcProviderArn:
+    Type: String
+    AllowedPattern: '^arn:aws[a-zA-Z-]*:iam::[0-9]{12}:oidc-provider/token\.actions\.githubusercontent\.com$'
+  GitHubOrganization:
+    Type: String
+    Default: Itbem-Corp
+    AllowedPattern: '^[A-Za-z0-9_.-]+$'
+  GitHubRepository:
+    Type: String
+    Default: itbem-events-backend
+    AllowedPattern: '^[A-Za-z0-9_.-]+$'
+
+Resources:
+  TLSMonitorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: eventiapp-github-backend-tls-monitor-prod
+      Description: Daily main-branch monitor may verify and publish only to the production public-health topic.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: GitHubMainBranchOnly
+            Effect: Allow
+            Principal:
+              Federated: !Ref GitHubOidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub 'repo:${GitHubOrganization}/${GitHubRepository}:ref:refs/heads/main'
+      Policies:
+        - PolicyName: VerifyAndPublishProductionTLSAlert
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: VerifyAndPublishOnlyPublicHealthTopic
+                Effect: Allow
+                Action:
+                  - sns:GetTopicAttributes
+                  - sns:ListSubscriptionsByTopic
+                  - sns:Publish
+                Resource: !Sub 'arn:${AWS::Partition}:sns:us-east-1:${AWS::AccountId}:eventiapp-backend-public-health-alerts-prod'
+      Tags:
+        - Key: Application
+          Value: EventiApp
+        - Key: Repository
+          Value: !Sub '${GitHubOrganization}/${GitHubRepository}'
+        - Key: Purpose
+          Value: TLSCertificateMonitor
+
+Outputs:
+  TLSMonitorRoleArn:
+    Description: Configure as the repository variable AWS_TLS_MONITOR_ROLE_ARN.
+    Value: !GetAtt TLSMonitorRole.Arn
+  TLSAlertTopicArn:
+    Description: Configure as TLS_MONITOR_TOPIC_ARN after the production public-health subscription is confirmed.
+    Value: !Sub 'arn:${AWS::Partition}:sns:us-east-1:${AWS::AccountId}:eventiapp-backend-public-health-alerts-prod'

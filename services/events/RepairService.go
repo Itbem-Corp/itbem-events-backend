@@ -4,26 +4,50 @@ import (
 	"fmt"
 	"time"
 
+	"events-stocks/dtos"
 	"events-stocks/models"
-	"events-stocks/repositories/eventsrepository"
+	"events-stocks/services/ports"
 	"events-stocks/utils"
 
 	"github.com/gofrs/uuid"
 	"gorm.io/gorm"
 )
 
-type RepairResult struct {
-	Repaired bool     `json:"repaired"`
-	Fixes    []string `json:"fixes"`
-	Warnings []string `json:"warnings"`
+type RepairResult = dtos.EventRepairResponse
+
+var _repairSvc *RepairService
+
+func SetDefaultRepairService(svc *RepairService) {
+	_repairSvc = svc
 }
 
-func RepairEvent(db *gorm.DB, eventID uuid.UUID) (*RepairResult, error) {
+type RepairService struct {
+	db         *gorm.DB
+	eventsRepo ports.EventsRepository
+}
+
+func NewRepairService(db *gorm.DB, eventsRepo ports.EventsRepository) *RepairService {
+	return &RepairService{db: db, eventsRepo: eventsRepo}
+}
+
+func RepairEventByID(eventID uuid.UUID) (*RepairResult, error) {
+	if _repairSvc == nil {
+		return nil, fmt.Errorf("repair service not initialized")
+	}
+	return _repairSvc.RepairEventByID(eventID)
+}
+
+func (s *RepairService) RepairEventByID(eventID uuid.UUID) (*RepairResult, error) {
+	return repairEvent(s.db, s.eventsRepo.IdentifierExists, eventID)
+}
+
+func repairEvent(db *gorm.DB, identifierExists func(identifier string) bool, eventID uuid.UUID) (*RepairResult, error) {
 	result := &RepairResult{}
 
 	// Load event with preloads
 	var event models.Event
 	if err := db.Preload("EventType").Preload("EventConfig").Preload("EventConfig.DesignTemplate").
+		Preload("EventConfig.ColorPalette").Preload("EventConfig.FontSet").
 		First(&event, "id = ?", eventID).Error; err != nil {
 		return nil, fmt.Errorf("event not found: %w", err)
 	}
@@ -41,7 +65,7 @@ func RepairEvent(db *gorm.DB, eventID uuid.UUID) (*RepairResult, error) {
 	var configCount int64
 	tx.Model(&models.EventConfig{}).Where("id = ?", eventID).Count(&configCount)
 	if configCount == 0 {
-		cfg := &models.EventConfig{ID: eventID}
+		cfg := NewDefaultEventConfig(eventID)
 		if err := tx.Create(cfg).Error; err == nil {
 			result.Fixes = append(result.Fixes, "created missing event_config")
 		}
@@ -77,7 +101,7 @@ func RepairEvent(db *gorm.DB, eventID uuid.UUID) (*RepairResult, error) {
 				newSlug = "event"
 			}
 			candidate := newSlug
-			for i := 2; eventsrepository.IdentifierExists(candidate); i++ {
+			for i := 2; identifierExists(candidate); i++ {
 				candidate = fmt.Sprintf("%s-%d", newSlug, i)
 			}
 			updates["identifier"] = candidate
@@ -122,6 +146,22 @@ func RepairEvent(db *gorm.DB, eventID uuid.UUID) (*RepairResult, error) {
 			if tplCount == 0 {
 				tx.Model(&config).Update("design_template_id", nil)
 				result.Fixes = append(result.Fixes, "cleared orphaned design_template_id")
+			}
+		}
+		if config.ColorPaletteID != nil && *config.ColorPaletteID != uuid.Nil {
+			var paletteCount int64
+			tx.Model(&models.ColorPalette{}).Where("id = ?", *config.ColorPaletteID).Count(&paletteCount)
+			if paletteCount == 0 {
+				tx.Model(&config).Update("color_palette_id", nil)
+				result.Fixes = append(result.Fixes, "cleared orphaned color_palette_id")
+			}
+		}
+		if config.FontSetID != nil && *config.FontSetID != uuid.Nil {
+			var fontSetCount int64
+			tx.Model(&models.FontSet{}).Where("id = ?", *config.FontSetID).Count(&fontSetCount)
+			if fontSetCount == 0 {
+				tx.Model(&config).Update("font_set_id", nil)
+				result.Fixes = append(result.Fixes, "cleared orphaned font_set_id")
 			}
 		}
 	}

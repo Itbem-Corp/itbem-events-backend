@@ -1,30 +1,44 @@
 package clienttypes
 
 import (
-	"events-stocks/models"
-	"events-stocks/repositories/clienttyperepository"
 	"fmt"
+
+	"events-stocks/models"
+	"events-stocks/services/ports"
 )
 
-// GetAllowedClientTypes ahora es dinámico basado en DB
-func GetAllowedClientTypes(parentTypeCode string) ([]models.ClientType, error) {
+var _clientTypeSvc *ClientTypeService
 
-	// CASO A: Creación Root (No hay padre)
+func SetDefaultClientTypeService(svc *ClientTypeService) { _clientTypeSvc = svc }
+
+func clientTypeServiceUnavailable() error {
+	return fmt.Errorf("client type service not initialized")
+}
+
+func GetAllowedClientTypes(parentTypeCode string) ([]models.ClientType, error) {
+	if _clientTypeSvc == nil {
+		return nil, clientTypeServiceUnavailable()
+	}
+	return _clientTypeSvc.GetAllowedClientTypes(parentTypeCode)
+}
+
+type ClientTypeService struct {
+	repo ports.ClientTypeRepository
+}
+
+func NewClientTypeService(repo ports.ClientTypeRepository) *ClientTypeService {
+	return &ClientTypeService{repo: repo}
+}
+
+func (s *ClientTypeService) GetAllowedClientTypes(parentTypeCode string) ([]models.ClientType, error) {
 	if parentTypeCode == "" {
-		// Retorna solo el Nivel 1 (Plataforma)
-		return clienttyperepository.GetRootType()
+		return s.repo.GetRootType()
 	}
 
-	// CASO B: Sub-Creación (Hay padre)
-
-	// 1. Buscamos al tipo de padre en la DB para saber su NIVEL
-	parentType, err := clienttyperepository.GetByCode(parentTypeCode)
+	parentType, err := s.repo.GetByCode(parentTypeCode)
 	if err != nil {
-		// Si el código no existe en DB, retornamos error o vacío
 		return nil, fmt.Errorf("unknown parent type code: %s", parentTypeCode)
 	}
 
-	// 2. Pedimos a la DB todo lo que esté "debajo" de ese nivel
-	// Ej: Soy Agencia (Nivel 2) -> DB trae todo lo > 2 (Solo Clientes)
-	return clienttyperepository.GetChildTypes(parentType.Level)
+	return s.repo.GetChildTypes(parentType.Level)
 }
