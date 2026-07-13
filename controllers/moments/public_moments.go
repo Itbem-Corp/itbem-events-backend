@@ -866,10 +866,7 @@ func CreatePublicMoment(c echo.Context) error {
 	description := publicMomentDescription(cfg, c.FormValue("description"))
 	eventID := event.ID
 	invID := token.InvitationID
-	isApproved := false
-	if cfg != nil && cfg.AutoApproveUploads {
-		isApproved = true
-	}
+	isApproved := cfg != nil && cfg.AutoApproveUploads
 	moment := models.Moment{
 		EventID:          &eventID,
 		InvitationID:     &invID,
@@ -1397,10 +1394,7 @@ func confirmPresignedMoment(c echo.Context, event *models.Event, cfg *models.Eve
 	}
 
 	eventID := event.ID
-	isApproved := false
-	if cfg != nil && cfg.AutoApproveUploads {
-		isApproved = true
-	}
+	isApproved := cfg != nil && cfg.AutoApproveUploads
 	moment := models.Moment{
 		EventID:          &eventID,
 		InvitationID:     invitationID,

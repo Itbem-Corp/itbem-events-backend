@@ -278,7 +278,7 @@ func (p EventConfigPatch) ApplyTo(config *models.EventConfig) error {
 			return fieldError("show_moment_wall", err)
 		}
 
-		if !(hasAllowUploads && !allowUploads) && !(hasShowMomentWall && showMomentWall) {
+		if (!hasAllowUploads || allowUploads) && (!hasShowMomentWall || !showMomentWall) {
 			config.AllowUploads = true
 			config.ShowMomentWall = false
 			config.VisibilityConfigured = true

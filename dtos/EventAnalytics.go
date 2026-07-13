@@ -124,9 +124,10 @@ func NewGuestAnalyticsSummary(guests []AnalyticsGuest) GuestAnalyticsSummary {
 				point = &AnalyticsTimelinePoint{Date: day}
 				timeline[day] = point
 			}
-			if status == "CONFIRMED" {
+			switch status {
+			case "CONFIRMED":
 				point.Confirmed++
-			} else if status == "DECLINED" {
+			case "DECLINED":
 				point.Declined++
 			}
 		}

@@ -8,7 +8,7 @@ import (
 
 const (
 	deletePatternScanCount       int64 = 512
-	deletePatternUnlinkBatchSize       = 512
+	deletePatternUnlinkBatchSize int   = 512
 )
 
 type scanPatternKeys func(context.Context, uint64, string, int64) ([]string, uint64, error)
