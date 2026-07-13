@@ -195,23 +195,6 @@ jobs:
             --expected-alarm "eventiapp-backend-public-health-prod" \
             --routed-alarm "eventiapp-backend-public-health-prod"
 
-      - name: Snapshot database before startup migrations
-        id: database_snapshot
-        env:
-          DB_INSTANCE_ID: ${{ vars.BACKEND_DB_INSTANCE_ID }}
-          REVISION: ${{ needs.validate.outputs.revision }}
-        run: |
-          set -euo pipefail
-          test -n "$DB_INSTANCE_ID" || { echo "BACKEND_DB_INSTANCE_ID is required"; exit 1; }
-          SNAPSHOT_ID="eventiapp-predeploy-${REVISION:0:12}-${GITHUB_RUN_ID}"
-          aws rds create-db-snapshot \
-            --db-instance-identifier "$DB_INSTANCE_ID" \
-            --db-snapshot-identifier "$SNAPSHOT_ID" \
-            --tags Key=Application,Value=EventiApp Key=Purpose,Value=predeploy-rollback Key=Revision,Value="$REVISION"
-          aws rds wait db-snapshot-available --db-snapshot-identifier "$SNAPSHOT_ID"
-          echo "snapshot_id=$SNAPSHOT_ID" >> "$GITHUB_OUTPUT"
-          echo "Database rollback snapshot: \`$SNAPSHOT_ID\`" >> "$GITHUB_STEP_SUMMARY"
-
       - name: Render runtime environment without shell interpolation
         env:
           PORT: ${{ vars.BACKEND_PORT }}
@@ -283,6 +266,23 @@ jobs:
             --optional REDIS_PASSWORD \
             --optional INTERNAL_API_SECRET_PREVIOUS \
             --optional SQS_WORKER_QUEUE_URL
+
+      - name: Snapshot database before startup migrations
+        id: database_snapshot
+        env:
+          DB_INSTANCE_ID: ${{ vars.BACKEND_DB_INSTANCE_ID }}
+          REVISION: ${{ needs.validate.outputs.revision }}
+        run: |
+          set -euo pipefail
+          test -n "$DB_INSTANCE_ID" || { echo "BACKEND_DB_INSTANCE_ID is required"; exit 1; }
+          SNAPSHOT_ID="eventiapp-predeploy-${REVISION:0:12}-${GITHUB_RUN_ID}"
+          aws rds create-db-snapshot \
+            --db-instance-identifier "$DB_INSTANCE_ID" \
+            --db-snapshot-identifier "$SNAPSHOT_ID" \
+            --tags Key=Application,Value=EventiApp Key=Purpose,Value=predeploy-rollback Key=Revision,Value="$REVISION"
+          aws rds wait db-snapshot-available --db-snapshot-identifier "$SNAPSHOT_ID"
+          echo "snapshot_id=$SNAPSHOT_ID" >> "$GITHUB_OUTPUT"
+          echo "Database rollback snapshot: \`$SNAPSHOT_ID\`" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Open verified EC2 Instance Connect session
         env:

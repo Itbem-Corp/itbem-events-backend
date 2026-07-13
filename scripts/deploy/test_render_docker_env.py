@@ -91,6 +91,13 @@ class RenderDockerEnvTests(unittest.TestCase):
         self.assertIn("--optional REDIS_PASSWORD", workflow)
         self.assertNotIn("--required REDIS_PASSWORD", workflow)
 
+    def test_runtime_environment_is_validated_before_database_snapshot(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertLess(
+            workflow.index("- name: Render runtime environment"),
+            workflow.index("- name: Snapshot database"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
