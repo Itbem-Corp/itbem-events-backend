@@ -211,7 +211,15 @@ def main() -> int:
         raise VerificationError("expected and routed alarm names are required")
 
     alarms = aws_json(
-        ["cloudwatch", "describe-alarms", "--alarm-name-prefix", args.alarm_prefix]
+        [
+            "cloudwatch",
+            "describe-alarms",
+            "--alarm-name-prefix",
+            args.alarm_prefix,
+            "--alarm-types",
+            "MetricAlarm",
+            "CompositeAlarm",
+        ]
     )
     routed = configured_alarms(
         alarms,
