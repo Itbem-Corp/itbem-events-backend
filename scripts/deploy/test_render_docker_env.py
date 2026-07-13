@@ -86,6 +86,11 @@ class RenderDockerEnvTests(unittest.TestCase):
 
         self.assertEqual(violations, [], "secret expression found in shell source")
 
+    def test_redis_password_allows_the_current_no_auth_cluster(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("--optional REDIS_PASSWORD", workflow)
+        self.assertNotIn("--required REDIS_PASSWORD", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()

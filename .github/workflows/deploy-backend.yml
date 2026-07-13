@@ -265,7 +265,6 @@ jobs:
             --required DB_PORT \
             --required DB_TIMEZONE \
             --required REDIS_HOST \
-            --required REDIS_PASSWORD \
             --required REDIS_DB \
             --required REDIS_TLS \
             --required GOOGLE_CLIENT_ID \
@@ -281,6 +280,7 @@ jobs:
             --optional S3_CLIENT_SECRET \
             --optional CDN_BASE_URL \
             --optional CORS_ALLOW_ORIGINS \
+            --optional REDIS_PASSWORD \
             --optional INTERNAL_API_SECRET_PREVIOUS \
             --optional SQS_WORKER_QUEUE_URL
 

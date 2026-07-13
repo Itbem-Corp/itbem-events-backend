@@ -50,7 +50,7 @@ go run ./cmd/api
 | `DB_TIMEZONE` | **yes** | DB timezone (e.g. `UTC`) |
 | `DB_LOG_LEVEL` | no | GORM SQL logging: `silent`, `error`, `warn`, or `info`. Defaults to `info` locally and `warn` when `ENV` is set, avoiding per-query log overhead in production while retaining slow-query/error diagnostics. |
 | `REDIS_HOST` | **yes** | Redis/Valkey host + port (e.g. `localhost:6379`) |
-| `REDIS_PASSWORD` | **yes** | Redis password (empty string if none) |
+| `REDIS_PASSWORD` | no | Redis password. Leave empty only while the matching cluster has no AUTH; set it atomically with an AUTH migration. |
 | `REDIS_DB` | **yes** | Redis database index (usually `0`) |
 | `REDIS_TLS` | **yes** | Enable Redis TLS: `true` or `false` |
 | `GOOGLE_CLIENT_ID` | **yes** | Google OAuth 2.0 client ID |
