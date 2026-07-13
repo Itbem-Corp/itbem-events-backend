@@ -8,7 +8,7 @@ Parameters:
     AllowedPattern: '^[a-z0-9.-]+$'
   AliasLocalPart:
     Type: String
-    Default: alertas
+    Default: alarmas
     AllowedPattern: '^[a-z0-9._+-]+$'
   ForwardDestination:
     Type: String
