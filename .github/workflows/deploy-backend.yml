@@ -57,6 +57,9 @@ jobs:
       - name: Test
         run: go test ./... -timeout 120s
 
+      - name: Block reachable Go vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+
       - name: Test deployment safety gates
         run: |
           bash scripts/deploy/deploy-ec2-candidate_test.sh
