@@ -6,7 +6,7 @@ This is a Go-based events management backend following **clean architecture** pr
 
 ## Tech Stack
 
-- **Language**: Go 1.24
+- **Language**: Go 1.25.12
 - **Module**: `events-stocks` (see go.mod)
 - **Web Framework**: Echo (high-performance HTTP router)
 - **ORM**: GORM (PostgreSQL)

@@ -1,5 +1,5 @@
 # ---------- Etapa de compilación ----------
-FROM golang:1.24.3-bookworm AS build-env
+FROM golang:1.25.12-bookworm AS build-env
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libvips-dev pkg-config && \
