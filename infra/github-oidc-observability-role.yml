@@ -16,6 +16,11 @@ Parameters:
   DeploymentEnvironment:
     Type: String
     AllowedValues: [staging, prod]
+  GitHubEnvironment:
+    Type: String
+    Default: prod
+    AllowedPattern: '^[A-Za-z0-9_.-]+$'
+    Description: Protected GitHub Environment permitted to assume this role.
 
 Resources:
   ObservabilityCloudFormationExecutionRole:
@@ -113,7 +118,7 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
-                token.actions.githubusercontent.com:sub: !Sub 'repo:${GitHubOrganization}/${GitHubRepository}:environment:${DeploymentEnvironment}'
+                token.actions.githubusercontent.com:sub: !Sub 'repo:${GitHubOrganization}/${GitHubRepository}:environment:${GitHubEnvironment}'
       Policies:
         - PolicyName: DeployAndVerifyBackendObservability
           PolicyDocument:

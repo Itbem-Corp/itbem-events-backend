@@ -58,7 +58,9 @@ jobs:
     needs: validate
     if: inputs.confirm == true && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment }}
+    # Backend production secrets are protected in the existing `production`
+    # environment; resource names still use the shorter `prod` suffix.
+    environment: ${{ inputs.environment == 'prod' && 'production' || inputs.environment }}
     permissions:
       contents: read
       id-token: write
