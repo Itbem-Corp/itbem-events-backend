@@ -98,6 +98,12 @@ class RenderDockerEnvTests(unittest.TestCase):
             workflow.index("- name: Snapshot database"),
         )
 
+    def test_automatic_promotion_keeps_rollback_snapshots_bounded(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("github.event_name == 'push'", workflow)
+        self.assertIn("date='7 days ago'", workflow)
+        self.assertIn("rds delete-db-snapshot", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()

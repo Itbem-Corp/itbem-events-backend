@@ -12,6 +12,10 @@ on:
         description: Public API hostname without scheme or path
         required: true
         type: string
+      existing_health_check_id:
+        description: Existing Route53 health check ID to adopt (leave blank only to create one)
+        required: false
+        type: string
       ec2_instance_id:
         description: API EC2 instance ID for us-east-2 host status alarms
         required: true
@@ -90,6 +94,7 @@ jobs:
         env:
           BACKEND_ALERT_EMAIL: ${{ secrets.BACKEND_ALERT_EMAIL }}
           HEALTH_CHECK_FQDN: ${{ inputs.health_check_fqdn }}
+          EXISTING_HEALTH_CHECK_ID: ${{ inputs.existing_health_check_id }}
           EC2_INSTANCE_ID: ${{ inputs.ec2_instance_id }}
         run: |
           set -euo pipefail
@@ -99,6 +104,10 @@ jobs:
           }
           [[ "$HEALTH_CHECK_FQDN" != http* && "$HEALTH_CHECK_FQDN" != */* ]] || {
             echo "health_check_fqdn must contain only the public hostname" >&2
+            exit 1
+          }
+          [[ -z "$EXISTING_HEALTH_CHECK_ID" || "$EXISTING_HEALTH_CHECK_ID" =~ ^[0-9a-f-]{36}$ ]] || {
+            echo "existing_health_check_id must be a Route53 health check UUID" >&2
             exit 1
           }
           [[ "$EC2_INSTANCE_ID" =~ ^i-[0-9a-f]{8,17}$ ]] || {
@@ -140,6 +149,7 @@ jobs:
           ENVIRONMENT: ${{ inputs.environment }}
           BACKEND_ALERT_EMAIL: ${{ secrets.BACKEND_ALERT_EMAIL }}
           HEALTH_CHECK_FQDN: ${{ inputs.health_check_fqdn }}
+          EXISTING_HEALTH_CHECK_ID: ${{ inputs.existing_health_check_id }}
           CLOUDFORMATION_ROLE_ARN: ${{ vars.AWS_OBSERVABILITY_CLOUDFORMATION_ROLE_ARN }}
         run: |
           set -euo pipefail
@@ -152,7 +162,8 @@ jobs:
             --parameter-overrides \
               Environment="${ENVIRONMENT}" \
               AlertEmail="${BACKEND_ALERT_EMAIL}" \
-              HealthCheckFQDN="${HEALTH_CHECK_FQDN}"
+              HealthCheckFQDN="${HEALTH_CHECK_FQDN}" \
+              ExistingHealthCheckId="${EXISTING_HEALTH_CHECK_ID}"
 
       - name: Verify both confirmed delivery routes and enabled alarms
         env:

@@ -15,6 +15,11 @@ Parameters:
     Type: String
     AllowedPattern: '^[A-Za-z0-9.-]+$'
     Description: Public API hostname without scheme or path.
+  ExistingHealthCheckId:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[0-9a-f-]{36}$'
+    Description: Existing Route53 health check to adopt for the alarm; leave blank only when creating a new check.
   HealthCheckPath:
     Type: String
     Default: /health
@@ -29,6 +34,10 @@ Rules:
     Assertions:
       - Assert: !Equals [!Ref AWS::Region, us-east-1]
         AssertDescription: Route53 health-check metrics and their CloudWatch alarm must be deployed in us-east-1.
+
+Conditions:
+  CreateManagedHealthCheck:
+    !Equals [!Ref ExistingHealthCheckId, '']
 
 Resources:
   PublicHealthAlertTopic:
@@ -51,6 +60,7 @@ Resources:
 
   BackendHealthCheck:
     Type: AWS::Route53::HealthCheck
+    Condition: CreateManagedHealthCheck
     Properties:
       HealthCheckConfig:
         Type: HTTPS
@@ -77,7 +87,7 @@ Resources:
       MetricName: HealthCheckStatus
       Dimensions:
         - Name: HealthCheckId
-          Value: !Ref BackendHealthCheck
+          Value: !If [CreateManagedHealthCheck, !Ref BackendHealthCheck, !Ref ExistingHealthCheckId]
       Statistic: Minimum
       Period: 60
       EvaluationPeriods: 3
@@ -97,6 +107,6 @@ Outputs:
     Description: Must be an ARN, never PendingConfirmation, before production deploys.
     Value: !Ref PublicHealthEmailSubscription
   HealthCheckId:
-    Value: !Ref BackendHealthCheck
+    Value: !If [CreateManagedHealthCheck, !Ref BackendHealthCheck, !Ref ExistingHealthCheckId]
   PublicHealthAlarmName:
     Value: !Ref BackendPublicHealthAlarm

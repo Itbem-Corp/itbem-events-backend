@@ -53,10 +53,11 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              - Sid: CreatePredeploySnapshot
+              - Sid: ManageBoundedPredeploySnapshots
                 Effect: Allow
                 Action:
                   - rds:CreateDBSnapshot
+                  - rds:DeleteDBSnapshot
                 Resource:
                   - !Sub 'arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:db:${BackendDbInstanceId}'
                   - !Sub 'arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:snapshot:eventiapp-predeploy-*'
