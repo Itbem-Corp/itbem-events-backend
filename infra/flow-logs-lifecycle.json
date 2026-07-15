@@ -1,0 +1,11 @@
+{
+  "Rules": [
+    {
+      "ID": "expire-flow-logs-after-14-days",
+      "Status": "Enabled",
+      "Filter": {"Prefix": "flowlogs/"},
+      "Expiration": {"Days": 14},
+      "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 1}
+    }
+  ]
+}
