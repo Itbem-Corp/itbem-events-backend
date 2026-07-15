@@ -168,7 +168,7 @@ Resources:
   RdsFreeStorageAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: eventiapp-rds-free-storage-prod
+      AlarmName: eventiapp-backend-rds-free-storage-prod
       AlarmDescription: PostgreSQL free storage is below 3 GiB.
       Namespace: AWS/RDS
       MetricName: FreeStorageSpace
@@ -187,7 +187,7 @@ Resources:
   RdsConnectionsAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: eventiapp-rds-connections-prod
+      AlarmName: eventiapp-backend-rds-connections-prod
       AlarmDescription: PostgreSQL connections are unusually high for db.t4g.micro.
       Namespace: AWS/RDS
       MetricName: DatabaseConnections

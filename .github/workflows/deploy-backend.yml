@@ -192,12 +192,12 @@ jobs:
             --expected-alarm "eventiapp-backend-ec2-instance-status-prod" \
             --expected-alarm "eventiapp-backend-host-prod" \
             --expected-alarm "eventiapp-backend-public-5xx-prod" \
-            --expected-alarm "eventiapp-rds-free-storage-prod" \
-            --expected-alarm "eventiapp-rds-connections-prod" \
+            --expected-alarm "eventiapp-backend-rds-free-storage-prod" \
+            --expected-alarm "eventiapp-backend-rds-connections-prod" \
             --routed-alarm "eventiapp-backend-host-prod" \
             --routed-alarm "eventiapp-backend-public-5xx-prod" \
-            --routed-alarm "eventiapp-rds-free-storage-prod" \
-            --routed-alarm "eventiapp-rds-connections-prod"
+            --routed-alarm "eventiapp-backend-rds-free-storage-prod" \
+            --routed-alarm "eventiapp-backend-rds-connections-prod"
 
           PUBLIC_STACK=eventiapp-backend-prod-public-health-observability
           MONITORED_FQDN="$(aws cloudformation describe-stacks \
