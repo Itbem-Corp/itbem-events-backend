@@ -1,0 +1,23 @@
+{
+  "Rules": [
+    {
+      "ID": "expire-unconfirmed-uploads",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "moments/uploads/tmp/" },
+      "Expiration": { "Days": 1 }
+    },
+    {
+      "ID": "AbortIncompleteMultipartMoments",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "moments/" },
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 1 }
+    },
+    {
+      "ID": "ExpireNoncurrentMediaVersions",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "" },
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 30, "NewerNoncurrentVersions": 1 },
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 1 }
+    }
+  ]
+}

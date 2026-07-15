@@ -1,0 +1,11 @@
+{
+  "Rules": [
+    {
+      "ID": "ExpireAuditLogsAfter90Days",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "AWSLogs/" },
+      "Expiration": { "Days": 90 },
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 1 }
+    }
+  ]
+}

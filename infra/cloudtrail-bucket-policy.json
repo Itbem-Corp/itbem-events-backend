@@ -1,0 +1,28 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AWSCloudTrailAclCheck",
+      "Effect": "Allow",
+      "Principal": { "Service": "cloudtrail.amazonaws.com" },
+      "Action": "s3:GetBucketAcl",
+      "Resource": "arn:aws:s3:::eventiapp-cloudtrail-752279076974-us-east-2",
+      "Condition": {
+        "StringEquals": { "aws:SourceArn": "arn:aws:cloudtrail:us-east-2:752279076974:trail/eventiapp-management-audit" }
+      }
+    },
+    {
+      "Sid": "AWSCloudTrailWrite",
+      "Effect": "Allow",
+      "Principal": { "Service": "cloudtrail.amazonaws.com" },
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::eventiapp-cloudtrail-752279076974-us-east-2/AWSLogs/752279076974/*",
+      "Condition": {
+        "StringEquals": {
+          "s3:x-amz-acl": "bucket-owner-full-control",
+          "aws:SourceArn": "arn:aws:cloudtrail:us-east-2:752279076974:trail/eventiapp-management-audit"
+        }
+      }
+    }
+  ]
+}

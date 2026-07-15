@@ -164,6 +164,7 @@ Resources:
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
       AlarmActions: [!Ref AlertTopicArn]
+      OKActions: [!Ref AlertTopicArn]
 
   RdsFreeStorageAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -183,12 +184,13 @@ Resources:
       ComparisonOperator: LessThanThreshold
       TreatMissingData: breaching
       AlarmActions: [!Ref AlertTopicArn]
+      OKActions: [!Ref AlertTopicArn]
 
   RdsConnectionsAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: eventiapp-backend-rds-connections-prod
-      AlarmDescription: PostgreSQL connections are unusually high for db.t4g.micro.
+      AlarmDescription: PostgreSQL connections are unusually high for the production database.
       Namespace: AWS/RDS
       MetricName: DatabaseConnections
       Dimensions:
@@ -202,6 +204,7 @@ Resources:
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
       AlarmActions: [!Ref AlertTopicArn]
+      OKActions: [!Ref AlertTopicArn]
 
 Outputs:
   ArtifactBucketName:
