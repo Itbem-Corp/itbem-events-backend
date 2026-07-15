@@ -133,6 +133,27 @@ if ! wait_for_health "$BACKEND_PORT" 60; then
   exit 1
 fi
 
+# A candidate can be healthy while a later host/container restart exposes stale
+# runtime state. Assert the serving container is exactly the promoted image and
+# env, then restart that same container once and re-run the dependency gate.
+expected_db_host="$(sed -n 's/^DB_HOST=//p' "$ENV_FILE" | tail -n 1)"
+[[ -n "$expected_db_host" ]] || { echo 'Promoted runtime is missing DB_HOST' >&2; exit 1; }
+[[ "$(d inspect --format '{{.Config.Image}}' "$APP_NAME")" == "$IMAGE_TAG" ]] || {
+  echo 'Serving container image does not match the promoted immutable image' >&2
+  exit 1
+}
+d inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$APP_NAME" | \
+  grep -Fqx "DB_HOST=$expected_db_host" || {
+  echo 'Serving container DB_HOST does not match the promoted runtime configuration' >&2
+  exit 1
+}
+d restart "$APP_NAME" >/dev/null
+if ! wait_for_health "$BACKEND_PORT" 45; then
+  echo 'Serving container failed health after restart-resilience verification' >&2
+  d logs --tail 200 "$APP_NAME" >&2 || true
+  exit 1
+fi
+
 if [[ "$HAD_PREVIOUS" == "true" ]]; then
   d rm "$PREVIOUS_NAME" >/dev/null
 fi
