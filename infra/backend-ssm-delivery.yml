@@ -16,6 +16,12 @@ Parameters:
     Type: String
     Default: eventiapp-events-backend-prod
     AllowedPattern: '^[a-z0-9]+(?:[._-][a-z0-9]+)*$'
+  AlertTopicArn:
+    Type: String
+    Default: arn:aws:sns:us-east-2:752279076974:eventiapp-backend-alerts-prod
+  DatabaseInstanceId:
+    Type: String
+    Default: events-database
 
 Resources:
   DeliveryArtifactBucket:
@@ -46,6 +52,14 @@ Resources:
           Value: EventiApp
         - Key: Purpose
           Value: backend-delivery-artifacts
+
+  BackendApplicationLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /ec2/eventiapp-backend/prod
+      RetentionInDays: 14
 
   BackendRepository:
     Type: AWS::ECR::Repository
@@ -99,6 +113,20 @@ Resources:
                 Effect: Allow
                 Action: s3:GetObject
                 Resource: !Sub '${DeliveryArtifactBucket.Arn}/releases/*'
+              - Sid: PublishOnlyBackendOperationalLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:DescribeLogStreams
+                  - logs:PutLogEvents
+                Resource: !GetAtt BackendApplicationLogGroup.Arn
+              - Sid: PublishOnlyBackendHostMetrics
+                Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: CWAgent
       Tags:
         - Key: Application
           Value: EventiApp
@@ -110,6 +138,70 @@ Resources:
     Properties:
       InstanceProfileName: eventiapp-backend-production-instance
       Roles: [!Ref BackendInstanceRole]
+
+  BackendServerErrorsMetric:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref BackendApplicationLogGroup
+      FilterPattern: '{ $.status >= 500 }'
+      MetricTransformations:
+        - MetricNamespace: EventiApp/Backend
+          MetricName: ServerErrors
+          MetricValue: '1'
+
+  BackendServerErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: eventiapp-backend-public-5xx-prod
+      AlarmDescription: Public backend returned one or more HTTP 5xx responses in five minutes.
+      Namespace: EventiApp/Backend
+      MetricName: ServerErrors
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopicArn]
+
+  RdsFreeStorageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: eventiapp-rds-free-storage-prod
+      AlarmDescription: PostgreSQL free storage is below 3 GiB.
+      Namespace: AWS/RDS
+      MetricName: FreeStorageSpace
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref DatabaseInstanceId
+      Statistic: Minimum
+      Period: 300
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 3221225472
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref AlertTopicArn]
+
+  RdsConnectionsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: eventiapp-rds-connections-prod
+      AlarmDescription: PostgreSQL connections are unusually high for db.t4g.micro.
+      Namespace: AWS/RDS
+      MetricName: DatabaseConnections
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref DatabaseInstanceId
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 70
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopicArn]
 
 Outputs:
   ArtifactBucketName:

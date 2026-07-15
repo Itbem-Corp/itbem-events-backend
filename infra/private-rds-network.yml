@@ -1,0 +1,76 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Private database subnets for the EventiApp production RDS instance.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-040e6042bd46d2663
+  AvailabilityZoneA:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: us-east-2a
+  AvailabilityZoneB:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: us-east-2b
+
+Resources:
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: eventiapp-rds-private
+        - Key: Application
+          Value: EventiApp
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VpcId
+      AvailabilityZone: !Ref AvailabilityZoneA
+      CidrBlock: 172.31.64.0/24
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: eventiapp-rds-private-a
+        - Key: Application
+          Value: EventiApp
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VpcId
+      AvailabilityZone: !Ref AvailabilityZoneB
+      CidrBlock: 172.31.65.0/24
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: eventiapp-rds-private-b
+        - Key: Application
+          Value: EventiApp
+
+  PrivateSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnetA
+
+  PrivateSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnetB
+
+  PrivateDatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Private EventiApp production PostgreSQL subnets.
+      DBSubnetGroupName: eventiapp-rds-private
+      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+      Tags:
+        - Key: Application
+          Value: EventiApp
+
+Outputs:
+  DatabaseSubnetGroupName:
+    Value: !Ref PrivateDatabaseSubnetGroup
