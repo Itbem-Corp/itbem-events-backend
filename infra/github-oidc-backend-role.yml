@@ -28,6 +28,14 @@ Parameters:
     Type: String
     Default: ec2-user
     AllowedPattern: '^[A-Za-z_][A-Za-z0-9_-]{0,31}$'
+  BackendEcrRepositoryName:
+    Type: String
+    Default: eventiapp-events-backend-prod
+    AllowedPattern: '^[a-z0-9]+(?:[._-][a-z0-9]+)*$'
+  DeliveryArtifactBucketName:
+    Type: String
+    Default: eventiapp-backend-delivery-752279076974-us-east-2
+    AllowedPattern: '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$'
 
 Resources:
   BackendProductionDeployRole:
@@ -71,14 +79,35 @@ Resources:
                 Action:
                   - rds:DescribeDBSnapshots
                 Resource: '*'
-              - Sid: EphemeralEc2InstanceConnectKey
+              - Sid: PushOnlyBackendRelease
                 Effect: Allow
                 Action:
-                  - ec2-instance-connect:SendSSHPublicKey
-                Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/${BackendEc2InstanceId}'
-                Condition:
-                  StringEquals:
-                    ec2:osuser: !Ref BackendEc2User
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:CompleteLayerUpload
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                Resource: !Sub 'arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${BackendEcrRepositoryName}'
+              - Sid: GetEcrAuthorizationToken
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: '*'
+              - Sid: StageAndRemoveOnlyOwnDeploymentArtifacts
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${DeliveryArtifactBucketName}/releases/*'
+              - Sid: InvokeOnlyBackendSsmCommand
+                Effect: Allow
+                Action: ssm:SendCommand
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}::document/AWS-RunShellScript'
+                  - !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/${BackendEc2InstanceId}'
+              - Sid: ReadOnlyOwnSsmCommandResult
+                Effect: Allow
+                Action: ssm:GetCommandInvocation
+                Resource: '*'
               - Sid: VerifyProductionObservabilityStack
                 Effect: Allow
                 Action: cloudformation:DescribeStacks

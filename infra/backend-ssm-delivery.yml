@@ -1,0 +1,120 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Private delivery boundary for the EventiApp backend EC2 host.
+
+Parameters:
+  BackendInstanceId:
+    Type: AWS::EC2::Instance::Id
+  BackendInstanceName:
+    Type: String
+    Default: Events-Production
+    AllowedPattern: '^[A-Za-z0-9._ -]{1,128}$'
+  ArtifactBucketName:
+    Type: String
+    Default: eventiapp-backend-delivery-752279076974-us-east-2
+    AllowedPattern: '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$'
+  RepositoryName:
+    Type: String
+    Default: eventiapp-events-backend-prod
+    AllowedPattern: '^[a-z0-9]+(?:[._-][a-z0-9]+)*$'
+
+Resources:
+  DeliveryArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref ArtifactBucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireDeploymentArtifacts
+            Status: Enabled
+            Prefix: releases/
+            ExpirationInDays: 2
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+      Tags:
+        - Key: Application
+          Value: EventiApp
+        - Key: Purpose
+          Value: backend-delivery-artifacts
+
+  BackendRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref RepositoryName
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {"rules":[{"rulePriority":1,"description":"Keep the 30 newest immutable backend releases","selection":{"tagStatus":"tagged","tagPrefixList":["sha-"],"countType":"imageCountMoreThan","countNumber":30},"action":{"type":"expire"}},{"rulePriority":2,"description":"Expire untagged image remnants","selection":{"tagStatus":"untagged","countType":"sinceImagePushed","countUnit":"days","countNumber":2},"action":{"type":"expire"}}]}
+      Tags:
+        - Key: Application
+          Value: EventiApp
+        - Key: Environment
+          Value: production
+
+  BackendInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: eventiapp-backend-production-instance
+      Description: Runtime identity for SSM-managed EventiApp backend host.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: PullOnlyBackendRelease
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: GetEcrAuthorizationToken
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: '*'
+              - Sid: PullOnlyThisRepository
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                Resource: !GetAtt BackendRepository.Arn
+              - Sid: ReadOnlyCurrentDeploymentArtifacts
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub '${DeliveryArtifactBucket.Arn}/releases/*'
+      Tags:
+        - Key: Application
+          Value: EventiApp
+        - Key: Environment
+          Value: production
+
+  BackendInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: eventiapp-backend-production-instance
+      Roles: [!Ref BackendInstanceRole]
+
+Outputs:
+  ArtifactBucketName:
+    Value: !Ref DeliveryArtifactBucket
+  BackendRepositoryUri:
+    Value: !GetAtt BackendRepository.RepositoryUri
+  BackendInstanceProfileArn:
+    Value: !GetAtt BackendInstanceProfile.Arn

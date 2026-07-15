@@ -23,7 +23,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE_REPOSITORY: itbem-events-backend
+  IMAGE_REPOSITORY: eventiapp-events-backend-prod
 
 jobs:
   validate:
@@ -56,6 +56,22 @@ jobs:
 
       - name: Test
         run: go test ./... -timeout 120s
+
+      - name: Verify cache contract against Valkey
+        run: |
+          set -euo pipefail
+          docker run --rm -d --name eventiapp-valkey-compat -p 127.0.0.1:16380:6379 valkey/valkey:7.2-alpine
+          trap 'docker rm -f eventiapp-valkey-compat >/dev/null 2>&1 || true' EXIT
+          for attempt in {1..20}; do
+            if docker exec eventiapp-valkey-compat valkey-cli ping | grep -qx PONG; then
+              VALKEY_INTEGRATION_ADDR=127.0.0.1:16380 \
+                go test ./repositories/redisrepository -run '^TestValkeyCompatibility$' -count=1
+              exit 0
+            fi
+            sleep 1
+          done
+          echo 'Valkey compatibility container did not become ready' >&2
+          exit 1
 
       - name: Block reachable Go vulnerabilities
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
@@ -112,7 +128,7 @@ jobs:
       # the repository or persists a GitHub PAT in ~/.git-credentials.
       - name: Build deployment image
         env:
-          IMAGE_TAG: ${{ env.IMAGE_REPOSITORY }}:${{ needs.validate.outputs.revision }}
+          IMAGE_TAG: ${{ env.IMAGE_REPOSITORY }}:sha-${{ needs.validate.outputs.revision }}
         run: docker build --pull --tag "$IMAGE_TAG" .
 
       - name: Require the provisioned production deployment boundary
@@ -199,6 +215,23 @@ jobs:
             --alarm-suffix=-prod \
             --expected-alarm "eventiapp-backend-public-health-prod" \
             --routed-alarm "eventiapp-backend-public-health-prod"
+
+      - name: Publish immutable image to ECR
+        id: image
+        env:
+          REVISION: ${{ needs.validate.outputs.revision }}
+          IMAGE_TAG: ${{ env.IMAGE_REPOSITORY }}:sha-${{ needs.validate.outputs.revision }}
+        run: |
+          set -euo pipefail
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.us-east-2.amazonaws.com"
+          ECR_URI="${ACCOUNT_ID}.dkr.ecr.us-east-2.amazonaws.com/${IMAGE_REPOSITORY}"
+          aws ecr get-login-password --region us-east-2 | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+          docker tag "$IMAGE_TAG" "$ECR_URI:sha-${REVISION}"
+          docker push "$ECR_URI:sha-${REVISION}"
+          DIGEST="$(aws ecr describe-images --repository-name "$IMAGE_REPOSITORY" --image-ids imageTag="sha-${REVISION}" --query 'imageDetails[0].imageDigest' --output text)"
+          [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo "ECR did not return an immutable digest" >&2; exit 1; }
+          echo "reference=${ECR_URI}@${DIGEST}" >> "$GITHUB_OUTPUT"
 
       - name: Render runtime environment without shell interpolation
         env:
@@ -306,74 +339,50 @@ jobs:
           echo "snapshot_id=$SNAPSHOT_ID" >> "$GITHUB_OUTPUT"
           echo "Database rollback snapshot: \`$SNAPSHOT_ID\`" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Open verified EC2 Instance Connect session
+      - name: Deploy through SSM, health-gate promotion, and rollback on failure
         env:
-          EC2_HOST_KEY: ${{ secrets.EC2_HOST_KEY }}
-        run: |
-          set -euo pipefail
-          test -n "$EC2_HOST_KEY" || { echo "EC2_HOST_KEY secret is required"; exit 1; }
-          install -d -m 700 ~/.ssh
-          ssh-keygen -t ed25519 -f ~/.ssh/ec2_deploy -N '' -q
-          printf '%s\n' "$EC2_HOST_KEY" > ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/ec2_deploy ~/.ssh/known_hosts
-
-          aws ec2-instance-connect send-ssh-public-key \
-            --instance-id '${{ vars.EC2_INSTANCE_ID }}' \
-            --instance-os-user '${{ vars.EC2_USER }}' \
-            --ssh-public-key file://~/.ssh/ec2_deploy.pub \
-            --region us-east-2
-
-          ssh -M -S ~/.ssh/eventiapp-ec2.sock -o ControlPersist=15m -fnNT \
-            -i ~/.ssh/ec2_deploy \
-            -o StrictHostKeyChecking=yes \
-            '${{ vars.EC2_USER }}@${{ vars.EC2_HOST }}'
-
-      - name: Install Docker when needed
-        run: |
-          ssh -S ~/.ssh/eventiapp-ec2.sock '${{ vars.EC2_USER }}@${{ vars.EC2_HOST }}' <<'REMOTE'
-          set -euo pipefail
-          missing_packages=()
-          command -v docker >/dev/null 2>&1 || missing_packages+=(docker)
-          command -v curl >/dev/null 2>&1 || missing_packages+=(curl)
-          command -v python3 >/dev/null 2>&1 || missing_packages+=(python3)
-          if ((${#missing_packages[@]})); then
-            sudo yum install -y "${missing_packages[@]}"
-          fi
-          sudo systemctl enable --now docker
-          REMOTE
-
-      - name: Transfer immutable image
-        env:
-          IMAGE_TAG: ${{ env.IMAGE_REPOSITORY }}:${{ needs.validate.outputs.revision }}
-        run: |
-          set -euo pipefail
-          docker save "$IMAGE_TAG" | gzip -1 | \
-            ssh -S ~/.ssh/eventiapp-ec2.sock '${{ vars.EC2_USER }}@${{ vars.EC2_HOST }}' \
-              'gunzip | sudo docker load'
-
-      - name: Deploy candidate, health-gate promotion, and rollback on failure
-        env:
-          IMAGE_TAG: ${{ env.IMAGE_REPOSITORY }}:${{ needs.validate.outputs.revision }}
+          IMAGE_REFERENCE: ${{ steps.image.outputs.reference }}
           BACKEND_PORT: ${{ vars.BACKEND_PORT }}
           BACKEND_CANDIDATE_PORT: ${{ vars.BACKEND_CANDIDATE_PORT || '18080' }}
+          DELIVERY_BUCKET: eventiapp-backend-delivery-752279076974-us-east-2
         run: |
           set -euo pipefail
           LOCAL_ENV_FILE="${RUNNER_TEMP}/eventiapp-backend-${GITHUB_RUN_ID}.env"
-          REMOTE_ENV_FILE=".eventiapp-deploy/eventiapp-backend-${GITHUB_RUN_ID}.env"
           test -r "$LOCAL_ENV_FILE" || { echo "rendered runtime environment is missing"; exit 1; }
+          PREFIX="releases/${GITHUB_RUN_ID}"
+          ENV_KEY="${PREFIX}/runtime.env"
+          SCRIPT_KEY="${PREFIX}/deploy-ec2-candidate.sh"
+          aws s3 cp "$LOCAL_ENV_FILE" "s3://${DELIVERY_BUCKET}/${ENV_KEY}" --only-show-errors
+          aws s3 cp scripts/deploy/deploy-ec2-candidate.sh "s3://${DELIVERY_BUCKET}/${SCRIPT_KEY}" --only-show-errors
+          remote_script="$(cat <<REMOTE
+          set -Eeuo pipefail
+          install -d -m 700 "\$HOME/.eventiapp-deploy/${GITHUB_RUN_ID}"
+          aws s3 cp 's3://${DELIVERY_BUCKET}/${ENV_KEY}' "\$HOME/.eventiapp-deploy/${GITHUB_RUN_ID}/runtime.env" --only-show-errors
+          aws s3 cp 's3://${DELIVERY_BUCKET}/${SCRIPT_KEY}' "\$HOME/.eventiapp-deploy/${GITHUB_RUN_ID}/deploy.sh" --only-show-errors
+          chmod 600 "\$HOME/.eventiapp-deploy/${GITHUB_RUN_ID}/runtime.env"
+          chmod 700 "\$HOME/.eventiapp-deploy/${GITHUB_RUN_ID}/deploy.sh"
+          command -v docker >/dev/null 2>&1 || sudo yum install -y docker
+          command -v curl >/dev/null 2>&1 || sudo yum install -y curl
+          command -v python3 >/dev/null 2>&1 || sudo yum install -y python3
+          sudo systemctl enable --now docker
+          ECR_REGISTRY="${IMAGE_REFERENCE%%/*}"
+          aws ecr get-login-password --region us-east-2 | sudo docker login --username AWS --password-stdin "\$ECR_REGISTRY"
+          sudo docker pull '${IMAGE_REFERENCE}'
+          IMAGE_TAG='${IMAGE_REFERENCE}' BACKEND_PORT='${BACKEND_PORT}' CANDIDATE_PORT='${BACKEND_CANDIDATE_PORT}' DEPLOY_ID='${GITHUB_RUN_ID}' ENV_FILE="\$HOME/.eventiapp-deploy/${GITHUB_RUN_ID}/runtime.env" bash "\$HOME/.eventiapp-deploy/${GITHUB_RUN_ID}/deploy.sh"
+          REMOTE
+          )"
+          command_id="$(aws ssm send-command \
+            --instance-ids '${{ vars.EC2_INSTANCE_ID }}' \
+            --document-name AWS-RunShellScript \
+            --comment "EventiApp backend ${GITHUB_RUN_ID}" \
+            --parameters "commands=$(printf '%s' "$remote_script" | base64 -w 0 | sed 's|^|echo |; s|$| | base64 -d | bash|')" \
+            --timeout-seconds 1800 \
+            --query 'Command.CommandId' --output text)"
+          aws ssm wait command-executed --command-id "$command_id" --instance-id '${{ vars.EC2_INSTANCE_ID }}'
+          aws ssm get-command-invocation --command-id "$command_id" --instance-id '${{ vars.EC2_INSTANCE_ID }}' --query StandardOutputContent --output text
 
-          ssh -S ~/.ssh/eventiapp-ec2.sock '${{ vars.EC2_USER }}@${{ vars.EC2_HOST }}' \
-            "install -d -m 700 ~/.eventiapp-deploy; umask 077; cat > ~/'$REMOTE_ENV_FILE'" < "$LOCAL_ENV_FILE"
-
-          ssh -S ~/.ssh/eventiapp-ec2.sock '${{ vars.EC2_USER }}@${{ vars.EC2_HOST }}' \
-            "IMAGE_TAG='$IMAGE_TAG' BACKEND_PORT='$BACKEND_PORT' CANDIDATE_PORT='$BACKEND_CANDIDATE_PORT' DEPLOY_ID='$GITHUB_RUN_ID' ENV_FILE='$REMOTE_ENV_FILE' bash -s" \
-            < scripts/deploy/deploy-ec2-candidate.sh
-
-      - name: Close SSH control session
+      - name: Remove ephemeral delivery artifacts
         if: always()
         run: |
           rm -f "${RUNNER_TEMP}/eventiapp-backend-${GITHUB_RUN_ID}.env"
-          ssh -S ~/.ssh/eventiapp-ec2.sock '${{ vars.EC2_USER }}@${{ vars.EC2_HOST }}' \
-            "rm -f ~/.eventiapp-deploy/eventiapp-backend-${GITHUB_RUN_ID}.env" 2>/dev/null || true
-          ssh -S ~/.ssh/eventiapp-ec2.sock -O exit \
-            '${{ vars.EC2_USER }}@${{ vars.EC2_HOST }}' 2>/dev/null || true
+          aws s3 rm "s3://eventiapp-backend-delivery-752279076974-us-east-2/releases/${GITHUB_RUN_ID}/" --recursive --only-show-errors || true
