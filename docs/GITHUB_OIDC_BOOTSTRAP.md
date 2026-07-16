@@ -118,7 +118,6 @@ aws cloudformation deploy \
     GitHubOidcProviderArn="$PROVIDER_ARN" \
     BackendDbInstanceId="<rds-instance-id>" \
     BackendEc2InstanceId="<i-instance-id>" \
-    BackendEc2User="ec2-user"
 
 # Inspect the change set, then repeat without --no-execute-changeset.
 ```

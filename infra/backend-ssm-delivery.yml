@@ -2,12 +2,6 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: Private delivery boundary for the EventiApp backend EC2 host.
 
 Parameters:
-  BackendInstanceId:
-    Type: AWS::EC2::Instance::Id
-  BackendInstanceName:
-    Type: String
-    Default: Events-Production
-    AllowedPattern: '^[A-Za-z0-9._ -]{1,128}$'
   ArtifactBucketName:
     Type: String
     Default: eventiapp-backend-delivery-752279076974-us-east-2

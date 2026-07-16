@@ -24,10 +24,6 @@ Parameters:
   BackendEc2InstanceId:
     Type: AWS::EC2::Instance::Id
     Description: Exact EC2 instance that accepts the ephemeral Instance Connect key.
-  BackendEc2User:
-    Type: String
-    Default: ec2-user
-    AllowedPattern: '^[A-Za-z_][A-Za-z0-9_-]{0,31}$'
   BackendEcrRepositoryName:
     Type: String
     Default: eventiapp-events-backend-prod
