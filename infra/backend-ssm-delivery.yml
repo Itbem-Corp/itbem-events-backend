@@ -107,6 +107,32 @@ Resources:
                 Effect: Allow
                 Action: s3:GetObject
                 Resource: !Sub '${DeliveryArtifactBucket.Arn}/releases/*'
+              - Sid: LocateTenantMediaBuckets
+                Effect: Allow
+                Action:
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                Resource:
+                  - arn:aws:s3:::itbem-events-bucket-prod
+                  - !Sub 'arn:${AWS::Partition}:s3:::eventiapp-*-media-prod-${AWS::AccountId}-${AWS::Region}'
+              - Sid: ManageTenantMediaObjects
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:AbortMultipartUpload
+                  - s3:ListMultipartUploadParts
+                Resource:
+                  - arn:aws:s3:::itbem-events-bucket-prod/*
+                  - !Sub 'arn:${AWS::Partition}:s3:::eventiapp-*-media-prod-${AWS::AccountId}-${AWS::Region}/*'
+              - Sid: PublishOnlyBackendQueues
+                Effect: Allow
+                Action: sqs:SendMessage
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:itbem-media-images-prod'
+                  - !Sub 'arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:itbem-media-videos-prod'
+                  - !Sub 'arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:eventiapp-workers-prod'
               - Sid: PublishOnlyBackendOperationalLogs
                 Effect: Allow
                 Action:

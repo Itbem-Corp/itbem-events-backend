@@ -275,8 +275,6 @@ jobs:
           AWS_BUCKET_NAME: ${{ secrets.AWS_BUCKET_NAME }}
           TENANT_BUCKET_MAP: ${{ secrets.BACKEND_TENANT_BUCKET_MAP }}
           CDN_BASE_URL: ${{ secrets.CDN_BASE_URL }}
-          S3_CLIENT_ID: ${{ secrets.S3_CLIENT_ID }}
-          S3_CLIENT_SECRET: ${{ secrets.S3_CLIENT_SECRET }}
           DB_HOST: ${{ secrets.BACKEND_DB_HOST }}
           DB_USER: ${{ secrets.BACKEND_DB_USER }}
           DB_PASSWORD: ${{ secrets.BACKEND_DB_PASSWORD }}
