@@ -51,6 +51,7 @@ var modelsWithoutSeed = []interface{}{
 	&models.Application{},
 	&models.ClientApplication{},
 	&models.ClientMemberApplication{},
+	&models.AuditLog{},
 	&models.EventPhrase{},
 }
 
@@ -186,6 +187,26 @@ func migrateModels(db *gorm.DB) error {
 		// Allow invitation_id to be NULL (needed for shared QR uploads without a personal token).
 		if err := tx.Exec("ALTER TABLE IF EXISTS moments ALTER COLUMN invitation_id DROP NOT NULL").Error; err != nil {
 			return fmt.Errorf("relax moments invitation constraint: %w", err)
+		}
+		// Security audit rows are append-only. Even application code running
+		// with the normal database owner cannot rewrite or delete history
+		// accidentally; retention must use an explicit privileged migration.
+		auditStatements := []string{
+			`CREATE OR REPLACE FUNCTION prevent_audit_log_mutation()
+			 RETURNS trigger AS $$
+			 BEGIN
+			   RAISE EXCEPTION 'audit_logs are append-only';
+			 END;
+			 $$ LANGUAGE plpgsql`,
+			"DROP TRIGGER IF EXISTS audit_logs_append_only ON audit_logs",
+			`CREATE TRIGGER audit_logs_append_only
+			 BEFORE UPDATE OR DELETE ON audit_logs
+			 FOR EACH ROW EXECUTE FUNCTION prevent_audit_log_mutation()`,
+		}
+		for _, statement := range auditStatements {
+			if err := tx.Exec(statement).Error; err != nil {
+				return fmt.Errorf("protect audit log: %w", err)
+			}
 		}
 		return nil
 	})

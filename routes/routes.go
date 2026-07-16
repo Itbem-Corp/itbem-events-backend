@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"events-stocks/controllers/auditlogs"
 	"events-stocks/controllers/cache"
 	"events-stocks/controllers/clientroles"
 	"events-stocks/controllers/clients"
@@ -22,6 +23,7 @@ import (
 	"events-stocks/controllers/sessions"
 	"events-stocks/controllers/users"
 	"events-stocks/middleware/applicationaccess"
+	"events-stocks/middleware/audit"
 	"events-stocks/middleware/token"
 	"events-stocks/models"
 	"events-stocks/utils"
@@ -260,8 +262,10 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	protected.Use(token.Autenticacion(cfg))
 	protected.Use(protectedRateLimiter())
 	protected.Use(applicationaccess.Require)
+	protected.Use(audit.Mutations)
 
 	protected.GET("/session", sessions.GetSession)
+	protected.GET("/audit-logs", auditlogs.List)
 
 	// ── Events ────────────────────────────────
 	protected.GET("/events/all", events.ListEvents)
