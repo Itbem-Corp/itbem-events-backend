@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"events-stocks/dtos"
+	"events-stocks/internal/authz"
 	customValidator "events-stocks/middleware/validator"
 	"events-stocks/models"
 	clientService "events-stocks/services/clients"
@@ -207,6 +208,15 @@ func setAuthenticatedClientUser(t *testing.T, userID uuid.UUID) {
 		&mockControllerAuthRepo{},
 		nil,
 	))
+	restoreAuthz := authz.ReplaceHooksForTest(authz.Hooks{
+		SyncUser: func(cognitoSub string) (*models.User, error) {
+			if cognitoSub != user.CognitoSub {
+				return nil, errors.New("user not found")
+			}
+			return user, nil
+		},
+	})
+	t.Cleanup(restoreAuthz)
 	t.Cleanup(func() { usersService.SetDefaultUserService(nil) })
 }
 

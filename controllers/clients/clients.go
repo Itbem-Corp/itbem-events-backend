@@ -2,6 +2,7 @@ package clients
 
 import (
 	"events-stocks/dtos"
+	"events-stocks/internal/authz"
 	"events-stocks/internal/tenantresources"
 	"events-stocks/models"
 	"events-stocks/services/clients"
@@ -38,12 +39,28 @@ func operationalRootMayNotManageOrganization(c echo.Context, user *models.User) 
 	return true
 }
 
+func operationalRootMayNotManageRootTarget(c echo.Context, requester *models.User, targetUserID uuid.UUID) bool {
+	if requester.EffectiveRootLevel() != models.RootLevelOperational {
+		return false
+	}
+	target, err := users.GetUserByID(targetUserID)
+	if err != nil {
+		_ = utils.Error(c, http.StatusNotFound, "User not found", err.Error())
+		return true
+	}
+	if target.IsPlatformAdmin() {
+		_ = utils.Error(c, http.StatusForbidden, "Permission Denied", "Operational roots cannot modify platform-root accounts")
+		return true
+	}
+	return false
+}
+
 func CreateNewClient(c echo.Context) error {
-	cognitoSub, ok := c.Get("cognito_sub").(string)
+	_, ok := c.Get("cognito_sub").(string)
 	if !ok {
 		return utils.Error(c, http.StatusUnauthorized, "Unauthorized", "Invalid token")
 	}
-	user, err := users.SyncUser(cognitoSub)
+	user, err := authz.CurrentUser(c)
 	if err != nil {
 		return utils.Error(c, http.StatusUnauthorized, "User not found", err.Error())
 	}
@@ -100,12 +117,12 @@ func CreateNewClient(c echo.Context) error {
 }
 
 func GetClient(c echo.Context) error {
-	cognitoSub, ok := c.Get("cognito_sub").(string)
+	_, ok := c.Get("cognito_sub").(string)
 	if !ok {
 		return utils.Error(c, http.StatusUnauthorized, "Unauthorized", "")
 	}
 
-	user, err := users.SyncUser(cognitoSub)
+	user, err := authz.CurrentUser(c)
 	if err != nil {
 		return utils.Error(c, http.StatusUnauthorized, "User not found", err.Error())
 	}
@@ -136,14 +153,19 @@ func GetClient(c echo.Context) error {
 }
 
 func ListMyClients(c echo.Context) error {
-	cognitoSub, ok := c.Get("cognito_sub").(string)
+	_, ok := c.Get("cognito_sub").(string)
 	if !ok {
 		return utils.Error(c, http.StatusUnauthorized, "Unauthorized", "")
 	}
 
-	user, err := users.SyncUser(cognitoSub)
+	user, err := authz.CurrentUser(c)
 	if err != nil {
 		return utils.Error(c, http.StatusUnauthorized, "User not found", err.Error())
+	}
+	tenantCode, _ := c.Get("tenant_code").(string)
+	tenantCode = strings.ToLower(strings.TrimSpace(tenantCode))
+	if tenantCode == "eventiapp" || tenantCode == "itbem" {
+		tenantCode = ""
 	}
 	if c.QueryParam("page_size") != "" {
 		page, err := strconv.Atoi(c.QueryParam("page"))
@@ -158,7 +180,11 @@ func ListMyClients(c echo.Context) error {
 		if !user.IsPlatformAdmin() {
 			userID = &user.ID
 		}
-		query := dtos.ClientsListQuery{Page: page, PageSize: pageSize, Search: strings.TrimSpace(c.QueryParam("search"))}
+		query := dtos.ClientsListQuery{
+			Page: page, PageSize: pageSize,
+			Search:     strings.TrimSpace(c.QueryParam("search")),
+			TenantCode: tenantCode,
+		}
 		myClients, total, err := clientSvc.ListClientsPaginated(userID, query)
 		if err != nil {
 			return utils.Error(c, http.StatusInternalServerError, "Error fetching clients", err.Error())
@@ -172,6 +198,22 @@ func ListMyClients(c echo.Context) error {
 		return utils.Success(c, http.StatusOK, "User clients", dtos.ClientsPageResponse{
 			Data: dtos.NewClientResponses(myClients), Total: total, Page: page, PageSize: pageSize, TotalPages: totalPages,
 		})
+	}
+
+	if tenantCode != "" {
+		myClients, _, err := clientSvc.ListClientsPaginated(
+			&user.ID,
+			dtos.ClientsListQuery{Page: 1, PageSize: 1000, TenantCode: tenantCode},
+		)
+		if err != nil {
+			return utils.Error(c, http.StatusInternalServerError, "Error fetching clients", err.Error())
+		}
+		for i := range myClients {
+			if myClients[i].Logo != "" {
+				myClients[i].Logo = clientSvc.GetClientLogoURL(myClients[i].ID, myClients[i].Logo)
+			}
+		}
+		return utils.Success(c, http.StatusOK, "User clients", dtos.NewClientResponses(myClients))
 	}
 
 	var myClients []models.Client
@@ -194,12 +236,12 @@ func ListMyClients(c echo.Context) error {
 }
 
 func GetMySubClients(c echo.Context) error {
-	cognitoSub, ok := c.Get("cognito_sub").(string)
+	_, ok := c.Get("cognito_sub").(string)
 	if !ok {
 		return utils.Error(c, http.StatusUnauthorized, "Unauthorized", "")
 	}
 
-	user, err := users.SyncUser(cognitoSub)
+	user, err := authz.CurrentUser(c)
 	if err != nil {
 		return utils.Error(c, http.StatusUnauthorized, "User not found", err.Error())
 	}
@@ -234,18 +276,14 @@ func GetMySubClients(c echo.Context) error {
 }
 
 func InviteUser(c echo.Context) error {
-	cognitoSub, ok := c.Get("cognito_sub").(string)
+	_, ok := c.Get("cognito_sub").(string)
 	if !ok {
 		return utils.Error(c, http.StatusUnauthorized, "Unauthorized", "Invalid token")
 	}
-	requester, err := users.SyncUser(cognitoSub)
+	requester, err := authz.CurrentUser(c)
 	if err != nil {
 		return utils.Error(c, http.StatusUnauthorized, "User not found", err.Error())
 	}
-	if operationalRootMayNotManageOrganization(c, requester) {
-		return nil
-	}
-
 	var req struct {
 		ClientID uuid.UUID `json:"client_id"`
 		UserID   uuid.UUID `json:"user_id"`
@@ -289,6 +327,9 @@ func InviteUser(c echo.Context) error {
 		}
 		targetUserID = targetUser.ID
 	}
+	if operationalRootMayNotManageRootTarget(c, requester, targetUserID) {
+		return nil
+	}
 
 	if err := clientSvc.AddUserToClient(req.ClientID, targetUserID, req.RoleID); err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Failed to add user", err.Error())
@@ -302,12 +343,12 @@ func InviteUser(c echo.Context) error {
 }
 
 func DeleteClient(c echo.Context) error {
-	cognitoSub, ok := c.Get("cognito_sub").(string)
+	_, ok := c.Get("cognito_sub").(string)
 	if !ok {
 		return utils.Error(c, http.StatusUnauthorized, "Unauthorized", "")
 	}
 
-	user, err := users.SyncUser(cognitoSub)
+	user, err := authz.CurrentUser(c)
 	if err != nil {
 		return utils.Error(c, http.StatusUnauthorized, "User not found", err.Error())
 	}
@@ -339,22 +380,17 @@ func DeleteClient(c echo.Context) error {
 // CreateClientMember registers a new user and links them to a client.
 // Cross-domain: uses users package-level functions for user creation.
 func CreateClientMember(c echo.Context) error {
-	cognitoSub, ok := c.Get("cognito_sub").(string)
+	_, ok := c.Get("cognito_sub").(string)
 	if !ok {
 		return utils.Error(c, http.StatusUnauthorized, "Unauthorized", "Invalid token")
 	}
 
-	requester, err := users.SyncUser(cognitoSub)
+	requester, err := authz.CurrentUser(c)
 	if err != nil {
 		return utils.Error(c, http.StatusUnauthorized, "User not found", err.Error())
 	}
-	if operationalRootMayNotManageOrganization(c, requester) {
-		return nil
-	}
-
 	var req struct {
 		Email     string    `json:"email"`
-		Password  string    `json:"password"`
 		FirstName string    `json:"first_name"`
 		LastName  string    `json:"last_name"`
 		ClientID  uuid.UUID `json:"client_id"`
@@ -380,7 +416,8 @@ func CreateClientMember(c echo.Context) error {
 		return utils.Error(c, http.StatusForbidden, "Permission Denied", rolePermissionErr.Error())
 	}
 
-	newUser, err := users.RegisterUser(req.Email, req.Password, req.FirstName, req.LastName)
+	tenantCode, _ := c.Get("tenant_code").(string)
+	newUser, err := users.InviteUserForTenant(req.Email, req.FirstName, req.LastName, tenantCode)
 	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Registration failed", err.Error())
 	}
@@ -400,12 +437,12 @@ func CreateClientMember(c echo.Context) error {
 }
 
 func ListClientMembers(c echo.Context) error {
-	cognitoSub, ok := c.Get("cognito_sub").(string)
+	_, ok := c.Get("cognito_sub").(string)
 	if !ok {
 		return utils.Error(c, http.StatusUnauthorized, "Unauthorized", "")
 	}
 
-	user, err := users.SyncUser(cognitoSub)
+	user, err := authz.CurrentUser(c)
 	if err != nil {
 		return utils.Error(c, http.StatusUnauthorized, "User not found", err.Error())
 	}
@@ -434,7 +471,7 @@ func ListClientMembers(c echo.Context) error {
 		var members []models.ClientMember
 		var total int64
 		var listErr error
-		if user.IsPrimaryRoot() {
+		if user.IsPlatformAdmin() {
 			members, total, listErr = clientSvc.ListClientMembersPageAsRoot(targetClientID, page, pageSize, c.QueryParam("search"))
 		} else {
 			members, total, listErr = clientSvc.ListClientMembersPage(targetClientID, user.ID, page, pageSize, c.QueryParam("search"))
@@ -447,7 +484,7 @@ func ListClientMembers(c echo.Context) error {
 	}
 
 	var members []models.ClientMember
-	if user.IsPrimaryRoot() {
+	if user.IsPlatformAdmin() {
 		members, err = clientSvc.ListClientMembersAsRoot(targetClientID)
 	} else {
 		members, err = clientSvc.ListClientMembers(targetClientID, user.ID)
@@ -460,18 +497,14 @@ func ListClientMembers(c echo.Context) error {
 }
 
 func RemoveMember(c echo.Context) error {
-	cognitoSub, ok := c.Get("cognito_sub").(string)
+	_, ok := c.Get("cognito_sub").(string)
 	if !ok {
 		return utils.Error(c, http.StatusUnauthorized, "Unauthorized", "")
 	}
-	requester, err := users.SyncUser(cognitoSub)
+	requester, err := authz.CurrentUser(c)
 	if err != nil {
 		return utils.Error(c, http.StatusUnauthorized, "User not found", err.Error())
 	}
-	if operationalRootMayNotManageOrganization(c, requester) {
-		return nil
-	}
-
 	targetUserID, err := uuid.FromString(c.Param("user_id"))
 	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid user ID", err.Error())
@@ -480,6 +513,9 @@ func RemoveMember(c echo.Context) error {
 	clientID, err := uuid.FromString(c.QueryParam("client_id"))
 	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid client ID", err.Error())
+	}
+	if operationalRootMayNotManageRootTarget(c, requester, targetUserID) {
+		return nil
 	}
 
 	var removeErr error
@@ -496,18 +532,14 @@ func RemoveMember(c echo.Context) error {
 }
 
 func UpdateMemberRole(c echo.Context) error {
-	cognitoSub, ok := c.Get("cognito_sub").(string)
+	_, ok := c.Get("cognito_sub").(string)
 	if !ok {
 		return utils.Error(c, http.StatusUnauthorized, "Unauthorized", "")
 	}
-	requester, err := users.SyncUser(cognitoSub)
+	requester, err := authz.CurrentUser(c)
 	if err != nil {
 		return utils.Error(c, http.StatusUnauthorized, "User not found", err.Error())
 	}
-	if operationalRootMayNotManageOrganization(c, requester) {
-		return nil
-	}
-
 	targetUserID, err := uuid.FromString(c.Param("user_id"))
 	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid user ID", err.Error())
@@ -516,6 +548,9 @@ func UpdateMemberRole(c echo.Context) error {
 	clientID, err := uuid.FromString(c.QueryParam("client_id"))
 	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid client ID", err.Error())
+	}
+	if operationalRootMayNotManageRootTarget(c, requester, targetUserID) {
+		return nil
 	}
 
 	var req struct {
@@ -546,7 +581,7 @@ func UpdateMemberRole(c echo.Context) error {
 }
 
 func UpdateClient(c echo.Context) error {
-	cognitoSub, ok := c.Get("cognito_sub").(string)
+	_, ok := c.Get("cognito_sub").(string)
 	if !ok {
 		return utils.Error(c, http.StatusUnauthorized, "Unauthorized", "Session expired")
 	}
@@ -555,7 +590,7 @@ func UpdateClient(c echo.Context) error {
 	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid client ID", err.Error())
 	}
-	user, err := users.SyncUser(cognitoSub)
+	user, err := authz.CurrentUser(c)
 	if err != nil {
 		return utils.Error(c, http.StatusUnauthorized, "User not found", err.Error())
 	}

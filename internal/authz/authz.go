@@ -132,11 +132,13 @@ func CurrentUser(c echo.Context) (*models.User, error) {
 }
 
 // A tenant app client is an authenticated organizational entry point, not a
-// cosmetic hostname. Platform-root authority exists only on the EventiApp
-// client; other tenants use explicit organization memberships and roles.
+// cosmetic hostname. Platform-root authority exists on EventiApp and the ITBEM
+// control plane; branded customer portals use explicit memberships and roles.
 func scopeUserToTenant(c echo.Context, user *models.User) *models.User {
 	tenantCode, _ := c.Get("tenant_code").(string)
-	if user == nil || tenantCode == "" || strings.EqualFold(tenantCode, "eventiapp") {
+	if user == nil || tenantCode == "" ||
+		strings.EqualFold(tenantCode, "eventiapp") ||
+		strings.EqualFold(tenantCode, "itbem") {
 		return user
 	}
 	scoped := *user
@@ -273,7 +275,7 @@ func platformHasCapability(user *models.User, capability Capability) bool {
 		return false
 	}
 	switch capability {
-	case CapabilityView, CapabilityGuestManage, CapabilityCheckin, CapabilityAnalyticsView:
+	case CapabilityView, CapabilityGuestManage, CapabilityCheckin, CapabilityAnalyticsView, CapabilityMembersManage:
 		return true
 	default:
 		return false

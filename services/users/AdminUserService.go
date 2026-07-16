@@ -1,15 +1,36 @@
 package users
 
 import (
+	"errors"
 	"events-stocks/dtos"
 	"events-stocks/models"
 	"events-stocks/services/ports"
 	"fmt"
+	"net/mail"
 	"strings"
 
 	"github.com/gofrs/uuid"
 	"golang.org/x/sync/errgroup"
 )
+
+var ErrInvalidInviteIdentity = errors.New("invalid invitation identity")
+
+func normalizeInviteIdentity(email, firstName, lastName string) (string, string, string, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	firstName = strings.TrimSpace(firstName)
+	lastName = strings.TrimSpace(lastName)
+	parsed, err := mail.ParseAddress(email)
+	if err != nil || !strings.EqualFold(parsed.Address, email) {
+		return "", "", "", fmt.Errorf("%w: correo electrónico inválido", ErrInvalidInviteIdentity)
+	}
+	if len(firstName) < 2 || len(firstName) > 100 {
+		return "", "", "", fmt.Errorf("%w: el nombre debe tener entre 2 y 100 caracteres", ErrInvalidInviteIdentity)
+	}
+	if len(lastName) < 2 || len(lastName) > 100 {
+		return "", "", "", fmt.Errorf("%w: el apellido debe tener entre 2 y 100 caracteres", ErrInvalidInviteIdentity)
+	}
+	return email, firstName, lastName, nil
+}
 
 // AdminUserService is the injectable, struct-based admin user service.
 type AdminUserService struct {
@@ -186,7 +207,20 @@ func (s *AdminUserService) DeleteUser(userID uuid.UUID) error {
 }
 
 func (s *AdminUserService) InviteUser(email, firstName, lastName string) (*models.User, error) {
-	authUser, err := s.authRepo.InviteUser(email, firstName, lastName, "cognito")
+	return s.InviteUserForTenant(email, firstName, lastName, "eventiapp")
+}
+
+func (s *AdminUserService) InviteUserForTenant(email, firstName, lastName, tenantCode string) (*models.User, error) {
+	email, firstName, lastName, err := normalizeInviteIdentity(email, firstName, lastName)
+	if err != nil {
+		return nil, err
+	}
+	var authUser *dtos.AuthUser
+	if tenantRepo, ok := s.authRepo.(tenantInvitationAuthProvider); ok {
+		authUser, err = tenantRepo.InviteUserForTenant(email, firstName, lastName, tenantCode, "cognito")
+	} else {
+		authUser, err = s.authRepo.InviteUser(email, firstName, lastName, "cognito")
+	}
 	if err != nil {
 		return nil, err
 	}

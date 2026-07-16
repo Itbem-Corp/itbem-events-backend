@@ -48,6 +48,9 @@ var modelsWithoutSeed = []interface{}{
 	&models.User{},
 	&models.EventMember{},
 	&models.ClientMember{},
+	&models.Application{},
+	&models.ClientApplication{},
+	&models.ClientMemberApplication{},
 	&models.EventPhrase{},
 }
 
@@ -200,6 +203,12 @@ func SeedBaseData() {
 	// Authorization roles are policy, not optional catalog data. This seed is
 	// idempotent and must run for existing installations as new roles are added.
 	seeds.SeedClientRoles(DB)
+	// Applications and their memberships are an authorization boundary. The
+	// seed is additive and backfills existing organization memberships.
+	if err := seeds.SeedApplications(DB); err != nil {
+		slog.Error("required application catalog seed failed", "error", err)
+		os.Exit(1)
+	}
 	// Versioned product catalogs use stable IDs and preserve custom entries.
 	if err := seeds.SeedDesignCatalog(DB); err != nil {
 		slog.Error("required design catalog seed failed", "error", err)

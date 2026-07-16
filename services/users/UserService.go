@@ -28,6 +28,13 @@ func DeleteFullAccount(cognitoSub string) error        { return _userSvc.DeleteF
 func GetUserByEmail(email string) (*models.User, error) {
 	return _userSvc.GetUserByEmail(email)
 }
+func GetUserByID(userID uuid.UUID) (*models.User, error) { return _userSvc.GetUserByID(userID) }
+func InviteUser(email, firstName, lastName string) (*models.User, error) {
+	return _userSvc.InviteUser(email, firstName, lastName)
+}
+func InviteUserForTenant(email, firstName, lastName, tenantCode string) (*models.User, error) {
+	return _userSvc.InviteUserForTenant(email, firstName, lastName, tenantCode)
+}
 func UpdateProfileImage(userID uuid.UUID, newImagePath string) error {
 	return _userSvc.UpdateProfileImage(userID, newImagePath)
 }
@@ -108,6 +115,52 @@ func (s *UserService) RegisterUser(email, password, firstName, lastName string) 
 		return nil, err
 	}
 	return newUser, nil
+}
+
+func (s *UserService) GetUserByID(userID uuid.UUID) (*models.User, error) {
+	return s.userRepo.GetUserByID(userID)
+}
+
+// InviteUser creates the identity in Cognito and mirrors it locally. Cognito
+// owns the temporary credential and delivery flow; the dashboard never
+// generates, stores, displays, or transmits a password for another user.
+func (s *UserService) InviteUser(email, firstName, lastName string) (*models.User, error) {
+	return s.InviteUserForTenant(email, firstName, lastName, "eventiapp")
+}
+
+type tenantInvitationAuthProvider interface {
+	InviteUserForTenant(email, firstName, lastName, tenantCode, provider string) (*dtos.AuthUser, error)
+}
+
+func (s *UserService) InviteUserForTenant(email, firstName, lastName, tenantCode string) (*models.User, error) {
+	email, firstName, lastName, err := normalizeInviteIdentity(email, firstName, lastName)
+	if err != nil {
+		return nil, err
+	}
+	authUser, err := s.inviteAuthUser(email, firstName, lastName, tenantCode)
+	if err != nil {
+		return nil, err
+	}
+	newUser := &models.User{
+		CognitoSub: authUser.Sub,
+		Email:      authUser.Email,
+		FirstName:  authUser.FirstName,
+		LastName:   authUser.LastName,
+		IsActive:   true,
+		IsRoot:     false,
+	}
+	if err := s.userRepo.CreateUser(newUser); err != nil {
+		_ = s.authRepo.DeleteUser(authUser.Sub, "cognito")
+		return nil, err
+	}
+	return newUser, nil
+}
+
+func (s *UserService) inviteAuthUser(email, firstName, lastName, tenantCode string) (*dtos.AuthUser, error) {
+	if tenantRepo, ok := s.authRepo.(tenantInvitationAuthProvider); ok {
+		return tenantRepo.InviteUserForTenant(email, firstName, lastName, tenantCode, "cognito")
+	}
+	return s.authRepo.InviteUser(email, firstName, lastName, "cognito")
 }
 
 func (s *UserService) SyncUser(cognitoSub string) (*models.User, error) {

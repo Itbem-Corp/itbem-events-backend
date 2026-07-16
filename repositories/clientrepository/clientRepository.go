@@ -37,6 +37,23 @@ func ListClientsPaginated(userID *uuid.UUID, query dtos.ClientsListQuery) ([]mod
 				ORDER BY client_id, depth ASC
 			) scoped_access ON scoped_access.client_id = clients.id`, *userID)
 		}
+		if tenantCode := strings.ToLower(strings.TrimSpace(query.TenantCode)); tenantCode != "" {
+			base = base.Where(`
+				clients.id IN (
+					WITH RECURSIVE tenant_tree AS (
+						SELECT id, 0 AS depth
+						FROM clients
+						WHERE LOWER(code) = ? AND deleted_at IS NULL
+						UNION ALL
+						SELECT child.id, tenant_tree.depth + 1
+						FROM clients child
+						JOIN tenant_tree ON child.parent_id = tenant_tree.id
+						WHERE child.deleted_at IS NULL AND tenant_tree.depth < 31
+					)
+					SELECT id FROM tenant_tree
+				)
+			`, tenantCode)
+		}
 		if search := strings.TrimSpace(query.Search); search != "" {
 			pattern := "%" + strings.ToLower(search) + "%"
 			base = base.Where("LOWER(clients.name) LIKE ? OR LOWER(clients.code) LIKE ?", pattern, pattern)
