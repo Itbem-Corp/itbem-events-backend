@@ -269,6 +269,8 @@ jobs:
           COGNITO_CLIENT_ID: ${{ secrets.BACKEND_COGNITO_CLIENT_ID }}
           COGNITO_CLIENT_SECRET: ${{ secrets.BACKEND_COGNITO_CLIENT_SECRET }}
           COGNITO_AWS_REGION: ${{ secrets.BACKEND_COGNITO_AWS_REGION }}
+          COGNITO_ALLOWED_CLIENT_IDS: ${{ secrets.BACKEND_COGNITO_ALLOWED_CLIENT_IDS }}
+          COGNITO_TENANT_CLIENT_MAP: ${{ secrets.BACKEND_COGNITO_TENANT_CLIENT_MAP }}
           AWS_BUCKET_NAME: ${{ secrets.AWS_BUCKET_NAME }}
           CDN_BASE_URL: ${{ secrets.CDN_BASE_URL }}
           S3_CLIENT_ID: ${{ secrets.S3_CLIENT_ID }}
@@ -323,6 +325,8 @@ jobs:
             --required SQS_VIDEO_QUEUE_URL \
             --optional COGNITO_CLIENT_ID \
             --optional COGNITO_CLIENT_SECRET \
+            --required COGNITO_ALLOWED_CLIENT_IDS \
+            --required COGNITO_TENANT_CLIENT_MAP \
             --optional S3_CLIENT_ID \
             --optional S3_CLIENT_SECRET \
             --optional CDN_BASE_URL \

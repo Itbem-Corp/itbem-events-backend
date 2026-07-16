@@ -19,6 +19,7 @@ func GetCORSConfig(cfg *models.Config) echo.MiddlewareFunc {
 		"https://www.eventiapp.com.mx",
 		"https://api.eventiapp.com.mx",
 		"https://dashboard.eventiapp.com.mx",
+		"https://dashboard.itbem.com",
 	}
 	if cfg.CorsAllowOrigins != "" {
 		for _, o := range strings.Split(cfg.CorsAllowOrigins, ",") {

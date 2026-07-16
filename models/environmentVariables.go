@@ -12,6 +12,10 @@ type Config struct {
 	// default credential chain; a legacy pair is used only when both values exist.
 	CognitoClientId     string `required:"false"`
 	CognitoClientSecret string `required:"false"`
+	// Signed ID-token audiences accepted by the API and their tenant binding.
+	// Map format: "client-id=eventiapp,other-client-id=itbem".
+	CognitoAllowedClientIds string `required:"false"`
+	CognitoTenantClientMap  string `required:"false"`
 	// JwtClockSkewSeconds is an explicit deployment-level JWT leeway. Keep it
 	// empty in production; local environments with a skewed host clock may opt in.
 	JwtClockSkewSeconds string `required:"false"`

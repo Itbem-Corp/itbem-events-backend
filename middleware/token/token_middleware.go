@@ -29,6 +29,56 @@ func jwtClockSkew(cfg *models.Config) time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
+func parseTenantClientMap(value string) map[string]string {
+	result := make(map[string]string)
+	for _, entry := range strings.Split(value, ",") {
+		parts := strings.SplitN(strings.TrimSpace(entry), "=", 2)
+		if len(parts) == 2 && strings.TrimSpace(parts[0]) != "" && strings.TrimSpace(parts[1]) != "" {
+			result[strings.TrimSpace(parts[0])] = strings.ToLower(strings.TrimSpace(parts[1]))
+		}
+	}
+	return result
+}
+
+func allowedClientIDs(cfg *models.Config) map[string]struct{} {
+	result := make(map[string]struct{})
+	for _, id := range strings.Split(cfg.CognitoAllowedClientIds, ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			result[id] = struct{}{}
+		}
+	}
+	for id := range parseTenantClientMap(cfg.CognitoTenantClientMap) {
+		result[id] = struct{}{}
+	}
+	return result
+}
+
+func validateCognitoIdentityClaims(claims jwt.MapClaims, cfg *models.Config) (string, string, string, error) {
+	issuer := fmt.Sprintf("https://cognito-idp.%s.amazonaws.com/%s", cfg.CognitoAwsRegion, cfg.CognitoUserPoolId)
+	if claims["iss"] != issuer {
+		return "", "", "", fmt.Errorf("issuer does not match configured user pool")
+	}
+	if tokenUse, _ := claims["token_use"].(string); tokenUse != "id" {
+		return "", "", "", fmt.Errorf("token_use must be id")
+	}
+	audience, ok := claims["aud"].(string)
+	if !ok || strings.TrimSpace(audience) == "" {
+		return "", "", "", fmt.Errorf("aud claim is required")
+	}
+	allowed := allowedClientIDs(cfg)
+	if len(allowed) == 0 {
+		return "", "", "", fmt.Errorf("no Cognito app clients are configured")
+	}
+	if _, ok := allowed[audience]; !ok {
+		return "", "", "", fmt.Errorf("token audience is not allowed")
+	}
+	subject, ok := claims["sub"].(string)
+	if !ok || strings.TrimSpace(subject) == "" {
+		return "", "", "", fmt.Errorf("sub claim is required")
+	}
+	return subject, audience, parseTenantClientMap(cfg.CognitoTenantClientMap)[audience], nil
+}
+
 var (
 	jwks   *keyfunc.JWKS
 	jwksMu sync.RWMutex
@@ -120,7 +170,16 @@ func Autenticacion(cfg *models.Config) echo.MiddlewareFunc {
 			}
 
 			// Inyectamos datos al contexto para usarlos en los controladores
+			validatedSub, audience, tenantCode, validationErr := validateCognitoIdentityClaims(claims, cfg)
+			if validationErr != nil {
+				return utils.Error(c, http.StatusUnauthorized, "Token no confiable", validationErr.Error())
+			}
+			cognitoSub = validatedSub
 			c.Set("cognito_sub", cognitoSub)
+			c.Set("auth_client_id", audience)
+			if tenantCode != "" {
+				c.Set("tenant_code", tenantCode)
+			}
 			if email, ok := claims["email"].(string); ok {
 				c.Set("user_email", email)
 			}

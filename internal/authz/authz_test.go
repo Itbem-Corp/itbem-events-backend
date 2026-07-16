@@ -81,6 +81,40 @@ func TestRequireEventAccessLoadsUserAndEventConcurrently(t *testing.T) {
 	assert.Equal(t, map[string]bool{"user": true, "event": true}, seen)
 }
 
+func TestCurrentUserRemovesPlatformAuthorityInsideTenantClient(t *testing.T) {
+	e := echo.New()
+	c := e.NewContext(httptest.NewRequest(http.MethodGet, "/api/users", nil), httptest.NewRecorder())
+	c.Set("cognito_sub", "platform-root")
+	c.Set("tenant_code", "itbem")
+	restore := ReplaceHooksForTest(Hooks{
+		SyncUser: func(string) (*models.User, error) {
+			return &models.User{ID: uuid.Must(uuid.NewV4()), IsRoot: true, RootLevel: models.RootLevelPrimary}, nil
+		},
+	})
+	t.Cleanup(restore)
+
+	user, err := CurrentUser(c)
+	require.NoError(t, err)
+	assert.False(t, user.IsPlatformAdmin())
+	assert.False(t, user.IsRoot)
+	assert.Equal(t, models.RootLevelNone, user.RootLevel)
+}
+
+func TestCurrentUserPreservesPlatformAuthorityOnEventiAppClient(t *testing.T) {
+	e := echo.New()
+	c := e.NewContext(httptest.NewRequest(http.MethodGet, "/api/users", nil), httptest.NewRecorder())
+	c.Set("cognito_sub", "platform-root")
+	c.Set("tenant_code", "eventiapp")
+	restore := ReplaceHooksForTest(Hooks{
+		SyncUser: func(string) (*models.User, error) { return &models.User{IsRoot: true}, nil },
+	})
+	t.Cleanup(restore)
+
+	user, err := CurrentUser(c)
+	require.NoError(t, err)
+	assert.True(t, user.IsPlatformAdmin())
+}
+
 func TestOrganizationRoleCapabilitiesAreLeastPrivilege(t *testing.T) {
 	tests := []struct {
 		role       string

@@ -194,6 +194,9 @@ func SeedBaseData() {
 			item.SeedFunc(DB)
 		}
 	}
+	// First-party tenant definitions are additive and must also be reconciled on
+	// established databases where the clients table is already populated.
+	seeds.SeedClientEventiAppSeed(DB)
 	// Authorization roles are policy, not optional catalog data. This seed is
 	// idempotent and must run for existing installations as new roles are added.
 	seeds.SeedClientRoles(DB)

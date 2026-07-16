@@ -120,7 +120,25 @@ func CurrentUser(c echo.Context) (*models.User, error) {
 	if err != nil {
 		return nil, err
 	}
-	return currentUserByCognitoSub(cognitoSub)
+	user, err := currentUserByCognitoSub(cognitoSub)
+	if err != nil {
+		return nil, err
+	}
+	return scopeUserToTenant(c, user), nil
+}
+
+// A tenant app client is an authenticated organizational entry point, not a
+// cosmetic hostname. Platform-root authority exists only on the EventiApp
+// client; other tenants use explicit organization memberships and roles.
+func scopeUserToTenant(c echo.Context, user *models.User) *models.User {
+	tenantCode, _ := c.Get("tenant_code").(string)
+	if user == nil || tenantCode == "" || strings.EqualFold(tenantCode, "eventiapp") {
+		return user
+	}
+	scoped := *user
+	scoped.IsRoot = false
+	scoped.RootLevel = models.RootLevelNone
+	return &scoped
 }
 
 func cognitoSubFromContext(c echo.Context) (string, error) {
@@ -258,7 +276,8 @@ func RequireEventAccess(c echo.Context, eventID uuid.UUID) (*models.User, *model
 
 	user, event, err := loadEventAccessInputs(
 		func() (*models.User, error) {
-			return currentUserByCognitoSub(cognitoSub)
+			user, loadErr := currentUserByCognitoSub(cognitoSub)
+			return scopeUserToTenant(c, user), loadErr
 		},
 		func() (*models.Event, error) {
 			return lookupEventByID(eventID)
