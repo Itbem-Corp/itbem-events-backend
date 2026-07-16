@@ -93,7 +93,7 @@ func (service *SessionService) Resolve(cognitoSub, tenantCode string) (*Session,
 	if err != nil {
 		return nil, err
 	}
-	if !(application.AllowsPlatformAdmin && user.IsPlatformAdmin()) && len(organizations) == 0 {
+	if (!application.AllowsPlatformAdmin || !user.IsPlatformAdmin()) && len(organizations) == 0 {
 		return nil, ErrApplicationAccessDenied
 	}
 	for index := range organizations {
