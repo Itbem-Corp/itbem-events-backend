@@ -579,7 +579,7 @@ func DeleteEvent(c echo.Context) error {
 		return utils.Error(c, http.StatusBadRequest, "Invalid UUID", err.Error())
 	}
 
-	if _, _, authErr := authz.RequireEventCapability(c, id, authz.CapabilityEventManage); authErr != nil {
+	if _, _, authErr := authz.RequireEventCapability(c, id, authz.CapabilityEventDelete); authErr != nil {
 		return authz.Respond(c, authErr)
 	}
 

@@ -159,9 +159,20 @@ func TestOrganizationRoleCapabilitiesAreLeastPrivilege(t *testing.T) {
 		allowed    bool
 	}{
 		{"Owner", CapabilityOrgManage, true},
+		{"Owner", CapabilityEventDelete, true},
 		{"Admin", CapabilityMembersManage, true},
+		{"Admin", CapabilityEventDelete, true},
+		{"EVENT_MANAGER", CapabilityEventCreate, true},
 		{"EVENT_MANAGER", CapabilityEventManage, true},
+		{"EVENT_MANAGER", CapabilityEventDelete, false},
+		{"EDITOR", CapabilityEventCreate, false},
+		{"EDITOR", CapabilityEventManage, true},
 		{"EDITOR", CapabilityGuestManage, true},
+		{"EDITOR", CapabilityCheckin, false},
+		{"MEMBER", CapabilityEventManage, false},
+		{"MEMBER", CapabilityGuestManage, true},
+		{"MEMBER", CapabilityCheckin, false},
+		{"MEMBER", CapabilityAnalyticsView, false},
 		{"CHECKIN", CapabilityCheckin, true},
 		{"CHECKIN", CapabilityGuestManage, false},
 		{"ANALYST", CapabilityAnalyticsView, true},
@@ -214,7 +225,9 @@ func TestOperationalRootHasSupportCapabilitiesButNotGovernanceCapabilities(t *te
 	assert.True(t, platformHasCapability(operationalRoot, CapabilityCheckin))
 	assert.True(t, platformHasCapability(operationalRoot, CapabilityAnalyticsView))
 	assert.True(t, platformHasCapability(operationalRoot, CapabilityMembersManage))
+	assert.False(t, platformHasCapability(operationalRoot, CapabilityEventCreate))
 	assert.False(t, platformHasCapability(operationalRoot, CapabilityEventManage))
+	assert.False(t, platformHasCapability(operationalRoot, CapabilityEventDelete))
 	assert.False(t, platformHasCapability(operationalRoot, CapabilityOrgManage))
 }
 

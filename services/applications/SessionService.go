@@ -295,7 +295,7 @@ func effectiveApplicationCapabilities(
 		if moduleEnabled(application.Modules, "events") {
 			capabilities.add("events:view", "guests:manage", "checkin:run", "analytics:view", "members:manage")
 			if user.IsPrimaryRoot() {
-				capabilities.add("events:manage")
+				capabilities.add("events:create", "events:manage", "events:delete")
 			}
 		}
 		if moduleEnabled(application.Modules, "users") {
@@ -320,7 +320,7 @@ func effectiveApplicationCapabilities(
 		}
 	}
 	if !moduleEnabled(application.Modules, "events") {
-		capabilities.remove("events:view", "events:manage", "guests:manage", "checkin:run", "analytics:view")
+		capabilities.remove("events:view", "events:create", "events:manage", "events:delete", "guests:manage", "checkin:run", "analytics:view")
 	}
 	if !moduleEnabled(application.Modules, "organizations") {
 		capabilities.remove("organizations:view", "organizations:manage")
@@ -338,15 +338,20 @@ func organizationCapabilities(role string) []string {
 	case "OWNER", "ADMIN":
 		capabilities.add(
 			"organizations:manage", "members:manage",
-			"events:view", "events:manage", "guests:manage", "checkin:run", "analytics:view", "metrics:view",
+			"events:view", "events:create", "events:manage", "events:delete",
+			"guests:manage", "checkin:run", "analytics:view", "metrics:view",
 		)
-	case "EVENT_MANAGER", "EDITOR", "MEMBER":
-		capabilities.add("events:view", "events:manage", "guests:manage", "checkin:run", "analytics:view", "metrics:view")
+	case "EVENT_MANAGER":
+		capabilities.add("events:view", "events:create", "events:manage", "guests:manage", "checkin:run", "analytics:view", "metrics:view")
+	case "EDITOR":
+		capabilities.add("events:view", "events:manage", "guests:manage", "analytics:view", "metrics:view")
+	case "MEMBER":
+		capabilities.add("events:view", "guests:manage")
 	case "CHECKIN":
 		capabilities.add("events:view", "checkin:run")
 	case "ANALYST":
 		capabilities.add("events:view", "analytics:view", "metrics:view")
-	case "GUEST":
+	case "GUEST", "VIEWER":
 		capabilities.add("events:view")
 	}
 	return capabilities.values()
@@ -355,7 +360,7 @@ func organizationCapabilities(role string) []string {
 func applicationOrganizationCapabilities(application models.Application, role string) []string {
 	capabilities := newCapabilitySet(organizationCapabilities(role)...)
 	if !moduleEnabled(application.Modules, "events") {
-		capabilities.remove("events:view", "events:manage", "guests:manage", "checkin:run", "analytics:view")
+		capabilities.remove("events:view", "events:create", "events:manage", "events:delete", "guests:manage", "checkin:run", "analytics:view")
 	}
 	if !moduleEnabled(application.Modules, "organizations") {
 		capabilities.remove("organizations:view", "organizations:manage")

@@ -83,7 +83,9 @@ type Capability string
 
 const (
 	CapabilityView          Capability = "view"
+	CapabilityEventCreate   Capability = "event:create"
 	CapabilityEventManage   Capability = "event:manage"
+	CapabilityEventDelete   Capability = "event:delete"
 	CapabilityGuestManage   Capability = "guest:manage"
 	CapabilityCheckin       Capability = "checkin:run"
 	CapabilityAnalyticsView Capability = "analytics:view"
@@ -291,14 +293,18 @@ func roleHasCapability(role string, capability Capability) bool {
 	switch capability {
 	case CapabilityView:
 		return code != ""
+	case CapabilityEventCreate:
+		return code == "EVENT_MANAGER"
 	case CapabilityEventManage:
-		return code == "EVENT_MANAGER" || code == "EDITOR" || code == "MEMBER"
+		return code == "EVENT_MANAGER" || code == "EDITOR"
+	case CapabilityEventDelete:
+		return false
 	case CapabilityGuestManage:
 		return code == "EVENT_MANAGER" || code == "EDITOR" || code == "MEMBER"
 	case CapabilityCheckin:
-		return code == "EVENT_MANAGER" || code == "EDITOR" || code == "MEMBER" || code == "CHECKIN"
+		return code == "EVENT_MANAGER" || code == "CHECKIN"
 	case CapabilityAnalyticsView:
-		return code == "EVENT_MANAGER" || code == "EDITOR" || code == "MEMBER" || code == "ANALYST"
+		return code == "EVENT_MANAGER" || code == "EDITOR" || code == "ANALYST"
 	case CapabilityMembersManage, CapabilityOrgManage:
 		return false
 	default:
@@ -470,8 +476,12 @@ func eventRoleHasCapability(role string, capability Capability) bool {
 	switch capability {
 	case CapabilityView:
 		return code == "EDITOR" || code == "CHECKIN" || code == "ANALYST" || code == "VIEWER"
+	case CapabilityEventCreate:
+		return false
 	case CapabilityEventManage:
 		return code == "EDITOR"
+	case CapabilityEventDelete:
+		return false
 	case CapabilityGuestManage:
 		return code == "EDITOR"
 	case CapabilityCheckin:
@@ -718,7 +728,7 @@ func RequireEventClientForCreate(user *models.User, clientID *uuid.UUID) error {
 			Detail:  "Events must belong to a client",
 		}
 	}
-	if err := RequireClientCapability(user, *clientID, CapabilityEventManage); err != nil {
+	if err := RequireClientCapability(user, *clientID, CapabilityEventCreate); err != nil {
 		return err
 	}
 	return nil
