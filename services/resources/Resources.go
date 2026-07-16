@@ -130,6 +130,17 @@ func NewResourceService(c *models.Config, deps ...ResourceServiceDeps) *Resource
 	}
 }
 
+// WithBucket creates an immutable request/entity-scoped view. It is safe to
+// use concurrently and avoids mutating the process-wide default service.
+func (rs *ResourceService) WithBucket(bucket string) *ResourceService {
+	if rs == nil || strings.TrimSpace(bucket) == "" || strings.TrimSpace(bucket) == rs.Bucket {
+		return rs
+	}
+	clone := *rs
+	clone.Bucket = strings.TrimSpace(bucket)
+	return &clone
+}
+
 func resourceServiceUnavailable() error {
 	return fmt.Errorf("resource service not initialized")
 }
@@ -181,7 +192,7 @@ func (rs *ResourceService) GetResourceByID(id uuid.UUID) (*models.Resource, stri
 		return nil, "", fmt.Errorf("file associated with resource not found in bucket")
 	}
 
-	viewURL, err := storage.GetPresignedFileURL(filename, folder, rs.Bucket, rs.Provider, ResourceViewURLTTLMinutes)
+	viewURL, err := storage.GetPresignedFileURL(filename, folder, rs.WithBucket(resource.MediaBucket).Bucket, rs.Provider, ResourceViewURLTTLMinutes)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to generate presigned URL: %w", err)
 	}
@@ -297,7 +308,7 @@ func (rs *ResourceService) resourceViewURLFor(storage ports.ObjectStorageReposit
 		return "", nil, false
 	}
 
-	viewURL, err := storage.GetPresignedFileURL(filename, folder, rs.Bucket, rs.Provider, ttlMinutes)
+	viewURL, err := storage.GetPresignedFileURL(filename, folder, rs.WithBucket(resource.MediaBucket).Bucket, rs.Provider, ttlMinutes)
 	if err != nil {
 		return "", nil, false
 	}
@@ -372,7 +383,7 @@ func (rs *ResourceService) DeleteResource(id uuid.UUID) error {
 	if err := rs.deleteResourceRecord(id, resource.EventSectionID); err != nil {
 		return fmt.Errorf("failed to delete resource from DB: %w", err)
 	}
-	_ = rs.DeleteFileIfExists(resource.Path)
+	_ = rs.WithBucket(resource.MediaBucket).DeleteFileIfExists(resource.Path)
 
 	return nil
 }
@@ -519,6 +530,7 @@ func (rs *ResourceService) UploadAndCreateResource(
 		EventSectionID: sectionID,
 		ResourceTypeID: resourceTypeID,
 		Path:           fmt.Sprintf("%s/%s", rs.UploadPath, filename),
+		MediaBucket:    rs.Bucket,
 		AltText:        altText,
 		Title:          title,
 		Position:       utils.PtrInt(position),
@@ -979,6 +991,7 @@ func (rs *ResourceService) UploadMultipleResources(
 			EventSectionID: sectionID,
 			ResourceTypeID: resourceTypeID,
 			Path:           fmt.Sprintf("%s/%s", rs.UploadPath, finalName),
+			MediaBucket:    rs.Bucket,
 			AltText:        "",
 			Title:          finalName,
 			Position:       utils.PtrInt(i),
@@ -1062,6 +1075,7 @@ func (rs *ResourceService) UploadBaseResources(
 		resource := &models.Resource{
 			ResourceTypeID: resourceTypeID,
 			Path:           finalPath,
+			MediaBucket:    rs.Bucket,
 			AltText:        "",
 			Title:          finalName,
 		}
@@ -1496,4 +1510,8 @@ func (rs *ResourceService) DeleteObjectByPath(fullPath string) error {
 	}
 
 	return nil
+}
+
+func (rs *ResourceService) DeleteObjectByPathFromBucket(fullPath, bucket string) error {
+	return rs.WithBucket(bucket).DeleteObjectByPath(fullPath)
 }

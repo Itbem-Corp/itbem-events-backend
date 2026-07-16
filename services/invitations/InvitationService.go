@@ -25,7 +25,7 @@ type RSVPConfirmationResult struct {
 	PrettyToken string
 }
 
-type EventCoverViewURLFunc func(path string) (string, *time.Time)
+type EventCoverViewURLFunc func(path, bucket string) (string, *time.Time)
 
 var (
 	ErrInvitationEventUnavailable  = errors.New("invitation event is unavailable")
@@ -211,7 +211,7 @@ func (s *InvitationService) invitationEventMeta(event models.Event) *dtos.EventM
 	coverViewURL := strings.TrimSpace(event.CoverImageURL)
 	var coverViewURLExpiresAt *time.Time
 	if s != nil && s.coverViewURL != nil {
-		if resolved, expiresAt := s.coverViewURL(event.CoverImageURL); strings.TrimSpace(resolved) != "" {
+		if resolved, expiresAt := s.coverViewURL(event.CoverImageURL, event.MediaBucket); strings.TrimSpace(resolved) != "" {
 			coverViewURL = resolved
 			coverViewURLExpiresAt = expiresAt
 		}

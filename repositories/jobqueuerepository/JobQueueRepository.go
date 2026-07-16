@@ -14,11 +14,12 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/gofrs/uuid"
 )
 
 const (
-	jobSchemaVersion     = 1
+	jobSchemaVersion     = 2
 	analyticsJobType     = "analytics.rollup"
 	analyticsJobBucket   = time.Minute
 	performanceJobType   = "performance.rollup"
@@ -36,6 +37,7 @@ type analyticsRollupEnvelope struct {
 	SchemaVersion int                    `json:"schema_version"`
 	JobID         uuid.UUID              `json:"job_id"`
 	OccurredAt    time.Time              `json:"occurred_at"`
+	TenantCode    string                 `json:"tenant_code,omitempty"`
 	Type          string                 `json:"type"`
 	Payload       analyticsRollupPayload `json:"payload"`
 }
@@ -128,11 +130,15 @@ func PublishPerformanceRollup() (bool, error) {
 
 // PublishAnalyticsRollup publishes a deterministic per-event/per-minute job.
 // Repeated stale reads in the same minute share a persistent idempotency key.
-func PublishAnalyticsRollup(eventID uuid.UUID) (bool, error) {
+func PublishAnalyticsRollup(eventID uuid.UUID, tenantCodes ...string) (bool, error) {
 	if client == nil || queueURL == "" || eventID == uuid.Nil {
 		return false, nil
 	}
-	envelope := buildAnalyticsRollupEnvelope(eventID, time.Now().UTC())
+	tenantCode := ""
+	if len(tenantCodes) > 0 {
+		tenantCode = strings.ToLower(strings.TrimSpace(tenantCodes[0]))
+	}
+	envelope := buildAnalyticsRollupEnvelope(eventID, tenantCode, time.Now().UTC())
 	bucket := envelope.OccurredAt.Truncate(analyticsJobBucket)
 	if !reserveAnalyticsPublish(eventID, bucket) {
 		return false, nil
@@ -151,10 +157,16 @@ func PublishAnalyticsRollup(eventID uuid.UUID) (bool, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), publishTimeout)
 	defer cancel()
-	_, err = client.SendMessage(ctx, &sqs.SendMessageInput{
+	input := &sqs.SendMessageInput{
 		QueueUrl:    aws.String(queueURL),
 		MessageBody: aws.String(string(body)),
-	})
+	}
+	if tenantCode != "" {
+		input.MessageAttributes = map[string]sqstypes.MessageAttributeValue{
+			"tenant_code": {DataType: aws.String("String"), StringValue: aws.String(tenantCode)},
+		}
+	}
+	_, err = client.SendMessage(ctx, input)
 	if err != nil {
 		releaseReservation()
 		return false, fmt.Errorf("publish analytics rollup job: %w", err)
@@ -184,7 +196,7 @@ func reserveAnalyticsPublish(eventID uuid.UUID, bucket time.Time) bool {
 	return true
 }
 
-func buildAnalyticsRollupEnvelope(eventID uuid.UUID, now time.Time) analyticsRollupEnvelope {
+func buildAnalyticsRollupEnvelope(eventID uuid.UUID, tenantCode string, now time.Time) analyticsRollupEnvelope {
 	now = now.UTC()
 	bucket := now.Truncate(analyticsJobBucket)
 	jobID := uuid.NewV5(
@@ -195,6 +207,7 @@ func buildAnalyticsRollupEnvelope(eventID uuid.UUID, now time.Time) analyticsRol
 		SchemaVersion: jobSchemaVersion,
 		JobID:         jobID,
 		OccurredAt:    now,
+		TenantCode:    strings.ToLower(strings.TrimSpace(tenantCode)),
 		Type:          analyticsJobType,
 		Payload: analyticsRollupPayload{
 			EventID:     eventID,

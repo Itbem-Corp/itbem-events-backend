@@ -16,8 +16,9 @@ type Moment struct {
 	GuestID       *uuid.UUID    `json:"guest_id,omitempty"`
 	Guest         *Guest        `gorm:"foreignKey:GuestID" json:"guest,omitempty"`
 	Title         string        `json:"title"`
-	Description   string        `json:"description"`                                                 // texto, caption o nota del invitado
-	ContentURL    string        `json:"content_url"`                                                 // imagen, video o audio en S3
+	Description   string        `json:"description"` // texto, caption o nota del invitado
+	ContentURL    string        `json:"content_url"` // imagen, video o audio en S3
+	MediaBucket   string        `gorm:"type:varchar(255);not null;default:'';index" json:"-"`
 	ThumbnailURL  string        `gorm:"type:varchar(500);default:''" json:"thumbnail_url,omitempty"` // WebP thumbnail for videos (extracted by Lambda)
 	MediaVariants MediaVariants `gorm:"type:jsonb;default:'[]';not null" json:"media_variants,omitempty"`
 	// Signed URL expirations are response-only metadata for admin/public clients.

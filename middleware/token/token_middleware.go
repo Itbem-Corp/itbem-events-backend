@@ -2,6 +2,7 @@ package token
 
 import (
 	"events-stocks/configuration"
+	"events-stocks/internal/tenantresources"
 	"events-stocks/models"
 	"events-stocks/utils"
 	"fmt"
@@ -38,6 +39,25 @@ func parseTenantClientMap(value string) map[string]string {
 		}
 	}
 	return result
+}
+
+func validateTenantRequestHost(host, tenant, configured string) error {
+	if strings.TrimSpace(configured) == "" {
+		return nil
+	}
+	host = strings.ToLower(strings.TrimSpace(host))
+	if colon := strings.LastIndex(host, ":"); colon > -1 && !strings.Contains(host[colon+1:], "]") {
+		host = host[:colon]
+	}
+	host = strings.TrimSuffix(host, ".")
+	expected := parseTenantClientMap(configured)[host]
+	if expected == "" {
+		return fmt.Errorf("API hostname is not configured")
+	}
+	if expected != "*" && expected != strings.ToLower(strings.TrimSpace(tenant)) {
+		return fmt.Errorf("token tenant does not match API hostname")
+	}
+	return nil
 }
 
 func allowedClientIDs(cfg *models.Config) map[string]struct{} {
@@ -178,7 +198,15 @@ func Autenticacion(cfg *models.Config) echo.MiddlewareFunc {
 			c.Set("cognito_sub", cognitoSub)
 			c.Set("auth_client_id", audience)
 			if tenantCode != "" {
+				if err := validateTenantRequestHost(c.Request().Host, tenantCode, cfg.TenantHostMap); err != nil {
+					return utils.Error(c, http.StatusForbidden, "Tenant hostname mismatch", err.Error())
+				}
 				c.Set("tenant_code", tenantCode)
+				bucket, bucketErr := tenantresources.ResolveBucket(cfg, tenantCode)
+				if bucketErr != nil {
+					return utils.Error(c, http.StatusServiceUnavailable, "Tenant storage is not configured", bucketErr.Error())
+				}
+				c.Set(tenantresources.ContextBucketKey, bucket)
 			}
 			if email, ok := claims["email"].(string); ok {
 				c.Set("user_email", email)

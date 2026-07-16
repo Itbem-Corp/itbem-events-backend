@@ -2,6 +2,7 @@ package clients
 
 import (
 	"events-stocks/dtos"
+	"events-stocks/internal/tenantresources"
 	"events-stocks/models"
 	"events-stocks/services/clients"
 	resourcesService "events-stocks/services/resources"
@@ -19,6 +20,14 @@ var clientSvc *clients.ClientService
 
 func InitClientsController(svc *clients.ClientService) {
 	clientSvc = svc
+}
+
+func clientServiceForContext(c echo.Context) *clients.ClientService {
+	bucket, err := tenantresources.BucketFromContext(c)
+	if err != nil {
+		return clientSvc
+	}
+	return clientSvc.WithResourceBucket(bucket)
 }
 
 func operationalRootMayNotManageOrganization(c echo.Context, user *models.User) bool {
@@ -73,10 +82,11 @@ func CreateNewClient(c echo.Context) error {
 	}
 
 	var newClient *models.Client
+	scopedClientSvc := clientServiceForContext(c)
 	if user.IsPrimaryRoot() {
-		newClient, err = clientSvc.CreateClientWithLogoAsPrimaryRoot(name, clientTypeID, user.ID, parentID, file, header)
+		newClient, err = scopedClientSvc.CreateClientWithLogoAsPrimaryRoot(name, clientTypeID, user.ID, parentID, file, header)
 	} else {
-		newClient, err = clientSvc.CreateClientWithLogo(name, clientTypeID, user.ID, parentID, file, header)
+		newClient, err = scopedClientSvc.CreateClientWithLogo(name, clientTypeID, user.ID, parentID, file, header)
 	}
 	if err != nil {
 		status, detail := resourcesService.UploadErrorResponse(err)
@@ -561,7 +571,7 @@ func UpdateClient(c echo.Context) error {
 
 	if errFile == nil {
 		defer file.Close()
-		filename, err := clientSvc.UploadClientLogo(file, header, clientID)
+		filename, err := clientServiceForContext(c).UploadClientLogo(file, header, clientID)
 		if err != nil {
 			status, detail := resourcesService.UploadErrorResponse(err)
 			if validations.IsValidationError(err) {
@@ -577,10 +587,11 @@ func UpdateClient(c echo.Context) error {
 	}
 
 	var res *models.Client
+	scopedClientSvc := clientServiceForContext(c)
 	if user.IsPrimaryRoot() {
-		res, err = clientSvc.UpdateClientDetailsAsPrimaryRoot(clientID, name, logoName, shouldDeleteOld)
+		res, err = scopedClientSvc.UpdateClientDetailsAsPrimaryRoot(clientID, name, logoName, shouldDeleteOld)
 	} else {
-		res, err = clientSvc.UpdateClientDetails(clientID, user.ID, name, logoName, shouldDeleteOld)
+		res, err = scopedClientSvc.UpdateClientDetails(clientID, user.ID, name, logoName, shouldDeleteOld)
 	}
 	if err != nil {
 		return utils.Error(c, http.StatusForbidden, "Update error", err.Error())

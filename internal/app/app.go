@@ -320,12 +320,12 @@ func wireDependencies(cfg *models.Config) {
 		Cache:      redisRepo,
 		EventsRepo: eventsRepo,
 		ConfigRepo: eventConfigRepo,
-		CoverViewURL: func(path string) (string, *time.Time) {
+		CoverViewURL: func(path, bucket string) (string, *time.Time) {
 			trimmed := strings.TrimSpace(path)
 			if trimmed == "" || strings.HasPrefix(trimmed, "http://") || strings.HasPrefix(trimmed, "https://") {
 				return path, nil
 			}
-			viewURL, err := resourceSvc.GetPresignedURLWithTTL(trimmed, resourcesService.ResourceViewURLTTLMinutes)
+			viewURL, err := resourceSvc.WithBucket(bucket).GetPresignedURLWithTTL(trimmed, resourcesService.ResourceViewURLTTLMinutes)
 			if err != nil || strings.TrimSpace(viewURL) == "" {
 				return path, nil
 			}
@@ -349,6 +349,7 @@ func wireDependencies(cfg *models.Config) {
 	authz.Configure(authz.Hooks{
 		SyncUser:              userSvc.SyncUser,
 		CheckAccessRecursive:  clientRepo.CheckAccessRecursive,
+		GetClientByID:         clientRepo.GetClientByID,
 		GetEventByIDRaw:       eventsRepo.GetEventByIDRaw,
 		GetEventSectionByID:   eventSectionRepo.GetEventSectionByID,
 		GetMomentByID:         momentRepo.GetMomentByID,

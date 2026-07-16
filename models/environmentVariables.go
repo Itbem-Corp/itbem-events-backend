@@ -16,12 +16,18 @@ type Config struct {
 	// Map format: "client-id=eventiapp,other-client-id=itbem".
 	CognitoAllowedClientIds string `required:"false"`
 	CognitoTenantClientMap  string `required:"false"`
+	// TenantHostMap binds branded API hosts to the Cognito tenant audience.
+	// Use "api.eventiapp.com.mx=*" only for the migration-compatible platform host.
+	TenantHostMap string `required:"false"`
 	// JwtClockSkewSeconds is an explicit deployment-level JWT leeway. Keep it
 	// empty in production; local environments with a skewed host clock may opt in.
 	JwtClockSkewSeconds string `required:"false"`
 	S3ClientId          string `required:"false"`
 	S3ClientSecret      string `required:"false"`
 	AwsBucketName       string `required:"true"`
+	// TenantBucketMap is the server-owned physical storage routing table.
+	// Format: "eventiapp=bucket-a,itbem=bucket-b,cafettonhouse=bucket-c".
+	TenantBucketMap string `required:"false"`
 	// S3Region may differ from the region used by Cognito/SQS. When omitted,
 	// startup discovers the bucket region before constructing the S3 client.
 	S3Region       string `required:"false"`

@@ -17,6 +17,7 @@ import (
 type Hooks struct {
 	SyncUser              func(cognitoSub string) (*models.User, error)
 	CheckAccessRecursive  func(userID, targetClientID uuid.UUID) (bool, string)
+	GetClientByID         func(clientID uuid.UUID) (*models.Client, error)
 	GetEventByIDRaw       func(eventID uuid.UUID) (*models.Event, error)
 	GetEventSectionByID   func(sectionID uuid.UUID) (*models.EventSection, error)
 	GetMomentByID         func(momentID uuid.UUID) (*models.Moment, error)
@@ -39,6 +40,9 @@ func ReplaceHooksForTest(replacement Hooks) func() {
 	}
 	if replacement.CheckAccessRecursive != nil {
 		hooks.CheckAccessRecursive = replacement.CheckAccessRecursive
+	}
+	if replacement.GetClientByID != nil {
+		hooks.GetClientByID = replacement.GetClientByID
 	}
 	if replacement.GetEventByIDRaw != nil {
 		hooks.GetEventByIDRaw = replacement.GetEventByIDRaw
@@ -138,6 +142,7 @@ func scopeUserToTenant(c echo.Context, user *models.User) *models.User {
 	scoped := *user
 	scoped.IsRoot = false
 	scoped.RootLevel = models.RootLevelNone
+	scoped.AuthTenantCode = strings.ToLower(strings.TrimSpace(tenantCode))
 	return &scoped
 }
 
@@ -190,6 +195,9 @@ func RequirePrimaryRoot(c echo.Context) (*models.User, error) {
 }
 
 func RequireClientAccess(user *models.User, clientID uuid.UUID) error {
+	if err := requireTenantClientBoundary(user, clientID); err != nil {
+		return err
+	}
 	if user.IsPlatformAdmin() {
 		return nil
 	}
@@ -211,6 +219,9 @@ func RequireClientAccess(user *models.User, clientID uuid.UUID) error {
 // role. Event memberships may narrow this later, but can never grant a
 // capability beyond this organization role.
 func RequireClientCapability(user *models.User, clientID uuid.UUID, capability Capability) error {
+	if err := requireTenantClientBoundary(user, clientID); err != nil {
+		return err
+	}
 	if user.IsPlatformAdmin() {
 		if platformHasCapability(user, capability) {
 			return nil
@@ -225,6 +236,30 @@ func RequireClientCapability(user *models.User, clientID uuid.UUID, capability C
 		return &Failure{Status: http.StatusForbidden, Message: "Access denied", Detail: "Your organization role cannot perform this action"}
 	}
 	return nil
+}
+
+func requireTenantClientBoundary(user *models.User, clientID uuid.UUID) error {
+	if user == nil || strings.TrimSpace(user.AuthTenantCode) == "" || strings.EqualFold(user.AuthTenantCode, "eventiapp") {
+		return nil
+	}
+	if hooks.GetClientByID == nil {
+		return dependencyFailure("GetClientByID")
+	}
+	currentID := clientID
+	for depth := 0; depth < 32 && currentID != uuid.Nil; depth++ {
+		client, err := hooks.GetClientByID(currentID)
+		if err != nil || client == nil {
+			return &Failure{Status: http.StatusForbidden, Message: "Access denied", Detail: "Client is outside the authenticated tenant"}
+		}
+		if strings.EqualFold(strings.TrimSpace(client.Code), user.AuthTenantCode) {
+			return nil
+		}
+		if client.ParentID == nil {
+			break
+		}
+		currentID = *client.ParentID
+	}
+	return &Failure{Status: http.StatusForbidden, Message: "Access denied", Detail: "Client is outside the authenticated tenant"}
 }
 
 // platformHasCapability makes Root 2 useful for cross-account operational

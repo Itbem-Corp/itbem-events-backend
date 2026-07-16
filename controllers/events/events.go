@@ -10,6 +10,7 @@ import (
 	"events-stocks/internal/phrasecatalog"
 	"events-stocks/internal/previewtoken"
 	"events-stocks/internal/publicaccessproof"
+	"events-stocks/internal/tenantresources"
 	"events-stocks/models"
 	jobqueuerepository "events-stocks/repositories/jobqueuerepository"
 	"events-stocks/repositories/phraserepository"
@@ -94,16 +95,20 @@ func coverViewURL(path string) string {
 	return viewURL
 }
 
-func coverViewURLWithExpiry(path string) (string, *time.Time) {
-	return resourceViewURLWithExpiry(path, eventCoverViewURLTTLMinutes)
+func coverViewURLWithExpiry(path string, buckets ...string) (string, *time.Time) {
+	return resourceViewURLWithExpiry(path, eventCoverViewURLTTLMinutes, buckets...)
 }
 
-func resourceViewURLWithExpiry(path string, ttlMinutes int64) (string, *time.Time) {
+func resourceViewURLWithExpiry(path string, ttlMinutes int64, buckets ...string) (string, *time.Time) {
 	trimmed := strings.TrimSpace(path)
 	if trimmed == "" || utils.IsAbsoluteURLLike(trimmed) || coverResourceSvc == nil {
 		return path, nil
 	}
-	viewURL, err := coverResourceSvc.GetPresignedURLWithTTL(trimmed, ttlMinutes)
+	svc := coverResourceSvc
+	if len(buckets) > 0 {
+		svc = svc.WithBucket(buckets[0])
+	}
+	viewURL, err := svc.GetPresignedURLWithTTL(trimmed, ttlMinutes)
 	if err != nil || viewURL == "" {
 		return path, nil
 	}
@@ -116,13 +121,13 @@ func eventResponseWithCoverView(event *models.Event) dtos.EventResponse {
 	if event == nil {
 		return response
 	}
-	response.CoverViewURL, response.CoverViewURLExpiresAt = coverViewURLWithExpiry(event.CoverImageURL)
-	response.CoverViewURL2, response.CoverViewURL2ExpiresAt = coverViewURLWithExpiry(event.CoverImageURL2)
-	response.CoverPendingViewURL, response.CoverPendingViewURLExpiresAt = coverViewURLWithExpiry(event.CoverPendingURL)
+	response.CoverViewURL, response.CoverViewURLExpiresAt = coverViewURLWithExpiry(event.CoverImageURL, event.MediaBucket)
+	response.CoverViewURL2, response.CoverViewURL2ExpiresAt = coverViewURLWithExpiry(event.CoverImageURL2, event.MediaBucket)
+	response.CoverPendingViewURL, response.CoverPendingViewURLExpiresAt = coverViewURLWithExpiry(event.CoverPendingURL, event.MediaBucket)
 	response.ViewURL = response.CoverViewURL
 	response.ViewURLExpiresAt = response.CoverViewURLExpiresAt
 	for i := range response.CoverVariants {
-		response.CoverVariants[i].ViewURL, response.CoverVariants[i].ExpiresAt = coverViewURLWithExpiry(response.CoverVariants[i].URL)
+		response.CoverVariants[i].ViewURL, response.CoverVariants[i].ExpiresAt = coverViewURLWithExpiry(response.CoverVariants[i].URL, event.MediaBucket)
 	}
 	return response
 }
@@ -142,9 +147,9 @@ func withPageSpecCoverViewURL(spec *dtos.PageSpec) *dtos.PageSpec {
 	response := *spec
 	response.Sections = append(make([]dtos.PageSpecSection, 0, len(spec.Sections)), spec.Sections...)
 	response.Meta.CoverVariants = append([]dtos.PublicMediaVariant(nil), spec.Meta.CoverVariants...)
-	response.Meta.CoverViewURL, response.Meta.CoverViewURLExpiresAt = coverViewURLWithExpiry(spec.Meta.CoverImageURL)
+	response.Meta.CoverViewURL, response.Meta.CoverViewURLExpiresAt = coverViewURLWithExpiry(spec.Meta.CoverImageURL, spec.MediaBucket)
 	for i := range response.Meta.CoverVariants {
-		response.Meta.CoverVariants[i].ViewURL, response.Meta.CoverVariants[i].ExpiresAt = coverViewURLWithExpiry(response.Meta.CoverVariants[i].URL)
+		response.Meta.CoverVariants[i].ViewURL, response.Meta.CoverVariants[i].ExpiresAt = coverViewURLWithExpiry(response.Meta.CoverVariants[i].URL, spec.MediaBucket)
 	}
 	response.Meta.Theme = withPageSpecThemeFontViewURLs(spec.Meta.Theme)
 	return &response
@@ -516,6 +521,12 @@ func CreateEvent(c echo.Context) error {
 	if err := authz.RequireEventClientForCreate(user, event.ClientID); err != nil {
 		return authz.Respond(c, err)
 	}
+	if _, hasTenant := c.Get("tenant_code").(string); hasTenant {
+		event.MediaBucket, err = tenantresources.BucketFromContext(c)
+		if err != nil {
+			return utils.Error(c, http.StatusServiceUnavailable, "Tenant storage is not configured", err.Error())
+		}
+	}
 
 	if err := eventSvc.CreateEvent(&event); err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Error creating event", err.Error())
@@ -856,7 +867,7 @@ func GetEventMeta(c echo.Context) error {
 	if event.EventType.Name != "" {
 		eventType = event.EventType.Name
 	}
-	coverURL, coverURLExpiresAt := coverViewURLWithExpiry(event.CoverImageURL)
+	coverURL, coverURLExpiresAt := coverViewURLWithExpiry(event.CoverImageURL, event.MediaBucket)
 	var eventDateTime *time.Time
 	if !event.EventDateTime.IsZero() {
 		eventDateTime = &event.EventDateTime

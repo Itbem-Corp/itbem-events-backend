@@ -302,9 +302,20 @@ func rollbackUploadLimit(eventID, ip string) {
 	}
 }
 
-func cleanupMomentUpload(eventID, ip, objectKey string, releaseQuota bool) {
-	if publicResSvc != nil && strings.TrimSpace(objectKey) != "" {
-		if err := publicResSvc.DeleteMomentUpload(objectKey); err != nil {
+func publicResourceServiceForEvent(event *models.Event) *resourcesService.ResourceService {
+	if publicResSvc == nil || event == nil {
+		return publicResSvc
+	}
+	return publicResSvc.WithBucket(event.MediaBucket)
+}
+
+func cleanupMomentUpload(eventID, ip, objectKey string, releaseQuota bool, scoped ...*resourcesService.ResourceService) {
+	svc := publicResSvc
+	if len(scoped) > 0 && scoped[0] != nil {
+		svc = scoped[0]
+	}
+	if svc != nil && strings.TrimSpace(objectKey) != "" {
+		if err := svc.DeleteMomentUpload(objectKey); err != nil {
 			slog.Error("moment upload object rollback failed", "event_id", eventID, "object_key", objectKey, "error", err)
 		}
 	}
@@ -313,14 +324,18 @@ func cleanupMomentUpload(eventID, ip, objectKey string, releaseQuota bool) {
 	}
 }
 
-func cleanupMultipartUpload(eventID, objectKey, uploadID string) {
-	if publicResSvc == nil {
+func cleanupMultipartUpload(eventID, objectKey, uploadID string, scoped ...*resourcesService.ResourceService) {
+	svc := publicResSvc
+	if len(scoped) > 0 && scoped[0] != nil {
+		svc = scoped[0]
+	}
+	if svc == nil {
 		return
 	}
-	if err := publicResSvc.AbortMomentMultipartUpload(objectKey, uploadID); err != nil {
+	if err := svc.AbortMomentMultipartUpload(objectKey, uploadID); err != nil {
 		slog.Warn("multipart upload abort rollback failed", "event_id", eventID, "object_key", objectKey, "error", err)
 	}
-	cleanupMomentUpload(eventID, "", objectKey, false)
+	cleanupMomentUpload(eventID, "", objectKey, false, svc)
 }
 
 const defaultPageLimit = 20
@@ -416,13 +431,14 @@ func withMomentUploadQuota(moment *models.Moment, quota uploadQuota) interface{}
 	}
 	publicMoment := dtos.NewPublicMoment(*moment)
 	if publicResSvc != nil {
-		publicMoment.ContentURL = canonicalMomentStoragePath(publicResSvc, publicMoment.ContentURL)
-		publicMoment.ThumbnailURL = canonicalMomentStoragePath(publicResSvc, publicMoment.ThumbnailURL)
-		if contentViewURL, expiresAt := presignMomentURLWithExpiry(publicResSvc, publicMoment.ContentURL); strings.TrimSpace(contentViewURL) != "" {
+		svc := publicResSvc.WithBucket(moment.MediaBucket)
+		publicMoment.ContentURL = canonicalMomentStoragePath(svc, publicMoment.ContentURL)
+		publicMoment.ThumbnailURL = canonicalMomentStoragePath(svc, publicMoment.ThumbnailURL)
+		if contentViewURL, expiresAt := presignMomentURLWithExpiry(svc, publicMoment.ContentURL); strings.TrimSpace(contentViewURL) != "" {
 			publicMoment.ContentViewURL = contentViewURL
 			publicMoment.ContentViewURLExpiresAt = expiresAt
 		}
-		if thumbnailViewURL, expiresAt := presignMomentURLWithExpiry(publicResSvc, publicMoment.ThumbnailURL); strings.TrimSpace(thumbnailViewURL) != "" {
+		if thumbnailViewURL, expiresAt := presignMomentURLWithExpiry(svc, publicMoment.ThumbnailURL); strings.TrimSpace(thumbnailViewURL) != "" {
 			publicMoment.ThumbnailViewURL = thumbnailViewURL
 			publicMoment.ThumbnailViewURLExpiresAt = expiresAt
 		}
@@ -561,20 +577,21 @@ func newPublicMomentResponses(moments []models.Moment) []dtos.PublicMoment {
 	}
 
 	for i := range items {
-		items[i].ContentURL = canonicalMomentStoragePath(publicResSvc, items[i].ContentURL)
-		items[i].ThumbnailURL = canonicalMomentStoragePath(publicResSvc, items[i].ThumbnailURL)
-		if contentViewURL, expiresAt := presignMomentURLWithExpiry(publicResSvc, items[i].ContentURL); strings.TrimSpace(contentViewURL) != "" {
+		svc := publicResSvc.WithBucket(moments[i].MediaBucket)
+		items[i].ContentURL = canonicalMomentStoragePath(svc, items[i].ContentURL)
+		items[i].ThumbnailURL = canonicalMomentStoragePath(svc, items[i].ThumbnailURL)
+		if contentViewURL, expiresAt := presignMomentURLWithExpiry(svc, items[i].ContentURL); strings.TrimSpace(contentViewURL) != "" {
 			items[i].ContentViewURL = contentViewURL
 			items[i].ContentViewURLExpiresAt = expiresAt
 		}
-		if thumbnailViewURL, expiresAt := presignMomentURLWithExpiry(publicResSvc, items[i].ThumbnailURL); strings.TrimSpace(thumbnailViewURL) != "" {
+		if thumbnailViewURL, expiresAt := presignMomentURLWithExpiry(svc, items[i].ThumbnailURL); strings.TrimSpace(thumbnailViewURL) != "" {
 			items[i].ThumbnailViewURL = thumbnailViewURL
 			items[i].ThumbnailViewURLExpiresAt = expiresAt
 		}
 		for variantIndex := range items[i].MediaVariants {
 			variant := &items[i].MediaVariants[variantIndex]
-			variant.URL = canonicalMomentStoragePath(publicResSvc, variant.URL)
-			if viewURL, expiresAt := presignMomentURLWithExpiry(publicResSvc, variant.URL); strings.TrimSpace(viewURL) != "" {
+			variant.URL = canonicalMomentStoragePath(svc, variant.URL)
+			if viewURL, expiresAt := presignMomentURLWithExpiry(svc, variant.URL); strings.TrimSpace(viewURL) != "" {
 				variant.ViewURL = viewURL
 				variant.ExpiresAt = expiresAt
 			}
@@ -861,13 +878,14 @@ func CreatePublicMoment(c echo.Context) error {
 		return utils.Error(c, http.StatusInternalServerError, "Resource service unavailable", "")
 	}
 
-	rawKey, contentType, err := publicResSvc.UploadRawToMomentsFolder(file, header, event.ID.String())
+	eventResSvc := publicResourceServiceForEvent(event)
+	rawKey, contentType, err := eventResSvc.UploadRawToMomentsFolder(file, header, event.ID.String())
 	if err != nil {
 		return respondMomentUploadError(c, "Error uploading file", err)
 	}
 	limitReached, uploadedCount, quotaReserved, _ := checkAndIncrementUploadLimit(c.Request().Context(), event.ID.String(), c.RealIP(), maxUploads)
 	if limitReached {
-		cleanupMomentUpload(event.ID.String(), c.RealIP(), rawKey, quotaReserved)
+		cleanupMomentUpload(event.ID.String(), c.RealIP(), rawKey, quotaReserved, eventResSvc)
 		return writeUploadLimitReached(c, event.Name, maxUploads, uploadedCount)
 	}
 
@@ -879,6 +897,7 @@ func CreatePublicMoment(c echo.Context) error {
 		EventID:          &eventID,
 		InvitationID:     &invID,
 		ContentURL:       rawKey,
+		MediaBucket:      eventResSvc.Bucket,
 		ContentType:      contentType,
 		Description:      description,
 		IsApproved:       isApproved,
@@ -886,14 +905,14 @@ func CreatePublicMoment(c echo.Context) error {
 	}
 
 	if err := momentsService.CreateMoment(&moment); err != nil {
-		cleanupMomentUpload(event.ID.String(), c.RealIP(), rawKey, quotaReserved)
+		cleanupMomentUpload(event.ID.String(), c.RealIP(), rawKey, quotaReserved, eventResSvc)
 		return utils.Error(c, http.StatusInternalServerError, "Error saving moment", err.Error())
 	}
 
 	// A queue failure is persisted as terminal "failed" by the service. The raw
 	// object remains private and can be retried by an admin; never publish it as
 	// a legacy-ready moment.
-	momentsService.EnqueueMediaProcessing(&moment, rawKey, publicResSvc.Bucket, contentType)
+	momentsService.EnqueueMediaProcessing(&moment, rawKey, eventResSvc.Bucket, contentType)
 
 	go recordMomentCreatedAnalytics(eventID, description)
 
@@ -924,13 +943,14 @@ func CreateSharedMoment(c echo.Context) error {
 		return utils.Error(c, http.StatusInternalServerError, "Resource service unavailable", "")
 	}
 
-	rawKey, contentType, err := publicResSvc.UploadRawToMomentsFolder(file, header, event.ID.String())
+	eventResSvc := publicResourceServiceForEvent(event)
+	rawKey, contentType, err := eventResSvc.UploadRawToMomentsFolder(file, header, event.ID.String())
 	if err != nil {
 		return respondMomentUploadError(c, "Error uploading file", err)
 	}
 	limitReached, uploadedCount, quotaReserved, _ := checkAndIncrementUploadLimit(c.Request().Context(), event.ID.String(), c.RealIP(), maxUploads)
 	if limitReached {
-		cleanupMomentUpload(event.ID.String(), c.RealIP(), rawKey, quotaReserved)
+		cleanupMomentUpload(event.ID.String(), c.RealIP(), rawKey, quotaReserved, eventResSvc)
 		return writeUploadLimitReached(c, event.Name, maxUploads, uploadedCount)
 	}
 
@@ -940,6 +960,7 @@ func CreateSharedMoment(c echo.Context) error {
 	moment := models.Moment{
 		EventID:          &eventID,
 		ContentURL:       rawKey,
+		MediaBucket:      eventResSvc.Bucket,
 		ContentType:      contentType,
 		Description:      description,
 		IsApproved:       isApproved,
@@ -947,11 +968,11 @@ func CreateSharedMoment(c echo.Context) error {
 	}
 
 	if err := momentsService.CreateMoment(&moment); err != nil {
-		cleanupMomentUpload(event.ID.String(), c.RealIP(), rawKey, quotaReserved)
+		cleanupMomentUpload(event.ID.String(), c.RealIP(), rawKey, quotaReserved, eventResSvc)
 		return utils.Error(c, http.StatusInternalServerError, "Error saving moment", err.Error())
 	}
 
-	momentsService.EnqueueMediaProcessing(&moment, rawKey, publicResSvc.Bucket, contentType)
+	momentsService.EnqueueMediaProcessing(&moment, rawKey, eventResSvc.Bucket, contentType)
 
 	go recordMomentCreatedAnalytics(eventID, description)
 
@@ -1051,11 +1072,12 @@ func RequestBatchSharedUploadURLs(c echo.Context) error {
 		return err
 	}
 	urls := make([]dtos.MomentUploadURLResponse, 0, len(body.Files))
+	eventResSvc := publicResourceServiceForEvent(event)
 	for _, file := range body.Files {
 		if err := validateRequestedMomentUploadSize(file.filename(), file.contentType(), file.fileSize()); err != nil {
 			return respondMomentUploadError(c, "Invalid file", err)
 		}
-		s3Key, uploadURL, contentType, err := publicResSvc.PrepareMomentUploadURL(event.ID.String(), file.filename(), file.contentType())
+		s3Key, uploadURL, contentType, err := eventResSvc.PrepareMomentUploadURL(event.ID.String(), file.filename(), file.contentType())
 		if err != nil {
 			return respondMomentUploadError(c, "Could not prepare file upload", err)
 		}
@@ -1112,7 +1134,8 @@ func StartSharedMultipartUpload(c echo.Context) error {
 		return err
 	}
 	partCount := int(math.Ceil(float64(fileSize) / float64(multipartPartSize)))
-	s3Key, uploadID, partURLs, contentType, err := publicResSvc.PrepareMomentMultipartUpload(event.ID.String(), filename, contentType, partCount)
+	eventResSvc := publicResourceServiceForEvent(event)
+	s3Key, uploadID, partURLs, contentType, err := eventResSvc.PrepareMomentMultipartUpload(event.ID.String(), filename, contentType, partCount)
 	if err != nil {
 		return respondMomentUploadError(c, "Error preparing multipart upload", err)
 	}
@@ -1144,10 +1167,11 @@ func AbortSharedMultipartUpload(c echo.Context) error {
 	if uploadID == "" || objectKey == "" {
 		return utils.Error(c, http.StatusBadRequest, "upload_id and object_key are required", "")
 	}
-	if err := publicResSvc.ValidateMomentRawKey(event.ID.String(), objectKey); err != nil {
+	eventResSvc := publicResourceServiceForEvent(event)
+	if err := eventResSvc.ValidateMomentRawKey(event.ID.String(), objectKey); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid upload key", err.Error())
 	}
-	if err := publicResSvc.AbortMomentMultipartUpload(objectKey, uploadID); err != nil {
+	if err := eventResSvc.AbortMomentMultipartUpload(objectKey, uploadID); err != nil {
 		return respondMomentUploadError(c, "Error aborting multipart upload", err)
 	}
 	return utils.Success(c, http.StatusOK, "Multipart upload aborted", nil)
@@ -1170,7 +1194,8 @@ func CompleteSharedMultipartUpload(c echo.Context) error {
 	if uploadID == "" || objectKey == "" {
 		return utils.Error(c, http.StatusBadRequest, "upload_id and object_key are required", "")
 	}
-	if err := publicResSvc.ValidateMomentRawKey(event.ID.String(), objectKey); err != nil {
+	eventResSvc := publicResourceServiceForEvent(event)
+	if err := eventResSvc.ValidateMomentRawKey(event.ID.String(), objectKey); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid upload key", err.Error())
 	}
 	if existing, lookupErr := findConfirmedMoment(event.ID, objectKey); lookupErr != nil {
@@ -1179,10 +1204,10 @@ func CompleteSharedMultipartUpload(c echo.Context) error {
 		return utils.Success(c, http.StatusCreated, "Moment submitted for review", withMomentUploadQuota(existing, getUploadQuota(c, event.ID, cfg)))
 	}
 	if ok, err := ensureUploadSlots(c, event, cfg, 1); !ok {
-		cleanupMultipartUpload(event.ID.String(), objectKey, uploadID)
+		cleanupMultipartUpload(event.ID.String(), objectKey, uploadID, eventResSvc)
 		return err
 	}
-	if err := publicResSvc.CompleteMomentMultipartUpload(objectKey, uploadID, body.completedParts()); err != nil {
+	if err := eventResSvc.CompleteMomentMultipartUpload(objectKey, uploadID, body.completedParts()); err != nil {
 		message := "Error completing multipart upload"
 		if validations.IsValidationError(err) {
 			message = "Invalid multipart upload"
@@ -1277,7 +1302,8 @@ func issueMomentUploadURL(c echo.Context, event *models.Event, cfg *models.Event
 	if err := validateRequestedMomentUploadSize(filename, contentType, fileSize); err != nil {
 		return respondMomentUploadError(c, "Invalid file", err)
 	}
-	s3Key, uploadURL, normalizedContentType, err := publicResSvc.PrepareMomentUploadURL(event.ID.String(), filename, contentType)
+	eventResSvc := publicResourceServiceForEvent(event)
+	s3Key, uploadURL, normalizedContentType, err := eventResSvc.PrepareMomentUploadURL(event.ID.String(), filename, contentType)
 	if err != nil {
 		return respondMomentUploadError(c, "Could not prepare file upload", err)
 	}
@@ -1375,7 +1401,8 @@ func confirmPresignedMoment(c echo.Context, event *models.Event, cfg *models.Eve
 	if objectKey == "" {
 		return nil, utils.Error(c, http.StatusBadRequest, "object_key is required", "")
 	}
-	if err := publicResSvc.ValidateMomentRawKey(event.ID.String(), objectKey); err != nil {
+	eventResSvc := publicResourceServiceForEvent(event)
+	if err := eventResSvc.ValidateMomentRawKey(event.ID.String(), objectKey); err != nil {
 		return nil, utils.Error(c, http.StatusBadRequest, "Invalid upload key", err.Error())
 	}
 	existing, lookupErr := findConfirmedMoment(event.ID, objectKey)
@@ -1385,9 +1412,9 @@ func confirmPresignedMoment(c echo.Context, event *models.Event, cfg *models.Eve
 	if existing != nil {
 		return existing, nil
 	}
-	verifiedContentType, verifyErr := publicResSvc.VerifyMomentUpload(objectKey, contentType)
+	verifiedContentType, verifyErr := eventResSvc.VerifyMomentUpload(objectKey, contentType)
 	if verifyErr != nil {
-		cleanupMomentUpload(event.ID.String(), c.RealIP(), objectKey, false)
+		cleanupMomentUpload(event.ID.String(), c.RealIP(), objectKey, false, eventResSvc)
 		return nil, respondMomentUploadError(c, "Upload verification failed", verifyErr)
 	}
 	contentType = verifiedContentType
@@ -1397,7 +1424,7 @@ func confirmPresignedMoment(c echo.Context, event *models.Event, cfg *models.Eve
 	ctx := c.Request().Context()
 	limitReached, uploadedCount, quotaReserved, _ := checkAndIncrementUploadLimit(ctx, event.ID.String(), ip, maxUploads)
 	if limitReached {
-		cleanupMomentUpload(event.ID.String(), ip, objectKey, quotaReserved)
+		cleanupMomentUpload(event.ID.String(), ip, objectKey, quotaReserved, eventResSvc)
 		return nil, writeUploadLimitReached(c, event.Name, maxUploads, uploadedCount)
 	}
 
@@ -1407,16 +1434,17 @@ func confirmPresignedMoment(c echo.Context, event *models.Event, cfg *models.Eve
 		EventID:          &eventID,
 		InvitationID:     invitationID,
 		ContentURL:       objectKey,
+		MediaBucket:      eventResSvc.Bucket,
 		ContentType:      contentType,
 		Description:      description,
 		IsApproved:       isApproved,
 		ProcessingStatus: "pending",
 	}
 	if err := momentsService.CreateMoment(&moment); err != nil {
-		cleanupMomentUpload(event.ID.String(), ip, objectKey, quotaReserved)
+		cleanupMomentUpload(event.ID.String(), ip, objectKey, quotaReserved, eventResSvc)
 		return nil, utils.Error(c, http.StatusInternalServerError, "Error saving moment", err.Error())
 	}
-	momentsService.EnqueueMediaProcessing(&moment, objectKey, publicResSvc.Bucket, contentType)
+	momentsService.EnqueueMediaProcessing(&moment, objectKey, eventResSvc.Bucket, contentType)
 	go recordMomentCreatedAnalytics(eventID, description)
 	return &moment, nil
 }

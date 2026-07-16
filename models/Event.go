@@ -14,6 +14,7 @@ type Event struct {
 	Identifier                string         `gorm:"uniqueIndex" json:"identifier"`
 	Description               string         `json:"description"`
 	CoverImageURL             string         `json:"cover_image_url"`
+	MediaBucket               string         `gorm:"type:varchar(255);not null;default:'';index" json:"-"`
 	CoverImageURL2            string         `json:"cover_image_url2"`
 	CoverVariants             MediaVariants  `gorm:"type:jsonb;default:'[]';not null" json:"cover_variants,omitempty"`
 	CoverPendingURL           string         `json:"cover_pending_url,omitempty"`

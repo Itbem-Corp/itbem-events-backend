@@ -262,8 +262,9 @@ func buildPageSpecFromEventWithConfig(event *models.Event, deps buildSpecDeps, c
 	sortPageSpecSections(specSections)
 
 	return &dtos.PageSpec{
-		Meta:     meta,
-		Sections: specSections,
+		Meta:        meta,
+		Sections:    specSections,
+		MediaBucket: event.MediaBucket,
 	}, nil
 }
 

@@ -1990,7 +1990,7 @@ func TestGetInvitationByToken_UsesEventCoverViewURLResolver(t *testing.T) {
 		Repo:      invRepo,
 		GuestRepo: guestRepo,
 		TokenRepo: tokenRepo,
-		CoverViewURL: func(path string) (string, *time.Time) {
+		CoverViewURL: func(path, _ string) (string, *time.Time) {
 			seenCoverPath = path
 			return "https://signed.example.com/events/evento/cover.webp", &expiresAt
 		},

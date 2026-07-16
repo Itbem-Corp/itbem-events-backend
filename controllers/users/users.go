@@ -3,6 +3,7 @@ package users
 import (
 	"events-stocks/dtos"
 	"events-stocks/internal/authz"
+	"events-stocks/internal/tenantresources"
 	"events-stocks/models"
 	resourcesService "events-stocks/services/resources"
 	"events-stocks/services/users"
@@ -25,12 +26,16 @@ func InitUsersController(svc *users.UserService, admin *users.AdminUserService, 
 	resourceSvc = resources
 }
 
-func profileImageViewURL(path string) string {
+func profileImageViewURL(path string, buckets ...string) string {
 	cleanPath := strings.TrimSpace(path)
 	if cleanPath == "" || resourceSvc == nil {
 		return ""
 	}
-	viewURL, _ := resourceSvc.GetAvatarPresignedURL(cleanPath)
+	svc := resourceSvc
+	if len(buckets) > 0 {
+		svc = svc.WithBucket(buckets[0])
+	}
+	viewURL, _ := svc.GetAvatarPresignedURL(cleanPath)
 	return viewURL
 }
 
@@ -38,7 +43,7 @@ func userProfileResponse(user *models.User) dtos.UserProfileResponse {
 	if user == nil {
 		return dtos.UserProfileResponse{}
 	}
-	return dtos.NewUserProfileResponse(user, profileImageViewURL(user.ProfileImage))
+	return dtos.NewUserProfileResponse(user, profileImageViewURL(user.ProfileImage, user.ProfileImageBucket))
 }
 
 func clientLogoViewURL(clientID uuid.UUID, logo string) string {
@@ -155,25 +160,30 @@ func UploadAvatar(c echo.Context) error {
 		return utils.Error(c, http.StatusInternalServerError, "Resource service not initialized", "")
 	}
 
-	newAvatarPath, err := resourceSvc.UploadAvatar(file, header, user.ID)
+	bucket, bucketErr := tenantresources.BucketFromContext(c)
+	if bucketErr != nil {
+		return utils.Error(c, http.StatusServiceUnavailable, "Tenant storage is not configured", bucketErr.Error())
+	}
+	scopedResourceSvc := resourceSvc.WithBucket(bucket)
+	newAvatarPath, err := scopedResourceSvc.UploadAvatar(file, header, user.ID)
 	if err != nil {
 		status, detail := resourcesService.UploadErrorResponse(err)
 		return utils.Error(c, status, "Error uploading avatar", detail)
 	}
 
-	if err := userSvc.UpdateProfileImage(user.ID, newAvatarPath); err != nil {
-		if cleanupErr := resourceSvc.DeleteObjectByPath(newAvatarPath); cleanupErr != nil {
+	if err := userSvc.UpdateProfileImageInBucket(user.ID, newAvatarPath, bucket); err != nil {
+		if cleanupErr := scopedResourceSvc.DeleteObjectByPath(newAvatarPath); cleanupErr != nil {
 			slog.Error("new avatar rollback failed", "user_id", user.ID, "path", newAvatarPath, "error", cleanupErr)
 		}
 		return utils.Error(c, http.StatusInternalServerError, "Error saving changes", err.Error())
 	}
 	if oldAvatarPath := strings.TrimSpace(user.ProfileImage); oldAvatarPath != "" && oldAvatarPath != newAvatarPath {
-		if cleanupErr := resourceSvc.DeleteObjectByPath(oldAvatarPath); cleanupErr != nil {
+		if cleanupErr := resourceSvc.WithBucket(user.ProfileImageBucket).DeleteObjectByPath(oldAvatarPath); cleanupErr != nil {
 			slog.Warn("old avatar cleanup failed", "user_id", user.ID, "path", oldAvatarPath, "error", cleanupErr)
 		}
 	}
 
-	signedURL, _ := resourceSvc.GetAvatarPresignedURL(newAvatarPath)
+	signedURL, _ := scopedResourceSvc.GetAvatarPresignedURL(newAvatarPath)
 
 	return utils.Success(c, http.StatusOK, "Avatar updated", dtos.AvatarResponse{
 		Path: newAvatarPath,
@@ -196,7 +206,9 @@ func DeleteAvatar(c echo.Context) error {
 		return utils.Success(c, http.StatusOK, "No avatar to delete", nil)
 	}
 
-	userSvc.DeleteUserAvatar(user)
+	if err := resourceSvc.WithBucket(user.ProfileImageBucket).DeleteObjectByPath(user.ProfileImage); err != nil {
+		slog.Warn("avatar cleanup failed", "user_id", user.ID, "path", user.ProfileImage, "error", err)
+	}
 
 	if err := userSvc.ClearProfileImage(user.ID); err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Error cleaning avatar", err.Error())
