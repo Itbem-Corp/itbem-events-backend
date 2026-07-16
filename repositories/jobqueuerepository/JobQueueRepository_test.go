@@ -65,3 +65,19 @@ func TestReserveAnalyticsPublishDeduplicatesCurrentBucketAndPrunesOlderEvents(t 
 	assert.Equal(t, bucket, publishedBuckets[currentEventID])
 	publishMu.Unlock()
 }
+
+func TestBuildAnalyticsRollupMessageReturnsPersistableDeterministicEnvelope(t *testing.T) {
+	eventID := uuid.Must(uuid.FromString("7c9e6679-7425-40de-944b-e07fc1f90ae7"))
+	now := time.Date(2026, 7, 16, 17, 5, 42, 0, time.UTC)
+
+	body, dedupeKey, tenant, err := BuildAnalyticsRollupMessage(eventID, " ItBeM ", now)
+	require.NoError(t, err)
+	assert.Equal(t, "itbem", tenant)
+
+	envelope := buildAnalyticsRollupEnvelope(eventID, tenant, now)
+	assert.Equal(t, envelope.JobID.String(), dedupeKey)
+	var decoded map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(body), &decoded))
+	assert.Equal(t, dedupeKey, decoded["job_id"])
+	assert.Equal(t, analyticsJobType, decoded["type"])
+}

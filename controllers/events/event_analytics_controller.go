@@ -7,7 +7,6 @@ import (
 	"events-stocks/dtos"
 	"events-stocks/internal/authz"
 	"events-stocks/models"
-	jobqueuerepository "events-stocks/repositories/jobqueuerepository"
 	"log/slog"
 	"math"
 	"net/http"
@@ -16,6 +15,7 @@ import (
 	"time"
 
 	eventsService "events-stocks/services/events"
+	outboxService "events-stocks/services/outbox"
 	"events-stocks/utils"
 	"github.com/gofrs/uuid"
 	"github.com/labstack/echo/v4"
@@ -274,8 +274,8 @@ func tenantCodeFromContext(c echo.Context) string {
 
 func requestAnalyticsRollup(eventID uuid.UUID, tenantCode string) {
 	go func() {
-		if _, err := jobqueuerepository.PublishAnalyticsRollup(eventID, tenantCode); err != nil {
-			slog.Warn("failed to publish analytics rollup", "event_id", eventID, "error", err)
+		if _, err := outboxService.EnqueueAnalyticsRollup(configuration.DB, eventID, tenantCode); err != nil {
+			slog.Warn("analytics rollup outbox enqueue failed", "event_id", eventID, "error", err)
 		}
 	}()
 }

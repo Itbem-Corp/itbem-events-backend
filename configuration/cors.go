@@ -38,8 +38,10 @@ func GetCORSConfig(cfg *models.Config) echo.MiddlewareFunc {
 			echo.HeaderContentType,
 			echo.HeaderAccept,
 			echo.HeaderAuthorization,
+			"Idempotency-Key",
 			utils.HeaderEventAccessToken,
 		},
+		ExposeHeaders: []string{"Idempotency-Replayed", "Idempotency-Status"},
 		AllowMethods: []string{
 			http.MethodGet,
 			http.MethodPost,
