@@ -19,6 +19,7 @@ import (
 	"events-stocks/controllers/health"
 	"events-stocks/controllers/invitations"
 	"events-stocks/controllers/moments"
+	productmetricsController "events-stocks/controllers/productmetrics"
 	"events-stocks/controllers/resources"
 	"events-stocks/controllers/sessions"
 	"events-stocks/controllers/users"
@@ -27,6 +28,7 @@ import (
 	"events-stocks/middleware/idempotency"
 	"events-stocks/middleware/token"
 	"events-stocks/models"
+	productmetricsService "events-stocks/services/productmetrics"
 	"events-stocks/utils"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
@@ -209,6 +211,7 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	// ==========================================
 	public := e.Group("/api")
 	public.Use(middleware.BodyLimit("2M")) // Protege endpoints públicos no-upload
+	public.Use(productmetricsService.CaptureTenant("eventiapp"))
 	public.Use(publicAccessCacheControl())
 	public.Use(publicRateLimiter())
 
@@ -231,6 +234,7 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	// 225M supports video uploads up to 200 MB plus multipart overhead.
 	uploadsGroup := e.Group("/api")
 	uploadsGroup.Use(middleware.BodyLimit("225M"))
+	uploadsGroup.Use(productmetricsService.CaptureTenant("eventiapp"))
 	uploadsGroup.Use(publicAccessCacheControl())
 	uploadsGroup.Use(uploadRateLimiter())
 	uploadsGroup.POST("/events/:identifier/moments", moments.CreatePublicMoment)
@@ -263,11 +267,13 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	protected.Use(token.Autenticacion(cfg))
 	protected.Use(protectedRateLimiter())
 	protected.Use(applicationaccess.Require)
+	protected.Use(productmetricsService.Capture)
 	protected.Use(idempotency.CriticalMutations)
 	protected.Use(audit.Mutations)
 
 	protected.GET("/session", sessions.GetSession)
 	protected.GET("/audit-logs", auditlogs.List)
+	protected.GET("/metrics/portfolio", productmetricsController.Portfolio)
 
 	// ── Events ────────────────────────────────
 	protected.GET("/events/all", events.ListEvents)

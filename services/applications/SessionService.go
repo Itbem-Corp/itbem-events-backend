@@ -287,9 +287,11 @@ func effectiveApplicationCapabilities(
 	if moduleEnabled(application.Modules, "home") {
 		capabilities.add("dashboard:view")
 	}
-
 	platformAuthority := application.AllowsPlatformAdmin && user != nil && user.IsPlatformAdmin()
 	if platformAuthority {
+		if moduleEnabled(application.Modules, "metrics") {
+			capabilities.add("metrics:view")
+		}
 		if moduleEnabled(application.Modules, "events") {
 			capabilities.add("events:view", "guests:manage", "checkin:run", "analytics:view")
 			if user.IsPrimaryRoot() {
@@ -323,6 +325,9 @@ func effectiveApplicationCapabilities(
 	if !moduleEnabled(application.Modules, "organizations") {
 		capabilities.remove("organizations:view", "organizations:manage")
 	}
+	if !moduleEnabled(application.Modules, "metrics") {
+		capabilities.remove("metrics:view")
+	}
 	return capabilities.values()
 }
 
@@ -333,14 +338,14 @@ func organizationCapabilities(role string) []string {
 	case "OWNER", "ADMIN":
 		capabilities.add(
 			"organizations:manage", "members:manage",
-			"events:view", "events:manage", "guests:manage", "checkin:run", "analytics:view",
+			"events:view", "events:manage", "guests:manage", "checkin:run", "analytics:view", "metrics:view",
 		)
 	case "EVENT_MANAGER", "EDITOR", "MEMBER":
-		capabilities.add("events:view", "events:manage", "guests:manage", "checkin:run", "analytics:view")
+		capabilities.add("events:view", "events:manage", "guests:manage", "checkin:run", "analytics:view", "metrics:view")
 	case "CHECKIN":
 		capabilities.add("events:view", "checkin:run")
 	case "ANALYST":
-		capabilities.add("events:view", "analytics:view")
+		capabilities.add("events:view", "analytics:view", "metrics:view")
 	case "GUEST":
 		capabilities.add("events:view")
 	}
@@ -354,6 +359,9 @@ func applicationOrganizationCapabilities(application models.Application, role st
 	}
 	if !moduleEnabled(application.Modules, "organizations") {
 		capabilities.remove("organizations:view", "organizations:manage")
+	}
+	if !moduleEnabled(application.Modules, "metrics") {
+		capabilities.remove("metrics:view")
 	}
 	return capabilities.values()
 }

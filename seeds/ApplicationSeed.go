@@ -12,17 +12,17 @@ import (
 var firstPartyApplications = []models.Application{
 	{
 		Code: "eventiapp", Name: "EventiApp", ProductLabel: "Event operations",
-		Modules:             models.StringList{"home", "events"},
+		Modules:             models.StringList{"home", "events", "metrics"},
 		AllowsPlatformAdmin: true, IsActive: true,
 	},
 	{
 		Code: "itbem", Name: "ITBEM", ProductLabel: "Platform control plane",
-		Modules:             models.StringList{"home", "users", "organizations"},
+		Modules:             models.StringList{"home", "users", "organizations", "metrics"},
 		AllowsPlatformAdmin: true, IsActive: true,
 	},
 	{
 		Code: "cafettonhouse", Name: "Cafetton House", ProductLabel: "Client operations",
-		Modules:             models.StringList{"home", "users", "organizations"},
+		Modules:             models.StringList{"home", "users", "organizations", "metrics"},
 		AllowsPlatformAdmin: false, IsActive: true,
 	},
 }

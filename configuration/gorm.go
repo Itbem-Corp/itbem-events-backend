@@ -52,6 +52,8 @@ var modelsWithoutSeed = []interface{}{
 	&models.ClientApplication{},
 	&models.ClientMemberApplication{},
 	&models.AuditLog{},
+	&models.ProductMetricDaily{},
+	&models.ProductActiveUserDaily{},
 	&models.IdempotencyRecord{},
 	&models.OutboxEvent{},
 	&models.EventPhrase{},

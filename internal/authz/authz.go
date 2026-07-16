@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"events-stocks/models"
+	"events-stocks/services/productmetrics"
 	"events-stocks/utils"
 
 	"github.com/gofrs/uuid"
@@ -325,6 +326,9 @@ func RequireEventAccess(c echo.Context, eventID uuid.UUID) (*models.User, *model
 	}
 	if err := EnsureEventAccess(user, event); err != nil {
 		return nil, nil, err
+	}
+	if event.ClientID != nil {
+		productmetrics.ScopeOrganization(c, *event.ClientID)
 	}
 	return user, event, nil
 }
