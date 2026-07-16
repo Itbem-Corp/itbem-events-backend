@@ -23,7 +23,7 @@ administrator/SSO session, never from one of the deploy roles.
 - `eventiapp-github-backend-production-role` is `CREATE_COMPLETE`. Its trust is
   exactly `repo:Itbem-Corp/itbem-events-backend:environment:production`, its
   session duration is capped at one hour, and its resource parameters are the
-  production `events-database` RDS instance and `i-07a11e90284b8d69f` EC2
+  production `eventiapp-private-database` RDS instance and `i-07a11e90284b8d69f` EC2
   instance with OS user `ec2-user`.
 - The Media `staging` and `prod` role stacks are also `CREATE_COMPLETE`, with
   exact environment trusts, isolated artifact buckets, and environment-bound

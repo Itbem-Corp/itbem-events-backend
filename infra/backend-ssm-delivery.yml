@@ -15,7 +15,7 @@ Parameters:
     Default: arn:aws:sns:us-east-2:752279076974:eventiapp-backend-alerts-prod
   DatabaseInstanceId:
     Type: String
-    Default: events-database
+    Default: eventiapp-private-database
 
 Resources:
   DeliveryArtifactBucket:

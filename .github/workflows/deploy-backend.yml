@@ -128,8 +128,11 @@ jobs:
       # the repository or persists a GitHub PAT in ~/.git-credentials.
       - name: Build deployment image
         env:
+          REVISION: ${{ needs.validate.outputs.revision }}
           IMAGE_TAG: ${{ env.IMAGE_REPOSITORY }}:sha-${{ needs.validate.outputs.revision }}
-        run: docker build --pull --tag "$IMAGE_TAG" .
+        run: |
+          docker build --pull --build-arg "SOURCE_REVISION=$REVISION" --tag "$IMAGE_TAG" .
+          [[ "$(docker image inspect --format '{{ index .Config.Labels \"org.opencontainers.image.revision\" }}' "$IMAGE_TAG")" == "$REVISION" ]]
 
       - name: Require the provisioned production deployment boundary
         env:
@@ -233,9 +236,26 @@ jobs:
           ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.us-east-2.amazonaws.com"
           ECR_URI="${ACCOUNT_ID}.dkr.ecr.us-east-2.amazonaws.com/${IMAGE_REPOSITORY}"
           aws ecr get-login-password --region us-east-2 | docker login --username AWS --password-stdin "$ECR_REGISTRY"
-          docker tag "$IMAGE_TAG" "$ECR_URI:sha-${REVISION}"
-          docker push "$ECR_URI:sha-${REVISION}"
-          DIGEST="$(aws ecr describe-images --repository-name "$IMAGE_REPOSITORY" --image-ids imageTag="sha-${REVISION}" --query 'imageDetails[0].imageDigest' --output text)"
+          DIGEST="$(aws ecr describe-images \
+            --repository-name "$IMAGE_REPOSITORY" \
+            --image-ids imageTag="sha-${REVISION}" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text 2>/dev/null || true)"
+          if [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            docker pull "$ECR_URI@$DIGEST" >/dev/null
+            REMOTE_REVISION="$(docker image inspect \
+              --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+              "$ECR_URI@$DIGEST")"
+            [[ "$REMOTE_REVISION" == "$REVISION" ]] || {
+              echo 'Existing immutable image does not identify the requested revision' >&2
+              exit 1
+            }
+            echo "Reusing verified immutable image $ECR_URI@$DIGEST"
+          else
+            docker tag "$IMAGE_TAG" "$ECR_URI:sha-${REVISION}"
+            docker push "$ECR_URI:sha-${REVISION}"
+            DIGEST="$(aws ecr describe-images --repository-name "$IMAGE_REPOSITORY" --image-ids imageTag="sha-${REVISION}" --query 'imageDetails[0].imageDigest' --output text)"
+          fi
           [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo "ECR did not return an immutable digest" >&2; exit 1; }
           echo "reference=${ECR_URI}@${DIGEST}" >> "$GITHUB_OUTPUT"
 
@@ -391,4 +411,6 @@ jobs:
         if: always()
         run: |
           rm -f "${RUNNER_TEMP}/eventiapp-backend-${GITHUB_RUN_ID}.env"
-          aws s3 rm "s3://eventiapp-backend-delivery-752279076974-us-east-2/releases/${GITHUB_RUN_ID}/" --recursive --only-show-errors || true
+          prefix="s3://eventiapp-backend-delivery-752279076974-us-east-2/releases/${GITHUB_RUN_ID}"
+          aws s3 rm "$prefix/runtime.env" --only-show-errors || true
+          aws s3 rm "$prefix/deploy.sh" --only-show-errors || true

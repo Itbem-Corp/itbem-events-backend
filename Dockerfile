@@ -19,6 +19,9 @@ RUN go build -v -trimpath -ldflags="-s -w" -o main ./cmd/api | tee /dev/stderr
 # ---------- Etapa de ejecución ----------
 FROM debian:bookworm-slim
 
+ARG SOURCE_REVISION
+LABEL org.opencontainers.image.revision=$SOURCE_REVISION
+
 RUN apt-get update && apt-get install -y \
     libvips curl ca-certificates && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
