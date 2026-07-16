@@ -383,11 +383,13 @@ jobs:
           aws s3 cp scripts/deploy/deploy-ec2-candidate.sh "s3://${DELIVERY_BUCKET}/${SCRIPT_KEY}" --only-show-errors
           remote_script="$(cat <<REMOTE
           set -Eeuo pipefail
-          install -d -m 700 "\$HOME/.eventiapp-deploy/${GITHUB_RUN_ID}"
-          aws s3 cp 's3://${DELIVERY_BUCKET}/${ENV_KEY}' "\$HOME/.eventiapp-deploy/${GITHUB_RUN_ID}/runtime.env" --only-show-errors
-          aws s3 cp 's3://${DELIVERY_BUCKET}/${SCRIPT_KEY}' "\$HOME/.eventiapp-deploy/${GITHUB_RUN_ID}/deploy.sh" --only-show-errors
-          chmod 600 "\$HOME/.eventiapp-deploy/${GITHUB_RUN_ID}/runtime.env"
-          chmod 700 "\$HOME/.eventiapp-deploy/${GITHUB_RUN_ID}/deploy.sh"
+          deploy_dir='/var/lib/eventiapp-deploy/${GITHUB_RUN_ID}'
+          install -d -m 700 "\$deploy_dir"
+          trap 'rm -rf "\$deploy_dir"' EXIT
+          aws s3 cp 's3://${DELIVERY_BUCKET}/${ENV_KEY}' "\$deploy_dir/runtime.env" --only-show-errors
+          aws s3 cp 's3://${DELIVERY_BUCKET}/${SCRIPT_KEY}' "\$deploy_dir/deploy.sh" --only-show-errors
+          chmod 600 "\$deploy_dir/runtime.env"
+          chmod 700 "\$deploy_dir/deploy.sh"
           command -v docker >/dev/null 2>&1 || sudo yum install -y docker
           command -v curl >/dev/null 2>&1 || sudo yum install -y curl
           command -v python3 >/dev/null 2>&1 || sudo yum install -y python3
@@ -395,7 +397,7 @@ jobs:
           ECR_REGISTRY="${IMAGE_REFERENCE%%/*}"
           aws ecr get-login-password --region us-east-2 | sudo docker login --username AWS --password-stdin "\$ECR_REGISTRY"
           sudo docker pull '${IMAGE_REFERENCE}'
-          IMAGE_TAG='${IMAGE_REFERENCE}' BACKEND_PORT='${BACKEND_PORT}' CANDIDATE_PORT='${BACKEND_CANDIDATE_PORT}' DEPLOY_ID='${GITHUB_RUN_ID}' ENV_FILE="\$HOME/.eventiapp-deploy/${GITHUB_RUN_ID}/runtime.env" bash "\$HOME/.eventiapp-deploy/${GITHUB_RUN_ID}/deploy.sh"
+          IMAGE_TAG='${IMAGE_REFERENCE}' BACKEND_PORT='${BACKEND_PORT}' CANDIDATE_PORT='${BACKEND_CANDIDATE_PORT}' DEPLOY_ID='${GITHUB_RUN_ID}' ENV_FILE="\$deploy_dir/runtime.env" bash "\$deploy_dir/deploy.sh"
           deployed_revision="\$(sudo docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' itbem-events-backend)"
           [[ "\$deployed_revision" == '${REVISION}' ]]
           printf 'deployed_revision=%s\n' "\$deployed_revision"
