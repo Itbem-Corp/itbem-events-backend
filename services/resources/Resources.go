@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"mime/multipart"
 	"net/http"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -536,23 +537,104 @@ func (rs *ResourceService) UploadAndCreateResource(
 func (rs *ResourceService) UploadEventCover(
 	file multipart.File,
 	header *multipart.FileHeader,
-) (string, error) {
+) (string, models.MediaVariants, error) {
 	optimized, filename, contentType, err := rs.sanitizeAndOptimizeUpload(file, header, "")
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if err := requireImageUploadContentType(contentType); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	storage, err := rs.requireStorage()
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	err = storage.UploadRawBytesSimple(optimized, filename, contentType, rs.UploadPath, rs.Bucket, rs.Provider)
 	if err != nil {
-		return "", fmt.Errorf("failed to upload cover image: %w", err)
+		return "", nil, fmt.Errorf("failed to upload cover image: %w", err)
 	}
-	return fmt.Sprintf("%s/%s", rs.UploadPath, filename), nil
+	mainPath := fmt.Sprintf("%s/%s", rs.UploadPath, filename)
+	sourceWidth, widthErr := rs.Optimizer.ImageWidth(optimized)
+	if widthErr != nil {
+		_ = rs.DeleteObjectByPath(mainPath)
+		return "", nil, widthErr
+	}
+	widths := responsiveCoverWidths(sourceWidth)
+	generated, variantErr := rs.Optimizer.ResponsiveWebPVariants(optimized, widths, 82)
+	if variantErr != nil {
+		_ = rs.DeleteObjectByPath(mainPath)
+		return "", nil, variantErr
+	}
+	stem := strings.TrimSuffix(filename, filepath.Ext(filename))
+	variants := make(models.MediaVariants, 0, len(generated))
+	for _, variant := range generated {
+		variantFilename := fmt.Sprintf("%s-%d.webp", stem, variant.Width)
+		if uploadErr := storage.UploadRawBytesSimple(variant.Bytes, variantFilename, "image/webp", rs.UploadPath, rs.Bucket, rs.Provider); uploadErr != nil {
+			_ = rs.DeleteObjectByPath(mainPath)
+			for _, uploaded := range variants {
+				_ = rs.DeleteObjectByPath(uploaded.ObjectKey)
+			}
+			return "", nil, fmt.Errorf("failed to upload cover variant: %w", uploadErr)
+		}
+		variants = append(variants, models.MediaVariant{
+			ObjectKey: fmt.Sprintf("%s/%s", rs.UploadPath, variantFilename),
+			Width:     variant.Width, Format: "webp", Bytes: int64(len(variant.Bytes)),
+		})
+	}
+	return mainPath, variants, nil
+}
+
+// UploadRawEventCover performs only bounded validation and storage I/O. CPU
+// intensive decode/resize work is delegated to the image queue so API latency
+// is independent of source dimensions and image format.
+func (rs *ResourceService) UploadRawEventCover(file multipart.File, header *multipart.FileHeader, eventID string) (string, string, int64, error) {
+	contentType, err := detectUploadContentType(file, header)
+	if err != nil {
+		return "", "", 0, err
+	}
+	if err := requireImageUploadContentType(contentType); err != nil {
+		return "", "", 0, err
+	}
+	if header.Size > MaxFileSizeBytes {
+		return "", "", 0, services.ValidationError{Msg: fmt.Sprintf("file size exceeds %d MB", MaxFileSizeMB)}
+	}
+	data, err := io.ReadAll(io.LimitReader(file, MaxFileSizeBytes+1))
+	if err != nil {
+		return "", "", 0, fmt.Errorf("read cover upload: %w", err)
+	}
+	if len(data) == 0 {
+		return "", "", 0, services.ValidationError{Msg: "uploaded file is empty"}
+	}
+	if len(data) > MaxFileSizeBytes {
+		return "", "", 0, services.ValidationError{Msg: fmt.Sprintf("file size exceeds %d MB", MaxFileSizeMB)}
+	}
+	u, _ := uuid.NewV4()
+	filename := updateFilenameExtension(u.String(), contentType)
+	folder := fmt.Sprintf("%s/%s/raw", strings.Trim(rs.UploadPath, "/"), eventID)
+	storage, err := rs.requireStorage()
+	if err != nil {
+		return "", "", 0, err
+	}
+	if err := storage.UploadRawBytesSimple(data, filename, contentType, folder, rs.Bucket, rs.Provider); err != nil {
+		return "", "", 0, fmt.Errorf("failed to upload raw cover image: %w", err)
+	}
+	return fmt.Sprintf("%s/%s", folder, filename), contentType, int64(len(data)), nil
+}
+
+func responsiveCoverWidths(sourceWidth int) []int {
+	if sourceWidth <= 640 {
+		return nil
+	}
+	widths := make([]int, 0, 3)
+	for _, width := range []int{640, 1280, 1920} {
+		if width < sourceWidth {
+			widths = append(widths, width)
+		}
+	}
+	if sourceWidth <= 1920 {
+		widths = append(widths, sourceWidth)
+	}
+	return widths
 }
 
 // UploadRawToMomentsFolder uploads a guest moment file to S3 WITHOUT optimization.

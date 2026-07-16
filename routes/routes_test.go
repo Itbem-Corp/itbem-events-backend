@@ -54,6 +54,7 @@ func TestConfigurarRutasRegistersFrontendContractRoutes(t *testing.T) {
 		"POST /api/invitations/rsvp",
 		"GET /api/events/:identifier/moments",
 		"POST /api/events/:identifier/moments",
+		"POST /api/events/:identifier/performance",
 		"POST /api/events/:identifier/moments/upload-url",
 		"POST /api/events/:identifier/moments/confirm",
 		"POST /api/events/:identifier/moments/shared",

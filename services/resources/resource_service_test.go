@@ -214,6 +214,12 @@ func (m *mockObjectStorage) GetFileStream(filename, folder, bucket, provider str
 
 var _ ports.ObjectStorageRepository = (*mockObjectStorage)(nil)
 
+func TestResponsiveCoverWidthsAvoidsUpscalingAndIncludesTrueTerminalWidth(t *testing.T) {
+	assert.Empty(t, responsiveCoverWidths(640))
+	assert.Equal(t, []int{640, 900}, responsiveCoverWidths(900))
+	assert.Equal(t, []int{640, 1280, 1920}, responsiveCoverWidths(2400))
+}
+
 type metadataObjectStorage struct {
 	*mockObjectStorage
 	metadata    ports.ObjectStorageMetadata

@@ -261,44 +261,52 @@ func decodeOptionalNonNegativeIntPointer(raw json.RawMessage, dest **int) error 
 }
 
 type EventResponse struct {
-	ID                     uuid.UUID              `json:"id"`
-	ClientID               *uuid.UUID             `json:"client_id"`
-	Client                 *ClientSummaryResponse `json:"client,omitempty"`
-	Name                   string                 `json:"name"`
-	Identifier             string                 `json:"identifier"`
-	Description            string                 `json:"description"`
-	CoverImageURL          string                 `json:"cover_image_url"`
-	CoverImageURL2         string                 `json:"cover_image_url2"`
-	CoverViewURL           string                 `json:"cover_view_url,omitempty"`
-	CoverViewURL2          string                 `json:"cover_view_url2,omitempty"`
-	CoverViewURLExpiresAt  *time.Time             `json:"cover_view_url_expires_at,omitempty"`
-	CoverViewURL2ExpiresAt *time.Time             `json:"cover_view_url2_expires_at,omitempty"`
-	ViewURL                string                 `json:"view_url,omitempty"`
-	ViewURLExpiresAt       *time.Time             `json:"view_url_expires_at,omitempty"`
-	CustomDomain           string                 `json:"custom_domain"`
-	Address                string                 `json:"address"`
-	SecondAddress          string                 `json:"second_address"`
-	MusicURL               string                 `json:"music_url"`
-	EventDateTime          time.Time              `json:"event_date_time"`
-	Timezone               string                 `json:"timezone"`
-	Language               string                 `json:"language"`
-	EventTypeID            uuid.UUID              `json:"event_type_id"`
-	EventType              *EventTypeResponse     `json:"event_type,omitempty"`
-	EventConfig            *EventConfigResponse   `json:"event_config,omitempty"`
-	Config                 *EventConfigResponse   `json:"config,omitempty"`
-	OrganizerName          string                 `json:"organizer_name"`
-	OrganizerEmail         string                 `json:"organizer_email"`
-	OrganizerPhone         string                 `json:"organizer_phone"`
-	MaxGuests              *int                   `json:"max_guests"`
-	AllowGuestAccess       bool                   `json:"allow_guest_access"`
-	SlugLocked             bool                   `json:"slug_locked"`
-	IsActive               bool                   `json:"is_active"`
-	PendingMomentCount     int64                  `json:"pending_moment_count"`
-	GuestSummary           *GuestSummary          `json:"guest_summary,omitempty"`
-	GuestShareSummary      *GuestShareSummary     `json:"guest_share_summary,omitempty"`
-	EventSections          []EventSectionResponse `json:"event_sections"`
-	CreatedAt              time.Time              `json:"created_at"`
-	UpdatedAt              time.Time              `json:"updated_at"`
+	ID                           uuid.UUID              `json:"id"`
+	ClientID                     *uuid.UUID             `json:"client_id"`
+	Client                       *ClientSummaryResponse `json:"client,omitempty"`
+	Name                         string                 `json:"name"`
+	Identifier                   string                 `json:"identifier"`
+	Description                  string                 `json:"description"`
+	CoverImageURL                string                 `json:"cover_image_url"`
+	CoverImageURL2               string                 `json:"cover_image_url2"`
+	CoverViewURL                 string                 `json:"cover_view_url,omitempty"`
+	CoverViewURL2                string                 `json:"cover_view_url2,omitempty"`
+	CoverViewURLExpiresAt        *time.Time             `json:"cover_view_url_expires_at,omitempty"`
+	CoverViewURL2ExpiresAt       *time.Time             `json:"cover_view_url2_expires_at,omitempty"`
+	ViewURL                      string                 `json:"view_url,omitempty"`
+	ViewURLExpiresAt             *time.Time             `json:"view_url_expires_at,omitempty"`
+	CoverVariants                []PublicMediaVariant   `json:"cover_variants,omitempty"`
+	CoverPendingURL              string                 `json:"cover_pending_url,omitempty"`
+	CoverPendingViewURL          string                 `json:"cover_pending_view_url,omitempty"`
+	CoverPendingViewURLExpiresAt *time.Time             `json:"cover_pending_view_url_expires_at,omitempty"`
+	CoverProcessingStatus        string                 `json:"cover_processing_status,omitempty"`
+	CoverProcessingJobID         string                 `json:"cover_processing_job_id,omitempty"`
+	CoverProcessingGeneration    int64                  `json:"cover_processing_generation,omitempty"`
+	CoverProcessingError         string                 `json:"cover_processing_error,omitempty"`
+	CustomDomain                 string                 `json:"custom_domain"`
+	Address                      string                 `json:"address"`
+	SecondAddress                string                 `json:"second_address"`
+	MusicURL                     string                 `json:"music_url"`
+	EventDateTime                time.Time              `json:"event_date_time"`
+	Timezone                     string                 `json:"timezone"`
+	Language                     string                 `json:"language"`
+	EventTypeID                  uuid.UUID              `json:"event_type_id"`
+	EventType                    *EventTypeResponse     `json:"event_type,omitempty"`
+	EventConfig                  *EventConfigResponse   `json:"event_config,omitempty"`
+	Config                       *EventConfigResponse   `json:"config,omitempty"`
+	OrganizerName                string                 `json:"organizer_name"`
+	OrganizerEmail               string                 `json:"organizer_email"`
+	OrganizerPhone               string                 `json:"organizer_phone"`
+	MaxGuests                    *int                   `json:"max_guests"`
+	AllowGuestAccess             bool                   `json:"allow_guest_access"`
+	SlugLocked                   bool                   `json:"slug_locked"`
+	IsActive                     bool                   `json:"is_active"`
+	PendingMomentCount           int64                  `json:"pending_moment_count"`
+	GuestSummary                 *GuestSummary          `json:"guest_summary,omitempty"`
+	GuestShareSummary            *GuestShareSummary     `json:"guest_share_summary,omitempty"`
+	EventSections                []EventSectionResponse `json:"event_sections"`
+	CreatedAt                    time.Time              `json:"created_at"`
+	UpdatedAt                    time.Time              `json:"updated_at"`
 }
 
 type StudioWorkspaceResponse struct {
@@ -363,31 +371,37 @@ func NewEventResponse(event *models.Event) EventResponse {
 	}
 
 	response := EventResponse{
-		ID:                 event.ID,
-		ClientID:           event.ClientID,
-		Name:               event.Name,
-		Identifier:         event.Identifier,
-		Description:        event.Description,
-		CoverImageURL:      event.CoverImageURL,
-		CoverImageURL2:     event.CoverImageURL2,
-		CustomDomain:       event.CustomDomain,
-		Address:            event.Address,
-		SecondAddress:      event.SecondAddress,
-		MusicURL:           event.MusicUrl,
-		EventDateTime:      event.EventDateTime,
-		Timezone:           event.Timezone,
-		Language:           event.Language,
-		EventTypeID:        event.EventTypeID,
-		OrganizerName:      event.OrganizerName,
-		OrganizerEmail:     event.OrganizerEmail,
-		OrganizerPhone:     event.OrganizerPhone,
-		MaxGuests:          event.MaxGuests,
-		AllowGuestAccess:   event.AllowGuestAccess,
-		SlugLocked:         event.SlugLocked,
-		IsActive:           event.IsActive,
-		PendingMomentCount: event.PendingMomentCount,
-		CreatedAt:          event.CreatedAt,
-		UpdatedAt:          event.UpdatedAt,
+		ID:                        event.ID,
+		ClientID:                  event.ClientID,
+		Name:                      event.Name,
+		Identifier:                event.Identifier,
+		Description:               event.Description,
+		CoverImageURL:             event.CoverImageURL,
+		CoverImageURL2:            event.CoverImageURL2,
+		CoverVariants:             NewPublicMediaVariants(event.CoverVariants),
+		CoverPendingURL:           event.CoverPendingURL,
+		CoverProcessingStatus:     event.CoverProcessingStatus,
+		CoverProcessingJobID:      event.CoverProcessingJobID,
+		CoverProcessingGeneration: event.CoverProcessingGeneration,
+		CoverProcessingError:      event.CoverProcessingError,
+		CustomDomain:              event.CustomDomain,
+		Address:                   event.Address,
+		SecondAddress:             event.SecondAddress,
+		MusicURL:                  event.MusicUrl,
+		EventDateTime:             event.EventDateTime,
+		Timezone:                  event.Timezone,
+		Language:                  event.Language,
+		EventTypeID:               event.EventTypeID,
+		OrganizerName:             event.OrganizerName,
+		OrganizerEmail:            event.OrganizerEmail,
+		OrganizerPhone:            event.OrganizerPhone,
+		MaxGuests:                 event.MaxGuests,
+		AllowGuestAccess:          event.AllowGuestAccess,
+		SlugLocked:                event.SlugLocked,
+		IsActive:                  event.IsActive,
+		PendingMomentCount:        event.PendingMomentCount,
+		CreatedAt:                 event.CreatedAt,
+		UpdatedAt:                 event.UpdatedAt,
 	}
 
 	if event.Client != nil {

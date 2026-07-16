@@ -44,19 +44,32 @@ type GuestAnalyticsSummary struct {
 }
 
 type EventAnalyticsResponse struct {
-	ID             uuid.UUID             `json:"id"`
-	EventID        uuid.UUID             `json:"event_id"`
-	Views          int                   `json:"views"`
-	MomentComments int                   `json:"moment_comments"`
-	MomentUploads  int                   `json:"moment_uploads"`
-	MomentTotal    int                   `json:"moment_total"`
-	MomentApproved int                   `json:"moment_approved"`
-	MomentPending  int                   `json:"moment_pending"`
-	RSVPConfirmed  int                   `json:"rsvp_confirmed"`
-	RSVPDeclined   int                   `json:"rsvp_declined"`
-	CreatedAt      time.Time             `json:"created_at"`
-	UpdatedAt      time.Time             `json:"updated_at"`
-	Guests         GuestAnalyticsSummary `json:"guests"`
+	ID             uuid.UUID                  `json:"id"`
+	EventID        uuid.UUID                  `json:"event_id"`
+	Views          int                        `json:"views"`
+	MomentComments int                        `json:"moment_comments"`
+	MomentUploads  int                        `json:"moment_uploads"`
+	MomentTotal    int                        `json:"moment_total"`
+	MomentApproved int                        `json:"moment_approved"`
+	MomentPending  int                        `json:"moment_pending"`
+	RSVPConfirmed  int                        `json:"rsvp_confirmed"`
+	RSVPDeclined   int                        `json:"rsvp_declined"`
+	CreatedAt      time.Time                  `json:"created_at"`
+	UpdatedAt      time.Time                  `json:"updated_at"`
+	Guests         GuestAnalyticsSummary      `json:"guests"`
+	Performance    []PerformanceMetricSummary `json:"performance"`
+}
+
+type PerformanceMetricSummary struct {
+	Route       string  `json:"route"`
+	Metric      string  `json:"metric"`
+	SampleCount int64   `json:"sample_count"`
+	Average     float64 `json:"average"`
+	Minimum     float64 `json:"minimum"`
+	Maximum     float64 `json:"maximum"`
+	P75         float64 `json:"p75"`
+	P95         float64 `json:"p95"`
+	Rating      string  `json:"rating,omitempty"`
 }
 
 type EventViewTrackingResponse struct {

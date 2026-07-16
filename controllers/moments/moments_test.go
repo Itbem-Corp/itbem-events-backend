@@ -488,7 +488,7 @@ func (m *casCallbackMomentRepo) BeginMediaProcessingJob(uuid.UUID, uuid.UUID, st
 	return 0, nil
 }
 
-func (m *casCallbackMomentRepo) ApplyMediaProcessingUpdate(uuid.UUID, uuid.UUID, string, int64, []string, string, string, string, string, int64, int64, int64) (bool, error) {
+func (m *casCallbackMomentRepo) ApplyMediaProcessingUpdate(uuid.UUID, uuid.UUID, string, int64, []string, string, string, string, string, int64, int64, int64, models.MediaVariants) (bool, error) {
 	return true, nil
 }
 

@@ -215,6 +215,7 @@ func buildPageSpecFromEventWithConfig(event *models.Event, deps buildSpecDeps, c
 		EventID:        event.ID.String(),
 		Identifier:     event.Identifier,
 		CoverImageURL:  event.CoverImageURL,
+		CoverVariants:  dtos.NewPublicMediaVariants(event.CoverVariants),
 		EventDateTime:  eventDateTime,
 		Address:        event.Address,
 		SecondAddress:  event.SecondAddress,

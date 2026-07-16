@@ -215,6 +215,7 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	public.GET("/events/:identifier/page-spec", events.GetPageSpecByIdentifier) // SDUI: PageSpec por identifier (vista previa)
 	public.GET("/events/:key", events.GetEvents)
 	public.POST("/events/:identifier/view", events.TrackView)                  // Incrementa contador de vistas
+	public.POST("/events/:identifier/performance", events.TrackPerformance)    // RUM agregado, sin PII
 	public.POST("/events/:identifier/verify-access", events.VerifyEventAccess) // Verifica contraseña
 
 	// Public moments: read-only wall endpoint with the public body limit/rate limit.
@@ -269,6 +270,7 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	protected.POST("/events/:id/duplicate", events.DuplicateEvent)
 	protected.POST("/events/:id/preview-token", events.IssuePreviewToken)
 	protected.POST("/events/:id/cover", events.UploadEventCover)
+	protected.POST("/events/covers/backfill", events.BackfillEventCovers)
 	protected.DELETE("/events/:id/cover", events.DeleteEventCover)
 	protected.POST("/events/:id/repair", events.RepairEvent)
 
@@ -332,6 +334,7 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	protected.GET("/moments/reoptimizing", moments.ListReoptimizingMoments)
 	protected.PATCH("/moments/reorder", moments.ReorderMoments)
 	protected.POST("/moments/batch/reoptimize", moments.BatchReoptimizeMoments)
+	protected.POST("/moments/backfill", moments.BackfillMomentVariants)
 	protected.DELETE("/moments/bulk", moments.BulkDeleteMoments)
 	protected.GET("/moments/:id", moments.GetMoment)
 	protected.POST("/moments", moments.CreateMoment)
@@ -395,4 +398,5 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	internal := e.Group("/api")
 	internal.Use(middleware.BodyLimit("2M"))
 	internal.PUT("/moments/:id/content", moments.UpdateMomentContent) // Lambda callback: processing done
+	internal.PUT("/events/:id/cover/content", events.UpdateEventCoverContent)
 }

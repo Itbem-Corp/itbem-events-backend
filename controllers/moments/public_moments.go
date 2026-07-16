@@ -571,6 +571,14 @@ func newPublicMomentResponses(moments []models.Moment) []dtos.PublicMoment {
 			items[i].ThumbnailViewURL = thumbnailViewURL
 			items[i].ThumbnailViewURLExpiresAt = expiresAt
 		}
+		for variantIndex := range items[i].MediaVariants {
+			variant := &items[i].MediaVariants[variantIndex]
+			variant.URL = canonicalMomentStoragePath(publicResSvc, variant.URL)
+			if viewURL, expiresAt := presignMomentURLWithExpiry(publicResSvc, variant.URL); strings.TrimSpace(viewURL) != "" {
+				variant.ViewURL = viewURL
+				variant.ExpiresAt = expiresAt
+			}
+		}
 	}
 	return items
 }

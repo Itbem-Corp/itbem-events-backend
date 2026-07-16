@@ -1,7 +1,9 @@
 package events
 
 import (
+	"context"
 	"errors"
+	"events-stocks/configuration"
 	"events-stocks/controllers/publicaccess"
 	"events-stocks/dtos"
 	"events-stocks/internal/authz"
@@ -9,6 +11,7 @@ import (
 	"events-stocks/internal/previewtoken"
 	"events-stocks/internal/publicaccessproof"
 	"events-stocks/models"
+	jobqueuerepository "events-stocks/repositories/jobqueuerepository"
 	"events-stocks/repositories/phraserepository"
 	eventsService "events-stocks/services/events"
 	guestsService "events-stocks/services/guests"
@@ -17,6 +20,10 @@ import (
 	"events-stocks/utils"
 	"github.com/gofrs/uuid"
 	"github.com/labstack/echo/v4"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+	"log/slog"
+	"math"
 	"math/rand"
 	"net/http"
 	"strconv"
@@ -24,6 +31,38 @@ import (
 	"sync"
 	"time"
 )
+
+var publicPerformanceMetrics = map[string]bool{
+	"lcp": true, "inp": true, "cls": true, "page_spec_ms": true,
+	"photo_visible_ms": true, "rsvp_submit_ms": true,
+}
+var publicPerformanceRoutes = map[string]bool{
+	"event": true, "moments": true, "rsvp": true, "upload": true, "tv": true,
+}
+
+var performanceWindowCleanup struct {
+	sync.Mutex
+	last time.Time
+}
+
+var publicPerformanceBucketBounds = map[string][]float64{
+	"cls":              {0.05, 0.1, 0.15, 0.25, 0.4, 0.75, 1, 2, 10, 600000},
+	"inp":              {100, 200, 300, 500, 800, 1200, 2500, 10000, 600000},
+	"lcp":              {500, 1000, 1800, 2500, 4000, 6000, 10000, 30000, 600000},
+	"page_spec_ms":     {100, 250, 500, 800, 1200, 1800, 2500, 4000, 10000, 600000},
+	"photo_visible_ms": {250, 500, 1000, 1800, 2500, 4000, 6000, 10000, 30000, 600000},
+	"rsvp_submit_ms":   {100, 250, 500, 800, 1200, 1800, 2500, 4000, 10000, 600000},
+}
+
+func performanceBucket(metric string, value float64) (int, float64) {
+	bounds := publicPerformanceBucketBounds[metric]
+	for index, upper := range bounds {
+		if value <= upper {
+			return index, upper
+		}
+	}
+	return len(bounds) - 1, bounds[len(bounds)-1]
+}
 
 var (
 	eventSvc             *eventsService.EventService
@@ -79,8 +118,12 @@ func eventResponseWithCoverView(event *models.Event) dtos.EventResponse {
 	}
 	response.CoverViewURL, response.CoverViewURLExpiresAt = coverViewURLWithExpiry(event.CoverImageURL)
 	response.CoverViewURL2, response.CoverViewURL2ExpiresAt = coverViewURLWithExpiry(event.CoverImageURL2)
+	response.CoverPendingViewURL, response.CoverPendingViewURLExpiresAt = coverViewURLWithExpiry(event.CoverPendingURL)
 	response.ViewURL = response.CoverViewURL
 	response.ViewURLExpiresAt = response.CoverViewURLExpiresAt
+	for i := range response.CoverVariants {
+		response.CoverVariants[i].ViewURL, response.CoverVariants[i].ExpiresAt = coverViewURLWithExpiry(response.CoverVariants[i].URL)
+	}
 	return response
 }
 
@@ -98,7 +141,11 @@ func withPageSpecCoverViewURL(spec *dtos.PageSpec) *dtos.PageSpec {
 	}
 	response := *spec
 	response.Sections = append(make([]dtos.PageSpecSection, 0, len(spec.Sections)), spec.Sections...)
+	response.Meta.CoverVariants = append([]dtos.PublicMediaVariant(nil), spec.Meta.CoverVariants...)
 	response.Meta.CoverViewURL, response.Meta.CoverViewURLExpiresAt = coverViewURLWithExpiry(spec.Meta.CoverImageURL)
+	for i := range response.Meta.CoverVariants {
+		response.Meta.CoverVariants[i].ViewURL, response.Meta.CoverVariants[i].ExpiresAt = coverViewURLWithExpiry(response.Meta.CoverVariants[i].URL)
+	}
 	response.Meta.Theme = withPageSpecThemeFontViewURLs(spec.Meta.Theme)
 	return &response
 }
@@ -601,6 +648,126 @@ func TrackView(c echo.Context) error {
 	go eventsService.IncrementAnalytics(event.ID, "views")
 
 	return utils.Success(c, http.StatusOK, "View tracked", dtos.EventViewTrackingResponse{Tracked: true})
+}
+
+// POST /api/events/:identifier/performance
+// Accepts aggregate-only RUM samples. Access rules mirror view tracking and no
+// request metadata or credential is persisted.
+func TrackPerformance(c echo.Context) error {
+	identifier := strings.TrimSpace(c.Param("identifier"))
+	if identifier == "" {
+		return utils.Error(c, http.StatusBadRequest, "Missing identifier", "")
+	}
+	var body struct {
+		Route   string `json:"route"`
+		Metrics []struct {
+			Name  string  `json:"name"`
+			Value float64 `json:"value"`
+		} `json:"metrics"`
+	}
+	if err := c.Bind(&body); err != nil || len(body.Metrics) == 0 || len(body.Metrics) > 12 {
+		return utils.Error(c, http.StatusBadRequest, "Invalid performance payload", "")
+	}
+	body.Route = strings.ToLower(strings.TrimSpace(body.Route))
+	if !publicPerformanceRoutes[body.Route] {
+		return utils.Error(c, http.StatusBadRequest, "Invalid performance route", "")
+	}
+	event, err := eventSvc.GetEventByIdentifier(identifier)
+	if err != nil || event == nil {
+		return utils.Success(c, http.StatusAccepted, "Performance ignored", map[string]bool{"accepted": false})
+	}
+	allowed, err := allowPublicViewTracking(event, utils.PublicInvitationQueryToken(c), utils.PublicEventAccessToken(c))
+	if err != nil || !allowed {
+		return utils.Success(c, http.StatusAccepted, "Performance ignored", map[string]bool{"accepted": false})
+	}
+	type sample struct {
+		name  string
+		value float64
+	}
+	valid := make([]sample, 0, len(body.Metrics))
+	for _, metric := range body.Metrics {
+		name := strings.ToLower(strings.TrimSpace(metric.Name))
+		if !publicPerformanceMetrics[name] || math.IsNaN(metric.Value) || math.IsInf(metric.Value, 0) || metric.Value < 0 || metric.Value > 600000 {
+			continue
+		}
+		valid = append(valid, sample{name: name, value: metric.Value})
+	}
+	if len(valid) == 0 {
+		return utils.Error(c, http.StatusBadRequest, "No valid performance metrics", "")
+	}
+	go func(eventID uuid.UUID, route string, samples []sample) {
+		if configuration.DB == nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		bucket := time.Now().UTC().Truncate(24 * time.Hour)
+		windowStart := time.Now().UTC().Truncate(5 * time.Minute)
+		persisted := false
+		for _, metric := range samples {
+			row := models.EventPerformanceDaily{EventID: eventID, BucketDate: bucket, Route: route, Metric: metric.name, SampleCount: 1, ValueSum: metric.value, ValueMin: metric.value, ValueMax: metric.value}
+			bucketIndex, upperBound := performanceBucket(metric.name, metric.value)
+			histogram := models.EventPerformanceBucketDaily{EventID: eventID, BucketDate: bucket, Route: route, Metric: metric.name, BucketIndex: bucketIndex, UpperBound: upperBound, SampleCount: 1}
+			window := models.PublicPerformanceWindowBucket{BucketStart: windowStart, Route: route, Metric: metric.name, BucketIndex: bucketIndex, UpperBound: upperBound, SampleCount: 1}
+			if err := configuration.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+				if createErr := tx.Clauses(clause.OnConflict{
+					Columns: []clause.Column{{Name: "event_id"}, {Name: "bucket_date"}, {Name: "route"}, {Name: "metric"}},
+					DoUpdates: clause.Assignments(map[string]interface{}{
+						"sample_count": gorm.Expr("event_performance_dailies.sample_count + 1"),
+						"value_sum":    gorm.Expr("event_performance_dailies.value_sum + EXCLUDED.value_sum"),
+						"value_min":    gorm.Expr("LEAST(event_performance_dailies.value_min, EXCLUDED.value_min)"),
+						"value_max":    gorm.Expr("GREATEST(event_performance_dailies.value_max, EXCLUDED.value_max)"),
+						"updated_at":   gorm.Expr("NOW()"),
+					}),
+				}).Create(&row).Error; createErr != nil {
+					return createErr
+				}
+				if err := tx.Clauses(clause.OnConflict{
+					Columns: []clause.Column{{Name: "event_id"}, {Name: "bucket_date"}, {Name: "route"}, {Name: "metric"}, {Name: "bucket_index"}},
+					DoUpdates: clause.Assignments(map[string]interface{}{
+						"sample_count": gorm.Expr("event_performance_bucket_dailies.sample_count + 1"),
+						"updated_at":   gorm.Expr("NOW()"),
+					}),
+				}).Create(&histogram).Error; err != nil {
+					return err
+				}
+				return tx.Clauses(clause.OnConflict{
+					Columns: []clause.Column{{Name: "bucket_start"}, {Name: "route"}, {Name: "metric"}, {Name: "bucket_index"}},
+					DoUpdates: clause.Assignments(map[string]interface{}{
+						"sample_count": gorm.Expr("public_performance_window_buckets.sample_count + 1"),
+						"updated_at":   gorm.Expr("NOW()"),
+					}),
+				}).Create(&window).Error
+			}); err != nil {
+				slog.Warn("failed to persist public performance aggregate", "event_id", eventID, "route", route, "metric", metric.name, "error", err)
+			} else {
+				persisted = true
+			}
+		}
+		if persisted {
+			if _, err := jobqueuerepository.PublishPerformanceRollup(); err != nil {
+				slog.Warn("failed to publish performance rollup", "error", err)
+			}
+			cleanupPublicPerformanceWindows()
+		}
+	}(event.ID, body.Route, valid)
+	return utils.Success(c, http.StatusAccepted, "Performance accepted", map[string]bool{"accepted": true})
+}
+
+func cleanupPublicPerformanceWindows() {
+	now := time.Now().UTC()
+	performanceWindowCleanup.Lock()
+	if now.Sub(performanceWindowCleanup.last) < time.Hour {
+		performanceWindowCleanup.Unlock()
+		return
+	}
+	performanceWindowCleanup.last = now
+	performanceWindowCleanup.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := configuration.DB.WithContext(ctx).Where("bucket_start < ?", now.Add(-48*time.Hour)).Delete(&models.PublicPerformanceWindowBucket{}).Error; err != nil {
+		slog.Warn("failed to prune public performance windows", "error", err)
+	}
 }
 
 // POST /api/events/:identifier/verify-access

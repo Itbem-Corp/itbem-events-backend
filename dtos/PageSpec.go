@@ -43,25 +43,26 @@ type PageSpecTheme struct {
 
 // PageSpecMeta holds event-level metadata for the SDUI page spec.
 type PageSpecMeta struct {
-	PageTitle              string           `json:"pageTitle"`
-	MusicUrl               *string          `json:"musicUrl,omitempty"`
-	Contact                *PageSpecContact `json:"contact,omitempty"`
-	EventID                string           `json:"eventId,omitempty"`
-	Identifier             string           `json:"identifier,omitempty"`
-	CoverImageURL          string           `json:"coverImageUrl,omitempty"`
-	CoverImageURLExpiresAt *time.Time       `json:"coverImageUrlExpiresAt,omitempty"`
-	CoverViewURL           string           `json:"coverViewUrl,omitempty"`
-	CoverViewURLExpiresAt  *time.Time       `json:"coverViewUrlExpiresAt,omitempty"`
-	EventDateTime          *time.Time       `json:"eventDateTime,omitempty"`
-	Address                string           `json:"address,omitempty"`
-	SecondAddress          string           `json:"secondAddress,omitempty"`
-	Timezone               string           `json:"timezone,omitempty"`
-	Language               string           `json:"language,omitempty"`
-	EventType              string           `json:"eventType,omitempty"`
-	ContentVersion         string           `json:"contentVersion,omitempty"`
-	Access                 *PageSpecAccess  `json:"access,omitempty"`
-	FooterVisible          bool             `json:"footerVisible"`
-	Theme                  *PageSpecTheme   `json:"theme,omitempty"`
+	PageTitle              string               `json:"pageTitle"`
+	MusicUrl               *string              `json:"musicUrl,omitempty"`
+	Contact                *PageSpecContact     `json:"contact,omitempty"`
+	EventID                string               `json:"eventId,omitempty"`
+	Identifier             string               `json:"identifier,omitempty"`
+	CoverImageURL          string               `json:"coverImageUrl,omitempty"`
+	CoverImageURLExpiresAt *time.Time           `json:"coverImageUrlExpiresAt,omitempty"`
+	CoverViewURL           string               `json:"coverViewUrl,omitempty"`
+	CoverViewURLExpiresAt  *time.Time           `json:"coverViewUrlExpiresAt,omitempty"`
+	CoverVariants          []PublicMediaVariant `json:"coverVariants,omitempty"`
+	EventDateTime          *time.Time           `json:"eventDateTime,omitempty"`
+	Address                string               `json:"address,omitempty"`
+	SecondAddress          string               `json:"secondAddress,omitempty"`
+	Timezone               string               `json:"timezone,omitempty"`
+	Language               string               `json:"language,omitempty"`
+	EventType              string               `json:"eventType,omitempty"`
+	ContentVersion         string               `json:"contentVersion,omitempty"`
+	Access                 *PageSpecAccess      `json:"access,omitempty"`
+	FooterVisible          bool                 `json:"footerVisible"`
+	Theme                  *PageSpecTheme       `json:"theme,omitempty"`
 }
 
 // PageSpecSection describes one section of the page in SDUI format.

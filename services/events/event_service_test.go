@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"events-stocks/dtos"
 	"events-stocks/models"
 	"events-stocks/services/ports"
 	"events-stocks/utils"
+	"fmt"
 	"testing"
 	"time"
 
@@ -70,19 +72,22 @@ func eventCachePatternRecorder(t *testing.T, called *bool) *mockCacheRepo {
 // ---------------------------------------------------------------------------
 
 type mockEventsRepo struct {
-	CreateEventFunc           func(event *models.Event) error
-	UpdateEventFunc           func(event *models.Event) error
-	DeleteEventFunc           func(id uuid.UUID) error
-	ListEventsFunc            func(page int, pageSize int, name string) ([]models.Event, error)
-	GetEventByIDFunc          func(id uuid.UUID) (string, error)
-	GetEventByIDRawFunc       func(id uuid.UUID) (*models.Event, error)
-	GetEventByIDForSpecFunc   func(id uuid.UUID) (*models.Event, error)
-	GetEventByIdentifierFunc  func(identifier string) (*models.Event, error)
-	GetEventsByClientIDFunc   func(clientID uuid.UUID) ([]models.Event, error)
-	GetAllEventsDashboardFunc func() ([]models.Event, error)
-	GetEventsForUserFunc      func(userID uuid.UUID) ([]models.Event, error)
-	UpdateEventCoverFunc      func(id uuid.UUID, coverImageURL string) error
-	IdentifierExistsFunc      func(identifier string) bool
+	CreateEventFunc                  func(event *models.Event) error
+	UpdateEventFunc                  func(event *models.Event) error
+	DeleteEventFunc                  func(id uuid.UUID) error
+	ListEventsFunc                   func(page int, pageSize int, name string) ([]models.Event, error)
+	GetEventByIDFunc                 func(id uuid.UUID) (string, error)
+	GetEventByIDRawFunc              func(id uuid.UUID) (*models.Event, error)
+	GetEventByIDForSpecFunc          func(id uuid.UUID) (*models.Event, error)
+	GetEventByIdentifierFunc         func(identifier string) (*models.Event, error)
+	GetEventsByClientIDFunc          func(clientID uuid.UUID) ([]models.Event, error)
+	GetAllEventsDashboardFunc        func() ([]models.Event, error)
+	GetEventsForUserFunc             func(userID uuid.UUID) ([]models.Event, error)
+	UpdateEventCoverFunc             func(id uuid.UUID, coverImageURL string) error
+	UpdateEventCoverWithVariantsFunc func(id uuid.UUID, coverImageURL string, variants models.MediaVariants) error
+	BeginEventCoverProcessingFunc    func(id uuid.UUID, pendingURL, jobID string) (*models.Event, string, error)
+	ApplyEventCoverProcessingFunc    func(id uuid.UUID, callback dtos.MediaProcessingCallback) (*models.Event, string, models.MediaVariants, error)
+	IdentifierExistsFunc             func(identifier string) bool
 }
 
 func (m *mockEventsRepo) CreateEvent(event *models.Event) error {
@@ -157,6 +162,24 @@ func (m *mockEventsRepo) UpdateEventCover(id uuid.UUID, coverImageURL string) er
 	}
 	return nil
 }
+func (m *mockEventsRepo) UpdateEventCoverWithVariants(id uuid.UUID, coverImageURL string, variants models.MediaVariants) error {
+	if m.UpdateEventCoverWithVariantsFunc != nil {
+		return m.UpdateEventCoverWithVariantsFunc(id, coverImageURL, variants)
+	}
+	return m.UpdateEventCover(id, coverImageURL)
+}
+func (m *mockEventsRepo) BeginEventCoverProcessing(id uuid.UUID, pendingURL, jobID string) (*models.Event, string, error) {
+	if m.BeginEventCoverProcessingFunc != nil {
+		return m.BeginEventCoverProcessingFunc(id, pendingURL, jobID)
+	}
+	return &models.Event{ID: id, CoverPendingURL: pendingURL, CoverProcessingJobID: jobID, CoverProcessingGeneration: 1, CoverProcessingStatus: "pending"}, "", nil
+}
+func (m *mockEventsRepo) ApplyEventCoverProcessing(id uuid.UUID, callback dtos.MediaProcessingCallback) (*models.Event, string, models.MediaVariants, error) {
+	if m.ApplyEventCoverProcessingFunc != nil {
+		return m.ApplyEventCoverProcessingFunc(id, callback)
+	}
+	return &models.Event{ID: id, CoverImageURL: callback.ObjectKey, CoverProcessingStatus: callback.ProcessingStatus}, "", nil, nil
+}
 func (m *mockEventsRepo) IdentifierExists(identifier string) bool {
 	if m.IdentifierExistsFunc != nil {
 		return m.IdentifierExistsFunc(identifier)
@@ -165,6 +188,8 @@ func (m *mockEventsRepo) IdentifierExists(identifier string) bool {
 }
 
 var _ ports.EventsRepository = (*mockEventsRepo)(nil)
+var _ ports.EventCoverVariantsRepository = (*mockEventsRepo)(nil)
+var _ ports.EventCoverProcessingRepository = (*mockEventsRepo)(nil)
 
 // ---------------------------------------------------------------------------
 // Mock: EventConfigRepository
@@ -450,6 +475,64 @@ func TestEventService_ClearCoverImage_NoExistingCoverSkipsUpdate(t *testing.T) {
 	assert.Empty(t, oldPath)
 	assert.False(t, updateCalled)
 	assert.False(t, invalidateCalled)
+}
+
+func TestEventService_ReplaceCoverImagePersistsVariantsAndReturnsOldSet(t *testing.T) {
+	eventID := uuid.Must(uuid.NewV4())
+	oldVariants := models.MediaVariants{{ObjectKey: "events/old-640.webp", Width: 640, Format: "webp"}}
+	newVariants := models.MediaVariants{{ObjectKey: "events/new-640.webp", Width: 640, Format: "webp"}}
+	var storedPath string
+	var storedVariants models.MediaVariants
+	repo := &mockEventsRepo{
+		GetEventByIDRawFunc: func(uuid.UUID) (*models.Event, error) {
+			return &models.Event{ID: eventID, CoverImageURL: "events/old.webp", CoverVariants: oldVariants}, nil
+		},
+		UpdateEventCoverWithVariantsFunc: func(id uuid.UUID, path string, variants models.MediaVariants) error {
+			require.Equal(t, eventID, id)
+			storedPath, storedVariants = path, variants
+			return nil
+		},
+	}
+
+	oldPath, replacedVariants, err := NewEventService(repo, &mockCacheRepo{}).ReplaceCoverImageWithVariants(eventID, "events/new.webp", newVariants)
+
+	require.NoError(t, err)
+	assert.Equal(t, "events/old.webp", oldPath)
+	assert.Equal(t, oldVariants, replacedVariants)
+	assert.Equal(t, "events/new.webp", storedPath)
+	assert.Equal(t, newVariants, storedVariants)
+}
+
+func TestEventService_ApplyCoverProcessingCallbackValidatesOwnedTerminalKeys(t *testing.T) {
+	eventID := uuid.Must(uuid.NewV4())
+	jobID := uuid.Must(uuid.NewV4()).String()
+	called := false
+	repo := &mockEventsRepo{ApplyEventCoverProcessingFunc: func(id uuid.UUID, callback dtos.MediaProcessingCallback) (*models.Event, string, models.MediaVariants, error) {
+		called = true
+		return &models.Event{ID: id, CoverImageURL: callback.ObjectKey}, "events/old.webp", nil, nil
+	}}
+	svc := NewEventService(repo, &mockCacheRepo{})
+	_, oldPath, _, err := svc.ApplyCoverProcessingCallback(eventID, dtos.MediaProcessingCallback{
+		JobID: jobID, Generation: 2, ProcessingStatus: "done",
+		ObjectKey:     fmt.Sprintf("events/%s/covers/%s.webp", eventID, jobID),
+		MediaVariants: []dtos.MediaVariant{{ObjectKey: fmt.Sprintf("events/%s/covers/%s-640.webp", eventID, jobID), Width: 640, Format: "webp", Bytes: 10}},
+	})
+	require.NoError(t, err)
+	assert.True(t, called)
+	assert.Equal(t, "events/old.webp", oldPath)
+}
+
+func TestEventService_ApplyCoverProcessingCallbackRejectsForeignOutput(t *testing.T) {
+	eventID := uuid.Must(uuid.NewV4())
+	called := false
+	repo := &mockEventsRepo{ApplyEventCoverProcessingFunc: func(uuid.UUID, dtos.MediaProcessingCallback) (*models.Event, string, models.MediaVariants, error) {
+		called = true
+		return nil, "", nil, nil
+	}}
+	_, _, _, err := NewEventService(repo, nil).ApplyCoverProcessingCallback(eventID, dtos.MediaProcessingCallback{JobID: uuid.Must(uuid.NewV4()).String(), Generation: 1, ProcessingStatus: "done", ObjectKey: "events/another/cover.webp"})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidCoverProcessingTransition)
+	assert.False(t, called)
 }
 
 func TestEventService_ListEvents_CacheHit(t *testing.T) {

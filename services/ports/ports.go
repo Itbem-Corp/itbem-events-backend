@@ -11,6 +11,11 @@ import (
 	"time"
 )
 
+var (
+	ErrStaleCoverProcessing             = errors.New("stale event cover processing callback")
+	ErrInvalidCoverProcessingTransition = errors.New("invalid event cover processing transition")
+)
+
 var ErrMultipartUploadNotFound = errors.New("multipart upload not found")
 
 // CacheRepository is the minimal Redis interface used by all services.
@@ -77,6 +82,17 @@ type EventsRepository interface {
 // adapters that only implement EventsRepository.
 type EventsDashboardRepository interface {
 	GetEventDashboardOverview(clientID, userID *uuid.UUID, now time.Time) (dtos.EventDashboardOverview, error)
+}
+
+// EventCoverVariantsRepository is optional so lightweight adapters remain
+// compatible while production persists the responsive cover set atomically.
+type EventCoverVariantsRepository interface {
+	UpdateEventCoverWithVariants(id uuid.UUID, coverImageURL string, variants models.MediaVariants) error
+}
+
+type EventCoverProcessingRepository interface {
+	BeginEventCoverProcessing(id uuid.UUID, pendingURL, jobID string) (*models.Event, string, error)
+	ApplyEventCoverProcessing(id uuid.UUID, callback dtos.MediaProcessingCallback) (*models.Event, string, models.MediaVariants, error)
 }
 
 type EventsPageRepository interface {
@@ -187,7 +203,7 @@ type MomentRepository interface {
 // existing tests and adapters.
 type MomentProcessingRepository interface {
 	BeginMediaProcessingJob(id, eventID uuid.UUID, inputKey, jobID string) (int64, error)
-	ApplyMediaProcessingUpdate(id, eventID uuid.UUID, jobID string, generation int64, allowedCurrentStatuses []string, contentURL, processingStatus, thumbnailURL, errorMessage string, durationMs, originalBytes, optimizedBytes int64) (bool, error)
+	ApplyMediaProcessingUpdate(id, eventID uuid.UUID, jobID string, generation int64, allowedCurrentStatuses []string, contentURL, processingStatus, thumbnailURL, errorMessage string, durationMs, originalBytes, optimizedBytes int64, mediaVariants models.MediaVariants) (bool, error)
 }
 
 type EventTableRepository interface {

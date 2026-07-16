@@ -6,10 +6,12 @@ import (
 	"events-stocks/models"
 	"events-stocks/repositories/gormrepository"
 	"events-stocks/repositories/guestrepository"
+	"events-stocks/services/ports"
 	"events-stocks/utils"
 	"github.com/gofrs/uuid"
 	"golang.org/x/sync/errgroup"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"strings"
 	"time"
 )
@@ -339,6 +341,114 @@ func UpdateEventCover(id uuid.UUID, coverImageURL string) error {
 	return gormrepository.UpdateFieldsByID(id, map[string]interface{}{
 		"cover_image_url": coverImageURL,
 	}, &models.Event{})
+}
+
+func (r *EventsRepo) UpdateEventCoverWithVariants(id uuid.UUID, coverImageURL string, variants models.MediaVariants) error {
+	return gormrepository.UpdateFieldsByID(id, map[string]interface{}{
+		"cover_image_url":             coverImageURL,
+		"cover_variants":              variants,
+		"cover_pending_url":           "",
+		"cover_processing_status":     "",
+		"cover_processing_job_id":     "",
+		"cover_processing_error":      "",
+		"cover_processing_generation": gorm.Expr("cover_processing_generation + 1"),
+	}, &models.Event{})
+}
+
+func (r *EventsRepo) BeginEventCoverProcessing(id uuid.UUID, pendingURL, jobID string) (*models.Event, string, error) {
+	var result models.Event
+	var previousPending string
+	err := gormrepository.DB().Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", id).First(&result).Error; err != nil {
+			return err
+		}
+		previousPending = result.CoverPendingURL
+		result.CoverProcessingGeneration++
+		updates := map[string]interface{}{
+			"cover_pending_url":            pendingURL,
+			"cover_processing_status":      "pending",
+			"cover_processing_job_id":      jobID,
+			"cover_processing_generation":  result.CoverProcessingGeneration,
+			"cover_processing_error":       "",
+			"cover_processing_duration_ms": 0,
+			"cover_original_size_bytes":    0,
+			"cover_optimized_size_bytes":   0,
+		}
+		if err := tx.Model(&models.Event{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+			return err
+		}
+		result.CoverPendingURL = pendingURL
+		result.CoverProcessingStatus = "pending"
+		result.CoverProcessingJobID = jobID
+		result.CoverProcessingError = ""
+		return nil
+	})
+	return &result, previousPending, err
+}
+
+func (r *EventsRepo) ApplyEventCoverProcessing(id uuid.UUID, callback dtos.MediaProcessingCallback) (*models.Event, string, models.MediaVariants, error) {
+	var result models.Event
+	var oldCover string
+	var oldVariants models.MediaVariants
+	err := gormrepository.DB().Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", id).First(&result).Error; err != nil {
+			return err
+		}
+		if result.CoverProcessingJobID != callback.JobID || result.CoverProcessingGeneration != callback.Generation {
+			return ports.ErrStaleCoverProcessing
+		}
+		current := result.CoverProcessingStatus
+		if current == callback.ProcessingStatus {
+			if current == "done" && result.CoverImageURL != callback.ObjectKey {
+				return ports.ErrStaleCoverProcessing
+			}
+			return nil
+		}
+		if current != "pending" && current != "processing" {
+			return ports.ErrInvalidCoverProcessingTransition
+		}
+		updates := map[string]interface{}{
+			"cover_processing_status": callback.ProcessingStatus,
+			"cover_processing_error":  callback.ErrorMessage,
+		}
+		switch callback.ProcessingStatus {
+		case "processing":
+			if current != "pending" {
+				return ports.ErrInvalidCoverProcessingTransition
+			}
+		case "failed":
+		case "done":
+			oldCover, oldVariants = result.CoverImageURL, result.CoverVariants
+			updates["cover_image_url"] = callback.ObjectKey
+			updates["cover_variants"] = eventCoverVariantsFromDTO(callback.MediaVariants)
+			updates["cover_pending_url"] = ""
+			updates["cover_processing_duration_ms"] = callback.ProcessingDurationMs
+			updates["cover_original_size_bytes"] = callback.OriginalSizeBytes
+			updates["cover_optimized_size_bytes"] = callback.OptimizedSizeBytes
+		default:
+			return ports.ErrInvalidCoverProcessingTransition
+		}
+		if err := tx.Model(&models.Event{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+			return err
+		}
+		result.CoverProcessingStatus = callback.ProcessingStatus
+		result.CoverProcessingError = callback.ErrorMessage
+		if callback.ProcessingStatus == "done" {
+			result.CoverImageURL = callback.ObjectKey
+			result.CoverVariants = eventCoverVariantsFromDTO(callback.MediaVariants)
+			result.CoverPendingURL = ""
+		}
+		return nil
+	})
+	return &result, oldCover, oldVariants, err
+}
+
+func eventCoverVariantsFromDTO(values []dtos.MediaVariant) models.MediaVariants {
+	result := make(models.MediaVariants, 0, len(values))
+	for _, value := range values {
+		result = append(result, models.MediaVariant{ObjectKey: value.ObjectKey, Width: value.Width, Format: value.Format, Bytes: value.Bytes})
+	}
+	return result
 }
 
 // GetEventsByClientID returns all events belonging to a specific client.
