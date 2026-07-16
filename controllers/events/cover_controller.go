@@ -35,7 +35,7 @@ func UploadEventCover(c echo.Context) error {
 	if _, existingEvent, authErr := authz.RequireEventCapability(c, eventID, authz.CapabilityEventManage); authErr != nil {
 		return authz.Respond(c, authErr)
 	} else if existingEvent != nil {
-		return uploadEventCoverForService(c, eventID, existingEvent, coverResourceSvc.WithBucket(existingEvent.MediaBucket))
+		return uploadEventCoverForService(c, eventID, existingEvent, coverResourceSvc.WithBucket(existingEvent.MediaBucket).WithOrganization(existingEvent.ClientID))
 	}
 	return utils.Error(c, http.StatusNotFound, "Event not found", "")
 }

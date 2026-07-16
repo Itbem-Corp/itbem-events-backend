@@ -28,7 +28,8 @@ func clientServiceForContext(c echo.Context) *clients.ClientService {
 	if err != nil {
 		return clientSvc
 	}
-	return clientSvc.WithResourceBucket(bucket)
+	tenantCode, _ := c.Get("tenant_code").(string)
+	return clientSvc.WithTenantScope(tenantCode, bucket)
 }
 
 func operationalRootMayNotManageOrganization(c echo.Context, user *models.User) bool {
@@ -220,7 +221,7 @@ func ListMyClients(c echo.Context) error {
 	if user.IsPlatformAdmin() {
 		myClients, err = clients.GetAllClients()
 	} else {
-		myClients, err = clientSvc.GetMyClients(user.ID)
+		myClients, err = clientServiceForContext(c).GetMyClients(user.ID)
 	}
 	if err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Error fetching clients", err.Error())

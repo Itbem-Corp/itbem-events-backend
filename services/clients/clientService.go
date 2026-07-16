@@ -89,6 +89,7 @@ type ClientService struct {
 	rs             *ResourceService.ResourceService
 	cache          ports.CacheRepository
 	tx             ports.Transactor
+	tenantCode     string
 }
 
 func NewClientService(
@@ -116,6 +117,29 @@ func (s *ClientService) WithResourceBucket(bucket string) *ClientService {
 	clone := *s
 	clone.rs = s.rs.WithBucket(bucket)
 	return &clone
+}
+
+// WithTenantScope creates an immutable request-scoped service. Tenant identity
+// is included in user-dependent cache keys so a Cognito identity shared across
+// applications cannot receive cached data from another entrypoint.
+func (s *ClientService) WithTenantScope(tenantCode, bucket string) *ClientService {
+	if s == nil {
+		return nil
+	}
+	clone := *s
+	clone.tenantCode = normalizeTenantCode(tenantCode)
+	if clone.rs != nil {
+		clone.rs = clone.rs.WithBucket(bucket)
+	}
+	return &clone
+}
+
+func normalizeTenantCode(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return "eventiapp"
+	}
+	return value
 }
 
 func (s *ClientService) CreateClient(name string, clientTypeID uuid.UUID, ownerUserID uuid.UUID, parentID *uuid.UUID) (*models.Client, error) {
@@ -284,7 +308,7 @@ func (s *ClientService) updateClientDetails(
 		return nil, err
 	}
 	if shouldDeleteOld && oldLogo != "" && oldLogo != logoName && s.rs != nil {
-		if err := s.rs.WithBucket(oldMediaBucket).DeleteObjectByPath(fmt.Sprintf("clients/%s/logo/%s", client.ID, oldLogo)); err != nil {
+		if err := s.rs.WithBucket(oldMediaBucket).DeleteObjectByPath(clientLogoObjectPath(client.ID, oldLogo)); err != nil {
 			slog.Warn("failed to delete replaced client logo", "client_id", client.ID, "logo", oldLogo, "error", err)
 		}
 	}
@@ -293,7 +317,7 @@ func (s *ClientService) updateClientDetails(
 }
 
 func (s *ClientService) myClientsKey(userID uuid.UUID) string {
-	return userID.String() + ":myclients"
+	return normalizeTenantCode(s.tenantCode) + ":" + userID.String() + ":myclients"
 }
 
 func (s *ClientService) GetMyClients(userID uuid.UUID) ([]models.Client, error) {
@@ -342,7 +366,7 @@ func (s *ClientService) cleanupClientLogo(clientID uuid.UUID, logoName string) {
 	if s == nil || s.rs == nil || strings.TrimSpace(logoName) == "" {
 		return
 	}
-	if err := s.rs.DeleteObjectByPath(fmt.Sprintf("clients/%s/logo/%s", clientID, logoName)); err != nil {
+	if err := s.rs.DeleteObjectByPath(clientLogoObjectPath(clientID, logoName)); err != nil {
 		slog.Error("client logo rollback failed", "client_id", clientID, "logo", logoName, "error", err)
 	}
 }
@@ -362,7 +386,7 @@ func (s *ClientService) rollbackCreatedClient(client *models.Client, ownerUserID
 
 func (s *ClientService) invalidateMyClients(userID uuid.UUID) {
 	if s.cache != nil {
-		_ = s.cache.Invalidate("myclients", userID.String())
+		_ = s.cache.Invalidate("myclients", normalizeTenantCode(s.tenantCode)+":"+userID.String())
 	}
 }
 
@@ -413,7 +437,7 @@ func (s *ClientService) deleteClient(clientID, requesterID uuid.UUID, primaryRoo
 	}
 	client, err := s.clientRepo.GetClientByID(clientID)
 	if err == nil && client.Logo != "" && s.rs != nil {
-		fullPath := fmt.Sprintf("clients/%s/logo/%s", client.ID, client.Logo)
+		fullPath := clientLogoObjectPath(client.ID, client.Logo)
 		_ = s.rs.WithBucket(client.MediaBucket).DeleteObjectByPath(fullPath)
 	}
 	if s.tx != nil {
@@ -438,6 +462,14 @@ func (s *ClientService) deleteClient(clientID, requesterID uuid.UUID, primaryRoo
 	}
 	s.invalidateAllMyClients()
 	return nil
+}
+
+func clientLogoObjectPath(clientID uuid.UUID, logo string) string {
+	logo = strings.TrimSpace(logo)
+	if strings.Contains(logo, "/") {
+		return strings.TrimLeft(logo, "/")
+	}
+	return fmt.Sprintf("clients/%s/logo/%s", clientID, logo)
 }
 
 func (s *ClientService) AddUserToClient(clientID, userID, roleID uuid.UUID) error {

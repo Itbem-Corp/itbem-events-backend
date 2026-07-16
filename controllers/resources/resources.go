@@ -268,6 +268,7 @@ func CreateResource(c echo.Context) error {
 
 	// section_id is optional — resources like event covers don't belong to a section
 	var sectionID *uuid.UUID
+	var organizationID *uuid.UUID
 	if sectionIDStr != "" {
 		parsed, err := uuid.FromString(sectionIDStr)
 		if err != nil {
@@ -285,8 +286,16 @@ func CreateResource(c echo.Context) error {
 		if !user.IsPrimaryRoot() {
 			return authz.Respond(c, &authz.Failure{Status: http.StatusForbidden, Message: "Access denied", Detail: "Only the primary platform administrator can create platform resources"})
 		}
-	} else if _, _, err := authz.RequireEventSectionCapability(c, *sectionID, authz.CapabilityEventManage); err != nil {
-		return authz.Respond(c, err)
+	} else {
+		_, section, err := authz.RequireEventSectionCapability(c, *sectionID, authz.CapabilityEventManage)
+		if err != nil {
+			return authz.Respond(c, err)
+		}
+		_, event, err := authz.RequireEventCapability(c, section.EventID, authz.CapabilityEventManage)
+		if err != nil {
+			return authz.Respond(c, err)
+		}
+		organizationID = event.ClientID
 	}
 
 	var position *int
@@ -336,7 +345,7 @@ func CreateResource(c echo.Context) error {
 	}
 	defer file.Close()
 
-	scopedResourceSvc := resourceServiceForContext(c)
+	scopedResourceSvc := resourceServiceForContext(c).WithOrganization(organizationID)
 	resource, err := scopedResourceSvc.UploadAndCreateResource(
 		file,
 		fileHeader,
@@ -363,6 +372,7 @@ func UploadMultipleResources(c echo.Context) error {
 	resourceTypeIDStr := resourceTypeIDFormValue(c)
 
 	var sectionID *uuid.UUID
+	var organizationID *uuid.UUID
 	if sectionIDStr != "" {
 		parsed, err := uuid.FromString(sectionIDStr)
 		if err != nil {
@@ -378,8 +388,16 @@ func UploadMultipleResources(c echo.Context) error {
 		if !user.IsPrimaryRoot() {
 			return authz.Respond(c, &authz.Failure{Status: http.StatusForbidden, Message: "Access denied", Detail: "Only the primary platform administrator can create platform resources"})
 		}
-	} else if _, _, err := authz.RequireEventSectionCapability(c, *sectionID, authz.CapabilityEventManage); err != nil {
-		return authz.Respond(c, err)
+	} else {
+		_, section, err := authz.RequireEventSectionCapability(c, *sectionID, authz.CapabilityEventManage)
+		if err != nil {
+			return authz.Respond(c, err)
+		}
+		_, event, err := authz.RequireEventCapability(c, section.EventID, authz.CapabilityEventManage)
+		if err != nil {
+			return authz.Respond(c, err)
+		}
+		organizationID = event.ClientID
 	}
 
 	var resourceTypeID uuid.UUID
@@ -407,7 +425,7 @@ func UploadMultipleResources(c echo.Context) error {
 		return utils.Error(c, http.StatusBadRequest, "No files provided", "")
 	}
 
-	scopedResourceSvc := resourceServiceForContext(c)
+	scopedResourceSvc := resourceServiceForContext(c).WithOrganization(organizationID)
 	resources, err := scopedResourceSvc.UploadMultipleResources(files, sectionID, resourceTypeID)
 	if err != nil {
 		status, detail := Resources.UploadErrorResponse(err)

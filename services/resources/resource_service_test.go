@@ -449,7 +449,7 @@ func TestUploadClientLogoNormalizesJpgAliasBeforeStorage(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, []string{"image/jpeg", "image/webp"}, storage.uploadedContentType)
 	assert.NotEqual(t, "image/jpg", storage.uploadedContentType)
-	assert.Equal(t, "clients/"+clientID.String()+"/logo", storage.uploadedFolder)
+	assert.Equal(t, "organizations/"+clientID.String()+"/branding/logo", storage.uploadedFolder)
 }
 
 func TestPrepareMomentUploadURLRejectsUnsupportedMomentMedia(t *testing.T) {

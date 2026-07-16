@@ -1418,7 +1418,7 @@ func TestAddUserToClient_InvalidatesCache(t *testing.T) {
 
 	cache := &mockCacheRepo{
 		InvalidateFunc: func(resource, key string) error {
-			if resource == "myclients" && key == userID.String() {
+			if resource == "myclients" && key == "eventiapp:"+userID.String() {
 				invalidated = true
 			}
 			return nil
@@ -1443,7 +1443,7 @@ func TestRemoveClientMember_InvalidatesTargetUserCache(t *testing.T) {
 
 	cache := &mockCacheRepo{
 		InvalidateFunc: func(resource, key string) error {
-			if resource == "myclients" && key == targetID.String() {
+			if resource == "myclients" && key == "eventiapp:"+targetID.String() {
 				invalidated = true
 			}
 			return nil
@@ -1577,5 +1577,17 @@ func TestCreateClientWithLogoRollsBackObjectAndClientWhenLogoPathSaveFails(t *te
 	assert.Nil(t, client)
 	assert.NotEqual(t, uuid.Nil, deletedClientID)
 	require.Len(t, storage.deleted, 1)
-	assert.Contains(t, storage.deleted[0], "clients/"+deletedClientID.String()+"/logo/")
+	assert.Contains(t, storage.deleted[0], "organizations/"+deletedClientID.String()+"/branding/logo/")
+}
+
+func TestMyClientsCacheKeyIsIsolatedByTenant(t *testing.T) {
+	userID := uuid.Must(uuid.NewV4())
+	svc := newClientServiceWithCache(&mockClientRepo{}, &mockCacheRepo{})
+
+	itbemKey := svc.WithTenantScope("itbem", "").myClientsKey(userID)
+	cafettonKey := svc.WithTenantScope("cafettonhouse", "").myClientsKey(userID)
+
+	assert.Equal(t, "itbem:"+userID.String()+":myclients", itbemKey)
+	assert.Equal(t, "cafettonhouse:"+userID.String()+":myclients", cafettonKey)
+	assert.NotEqual(t, itbemKey, cafettonKey)
 }

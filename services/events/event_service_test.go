@@ -535,6 +535,30 @@ func TestEventService_ApplyCoverProcessingCallbackRejectsForeignOutput(t *testin
 	assert.False(t, called)
 }
 
+func TestEventService_ApplyCoverProcessingCallbackPreservesOrganizationNamespace(t *testing.T) {
+	eventID := uuid.Must(uuid.NewV4())
+	jobID := uuid.Must(uuid.NewV4()).String()
+	root := "organizations/" + uuid.Must(uuid.NewV4()).String() + "/"
+	repo := &mockEventsRepo{
+		GetEventByIDRawFunc: func(id uuid.UUID) (*models.Event, error) {
+			return &models.Event{ID: id, CoverPendingURL: root + "events/" + id.String() + "/raw/source.jpg"}, nil
+		},
+		ApplyEventCoverProcessingFunc: func(id uuid.UUID, callback dtos.MediaProcessingCallback) (*models.Event, string, models.MediaVariants, error) {
+			return &models.Event{ID: id, CoverImageURL: callback.ObjectKey}, "", nil, nil
+		},
+	}
+
+	_, _, _, err := NewEventService(repo, &mockCacheRepo{}).ApplyCoverProcessingCallback(eventID, dtos.MediaProcessingCallback{
+		JobID: jobID, Generation: 1, ProcessingStatus: "done",
+		ObjectKey: root + fmt.Sprintf("events/%s/covers/%s.webp", eventID, jobID),
+		MediaVariants: []dtos.MediaVariant{{
+			ObjectKey: root + fmt.Sprintf("events/%s/covers/%s-640.webp", eventID, jobID),
+			Width:     640, Format: "webp", Bytes: 10,
+		}},
+	})
+	require.NoError(t, err)
+}
+
 func TestEventService_ListEvents_CacheHit(t *testing.T) {
 	repoCallCount := 0
 	repo := &mockEventsRepo{

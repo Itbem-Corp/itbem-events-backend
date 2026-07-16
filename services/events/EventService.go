@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"events-stocks/dtos"
+	"events-stocks/internal/storagekeys"
 	"events-stocks/models"
 	"events-stocks/services/cacheutil"
 	"events-stocks/services/ports"
@@ -343,7 +344,14 @@ func (s *EventService) ApplyCoverProcessingCallback(eventID uuid.UUID, callback 
 		return nil, "", nil, fmt.Errorf("%w: unsupported status", ErrInvalidCoverProcessingTransition)
 	}
 	if callback.ProcessingStatus == "done" {
-		expectedStem := fmt.Sprintf("events/%s/covers/%s", eventID, callback.JobID)
+		currentEvent, loadErr := s.repo.GetEventByIDRaw(eventID)
+		if loadErr != nil {
+			return nil, "", nil, loadErr
+		}
+		expectedStem := storagekeys.Scoped(
+			storagekeys.Namespace(currentEvent.CoverPendingURL),
+			fmt.Sprintf("events/%s/covers/%s", eventID, callback.JobID),
+		)
 		if callback.ObjectKey != expectedStem+".webp" {
 			return nil, "", nil, fmt.Errorf("%w: output key is not owned by this cover job", ErrInvalidCoverProcessingTransition)
 		}

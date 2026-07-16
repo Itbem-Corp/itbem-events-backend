@@ -61,6 +61,31 @@ func TestEnqueueMediaProcessingPublishesCASIdentity(t *testing.T) {
 	assert.Equal(t, inputKey, moment.ProcessingInputKey)
 }
 
+func TestValidateMediaCallbackKeysPreservesOrganizationNamespace(t *testing.T) {
+	eventID := uuid.Must(uuid.NewV4())
+	momentID := uuid.Must(uuid.NewV4())
+	root := "organizations/" + uuid.Must(uuid.NewV4()).String() + "/"
+	moment := &models.Moment{
+		ID:                 momentID,
+		EventID:            &eventID,
+		ContentType:        "image/jpeg",
+		ProcessingInputKey: root + "moments/" + eventID.String() + "/raw/source.jpg",
+	}
+
+	require.NoError(t, validateMediaCallbackKeys(
+		moment,
+		"done",
+		root+"moments/"+eventID.String()+"/photos/"+momentID.String()+".webp",
+		"",
+	))
+	require.Error(t, validateMediaCallbackKeys(
+		moment,
+		"done",
+		"moments/"+eventID.String()+"/photos/"+momentID.String()+".webp",
+		"",
+	))
+}
+
 func TestEnqueueMediaProcessingPersistsQueueFailureAsTerminal(t *testing.T) {
 	momentID := uuid.Must(uuid.NewV4())
 	eventID := uuid.Must(uuid.NewV4())
