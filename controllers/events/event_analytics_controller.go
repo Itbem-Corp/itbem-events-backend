@@ -77,7 +77,7 @@ func GetEventAnalytics(c echo.Context) error {
 			response.Guests = guestSummary
 			response.Performance = performance
 			if rollup.ComputedAt.IsZero() || time.Since(rollup.ComputedAt) >= analyticsRollupMaxAge {
-				requestAnalyticsRollup(eventID)
+				requestAnalyticsRollup(eventID, tenantCodeFromContext(c))
 			}
 			return utils.Success(c, http.StatusOK, "Analytics loaded", response)
 		} else {
@@ -94,7 +94,7 @@ func GetEventAnalytics(c echo.Context) error {
 		return utils.Error(c, http.StatusInternalServerError, "Error fetching analytics", err.Error())
 	}
 	response.Performance = performance
-	requestAnalyticsRollup(eventID)
+	requestAnalyticsRollup(eventID, tenantCodeFromContext(c))
 	return utils.Success(c, http.StatusOK, "Analytics loaded", response)
 }
 
@@ -267,9 +267,14 @@ func applyAnalyticsRollup(analytics *models.EventAnalytics, rollup *models.Event
 	}
 }
 
-func requestAnalyticsRollup(eventID uuid.UUID) {
+func tenantCodeFromContext(c echo.Context) string {
+	tenantCode, _ := c.Get("tenant_code").(string)
+	return tenantCode
+}
+
+func requestAnalyticsRollup(eventID uuid.UUID, tenantCode string) {
 	go func() {
-		if _, err := jobqueuerepository.PublishAnalyticsRollup(eventID); err != nil {
+		if _, err := jobqueuerepository.PublishAnalyticsRollup(eventID, tenantCode); err != nil {
 			slog.Warn("failed to publish analytics rollup", "event_id", eventID, "error", err)
 		}
 	}()

@@ -79,7 +79,8 @@ func UpdateUser(user *models.User) error {
 
 func ClearProfileImage(userID uuid.UUID) error {
 	fields := map[string]interface{}{
-		"profile_image": "",
+		"profile_image":        "",
+		"profile_image_bucket": "",
 	}
 
 	return gormrepository.UpdateFieldsByID(

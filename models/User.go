@@ -7,18 +7,20 @@ import (
 )
 
 type User struct {
-	ID           uuid.UUID `gorm:"type:uuid;default:uuid_generate_v4();primaryKey" json:"id"`
-	CognitoSub   string    `gorm:"uniqueIndex;not null" json:"-"`
-	Email        string    `gorm:"index" json:"email"`
-	FirstName    string    `json:"first_name"`
-	LastName     string    `json:"last_name"`
-	ProfileImage string    `gorm:"text" json:"profile_image"`
-	IsActive     bool      `gorm:"default:true" json:"is_active"`
+	ID                 uuid.UUID `gorm:"type:uuid;default:uuid_generate_v4();primaryKey" json:"id"`
+	CognitoSub         string    `gorm:"uniqueIndex;not null" json:"-"`
+	Email              string    `gorm:"index" json:"email"`
+	FirstName          string    `json:"first_name"`
+	LastName           string    `json:"last_name"`
+	ProfileImage       string    `gorm:"text" json:"profile_image"`
+	ProfileImageBucket string    `gorm:"type:varchar(255);not null;default:'';index" json:"-"`
+	IsActive           bool      `gorm:"default:true" json:"is_active"`
 	// RootLevel separates primary platform administrators from constrained
 	// operational administrators. 0 = none, 1 = primary, 2 = operational.
 	// Lower numbers have more authority.
-	RootLevel int  `gorm:"default:0;index" json:"root_level"`
-	IsRoot    bool `gorm:"default:false" json:"is_root"`
+	RootLevel      int    `gorm:"default:0;index" json:"root_level"`
+	IsRoot         bool   `gorm:"default:false" json:"is_root"`
+	AuthTenantCode string `gorm:"-" json:"-"`
 	// Relaciones (Has Many)
 	EventMembers  []EventMember  `gorm:"foreignKey:UserID" json:"event_members,omitempty"`
 	ClientMembers []ClientMember `gorm:"foreignKey:UserID" json:"client_members,omitempty"`

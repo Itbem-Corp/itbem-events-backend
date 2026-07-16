@@ -12,18 +12,19 @@ import (
 
 func TestBuildAnalyticsRollupEnvelopeMatchesRustContractAndDeduplicatesMinute(t *testing.T) {
 	eventID := uuid.Must(uuid.FromString("7c9e6679-7425-40de-944b-e07fc1f90ae7"))
-	first := buildAnalyticsRollupEnvelope(eventID, time.Date(2026, 7, 12, 18, 0, 1, 0, time.UTC))
-	second := buildAnalyticsRollupEnvelope(eventID, time.Date(2026, 7, 12, 18, 0, 59, 0, time.UTC))
-	nextMinute := buildAnalyticsRollupEnvelope(eventID, time.Date(2026, 7, 12, 18, 1, 0, 0, time.UTC))
+	first := buildAnalyticsRollupEnvelope(eventID, "itbem", time.Date(2026, 7, 12, 18, 0, 1, 0, time.UTC))
+	second := buildAnalyticsRollupEnvelope(eventID, "itbem", time.Date(2026, 7, 12, 18, 0, 59, 0, time.UTC))
+	nextMinute := buildAnalyticsRollupEnvelope(eventID, "itbem", time.Date(2026, 7, 12, 18, 1, 0, 0, time.UTC))
 
 	assert.Equal(t, first.JobID, second.JobID)
 	assert.NotEqual(t, first.JobID, nextMinute.JobID)
 	payload, err := json.Marshal(first)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"schema_version":1,
+		"schema_version":2,
 		"job_id":"`+first.JobID.String()+`",
 		"occurred_at":"2026-07-12T18:00:01Z",
+		"tenant_code":"itbem",
 		"type":"analytics.rollup",
 		"payload":{
 			"event_id":"7c9e6679-7425-40de-944b-e07fc1f90ae7",

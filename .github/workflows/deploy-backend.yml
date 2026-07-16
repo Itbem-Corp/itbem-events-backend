@@ -271,7 +271,9 @@ jobs:
           COGNITO_AWS_REGION: ${{ secrets.BACKEND_COGNITO_AWS_REGION }}
           COGNITO_ALLOWED_CLIENT_IDS: ${{ secrets.BACKEND_COGNITO_ALLOWED_CLIENT_IDS }}
           COGNITO_TENANT_CLIENT_MAP: ${{ secrets.BACKEND_COGNITO_TENANT_CLIENT_MAP }}
+          TENANT_HOST_MAP: ${{ secrets.BACKEND_TENANT_HOST_MAP }}
           AWS_BUCKET_NAME: ${{ secrets.AWS_BUCKET_NAME }}
+          TENANT_BUCKET_MAP: ${{ secrets.BACKEND_TENANT_BUCKET_MAP }}
           CDN_BASE_URL: ${{ secrets.CDN_BASE_URL }}
           S3_CLIENT_ID: ${{ secrets.S3_CLIENT_ID }}
           S3_CLIENT_SECRET: ${{ secrets.S3_CLIENT_SECRET }}
@@ -307,6 +309,7 @@ jobs:
             --required COGNITO_USER_POOL_ID \
             --required COGNITO_AWS_REGION \
             --required AWS_BUCKET_NAME \
+            --required TENANT_BUCKET_MAP \
             --required DB_HOST \
             --required DB_USER \
             --required DB_PASSWORD \
@@ -327,6 +330,7 @@ jobs:
             --optional COGNITO_CLIENT_SECRET \
             --required COGNITO_ALLOWED_CLIENT_IDS \
             --required COGNITO_TENANT_CLIENT_MAP \
+            --required TENANT_HOST_MAP \
             --optional S3_CLIENT_ID \
             --optional S3_CLIENT_SECRET \
             --optional CDN_BASE_URL \

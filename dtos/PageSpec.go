@@ -76,6 +76,7 @@ type PageSpecSection struct {
 
 // PageSpec is the full SDUI spec returned by GET /api/events/page-spec?token=...
 type PageSpec struct {
-	Meta     PageSpecMeta      `json:"meta"`
-	Sections []PageSpecSection `json:"sections"`
+	Meta        PageSpecMeta      `json:"meta"`
+	Sections    []PageSpecSection `json:"sections"`
+	MediaBucket string            `json:"-"`
 }

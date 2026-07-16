@@ -7,7 +7,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// SeedClientEventiAppSeed guarantees the two stable first-party organizations.
+// SeedClientEventiAppSeed guarantees the stable first-party organizations.
 // FirstOrCreate is intentionally additive: an existing row keeps its branding,
 // type, and hierarchy instead of being silently rewritten during a deployment.
 func SeedClientEventiAppSeed(db *gorm.DB) {
@@ -35,5 +35,11 @@ func SeedClientEventiAppSeed(db *gorm.DB) {
 	}
 	if err := db.Where(models.Client{Code: itbem.Code}).FirstOrCreate(&itbem).Error; err != nil {
 		slog.Error("failed to seed ITBEM organization", "error", err)
+	}
+	cafettonhouse := models.Client{
+		Name: "Cafetton House", Code: "cafettonhouse", ClientTypeID: agencyType.ID, ParentID: &root.ID, IsActive: true,
+	}
+	if err := db.Where(models.Client{Code: cafettonhouse.Code}).FirstOrCreate(&cafettonhouse).Error; err != nil {
+		slog.Error("failed to seed Cafetton House organization", "error", err)
 	}
 }

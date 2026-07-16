@@ -109,6 +109,15 @@ func NewClientService(
 	}
 }
 
+func (s *ClientService) WithResourceBucket(bucket string) *ClientService {
+	if s == nil || s.rs == nil {
+		return s
+	}
+	clone := *s
+	clone.rs = s.rs.WithBucket(bucket)
+	return &clone
+}
+
 func (s *ClientService) CreateClient(name string, clientTypeID uuid.UUID, ownerUserID uuid.UUID, parentID *uuid.UUID) (*models.Client, error) {
 	return s.createClient(name, clientTypeID, ownerUserID, parentID, false)
 }
@@ -164,12 +173,17 @@ func (s *ClientService) createClient(name string, clientTypeID uuid.UUID, ownerU
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate client id: %w", err)
 	}
+	mediaBucket := ""
+	if s.rs != nil {
+		mediaBucket = s.rs.Bucket
+	}
 	client := &models.Client{
 		ID:           clientID,
 		Name:         name,
 		Code:         slug,
 		ClientTypeID: clientTypeID,
 		ParentID:     parentID,
+		MediaBucket:  mediaBucket,
 	}
 	member := &models.ClientMember{
 		ClientID:     clientID,
@@ -251,6 +265,7 @@ func (s *ClientService) updateClientDetails(
 		return nil, fmt.Errorf("client not found")
 	}
 	oldLogo := client.Logo
+	oldMediaBucket := client.MediaBucket
 	if trimmedName := strings.TrimSpace(name); trimmedName != "" {
 		client.Name = trimmedName
 		slug := strings.ToLower(trimmedName)
@@ -258,6 +273,9 @@ func (s *ClientService) updateClientDetails(
 	}
 	if shouldDeleteOld || logoName != "" {
 		client.Logo = logoName
+		if logoName != "" && s.rs != nil {
+			client.MediaBucket = s.rs.Bucket
+		}
 	}
 	if err := s.clientRepo.UpdateClient(client); err != nil {
 		if logoName != "" && logoName != oldLogo && s.rs != nil {
@@ -266,7 +284,7 @@ func (s *ClientService) updateClientDetails(
 		return nil, err
 	}
 	if shouldDeleteOld && oldLogo != "" && oldLogo != logoName && s.rs != nil {
-		if err := s.rs.DeleteObjectByPath(fmt.Sprintf("clients/%s/logo/%s", client.ID, oldLogo)); err != nil {
+		if err := s.rs.WithBucket(oldMediaBucket).DeleteObjectByPath(fmt.Sprintf("clients/%s/logo/%s", client.ID, oldLogo)); err != nil {
 			slog.Warn("failed to delete replaced client logo", "client_id", client.ID, "logo", oldLogo, "error", err)
 		}
 	}
@@ -313,7 +331,11 @@ func (s *ClientService) GetClientLogoURL(clientID uuid.UUID, logoName string) st
 	if s.rs == nil || logoName == "" {
 		return ""
 	}
-	return s.rs.GetClientLogoURL(clientID, logoName)
+	client, err := s.clientRepo.GetClientByID(clientID)
+	if err != nil {
+		return ""
+	}
+	return s.rs.WithBucket(client.MediaBucket).GetClientLogoURL(clientID, logoName)
 }
 
 func (s *ClientService) cleanupClientLogo(clientID uuid.UUID, logoName string) {
@@ -390,9 +412,9 @@ func (s *ClientService) deleteClient(clientID, requesterID uuid.UUID, primaryRoo
 		return fmt.Errorf("cannot delete organization while it has sub-organizations")
 	}
 	client, err := s.clientRepo.GetClientByID(clientID)
-	if err == nil && client.Logo != "" {
+	if err == nil && client.Logo != "" && s.rs != nil {
 		fullPath := fmt.Sprintf("clients/%s/logo/%s", client.ID, client.Logo)
-		_ = s.rs.DeleteObjectByPath(fullPath)
+		_ = s.rs.WithBucket(client.MediaBucket).DeleteObjectByPath(fullPath)
 	}
 	if s.tx != nil {
 		if err := s.tx.Transaction(func(tx *gorm.DB) error {

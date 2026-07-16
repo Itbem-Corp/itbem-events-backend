@@ -81,13 +81,14 @@ func newAdminMomentResponse(moment *models.Moment) dtos.MomentResponse {
 	if moment == nil {
 		return response
 	}
-	response.ContentURL = canonicalMomentStoragePath(adminResSvc, moment.ContentURL)
-	response.ThumbnailURL = canonicalMomentStoragePath(adminResSvc, moment.ThumbnailURL)
-	if contentViewURL, expiresAt := presignMomentURLWithExpiry(adminResSvc, moment.ContentURL); strings.TrimSpace(contentViewURL) != "" {
+	svc := adminResSvc.WithBucket(moment.MediaBucket)
+	response.ContentURL = canonicalMomentStoragePath(svc, moment.ContentURL)
+	response.ThumbnailURL = canonicalMomentStoragePath(svc, moment.ThumbnailURL)
+	if contentViewURL, expiresAt := presignMomentURLWithExpiry(svc, moment.ContentURL); strings.TrimSpace(contentViewURL) != "" {
 		response.ContentViewURL = contentViewURL
 		response.ContentViewURLExpiresAt = expiresAt
 	}
-	if thumbnailViewURL, expiresAt := presignMomentURLWithExpiry(adminResSvc, moment.ThumbnailURL); strings.TrimSpace(thumbnailViewURL) != "" {
+	if thumbnailViewURL, expiresAt := presignMomentURLWithExpiry(svc, moment.ThumbnailURL); strings.TrimSpace(thumbnailViewURL) != "" {
 		response.ThumbnailViewURL = thumbnailViewURL
 		response.ThumbnailViewURLExpiresAt = expiresAt
 	}

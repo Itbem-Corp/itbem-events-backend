@@ -14,8 +14,9 @@ type Client struct {
 	ClientTypeID uuid.UUID  `gorm:"type:uuid;index;not null" json:"client_type_id"`
 	ClientType   ClientType `gorm:"foreignKey:ClientTypeID" json:"client_type,omitempty"`
 
-	Logo     string `gorm:"text" json:"logo"`
-	IsActive bool   `gorm:"default:true" json:"is_active"`
+	Logo        string `gorm:"text" json:"logo"`
+	MediaBucket string `gorm:"type:varchar(255);not null;default:'';index" json:"-"`
+	IsActive    bool   `gorm:"default:true" json:"is_active"`
 	// AccessRole is a read-only projection for the current session. It is
 	// populated by scoped list queries and is never persisted on clients.
 	AccessRole string `gorm:"-" json:"access_role,omitempty"`

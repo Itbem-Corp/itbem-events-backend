@@ -4,6 +4,7 @@ import (
 	"events-stocks/controllers/publicaccess"
 	"events-stocks/dtos"
 	"events-stocks/internal/authz"
+	"events-stocks/internal/tenantresources"
 	"events-stocks/models"
 	eventsService "events-stocks/services/events"
 	"events-stocks/services/ports"
@@ -45,6 +46,17 @@ func InitResourceController(svc *Resources.ResourceService, deps ...PublicResour
 	resourceAccessTokenRepo = deps[0].TokenRepo
 	resourceInvitationRepo = deps[0].InvitationRepo
 	resourceEventRepo = deps[0].EventRepo
+}
+
+func resourceServiceForContext(c echo.Context) *Resources.ResourceService {
+	if resourceSvc == nil {
+		return nil
+	}
+	bucket, err := tenantresources.BucketFromContext(c)
+	if err != nil {
+		return resourceSvc
+	}
+	return resourceSvc.WithBucket(bucket)
 }
 
 func filenameFromPath(path string) string {
@@ -324,7 +336,8 @@ func CreateResource(c echo.Context) error {
 	}
 	defer file.Close()
 
-	resource, err := resourceSvc.UploadAndCreateResource(
+	scopedResourceSvc := resourceServiceForContext(c)
+	resource, err := scopedResourceSvc.UploadAndCreateResource(
 		file,
 		fileHeader,
 		sectionID,
@@ -339,7 +352,7 @@ func CreateResource(c echo.Context) error {
 	}
 
 	// 🔐 Generar URL firmada
-	viewURL, _ := resourceSvc.GetPresignedURLWithTTL(resource.Path, Resources.ResourceMutationURLTTLMinutes)
+	viewURL, _ := scopedResourceSvc.GetPresignedURLWithTTL(resource.Path, Resources.ResourceMutationURLTTLMinutes)
 
 	// 🧼 Estructura final del response
 	return utils.Success(c, http.StatusCreated, "Resource created", adminResourceResponse(resource, viewURL, Resources.ResourceMutationURLTTLMinutes))
@@ -394,7 +407,8 @@ func UploadMultipleResources(c echo.Context) error {
 		return utils.Error(c, http.StatusBadRequest, "No files provided", "")
 	}
 
-	resources, err := resourceSvc.UploadMultipleResources(files, sectionID, resourceTypeID)
+	scopedResourceSvc := resourceServiceForContext(c)
+	resources, err := scopedResourceSvc.UploadMultipleResources(files, sectionID, resourceTypeID)
 	if err != nil {
 		status, detail := Resources.UploadErrorResponse(err)
 		return utils.Error(c, status, "Failed to upload resources", detail)
@@ -402,7 +416,7 @@ func UploadMultipleResources(c echo.Context) error {
 
 	result := make([]dtos.AdminResourceResponse, 0, len(resources))
 	for _, r := range resources {
-		viewURL, _ := resourceSvc.GetPresignedURLWithTTL(r.Path, Resources.ResourceMutationURLTTLMinutes)
+		viewURL, _ := scopedResourceSvc.GetPresignedURLWithTTL(r.Path, Resources.ResourceMutationURLTTLMinutes)
 		result = append(result, adminResourceResponse(r, viewURL, Resources.ResourceMutationURLTTLMinutes))
 	}
 
@@ -443,21 +457,22 @@ func UpdateFileContent(c echo.Context) error {
 		return utils.Error(c, http.StatusBadRequest, "Filename mismatch", "filename must match the stored resource path")
 	}
 
-	path, err := resourceSvc.UpdateFileContent(file, resource.Path, fileHeader)
+	scopedResourceSvc := resourceSvc.WithBucket(resource.MediaBucket)
+	path, err := scopedResourceSvc.UpdateFileContent(file, resource.Path, fileHeader)
 	if err != nil {
 		status, detail := Resources.UploadErrorResponse(err)
 		return utils.Error(c, status, "Failed to update file content", detail)
 	}
 	if path != resource.Path {
 		resource.Path = path
-		if err := resourceSvc.UpdateResource(resource); err != nil {
+		if err := scopedResourceSvc.UpdateResource(resource); err != nil {
 			return utils.Error(c, http.StatusInternalServerError, "Failed to update resource path", err.Error())
 		}
-	} else if err := resourceSvc.TouchResourceUpdatedAt(resource, time.Now().UTC()); err != nil {
+	} else if err := scopedResourceSvc.TouchResourceUpdatedAt(resource, time.Now().UTC()); err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Failed to update resource timestamp", err.Error())
 	}
 
-	viewURL, _ := resourceSvc.GetPresignedURLWithTTL(path, Resources.ResourceMutationURLTTLMinutes)
+	viewURL, _ := scopedResourceSvc.GetPresignedURLWithTTL(path, Resources.ResourceMutationURLTTLMinutes)
 
 	expiresAt := resourceViewURLExpiresAt(Resources.ResourceMutationURLTTLMinutes)
 	return utils.Success(c, http.StatusOK, "File content updated", dtos.NewResourceFileMutationResponse(path, viewURL, &expiresAt))
@@ -494,27 +509,28 @@ func ReplaceFile(c echo.Context) error {
 	defer file.Close()
 
 	oldPath := resource.Path
-	path, err := resourceSvc.ReplaceFile(oldPath, file, fileHeader)
+	scopedResourceSvc := resourceSvc.WithBucket(resource.MediaBucket)
+	path, err := scopedResourceSvc.ReplaceFile(oldPath, file, fileHeader)
 	if err != nil {
 		status, detail := Resources.UploadErrorResponse(err)
 		return utils.Error(c, status, "Failed to replace file", detail)
 	}
 	if path != oldPath {
 		resource.Path = path
-		if err := resourceSvc.UpdateResource(resource); err != nil {
-			if cleanupErr := resourceSvc.DeleteObjectByPath(path); cleanupErr != nil {
+		if err := scopedResourceSvc.UpdateResource(resource); err != nil {
+			if cleanupErr := scopedResourceSvc.DeleteObjectByPath(path); cleanupErr != nil {
 				slog.Error("replacement resource rollback failed", "resource_id", resource.ID, "path", path, "error", cleanupErr)
 			}
 			return utils.Error(c, http.StatusInternalServerError, "Failed to update resource path", err.Error())
 		}
-		if cleanupErr := resourceSvc.DeleteObjectByPath(oldPath); cleanupErr != nil {
+		if cleanupErr := scopedResourceSvc.DeleteObjectByPath(oldPath); cleanupErr != nil {
 			slog.Warn("old replacement resource cleanup failed", "resource_id", resource.ID, "path", oldPath, "error", cleanupErr)
 		}
-	} else if err := resourceSvc.TouchResourceUpdatedAt(resource, time.Now().UTC()); err != nil {
+	} else if err := scopedResourceSvc.TouchResourceUpdatedAt(resource, time.Now().UTC()); err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Failed to update resource timestamp", err.Error())
 	}
 
-	viewURL, _ := resourceSvc.GetPresignedURLWithTTL(path, Resources.ResourceMutationURLTTLMinutes)
+	viewURL, _ := scopedResourceSvc.GetPresignedURLWithTTL(path, Resources.ResourceMutationURLTTLMinutes)
 
 	expiresAt := resourceViewURLExpiresAt(Resources.ResourceMutationURLTTLMinutes)
 	return utils.Success(c, http.StatusOK, "File replaced", dtos.NewResourceFileMutationResponse(path, viewURL, &expiresAt))

@@ -11,6 +11,7 @@ type Resource struct {
 	ResourceTypeID uuid.UUID    `gorm:"type:uuid;index" json:"resource_type_id"`
 	ResourceType   ResourceType `gorm:"foreignKey:ResourceTypeID" json:"resource_type,omitempty"`
 	Path           string       `json:"path"`
+	MediaBucket    string       `gorm:"type:varchar(255);not null;default:'';index" json:"-"`
 	AltText        string       `json:"alt_text"`
 	Title          string       `json:"title"`
 	Position       *int         `json:"position,omitempty"`

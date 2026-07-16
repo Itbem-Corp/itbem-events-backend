@@ -32,9 +32,15 @@ func UploadEventCover(c echo.Context) error {
 	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid event ID", err.Error())
 	}
-	if _, _, authErr := authz.RequireEventCapability(c, eventID, authz.CapabilityEventManage); authErr != nil {
+	if _, existingEvent, authErr := authz.RequireEventCapability(c, eventID, authz.CapabilityEventManage); authErr != nil {
 		return authz.Respond(c, authErr)
+	} else if existingEvent != nil {
+		return uploadEventCoverForService(c, eventID, existingEvent, coverResourceSvc.WithBucket(existingEvent.MediaBucket))
 	}
+	return utils.Error(c, http.StatusNotFound, "Event not found", "")
+}
+
+func uploadEventCoverForService(c echo.Context, eventID uuid.UUID, existingEvent *models.Event, svc *Resources.ResourceService) error {
 	header, err := c.FormFile("file")
 	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "File is required", err.Error())
@@ -45,7 +51,7 @@ func UploadEventCover(c echo.Context) error {
 	}
 	defer file.Close()
 
-	rawPath, contentType, _, err := coverResourceSvc.UploadRawEventCover(file, header, eventID.String())
+	rawPath, contentType, _, err := svc.UploadRawEventCover(file, header, eventID.String())
 	if err != nil {
 		status, detail := Resources.UploadErrorResponse(err)
 		return utils.Error(c, status, "Failed to upload cover", detail)
@@ -53,13 +59,13 @@ func UploadEventCover(c echo.Context) error {
 	jobID := uuid.Must(uuid.NewV4()).String()
 	event, supersededPending, err := eventSvc.BeginCoverProcessing(eventID, rawPath, jobID)
 	if err != nil {
-		_ = coverResourceSvc.DeleteObjectByPath(rawPath)
+		_ = svc.DeleteObjectByPath(rawPath)
 		if errors.Is(err, eventsService.ErrEventNotFound) {
 			return utils.Error(c, http.StatusNotFound, "Event not found", err.Error())
 		}
 		return utils.Error(c, http.StatusInternalServerError, "Failed to start cover processing", err.Error())
 	}
-	message := dtos.NewMediaProcessMessage(eventID.String(), eventID.String(), rawPath, coverResourceSvc.Bucket, contentType, false)
+	message := dtos.NewMediaProcessMessage(eventID.String(), eventID.String(), rawPath, svc.Bucket, contentType, false)
 	message.TargetType, message.JobID, message.Generation = dtos.MediaTargetEventCover, jobID, event.CoverProcessingGeneration
 	enqueued, publishErr := sqsrepository.PublishMediaJob(message)
 	if publishErr != nil {
@@ -67,11 +73,11 @@ func UploadEventCover(c echo.Context) error {
 		return utils.Error(c, http.StatusServiceUnavailable, "Cover upload is safe but processing could not start", publishErr.Error())
 	}
 	if !enqueued {
-		return uploadCoverSynchronously(c, file, header, eventID, rawPath, supersededPending)
+		return uploadCoverSynchronously(c, file, header, eventID, rawPath, supersededPending, svc)
 	}
-	cleanupSupersededPending(supersededPending, event.CoverImageURL)
-	pendingViewURL, pendingExpiresAt := coverViewURLWithExpiry(rawPath)
-	currentViewURL, currentExpiresAt := coverViewURLWithExpiry(event.CoverImageURL)
+	cleanupSupersededPending(supersededPending, event.CoverImageURL, svc)
+	pendingViewURL, pendingExpiresAt := coverViewURLWithExpiry(rawPath, existingEvent.MediaBucket)
+	currentViewURL, currentExpiresAt := coverViewURLWithExpiry(event.CoverImageURL, existingEvent.MediaBucket)
 	return utils.Success(c, http.StatusAccepted, "Cover image accepted for processing", dtos.EventCoverResponse{
 		CoverImageURL: event.CoverImageURL, CoverViewURL: currentViewURL, CoverViewURLExpiresAt: currentExpiresAt,
 		ViewURL: currentViewURL, ViewURLExpiresAt: currentExpiresAt, PendingURL: rawPath,
@@ -80,24 +86,24 @@ func UploadEventCover(c echo.Context) error {
 	})
 }
 
-func uploadCoverSynchronously(c echo.Context, file multipart.File, header *multipart.FileHeader, eventID uuid.UUID, rawPath, supersededPending string) error {
+func uploadCoverSynchronously(c echo.Context, file multipart.File, header *multipart.FileHeader, eventID uuid.UUID, rawPath, supersededPending string, svc *Resources.ResourceService) error {
 	if _, err := file.Seek(0, 0); err != nil {
 		return utils.Error(c, http.StatusServiceUnavailable, "Cover processing is not configured", err.Error())
 	}
-	path, variants, err := coverResourceSvc.UploadEventCover(file, header)
+	path, variants, err := svc.UploadEventCover(file, header)
 	if err != nil {
 		return utils.Error(c, http.StatusServiceUnavailable, "Cover processing is not configured", err.Error())
 	}
 	oldPath, oldVariants, err := eventSvc.ReplaceCoverImageWithVariants(eventID, path, variants)
 	if err != nil {
-		cleanupCoverObjects(path, variants)
+		cleanupCoverObjects(path, variants, svc)
 		return utils.Error(c, http.StatusInternalServerError, "Failed to update event", err.Error())
 	}
-	cleanupCoverObjects(oldPath, oldVariants)
-	_ = coverResourceSvc.DeleteObjectByPath(rawPath)
-	cleanupSupersededPending(supersededPending, oldPath)
-	viewURL, expiresAt := coverViewURLWithExpiry(path)
-	return utils.Success(c, http.StatusOK, "Cover image uploaded", dtos.EventCoverResponse{CoverImageURL: path, CoverViewURL: viewURL, CoverViewURLExpiresAt: expiresAt, ViewURL: viewURL, ViewURLExpiresAt: expiresAt, Variants: publicCoverVariants(variants), ProcessingStatus: "done"})
+	cleanupCoverObjects(oldPath, oldVariants, svc)
+	_ = svc.DeleteObjectByPath(rawPath)
+	cleanupSupersededPending(supersededPending, oldPath, svc)
+	viewURL, expiresAt := coverViewURLWithExpiry(path, svc.Bucket)
+	return utils.Success(c, http.StatusOK, "Cover image uploaded", dtos.EventCoverResponse{CoverImageURL: path, CoverViewURL: viewURL, CoverViewURLExpiresAt: expiresAt, ViewURL: viewURL, ViewURLExpiresAt: expiresAt, Variants: publicCoverVariants(variants, svc.Bucket), ProcessingStatus: "done"})
 }
 
 // BackfillEventCovers queues legacy covers without responsive variants. It is
@@ -122,13 +128,14 @@ func BackfillEventCovers(c echo.Context) error {
 	}
 	queued, failed := 0, 0
 	for _, candidate := range candidates {
+		svc := coverResourceSvc.WithBucket(candidate.MediaBucket)
 		jobID := uuid.Must(uuid.NewV4()).String()
 		event, _, err := eventSvc.BeginCoverProcessing(candidate.ID, candidate.CoverImageURL, jobID)
 		if err != nil {
 			failed++
 			continue
 		}
-		message := dtos.NewMediaProcessMessage(candidate.ID.String(), candidate.ID.String(), candidate.CoverImageURL, coverResourceSvc.Bucket, "image/webp", false)
+		message := dtos.NewMediaProcessMessage(candidate.ID.String(), candidate.ID.String(), candidate.CoverImageURL, svc.Bucket, "image/webp", false)
 		message.TargetType, message.JobID, message.Generation = dtos.MediaTargetEventCover, jobID, event.CoverProcessingGeneration
 		enqueued, publishErr := sqsrepository.PublishMediaJob(message)
 		if publishErr != nil || !enqueued {
@@ -164,7 +171,7 @@ func UpdateEventCoverContent(c echo.Context) error {
 	if err := c.Bind(&body); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
 	}
-	_, oldPath, oldVariants, err := eventSvc.ApplyCoverProcessingCallback(eventID, dtos.MediaProcessingCallback{JobID: body.JobID, Generation: body.Generation, ObjectKey: body.ObjectKey, ProcessingStatus: body.ProcessingStatus, ErrorMessage: body.ErrorMessage, ProcessingDurationMs: body.ProcessingDurationMs, OriginalSizeBytes: body.OriginalSizeBytes, OptimizedSizeBytes: body.OptimizedSizeBytes, MediaVariants: body.MediaVariants})
+	event, oldPath, oldVariants, err := eventSvc.ApplyCoverProcessingCallback(eventID, dtos.MediaProcessingCallback{JobID: body.JobID, Generation: body.Generation, ObjectKey: body.ObjectKey, ProcessingStatus: body.ProcessingStatus, ErrorMessage: body.ErrorMessage, ProcessingDurationMs: body.ProcessingDurationMs, OriginalSizeBytes: body.OriginalSizeBytes, OptimizedSizeBytes: body.OptimizedSizeBytes, MediaVariants: body.MediaVariants})
 	if err != nil {
 		if errors.Is(err, eventsService.ErrStaleCoverProcessing) {
 			return utils.Error(c, http.StatusConflict, "Stale cover processing callback", err.Error())
@@ -175,7 +182,7 @@ func UpdateEventCoverContent(c echo.Context) error {
 		return utils.Error(c, http.StatusInternalServerError, "Failed to update cover processing", err.Error())
 	}
 	if body.ProcessingStatus == "done" {
-		cleanupCoverObjects(oldPath, oldVariants)
+		cleanupCoverObjects(oldPath, oldVariants, coverResourceSvc.WithBucket(event.MediaBucket))
 	}
 	return utils.Success(c, http.StatusOK, "Cover processing updated", map[string]bool{"updated": true})
 }
@@ -196,9 +203,14 @@ func DeleteEventCover(c echo.Context) error {
 		}
 		return utils.Error(c, http.StatusInternalServerError, "Failed to remove cover", err.Error())
 	}
-	cleanupCoverObjects(oldPath, oldVariants)
+	mediaBucket := ""
+	if event != nil {
+		mediaBucket = event.MediaBucket
+	}
+	svc := coverResourceSvc.WithBucket(mediaBucket)
+	cleanupCoverObjects(oldPath, oldVariants, svc)
 	if event != nil && event.CoverPendingURL != "" {
-		_ = coverResourceSvc.DeleteObjectByPath(event.CoverPendingURL)
+		_ = svc.DeleteObjectByPath(event.CoverPendingURL)
 	}
 	return utils.Success(c, http.StatusOK, "Cover image removed", dtos.EventCoverResponse{CoverImageURL: "", ViewURL: ""})
 }
@@ -216,33 +228,41 @@ func validCoverInternalSecret(provided string) bool {
 	return valid == 1
 }
 
-func cleanupCoverObjects(path string, variants models.MediaVariants) {
+func cleanupCoverObjects(path string, variants models.MediaVariants, scoped ...*Resources.ResourceService) {
 	if coverResourceSvc == nil {
 		return
 	}
+	svc := coverResourceSvc
+	if len(scoped) > 0 && scoped[0] != nil {
+		svc = scoped[0]
+	}
 	if path != "" {
-		if err := coverResourceSvc.DeleteObjectByPath(path); err != nil {
+		if err := svc.DeleteObjectByPath(path); err != nil {
 			slog.Warn("event cover cleanup failed", "path", path, "error", err)
 		}
 	}
 	for _, variant := range variants {
-		if err := coverResourceSvc.DeleteObjectByPath(variant.ObjectKey); err != nil {
+		if err := svc.DeleteObjectByPath(variant.ObjectKey); err != nil {
 			slog.Warn("event cover variant cleanup failed", "path", variant.ObjectKey, "error", err)
 		}
 	}
 }
 
-func cleanupSupersededPending(path, currentCover string) {
+func cleanupSupersededPending(path, currentCover string, scoped ...*Resources.ResourceService) {
 	if path == "" || path == currentCover || !strings.Contains(path, "/raw/") {
 		return
 	}
-	_ = coverResourceSvc.DeleteObjectByPath(path)
+	svc := coverResourceSvc
+	if len(scoped) > 0 && scoped[0] != nil {
+		svc = scoped[0]
+	}
+	_ = svc.DeleteObjectByPath(path)
 }
 
-func publicCoverVariants(variants models.MediaVariants) []dtos.PublicMediaVariant {
+func publicCoverVariants(variants models.MediaVariants, buckets ...string) []dtos.PublicMediaVariant {
 	result := make([]dtos.PublicMediaVariant, 0, len(variants))
 	for _, variant := range variants {
-		viewURL, expiresAt := coverViewURLWithExpiry(variant.ObjectKey)
+		viewURL, expiresAt := coverViewURLWithExpiry(variant.ObjectKey, buckets...)
 		result = append(result, dtos.PublicMediaVariant{URL: variant.ObjectKey, ViewURL: viewURL, ExpiresAt: expiresAt, Width: variant.Width, Format: variant.Format, Bytes: variant.Bytes})
 	}
 	return result

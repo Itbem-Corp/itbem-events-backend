@@ -115,6 +115,28 @@ func TestCurrentUserPreservesPlatformAuthorityOnEventiAppClient(t *testing.T) {
 	assert.True(t, user.IsPlatformAdmin())
 }
 
+func TestTenantClientBoundaryAllowsOnlyTenantHierarchy(t *testing.T) {
+	itbemID := uuid.Must(uuid.NewV4())
+	itbemChildID := uuid.Must(uuid.NewV4())
+	cafettonID := uuid.Must(uuid.NewV4())
+	clients := map[uuid.UUID]*models.Client{
+		itbemID:      {ID: itbemID, Code: "itbem"},
+		itbemChildID: {ID: itbemChildID, Code: "customer", ParentID: &itbemID},
+		cafettonID:   {ID: cafettonID, Code: "cafettonhouse"},
+	}
+	restore := ReplaceHooksForTest(Hooks{
+		GetClientByID:        func(id uuid.UUID) (*models.Client, error) { return clients[id], nil },
+		CheckAccessRecursive: func(_ uuid.UUID, _ uuid.UUID) (bool, string) { return true, "OWNER" },
+	})
+	t.Cleanup(restore)
+
+	user := &models.User{ID: uuid.Must(uuid.NewV4()), AuthTenantCode: "itbem"}
+	require.NoError(t, RequireClientCapability(user, itbemChildID, CapabilityEventManage))
+	err := RequireClientCapability(user, cafettonID, CapabilityEventManage)
+	require.Error(t, err)
+	assert.Equal(t, http.StatusForbidden, err.(*Failure).Status)
+}
+
 func TestOrganizationRoleCapabilitiesAreLeastPrivilege(t *testing.T) {
 	tests := []struct {
 		role       string

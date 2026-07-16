@@ -45,6 +45,10 @@ type storedObjectDeleter interface {
 	DeleteObjectByPath(fullPath string) error
 }
 
+type bucketStoredObjectDeleter interface {
+	DeleteObjectByPathFromBucket(fullPath, bucket string) error
+}
+
 const userProviderSyncInterval = 5 * time.Minute
 
 // UserService is the injectable, struct-based user service.
@@ -65,11 +69,17 @@ func NewUserService(userRepo ports.UserRepository, authRepo ports.AuthProviderRe
 	return &UserService{userRepo: userRepo, authRepo: authRepo, cfg: cfg, objectDeleter: deleter}
 }
 
-func (s *UserService) deleteAvatarObject(path string) {
+func (s *UserService) deleteAvatarObject(path, bucket string) {
 	if s.objectDeleter == nil || path == "" {
 		return
 	}
-	if err := s.objectDeleter.DeleteObjectByPath(path); err != nil {
+	var err error
+	if scoped, ok := s.objectDeleter.(bucketStoredObjectDeleter); ok {
+		err = scoped.DeleteObjectByPathFromBucket(path, bucket)
+	} else {
+		err = s.objectDeleter.DeleteObjectByPath(path)
+	}
+	if err != nil {
 		slog.Warn("failed to delete avatar object", "path", path, "error", err)
 	}
 }
@@ -191,7 +201,7 @@ func (s *UserService) DeleteFullAccount(cognitoSub string) error {
 		return err
 	}
 	if user.ProfileImage != "" {
-		s.deleteAvatarObject(user.ProfileImage)
+		s.deleteAvatarObject(user.ProfileImage, user.ProfileImageBucket)
 	}
 	if err := s.authRepo.DeleteUser(cognitoSub, "cognito"); err != nil {
 		return fmt.Errorf("no se pudo eliminar la identidad en la nube, operación cancelada: %w", err)
@@ -209,9 +219,19 @@ func (s *UserService) UpdateProfileImage(userID uuid.UUID, newImagePath string) 
 		return err
 	}
 	if user.ProfileImage != "" && user.ProfileImage != newImagePath {
-		s.deleteAvatarObject(user.ProfileImage)
+		s.deleteAvatarObject(user.ProfileImage, user.ProfileImageBucket)
 	}
 	user.ProfileImage = newImagePath
+	return s.userRepo.UpdateUser(user)
+}
+
+func (s *UserService) UpdateProfileImageInBucket(userID uuid.UUID, newImagePath, bucket string) error {
+	user, err := s.userRepo.GetUserByID(userID)
+	if err != nil {
+		return err
+	}
+	user.ProfileImage = newImagePath
+	user.ProfileImageBucket = strings.TrimSpace(bucket)
 	return s.userRepo.UpdateUser(user)
 }
 
@@ -242,7 +262,7 @@ func (s *UserService) DeleteUserAvatar(user *models.User) {
 	if user.ProfileImage == "" {
 		return
 	}
-	s.deleteAvatarObject(user.ProfileImage)
+	s.deleteAvatarObject(user.ProfileImage, user.ProfileImageBucket)
 }
 
 func (s *UserService) ClearProfileImage(userID uuid.UUID) error {
