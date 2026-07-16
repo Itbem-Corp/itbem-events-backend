@@ -30,7 +30,13 @@ case "$command_name" in
   inspect)
     target="${*: -1}"
     if [[ "$target" == "itbem-events-backend" && "$FAKE_ACTIVE_EXISTS" == "true" ]]; then
-      [[ "$*" == *"--format"* ]] && printf '%s\n' 'sha256:previous'
+      if [[ "$*" == *".Config.Image"* ]]; then
+        printf '%s\n' "$IMAGE_TAG"
+      elif [[ "$*" == *".Config.Env"* ]]; then
+        printf '%s\n' 'DB_HOST=db.internal'
+      elif [[ "$*" == *"--format"* ]]; then
+        printf '%s\n' 'sha256:previous'
+      fi
       exit 0
     fi
     exit 1
@@ -91,7 +97,7 @@ run_deploy() {
 
   mkdir -p "$case_dir"
   : >"${case_dir}/docker.log"
-  printf '%s\n' 'PORT=8080' >"${case_dir}/backend.env"
+  printf '%s\n' 'PORT=8080' 'DB_HOST=db.internal' >"${case_dir}/backend.env"
 
   set +e
   PATH="${BIN_DIR}:$PATH" \
