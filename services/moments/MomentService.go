@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"events-stocks/dtos"
+	"events-stocks/internal/storagekeys"
 	"events-stocks/models"
 	"events-stocks/repositories/awsrepository"
 	"events-stocks/services/cacheutil"
@@ -345,7 +346,7 @@ func validateMediaVariants(moment *models.Moment, status string, variants []dtos
 		if variant.Width < 160 || variant.Width > 4096 || variant.Bytes < 0 || seen[variant.Width] || (format != "webp" && format != "avif") {
 			return nil, fmt.Errorf("%w: invalid media variant metadata", ErrInvalidMomentProcessingCallback)
 		}
-		expected := fmt.Sprintf("moments/%s/photos/%s-%d.%s", moment.EventID.String(), moment.ID.String(), variant.Width, format)
+		expected := storagekeys.Scoped(storagekeys.Namespace(moment.ProcessingInputKey), fmt.Sprintf("moments/%s/photos/%s-%d.%s", moment.EventID.String(), moment.ID.String(), variant.Width, format))
 		if key != expected {
 			return nil, fmt.Errorf("%w: media variant key is outside the moment prefix", ErrInvalidMomentProcessingCallback)
 		}
@@ -386,20 +387,27 @@ func validateMediaCallbackKeys(moment *models.Moment, status, objectKey, thumbna
 	}
 
 	isVideo := detectMediaIsVideo(moment.ContentType, expectedInput)
+	namespace := storagekeys.Namespace(expectedInput)
 	allowedObjectKeys := map[string]bool{}
 	if isVideo {
-		allowedObjectKeys[fmt.Sprintf("moments/%s/videos/%s.mp4", eventID, moment.ID)] = true
-		// Compatibility with the first processor key layout.
-		allowedObjectKeys[fmt.Sprintf("moments/%s/%s.mp4", eventID, moment.ID)] = true
-		expectedThumbnail := fmt.Sprintf("moments/%s/videos/%s-thumb.webp", eventID, moment.ID)
-		legacyThumbnail := fmt.Sprintf("moments/%s/%s-thumb.webp", eventID, moment.ID)
-		if thumbnailKey != "" && thumbnailKey != expectedThumbnail && thumbnailKey != legacyThumbnail {
+		allowedObjectKeys[storagekeys.Scoped(namespace, fmt.Sprintf("moments/%s/videos/%s.mp4", eventID, moment.ID))] = true
+		expectedThumbnail := storagekeys.Scoped(namespace, fmt.Sprintf("moments/%s/videos/%s-thumb.webp", eventID, moment.ID))
+		legacyThumbnail := ""
+		if namespace == "" {
+			// Compatibility with the first processor key layout is allowed only
+			// for legacy unscoped inputs.
+			allowedObjectKeys[fmt.Sprintf("moments/%s/%s.mp4", eventID, moment.ID)] = true
+			legacyThumbnail = fmt.Sprintf("moments/%s/%s-thumb.webp", eventID, moment.ID)
+		}
+		if thumbnailKey != "" && thumbnailKey != expectedThumbnail && (legacyThumbnail == "" || thumbnailKey != legacyThumbnail) {
 			return fmt.Errorf("%w: thumbnail key is outside the moment video prefix", ErrInvalidMomentProcessingCallback)
 		}
 	} else {
 		for _, extension := range []string{".webp", ".gif", ".avif"} {
-			allowedObjectKeys[fmt.Sprintf("moments/%s/photos/%s%s", eventID, moment.ID, extension)] = true
-			allowedObjectKeys[fmt.Sprintf("moments/%s/%s%s", eventID, moment.ID, extension)] = true
+			allowedObjectKeys[storagekeys.Scoped(namespace, fmt.Sprintf("moments/%s/photos/%s%s", eventID, moment.ID, extension))] = true
+			if namespace == "" {
+				allowedObjectKeys[fmt.Sprintf("moments/%s/%s%s", eventID, moment.ID, extension)] = true
+			}
 		}
 		if thumbnailKey != "" {
 			return fmt.Errorf("%w: image callback cannot set a video thumbnail", ErrInvalidMomentProcessingCallback)

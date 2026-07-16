@@ -306,7 +306,7 @@ func publicResourceServiceForEvent(event *models.Event) *resourcesService.Resour
 	if publicResSvc == nil || event == nil {
 		return publicResSvc
 	}
-	return publicResSvc.WithBucket(event.MediaBucket)
+	return publicResSvc.WithBucket(event.MediaBucket).WithOrganization(event.ClientID)
 }
 
 func cleanupMomentUpload(eventID, ip, objectKey string, releaseQuota bool, scoped ...*resourcesService.ResourceService) {

@@ -92,6 +92,7 @@ type ResourceService struct {
 	Bucket     string
 	Provider   string
 	UploadPath string // e.g. "resources"
+	ObjectRoot string // e.g. "organizations/{clientID}"
 	Optimizer  *ImageOptimizerService
 	repo       ports.ResourceRepository
 	cache      ports.CacheRepository
@@ -139,6 +140,30 @@ func (rs *ResourceService) WithBucket(bucket string) *ResourceService {
 	clone := *rs
 	clone.Bucket = strings.TrimSpace(bucket)
 	return &clone
+}
+
+// WithOrganization creates an immutable storage-scoped view. Buckets isolate
+// applications; this prefix isolates organizations inside each application.
+func (rs *ResourceService) WithOrganization(clientID *uuid.UUID) *ResourceService {
+	if rs == nil || clientID == nil || *clientID == uuid.Nil {
+		return rs
+	}
+	root := fmt.Sprintf("organizations/%s", clientID.String())
+	if rs.ObjectRoot == root {
+		return rs
+	}
+	clone := *rs
+	clone.ObjectRoot = root
+	return &clone
+}
+
+func (rs *ResourceService) scopedObjectPath(path string) string {
+	path = strings.Trim(strings.TrimSpace(path), "/")
+	root := strings.Trim(strings.TrimSpace(rs.ObjectRoot), "/")
+	if root == "" || path == "" || path == root || strings.HasPrefix(path, root+"/") {
+		return path
+	}
+	return root + "/" + path
 }
 
 func resourceServiceUnavailable() error {
@@ -521,7 +546,8 @@ func (rs *ResourceService) UploadAndCreateResource(
 		return nil, err
 	}
 
-	err = storage.UploadRawBytesSimple(optimized, filename, contentType, rs.UploadPath, rs.Bucket, rs.Provider)
+	uploadPath := rs.scopedObjectPath(rs.UploadPath)
+	err = storage.UploadRawBytesSimple(optimized, filename, contentType, uploadPath, rs.Bucket, rs.Provider)
 	if err != nil {
 		return nil, fmt.Errorf("failed to upload resource: %w", err)
 	}
@@ -529,7 +555,7 @@ func (rs *ResourceService) UploadAndCreateResource(
 	resource := &models.Resource{
 		EventSectionID: sectionID,
 		ResourceTypeID: resourceTypeID,
-		Path:           fmt.Sprintf("%s/%s", rs.UploadPath, filename),
+		Path:           fmt.Sprintf("%s/%s", uploadPath, filename),
 		MediaBucket:    rs.Bucket,
 		AltText:        altText,
 		Title:          title,
@@ -537,7 +563,7 @@ func (rs *ResourceService) UploadAndCreateResource(
 	}
 
 	if err := rs.CreateResource(resource); err != nil {
-		_ = storage.DeleteFile(filename, rs.UploadPath, rs.Bucket, rs.Provider)
+		_ = storage.DeleteFile(filename, uploadPath, rs.Bucket, rs.Provider)
 		return nil, fmt.Errorf("failed to create resource in DB: %w", err)
 	}
 
@@ -561,11 +587,12 @@ func (rs *ResourceService) UploadEventCover(
 	if err != nil {
 		return "", nil, err
 	}
-	err = storage.UploadRawBytesSimple(optimized, filename, contentType, rs.UploadPath, rs.Bucket, rs.Provider)
+	uploadPath := rs.scopedObjectPath(rs.UploadPath)
+	err = storage.UploadRawBytesSimple(optimized, filename, contentType, uploadPath, rs.Bucket, rs.Provider)
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to upload cover image: %w", err)
 	}
-	mainPath := fmt.Sprintf("%s/%s", rs.UploadPath, filename)
+	mainPath := fmt.Sprintf("%s/%s", uploadPath, filename)
 	sourceWidth, widthErr := rs.Optimizer.ImageWidth(optimized)
 	if widthErr != nil {
 		_ = rs.DeleteObjectByPath(mainPath)
@@ -581,7 +608,7 @@ func (rs *ResourceService) UploadEventCover(
 	variants := make(models.MediaVariants, 0, len(generated))
 	for _, variant := range generated {
 		variantFilename := fmt.Sprintf("%s-%d.webp", stem, variant.Width)
-		if uploadErr := storage.UploadRawBytesSimple(variant.Bytes, variantFilename, "image/webp", rs.UploadPath, rs.Bucket, rs.Provider); uploadErr != nil {
+		if uploadErr := storage.UploadRawBytesSimple(variant.Bytes, variantFilename, "image/webp", uploadPath, rs.Bucket, rs.Provider); uploadErr != nil {
 			_ = rs.DeleteObjectByPath(mainPath)
 			for _, uploaded := range variants {
 				_ = rs.DeleteObjectByPath(uploaded.ObjectKey)
@@ -589,7 +616,7 @@ func (rs *ResourceService) UploadEventCover(
 			return "", nil, fmt.Errorf("failed to upload cover variant: %w", uploadErr)
 		}
 		variants = append(variants, models.MediaVariant{
-			ObjectKey: fmt.Sprintf("%s/%s", rs.UploadPath, variantFilename),
+			ObjectKey: fmt.Sprintf("%s/%s", uploadPath, variantFilename),
 			Width:     variant.Width, Format: "webp", Bytes: int64(len(variant.Bytes)),
 		})
 	}
@@ -622,7 +649,7 @@ func (rs *ResourceService) UploadRawEventCover(file multipart.File, header *mult
 	}
 	u, _ := uuid.NewV4()
 	filename := updateFilenameExtension(u.String(), contentType)
-	folder := fmt.Sprintf("%s/%s/raw", strings.Trim(rs.UploadPath, "/"), eventID)
+	folder := rs.scopedObjectPath(fmt.Sprintf("%s/%s/raw", strings.Trim(rs.UploadPath, "/"), eventID))
 	storage, err := rs.requireStorage()
 	if err != nil {
 		return "", "", 0, err
@@ -702,7 +729,7 @@ func (rs *ResourceService) UploadRawToMomentsFolder(
 	filename := u.String() + ext
 
 	// Organize: moments/{eventID}/raw/{uuid}.ext
-	folder := fmt.Sprintf("moments/%s/raw", eventID)
+	folder := rs.scopedObjectPath(fmt.Sprintf("moments/%s/raw", eventID))
 	storage, err := rs.requireStorage()
 	if err != nil {
 		return "", "", err
@@ -719,7 +746,7 @@ func (rs *ResourceService) PrepareMomentUploadURL(eventID, filename, contentType
 	if err != nil {
 		return "", "", "", err
 	}
-	key := buildMomentRawKey(eventID, filename)
+	key := rs.buildMomentRawKey(eventID, filename)
 	storage, err := rs.requireStorage()
 	if err != nil {
 		return "", "", "", err
@@ -742,7 +769,7 @@ func (rs *ResourceService) PrepareMomentMultipartUpload(eventID, filename, conte
 	if err != nil {
 		return "", "", nil, "", err
 	}
-	key := buildMomentRawKey(eventID, filename)
+	key := rs.buildMomentRawKey(eventID, filename)
 	storage, err := rs.requireStorage()
 	if err != nil {
 		return "", "", nil, "", err
@@ -807,7 +834,7 @@ func (rs *ResourceService) AbortMomentMultipartUpload(s3Key, uploadID string) er
 }
 
 func (rs *ResourceService) ValidateMomentRawKey(eventID, s3Key string) error {
-	expectedPrefix := fmt.Sprintf("moments/%s/raw/", eventID)
+	expectedPrefix := rs.scopedObjectPath(fmt.Sprintf("moments/%s/raw", eventID)) + "/"
 	if !strings.HasPrefix(s3Key, expectedPrefix) {
 		return services.ValidationError{Msg: "invalid upload key for event"}
 	}
@@ -891,13 +918,13 @@ func momentUploadLimit(contentType string) (int64, int) {
 	return int64(MaxMomentImageFileSizeBytes), MaxMomentImageFileSizeMB
 }
 
-func buildMomentRawKey(eventID, filename string) string {
+func (rs *ResourceService) buildMomentRawKey(eventID, filename string) string {
 	u, _ := uuid.NewV4()
 	ext := ""
 	if idx := strings.LastIndex(filename, "."); idx != -1 {
 		ext = strings.ToLower(filename[idx:])
 	}
-	return fmt.Sprintf("moments/%s/raw/%s%s", eventID, u.String(), ext)
+	return rs.scopedObjectPath(fmt.Sprintf("moments/%s/raw/%s%s", eventID, u.String(), ext))
 }
 
 func normalizeMomentUploadContentType(filename, contentType string) (string, error) {
@@ -959,7 +986,8 @@ func (rs *ResourceService) UploadMultipleResources(
 	}
 	created := make([]*models.Resource, 0, len(files))
 	uploadedNames := make([]string, 0, len(files))
-	cleanup := func() { rs.cleanupBatchUploads(storage, created, uploadedNames, rs.UploadPath) }
+	uploadPath := rs.scopedObjectPath(rs.UploadPath)
+	cleanup := func() { rs.cleanupBatchUploads(storage, created, uploadedNames, uploadPath) }
 
 	for i, header := range files {
 		file, err := header.Open()
@@ -980,7 +1008,7 @@ func (rs *ResourceService) UploadMultipleResources(
 			cleanup()
 			return nil, fmt.Errorf("failed to process file %d: %w", i+1, err)
 		}
-		err = storage.UploadRawBytesSimple(content, finalName, finalType, rs.UploadPath, rs.Bucket, rs.Provider)
+		err = storage.UploadRawBytesSimple(content, finalName, finalType, uploadPath, rs.Bucket, rs.Provider)
 		if err != nil {
 			cleanup()
 			return nil, fmt.Errorf("upload failed for file %d: %w", i+1, err)
@@ -990,7 +1018,7 @@ func (rs *ResourceService) UploadMultipleResources(
 		resource := &models.Resource{
 			EventSectionID: sectionID,
 			ResourceTypeID: resourceTypeID,
-			Path:           fmt.Sprintf("%s/%s", rs.UploadPath, finalName),
+			Path:           fmt.Sprintf("%s/%s", uploadPath, finalName),
 			MediaBucket:    rs.Bucket,
 			AltText:        "",
 			Title:          finalName,
