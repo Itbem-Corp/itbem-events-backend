@@ -121,7 +121,7 @@ func TestCriticalMutationsReplaysCompletedResponseWithoutExecutingAgain(t *testi
 			"created_at", "updated_at", "expires_at",
 		}).AddRow(
 			recordID, "itbem", "actor-1", http.MethodPost, "/api/users/invite", "invite-user-1",
-			requestHash, "completed", http.StatusCreated, echo.MIMEApplicationJSONCharsetUTF8,
+			requestHash, "completed", http.StatusCreated, "application/json; charset=UTF-8",
 			[]byte("{\"id\":\"user-1\"}\n"), now, now, now.Add(recordTTL),
 		))
 
