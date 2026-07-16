@@ -32,6 +32,7 @@ func Capabilities(c echo.Context) error {
 	capabilities := map[string]bool{}
 	for _, capability := range []authz.Capability{
 		authz.CapabilityEventManage,
+		authz.CapabilityEventDelete,
 		authz.CapabilityGuestManage,
 		authz.CapabilityCheckin,
 		authz.CapabilityAnalyticsView,

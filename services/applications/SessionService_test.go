@@ -116,7 +116,8 @@ func TestEffectiveApplicationCapabilitiesEnforcesRootCeilings(t *testing.T) {
 			name: "primary root governs platform and product",
 			user: &models.User{RootLevel: models.RootLevelPrimary},
 			want: []string{
-				"events:manage", "platform:users:manage", "platform:users:root-manage",
+				"events:create", "events:manage", "events:delete",
+				"platform:users:manage", "platform:users:root-manage",
 				"organizations:manage", "applications:manage", "members:manage",
 			},
 		},
@@ -128,7 +129,8 @@ func TestEffectiveApplicationCapabilitiesEnforcesRootCeilings(t *testing.T) {
 				"platform:users:view", "platform:users:support", "organizations:view", "members:manage",
 			},
 			notAllowed: []string{
-				"events:manage", "platform:users:manage", "platform:users:root-manage",
+				"events:create", "events:manage", "events:delete",
+				"platform:users:manage", "platform:users:root-manage",
 				"organizations:manage", "applications:manage",
 			},
 		},
@@ -152,12 +154,15 @@ func TestOrganizationCapabilitiesMatchRoleBoundaries(t *testing.T) {
 		want       []string
 		notAllowed []string
 	}{
-		{role: "Owner", want: []string{"organizations:manage", "members:manage", "events:manage"}},
-		{role: "Admin", want: []string{"organizations:manage", "members:manage", "events:manage"}},
-		{role: "EVENT_MANAGER", want: []string{"events:manage", "guests:manage"}, notAllowed: []string{"members:manage"}},
+		{role: "Owner", want: []string{"organizations:manage", "members:manage", "events:create", "events:manage", "events:delete"}},
+		{role: "Admin", want: []string{"organizations:manage", "members:manage", "events:create", "events:manage", "events:delete"}},
+		{role: "EVENT_MANAGER", want: []string{"events:create", "events:manage", "guests:manage"}, notAllowed: []string{"events:delete", "members:manage"}},
+		{role: "EDITOR", want: []string{"events:manage", "guests:manage", "analytics:view"}, notAllowed: []string{"events:create", "events:delete", "checkin:run"}},
+		{role: "MEMBER", want: []string{"events:view", "guests:manage"}, notAllowed: []string{"events:create", "events:manage", "events:delete", "checkin:run", "analytics:view"}},
 		{role: "CHECKIN", want: []string{"events:view", "checkin:run"}, notAllowed: []string{"events:manage", "guests:manage"}},
 		{role: "ANALYST", want: []string{"events:view", "analytics:view"}, notAllowed: []string{"events:manage", "checkin:run"}},
 		{role: "Guest", want: []string{"events:view"}, notAllowed: []string{"events:manage", "analytics:view"}},
+		{role: "Viewer", want: []string{"events:view"}, notAllowed: []string{"events:manage", "analytics:view"}},
 	}
 	for _, test := range tests {
 		t.Run(test.role, func(t *testing.T) {
@@ -230,5 +235,7 @@ func TestEventProductRootsCanManageTeamsOnlyWithinAuthorizedRequests(t *testing.
 	assert.Contains(t, primary, "members:manage")
 	assert.Contains(t, operational, "members:manage")
 	assert.NotContains(t, operational, "events:manage")
+	assert.NotContains(t, operational, "events:create")
+	assert.NotContains(t, operational, "events:delete")
 	assert.NotContains(t, primary, "organizations:manage")
 }
