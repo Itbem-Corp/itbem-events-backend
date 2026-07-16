@@ -13,6 +13,8 @@ class DeployWorkflowContractTests(unittest.TestCase):
         self.assertIn("jq -cn --arg command", workflow)
         self.assertIn("'{commands: [$command]}'", workflow)
         self.assertIn('grep -Fqx "deployed_revision=$REVISION"', workflow)
+        self.assertIn("deploy_dir='/var/lib/eventiapp-deploy/${GITHUB_RUN_ID}'", workflow)
+        self.assertNotIn("$HOME/.eventiapp-deploy", workflow)
         self.assertNotIn("sed 's|^|echo |", workflow)
 
 
