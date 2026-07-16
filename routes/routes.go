@@ -24,6 +24,7 @@ import (
 	"events-stocks/controllers/users"
 	"events-stocks/middleware/applicationaccess"
 	"events-stocks/middleware/audit"
+	"events-stocks/middleware/idempotency"
 	"events-stocks/middleware/token"
 	"events-stocks/models"
 	"events-stocks/utils"
@@ -262,6 +263,7 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	protected.Use(token.Autenticacion(cfg))
 	protected.Use(protectedRateLimiter())
 	protected.Use(applicationaccess.Require)
+	protected.Use(idempotency.CriticalMutations)
 	protected.Use(audit.Mutations)
 
 	protected.GET("/session", sessions.GetSession)

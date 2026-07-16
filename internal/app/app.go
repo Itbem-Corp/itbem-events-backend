@@ -72,6 +72,7 @@ import (
 	guestsService "events-stocks/services/guests"
 	invitationsService "events-stocks/services/invitations"
 	momentsService "events-stocks/services/moments"
+	outboxService "events-stocks/services/outbox"
 	resourcesService "events-stocks/services/resources"
 	templatesService "events-stocks/services/templates"
 	usersService "events-stocks/services/users"
@@ -110,6 +111,9 @@ func Run() error {
 	configuration.InitAwsServices(cfg)
 	sqsrepository.Init(cfg.AwsRegion, cfg.S3ClientId, cfg.S3ClientSecret, cfg.SQSImageQueueURL, cfg.SQSVideoQueueURL)
 	jobqueuerepository.Init(cfg.AwsRegion, cfg.S3ClientId, cfg.S3ClientSecret, cfg.SQSWorkerQueueURL)
+	dispatcherCtx, stopDispatcher := context.WithCancel(context.Background())
+	defer stopDispatcher()
+	outboxService.StartDispatcher(dispatcherCtx, configuration.DB)
 
 	e := newServer(cfg)
 	wireDependencies(cfg)

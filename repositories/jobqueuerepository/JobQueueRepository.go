@@ -65,6 +65,12 @@ var (
 	performancePublishedBucket time.Time
 )
 
+var ErrQueueUnavailable = fmt.Errorf("worker queue is unavailable")
+
+func IsConfigured() bool {
+	return queueURL != ""
+}
+
 // Init is fail-open so local/API operation remains available without workers.
 // Analytics reads retain their synchronous fallback until a snapshot exists.
 func Init(region, accessKeyID, secretAccessKey, workerQueueURL string) {
@@ -172,6 +178,45 @@ func PublishAnalyticsRollup(eventID uuid.UUID, tenantCodes ...string) (bool, err
 		return false, fmt.Errorf("publish analytics rollup job: %w", err)
 	}
 	return true, nil
+}
+
+// BuildAnalyticsRollupMessage exposes the stable worker contract so the API
+// can persist the exact envelope before attempting SQS delivery.
+func BuildAnalyticsRollupMessage(eventID uuid.UUID, tenantCode string, now time.Time) (body, dedupeKey, normalizedTenant string, err error) {
+	if eventID == uuid.Nil {
+		return "", "", "", fmt.Errorf("event ID is required")
+	}
+	normalizedTenant = strings.ToLower(strings.TrimSpace(tenantCode))
+	envelope := buildAnalyticsRollupEnvelope(eventID, normalizedTenant, now)
+	encoded, marshalErr := json.Marshal(envelope)
+	if marshalErr != nil {
+		return "", "", "", fmt.Errorf("marshal analytics rollup job: %w", marshalErr)
+	}
+	return string(encoded), envelope.JobID.String(), normalizedTenant, nil
+}
+
+// PublishRaw delivers a worker envelope that was already committed to the
+// database outbox.
+func PublishRaw(body, tenantCode string) error {
+	if client == nil || queueURL == "" {
+		return ErrQueueUnavailable
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), publishTimeout)
+	defer cancel()
+	input := &sqs.SendMessageInput{
+		QueueUrl:    aws.String(queueURL),
+		MessageBody: aws.String(body),
+	}
+	tenantCode = strings.ToLower(strings.TrimSpace(tenantCode))
+	if tenantCode != "" {
+		input.MessageAttributes = map[string]sqstypes.MessageAttributeValue{
+			"tenant_code": {DataType: aws.String("String"), StringValue: aws.String(tenantCode)},
+		}
+	}
+	if _, err := client.SendMessage(ctx, input); err != nil {
+		return fmt.Errorf("publish persisted worker job: %w", err)
+	}
+	return nil
 }
 
 func reserveAnalyticsPublish(eventID uuid.UUID, bucket time.Time) bool {
