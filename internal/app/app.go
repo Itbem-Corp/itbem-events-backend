@@ -73,6 +73,7 @@ import (
 	invitationsService "events-stocks/services/invitations"
 	momentsService "events-stocks/services/moments"
 	outboxService "events-stocks/services/outbox"
+	productmetricsService "events-stocks/services/productmetrics"
 	resourcesService "events-stocks/services/resources"
 	templatesService "events-stocks/services/templates"
 	usersService "events-stocks/services/users"
@@ -114,6 +115,9 @@ func Run() error {
 	dispatcherCtx, stopDispatcher := context.WithCancel(context.Background())
 	defer stopDispatcher()
 	outboxService.StartDispatcher(dispatcherCtx, configuration.DB)
+	metricsCollector := productmetricsService.NewCollector(configuration.DB)
+	productmetricsService.Configure(metricsCollector)
+	metricsCollector.Start(dispatcherCtx)
 
 	e := newServer(cfg)
 	wireDependencies(cfg)
@@ -152,6 +156,7 @@ func Run() error {
 	if err := e.Shutdown(ctx); err != nil {
 		return fmt.Errorf("server shutdown: %w", err)
 	}
+	metricsCollector.Flush(ctx)
 	slog.Info("server stopped gracefully")
 	return nil
 }

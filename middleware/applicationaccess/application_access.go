@@ -71,6 +71,9 @@ func requiredSurfaceCapability(method, path string) string {
 	if path == "/api/session" || path == "/api/users" || strings.HasPrefix(path, "/api/users/avatar") {
 		return ""
 	}
+	if strings.HasPrefix(path, "/api/metrics") {
+		return "metrics:view"
+	}
 	if strings.HasPrefix(path, "/api/users/") || path == "/api/users/all" {
 		return "platform:users:view"
 	}
