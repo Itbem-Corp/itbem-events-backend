@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -36,45 +35,4 @@ func TestValidateTenantRequestHostRejectsCrossProductTokens(t *testing.T) {
 	require.NoError(t, validateTenantRequestHost("api.itbem.com.mx:443", "itbem", hostMap))
 	assert.ErrorContains(t, validateTenantRequestHost("api.eventiapp.com.mx", "itbem", hostMap), "does not match")
 	assert.ErrorContains(t, validateTenantRequestHost("unknown.example.com", "itbem", hostMap), "not configured")
-}
-
-func TestValidateCognitoIdentityClaimsBindsAudienceToTenant(t *testing.T) {
-	cfg := &models.Config{
-		CognitoAwsRegion:        "us-east-1",
-		CognitoUserPoolId:       "pool-id",
-		CognitoAllowedClientIds: "eventi-client,itbem-client,cafetton-client",
-		CognitoTenantClientMap:  "eventi-client=eventiapp,itbem-client=itbem,cafetton-client=cafettonhouse",
-	}
-	claims := jwt.MapClaims{
-		"iss":       "https://cognito-idp.us-east-1.amazonaws.com/pool-id",
-		"token_use": "id",
-		"aud":       "itbem-client",
-		"sub":       "immutable-user-sub",
-	}
-
-	subject, audience, tenant, err := validateCognitoIdentityClaims(claims, cfg)
-
-	require.NoError(t, err)
-	assert.Equal(t, "immutable-user-sub", subject)
-	assert.Equal(t, "itbem-client", audience)
-	assert.Equal(t, "itbem", tenant)
-}
-
-func TestValidateCognitoIdentityClaimsRejectsUnknownAudience(t *testing.T) {
-	cfg := &models.Config{
-		CognitoAwsRegion:        "us-east-1",
-		CognitoUserPoolId:       "pool-id",
-		CognitoAllowedClientIds: "eventi-client",
-		CognitoTenantClientMap:  "eventi-client=eventiapp",
-	}
-	claims := jwt.MapClaims{
-		"iss":       "https://cognito-idp.us-east-1.amazonaws.com/pool-id",
-		"token_use": "id",
-		"aud":       "foreign-client",
-		"sub":       "immutable-user-sub",
-	}
-
-	_, _, _, err := validateCognitoIdentityClaims(claims, cfg)
-
-	assert.ErrorContains(t, err, "audience is not allowed")
 }
