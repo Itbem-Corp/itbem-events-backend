@@ -67,6 +67,7 @@ func TestConfigurarRutasRegistersFrontendContractRoutes(t *testing.T) {
 
 		// Dashboard protected contracts.
 		"GET /api/session",
+		"GET /api/audit-logs",
 		"GET /api/events",
 		"GET /api/events/dashboard",
 		"GET /api/events/all",

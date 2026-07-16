@@ -4,6 +4,9 @@ import (
 	"events-stocks/models"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestJWTClockSkewDefaultsToStrictValidation(t *testing.T) {
@@ -24,4 +27,12 @@ func TestJWTClockSkewRejectsInvalidValues(t *testing.T) {
 			t.Fatalf("expected strict validation for %q, got %s", value, got)
 		}
 	}
+}
+
+func TestValidateTenantRequestHostRejectsCrossProductTokens(t *testing.T) {
+	hostMap := "api.eventiapp.com.mx=eventiapp,api.itbem.com.mx=itbem,api.cafettonhouse.com=cafettonhouse"
+
+	require.NoError(t, validateTenantRequestHost("api.itbem.com.mx:443", "itbem", hostMap))
+	assert.ErrorContains(t, validateTenantRequestHost("api.eventiapp.com.mx", "itbem", hostMap), "does not match")
+	assert.ErrorContains(t, validateTenantRequestHost("unknown.example.com", "itbem", hostMap), "not configured")
 }
