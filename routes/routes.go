@@ -19,7 +19,9 @@ import (
 	"events-stocks/controllers/invitations"
 	"events-stocks/controllers/moments"
 	"events-stocks/controllers/resources"
+	"events-stocks/controllers/sessions"
 	"events-stocks/controllers/users"
+	"events-stocks/middleware/applicationaccess"
 	"events-stocks/middleware/token"
 	"events-stocks/models"
 	"events-stocks/utils"
@@ -257,6 +259,9 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	protected.Use(middleware.BodyLimit("25M")) // Permite subir recursos (logos, fuentes, etc.)
 	protected.Use(token.Autenticacion(cfg))
 	protected.Use(protectedRateLimiter())
+	protected.Use(applicationaccess.Require)
+
+	protected.GET("/session", sessions.GetSession)
 
 	// ── Events ────────────────────────────────
 	protected.GET("/events/all", events.ListEvents)
@@ -351,6 +356,8 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	protected.POST("/clients/members", clients.CreateClientMember)
 	protected.DELETE("/clients/members/:user_id", clients.RemoveMember)
 	protected.PUT("/clients/members/:user_id", clients.UpdateMemberRole)
+	protected.GET("/clients/:id/member-applications/:user_id", sessions.ListMemberApplications)
+	protected.PUT("/clients/:id/member-applications/:user_id/:application_code", sessions.SetMemberApplication)
 	protected.GET("/clients/:id", clients.GetClient)
 	protected.PUT("/clients/:id", clients.UpdateClient)
 	protected.DELETE("/clients/:id", clients.DeleteClient)

@@ -28,9 +28,10 @@ type ClientResponse struct {
 }
 
 type ClientsListQuery struct {
-	Page     int
-	PageSize int
-	Search   string
+	Page       int
+	PageSize   int
+	Search     string
+	TenantCode string
 }
 
 type ClientsPageResponse struct {

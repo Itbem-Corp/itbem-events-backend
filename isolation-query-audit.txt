@@ -1,0 +1,94 @@
+﻿repositories\clientrolerepository\clientRoleRepository.go:37:	err := gormrepository.DB().Where("LOWER(code) = LOWER(?)", code).First(&role).Error
+repositories\clientrepository\clientRepository.go:41:			base = base.Where(`
+repositories\clientrepository\clientRepository.go:59:			base = base.Where("LOWER(clients.name) LIKE ? OR LOWER(clients.code) LIKE ?", pattern, pattern)
+repositories\clientrepository\clientRepository.go:274:			query = query.Where("LOWER(\"User\".first_name) LIKE ? OR LOWER(\"User\".last_name) LIKE ? OR LOWER(\"User\".email) LIKE ?", like, like, like)
+repositories\clienttyperepository\clientTypeRepository.go:48:	err := gormrepository.DB().Where("code = ?", code).First(&t).Error
+repositories\eventanalyticsrepository\EventAnalyticsRepository.go:77:	if err := gormrepository.DB().Where("event_id = ?", eventID).First(&analytics).Error; err != nil {
+repositories\eventanalyticsrepository\EventAnalyticsRepository.go:85:	if err := gormrepository.DB().Where("event_id = ?", eventID).First(&rollup).Error; err != nil {
+repositories\eventmemberrepository\EventMemberRepository.go:17:	err := r.db.Where("event_id = ? AND user_id = ? AND is_active = true", eventID, userID).First(&member).Error
+repositories\eventmemberrepository\EventMemberRepository.go:29:	err := r.db.Preload("User").Where("event_id = ? AND is_active = true", eventID).Order("created_at ASC").Find(&members).Error
+repositories\eventmemberrepository\EventMemberRepository.go:35:	err := r.db.Where("event_id = ? AND user_id = ?", eventID, userID).First(&member).Error
+repositories\eventmemberrepository\EventMemberRepository.go:43:	} else if err := r.db.Model(&member).Updates(map[string]interface{}{"role": role, "is_active": true}).Error; err != nil {
+repositories\eventmemberrepository\EventMemberRepository.go:53:	return r.db.Where("event_id = ? AND user_id = ?", eventID, userID).Delete(&models.EventMember{}).Error
+repositories\eventsrepository\EventsRepository.go:114:		return query.Where("events.client_id = ?", *clientID)
+repositories\eventsrepository\EventsRepository.go:117:		return query.Where(
+repositories\eventsrepository\EventsRepository.go:154:		return dashboardEventsScope(db.Model(&models.Event{}), clientID, userID).
+repositories\eventsrepository\EventsRepository.go:167:		return dashboardEventsScope(db.Model(&models.Event{}), clientID, userID).
+repositories\eventsrepository\EventsRepository.go:176:		err := dashboardEventsScope(db.Model(&models.Event{}), clientID, userID).
+repositories\eventsrepository\EventsRepository.go:219:		query = query.Where(
+repositories\eventsrepository\EventsRepository.go:231:		query = query.Where(calendarDate+" > "+today, listQuery.Now)
+repositories\eventsrepository\EventsRepository.go:233:		query = query.Where(calendarDate+" = "+today, listQuery.Now)
+repositories\eventsrepository\EventsRepository.go:235:		query = query.Where(calendarDate+" < "+today, listQuery.Now)
+repositories\eventsrepository\EventsRepository.go:256:		return dashboardEventsScope(db.Model(&models.Event{}), clientID, userID).
+repositories\eventsrepository\EventsRepository.go:271:				dashboardEventsScope(db.Model(&models.Event{}), clientID, userID),
+repositories\eventsrepository\EventsRepository.go:278:			dashboardEventsScope(db.Model(&models.Event{}), clientID, userID),
+repositories\eventsrepository\EventsRepository.go:308:	gormrepository.DB().Model(&models.Event{}).Where("identifier = ?", identifier).Count(&count)
+repositories\eventsrepository\EventsRepository.go:362:		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", id).First(&result).Error; err != nil {
+repositories\eventsrepository\EventsRepository.go:377:		if err := tx.Model(&models.Event{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+repositories\eventsrepository\EventsRepository.go:394:		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", id).First(&result).Error; err != nil {
+repositories\eventsrepository\EventsRepository.go:431:		if err := tx.Model(&models.Event{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+repositories\eventtablerepository\EventTableRepository.go:35:		return tx.Where("id = ?", id).Delete(&models.EventTable{}).Error
+repositories\eventtablerepository\EventTableRepository.go:190:			if err := tx.Model(&models.EventTable{}).Where("event_id = ? AND id IN ?", eventID, assignmentTableIDs).Count(&count).Error; err != nil {
+repositories\eventtablerepository\EventTableRepository.go:211:			if err := tx.Model(&models.Guest{}).Where("event_id = ? AND id IN ?", eventID, guestIDs).Count(&guestCount).Error; err != nil {
+repositories\eventtablerepository\EventTableRepository.go:228:			if err := tx.Model(&models.Guest{}).Where("event_id = ? AND table_id IN ?", eventID, deletedIDs).Update("table_id", nil).Error; err != nil {
+repositories\eventtablerepository\EventTableRepository.go:231:			result := tx.Where("event_id = ? AND id IN ?", eventID, deletedIDs).Delete(&models.EventTable{})
+repositories\eventtablerepository\EventTableRepository.go:240:		return tx.Where("event_id = ?", eventID).Order("sort_order ASC").Order("created_at ASC").Find(&saved).Error
+services\events\DuplicateService.go:239:	if err := tx.Model(&models.Event{}).Where("name = ?", name).Count(&count).Error; err != nil {
+services\events\DuplicateService.go:266:	if err := tx.Model(&models.Event{}).Where("identifier = ?", identifier).Count(&count).Error; err != nil {
+services\events\DuplicateService.go:322:	if err := tx.Where("event_id = ?", sourceID).Order("\"order\" ASC").Find(&sections).Error; err != nil {
+services\events\DuplicateService.go:359:		if err := tx.Where("event_section_id = ?", sourceSectionID).Order("position ASC").Find(&resources).Error; err != nil {
+repositories\gormrepository\GormRepository.go:30:	return configuration.DB.Where(conditions).FirstOrCreate(model).Error
+repositories\gormrepository\GormRepository.go:43:		query = query.Where(opts.Filters)
+repositories\gormrepository\GormRepository.go:82:		return query.Where("id = ?", id).First(model).Error
+repositories\gormrepository\GormRepository.go:91:	result := configuration.DB.Model(model).Where("id = ?", id).Select("*").Updates(model)
+repositories\gormrepository\GormRepository.go:131:	return configuration.DB.Where("id = ?", id).Delete(model).Error
+repositories\gormrepository\GormRepository.go:135:	return configuration.DB.Where(filters).Delete(new(T)).Error
+repositories\gormrepository\GormRepository.go:151:		query = query.Where(opts.Filters)
+repositories\gormrepository\GormRepository.go:173:	err := configuration.DB.Model(model).Where(field+" = ?", value).Count(&count).Error
+services\applications\SessionService.go:81:	if err := service.db.Where("LOWER(code) = ? AND is_active = true", code).First(&application).Error; err != nil {
+services\applications\SessionService.go:139:	if err := service.db.Where("client_id = ? AND user_id = ? AND is_active = true", clientID, userID).First(&member).Error; err != nil {
+services\applications\SessionService.go:143:	err := service.db.Raw(`
+services\applications\SessionService.go:185:		if err := tx.Where("client_id = ? AND user_id = ? AND is_active = true", clientID, userID).First(&member).Error; err != nil {
+services\applications\SessionService.go:227:		if err := tx.Model(&models.User{}).Select("cognito_sub").Where("id = ?", userID).Scan(&cognitoSub).Error; err != nil {
+services\applications\SessionService.go:254:	err := service.db.Raw(`
+services\clients\clientService.go:421:			if err := tx.Where("client_id = ?", clientID).Delete(&models.ClientMember{}).Error; err != nil {
+services\clients\clientService.go:424:			if err := tx.Where("id = ?", clientID).Delete(&models.Client{}).Error; err != nil {
+services\events\RepairService.go:66:	tx.Model(&models.EventConfig{}).Where("id = ?", eventID).Count(&configCount)
+services\events\RepairService.go:76:	tx.Model(&models.EventAnalytics{}).Where("event_id = ?", eventID).Count(&analyticsCount)
+services\events\RepairService.go:145:			tx.Model(&models.DesignTemplate{}).Where("id = ?", *config.DesignTemplateID).Count(&tplCount)
+services\events\RepairService.go:153:			tx.Model(&models.ColorPalette{}).Where("id = ?", *config.ColorPaletteID).Count(&paletteCount)
+services\events\RepairService.go:161:			tx.Model(&models.FontSet{}).Where("id = ?", *config.FontSetID).Count(&fontSetCount)
+services\events\RepairService.go:171:	if err := tx.Where("UPPER(code) = ?", "PENDING").First(&pendingStatus).Error; err == nil {
+repositories\userrepository\UserRepository.go:16:	err := gormrepository.DB().Where("cognito_sub = ?", sub).First(&user).Error
+repositories\userrepository\UserRepository.go:54:		if err := tx.Where("user_id = ?", id).Delete(&models.EventMember{}).Error; err != nil {
+repositories\userrepository\UserRepository.go:59:		if err := tx.Where("user_id = ?", id).Delete(&models.ClientMember{}).Error; err != nil {
+repositories\userrepository\AdminUserRepository.go:28:		db = db.Where(
+repositories\userrepository\AdminUserRepository.go:38:		db = db.Where("is_active = ?", true)
+repositories\userrepository\AdminUserRepository.go:40:		db = db.Where("is_active = ?", false)
+repositories\userrepository\AdminUserRepository.go:42:		db = db.Where("is_root = ? OR root_level > ?", true, models.RootLevelNone)
+repositories\userrepository\AdminUserRepository.go:46:		db = db.Where("(is_root = ? OR is_root IS NULL) AND (root_level = ? OR root_level IS NULL)", false, models.RootLevelNone)
+repositories\momentrepository\MomentRepository_test.go:158:	stmt := applyPublicWallVisibleMomentFilters(db.Model(&models.Moment{}), eventID).
+repositories\guestrepository\GuestRepository.go:100:			base = base.Where("CAST(guests.id AS TEXT) = ? OR invitation_access_tokens.pretty_token = ?", qr, qr)
+repositories\guestrepository\GuestRepository.go:103:			base = base.Where(`LOWER(CONCAT_WS(' ', guests.first_name, guests.last_name, guests.email, guests.phone, guests.table_number, "Table".name)) LIKE ?`, pattern)
+repositories\guestrepository\GuestRepository.go:108:			base = base.Where(statusExpr + " = 'confirmed'")
+repositories\guestrepository\GuestRepository.go:110:			base = base.Where(statusExpr + " = 'pending'")
+repositories\guestrepository\GuestRepository.go:112:			base = base.Where(statusExpr + " = 'declined'")
+repositories\guestrepository\GuestRepository.go:282:	return db.Raw(guestDashboardSummariesSQL, eventID)
+repositories\guestrepository\GuestRepository.go:391:	return db.Raw(guestSummarySQL, eventID)
+repositories\guestrepository\GuestRepository.go:471:	return configuration.DB.Where("id IN ?", ids).Delete(&models.Guest{}).Error
+repositories\guestrepository\GuestRepository.go:480:		if err := tx.Model(&models.GuestStatus{}).Where("id = ?", statusID).Count(&statusCount).Error; err != nil {
+repositories\momentrepository\MomentRepository.go:34:	return configuration.DB.Where("id IN ?", ids).Delete(&models.Moment{}).Error
+repositories\momentrepository\MomentRepository.go:50:	return db.Where("event_id = ? AND content_url = ?", eventID, contentURL)
+repositories\momentrepository\MomentRepository.go:77:	query := configuration.DB.Where("event_id = ?", eventID)
+repositories\momentrepository\MomentRepository.go:79:		query = query.Where("is_approved = ?", true)
+repositories\momentrepository\MomentRepository.go:107:	return configuration.DB.Model(&models.Moment{}).Where("id = ?", id).Updates(updates).Error
+repositories\momentrepository\MomentRepository.go:410:		query = query.Where("content_url LIKE ?", "%/raw/%")
+repositories\momentrepository\MomentRepository.go:412:		query = query.Where("content_url NOT LIKE ?", "%/raw/%")
+repositories\momentrepository\MomentRepository.go:470:		return query.Where("(created_at < ? OR (created_at = ? AND id < ?::uuid))", *afterCreatedAt, *afterCreatedAt, afterID)
+repositories\momentrepository\MomentRepository.go:476:	return query.Where(
+repositories\resourcerepository\ResourceRepository.go:37:		return tx.Where("id = ?", resourceID).Delete(&models.Resource{}).Error
+repositories\invitationrepository\InvitationRepository.go:35:	err := configuration.DB.Where("id = ?", id).First(&model).Error
+controllers\events\events.go:779:	if err := configuration.DB.WithContext(ctx).Where("bucket_start < ?", now.Add(-48*time.Hour)).Delete(&models.PublicPerformanceWindowBucket{}).Error; err != nil {
+controllers\events\cover_controller.go:126:	if err := configuration.DB.Where("cover_image_url <> '' AND jsonb_array_length(COALESCE(cover_variants, '[]'::jsonb)) = 0 AND COALESCE(cover_processing_status, '') NOT IN ('pending','processing','done')").Order("updated_at ASC").Limit(body.Limit).Find(&candidates).Error; err != nil {
+controllers\events\event_analytics_controller.go:124:	if err := configuration.DB.Where("event_id = ? AND bucket_date >= ?", eventID, from).Find(&aggregates).Error; err != nil {
+controllers\events\event_analytics_controller.go:128:	if err := configuration.DB.Where("event_id = ? AND bucket_date >= ?", eventID, from).Find(&histogram).Error; err != nil {

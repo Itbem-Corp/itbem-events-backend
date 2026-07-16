@@ -156,6 +156,15 @@ func (m *mockAuthRepo) InviteUser(email, firstName, lastName, provider string) (
 
 var _ ports.AuthProviderRepository = (*mockAuthRepo)(nil)
 
+type tenantAwareMockAuthRepo struct {
+	*mockAuthRepo
+	InviteUserForTenantFunc func(email, firstName, lastName, tenantCode, provider string) (*dtos.AuthUser, error)
+}
+
+func (m *tenantAwareMockAuthRepo) InviteUserForTenant(email, firstName, lastName, tenantCode, provider string) (*dtos.AuthUser, error) {
+	return m.InviteUserForTenantFunc(email, firstName, lastName, tenantCode, provider)
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -787,4 +796,93 @@ func TestSetUserRoot_Success(t *testing.T) {
 	err := svc.SetUserRoot(userID, true)
 	require.NoError(t, err)
 	assert.True(t, capturedIsRoot)
+}
+
+func TestInviteUser_UsesCognitoSubjectAndNormalizesIdentity(t *testing.T) {
+	var invitedEmail, invitedFirstName, invitedLastName string
+	var created *models.User
+	authRepo := &mockAuthRepo{
+		InviteUserFunc: func(email, firstName, lastName, provider string) (*dtos.AuthUser, error) {
+			invitedEmail, invitedFirstName, invitedLastName = email, firstName, lastName
+			assert.Equal(t, "cognito", provider)
+			return &dtos.AuthUser{
+				Sub: "cognito-sub-immutable", Email: email,
+				FirstName: firstName, LastName: lastName, IsActive: true,
+			}, nil
+		},
+	}
+	userRepo := &mockUserRepo{CreateUserFunc: func(user *models.User) error {
+		created = user
+		return nil
+	}}
+
+	user, err := newUserService(userRepo, authRepo).InviteUser(
+		"  PERSON@Example.COM ", "  Ana  ", "  Pérez  ",
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, "person@example.com", invitedEmail)
+	assert.Equal(t, "Ana", invitedFirstName)
+	assert.Equal(t, "Pérez", invitedLastName)
+	require.NotNil(t, created)
+	assert.Equal(t, "cognito-sub-immutable", created.CognitoSub)
+	assert.Equal(t, created, user)
+}
+
+func TestInviteUserForTenant_PreservesBrandingContext(t *testing.T) {
+	var invitedVia string
+	authRepo := &tenantAwareMockAuthRepo{
+		mockAuthRepo: &mockAuthRepo{},
+		InviteUserForTenantFunc: func(email, firstName, lastName, tenantCode, provider string) (*dtos.AuthUser, error) {
+			invitedVia = tenantCode
+			return &dtos.AuthUser{
+				Sub: "tenant-invite-sub", Email: email,
+				FirstName: firstName, LastName: lastName, IsActive: true,
+			}, nil
+		},
+	}
+	svc := NewUserService(&mockUserRepo{}, authRepo, nil)
+
+	_, err := svc.InviteUserForTenant("person@example.com", "Ana", "Pérez", "cafettonhouse")
+
+	require.NoError(t, err)
+	assert.Equal(t, "cafettonhouse", invitedVia)
+}
+
+func TestInviteUser_RejectsInvalidIdentityBeforeCallingCognito(t *testing.T) {
+	called := false
+	authRepo := &mockAuthRepo{InviteUserFunc: func(email, firstName, lastName, provider string) (*dtos.AuthUser, error) {
+		called = true
+		return nil, nil
+	}}
+
+	_, err := newUserService(nil, authRepo).InviteUser("not-an-email", "A", "B")
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidInviteIdentity)
+	assert.False(t, called)
+}
+
+func TestInviteUser_RollsBackCognitoWhenLocalPersistenceFails(t *testing.T) {
+	deletedSub := ""
+	authRepo := &mockAuthRepo{
+		InviteUserFunc: func(email, firstName, lastName, provider string) (*dtos.AuthUser, error) {
+			return &dtos.AuthUser{
+				Sub: "rollback-sub", Email: email,
+				FirstName: firstName, LastName: lastName,
+			}, nil
+		},
+		DeleteUserFunc: func(sub, provider string) error {
+			deletedSub = sub
+			return nil
+		},
+	}
+	userRepo := &mockUserRepo{CreateUserFunc: func(user *models.User) error {
+		return errors.New("database unavailable")
+	}}
+
+	_, err := newUserService(userRepo, authRepo).InviteUser("person@example.com", "Ana", "Pérez")
+
+	require.EqualError(t, err, "database unavailable")
+	assert.Equal(t, "rollback-sub", deletedSub)
 }

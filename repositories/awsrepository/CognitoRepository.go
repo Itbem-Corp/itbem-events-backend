@@ -154,9 +154,20 @@ func InviteCognitoUser(
 	ctx context.Context,
 	email, firstName, lastName string,
 ) (*dtos.AuthUser, error) {
+	return InviteCognitoUserForTenant(ctx, email, firstName, lastName, "eventiapp")
+}
 
+func InviteCognitoUserForTenant(
+	ctx context.Context,
+	email, firstName, lastName, tenantCode string,
+) (*dtos.AuthUser, error) {
 	cfg := configuration.LoadConfig()
 	client := configuration.GetCognitoClient()
+	switch tenantCode {
+	case "eventiapp", "itbem", "cafettonhouse":
+	default:
+		return nil, fmt.Errorf("unsupported invitation tenant %q", tenantCode)
+	}
 
 	out, err := client.AdminCreateUser(ctx, &cognitoidentityprovider.AdminCreateUserInput{
 		UserPoolId: aws.String(cfg.CognitoUserPoolId),
@@ -166,15 +177,40 @@ func InviteCognitoUser(
 			{Name: aws.String("given_name"), Value: aws.String(firstName)},
 			{Name: aws.String("family_name"), Value: aws.String(lastName)},
 			{Name: aws.String("email_verified"), Value: aws.String("true")},
+			// This attribute only selects the branding of the initial invitation.
+			// Authorization continues to come from application memberships and
+			// the signed app-client audience, never from this mutable attribute.
+			{Name: aws.String("custom:invited_via"), Value: aws.String(tenantCode)},
 		},
 	})
 
 	if err != nil {
 		return nil, err
 	}
+	cognitoSub := ""
+	if out.User != nil {
+		for _, attribute := range out.User.Attributes {
+			if aws.ToString(attribute.Name) == "sub" {
+				cognitoSub = aws.ToString(attribute.Value)
+				break
+			}
+		}
+	}
+	if cognitoSub == "" {
+		// AdminCreateUser returns the sign-in username separately from the
+		// immutable Cognito subject. Persisting the username here would make the
+		// first JWT-backed sync create a second local identity.
+		if out.User != nil && aws.ToString(out.User.Username) != "" {
+			_, _ = client.AdminDeleteUser(ctx, &cognitoidentityprovider.AdminDeleteUserInput{
+				UserPoolId: aws.String(cfg.CognitoUserPoolId),
+				Username:   out.User.Username,
+			})
+		}
+		return nil, fmt.Errorf("cognito invitation did not return a user subject")
+	}
 
 	return &dtos.AuthUser{
-		Sub:       *out.User.Username,
+		Sub:       cognitoSub,
 		Email:     email,
 		FirstName: firstName,
 		LastName:  lastName,

@@ -66,6 +66,7 @@ func TestConfigurarRutasRegistersFrontendContractRoutes(t *testing.T) {
 		"POST /api/events/:identifier/moments/shared/multipart/abort",
 
 		// Dashboard protected contracts.
+		"GET /api/session",
 		"GET /api/events",
 		"GET /api/events/dashboard",
 		"GET /api/events/all",
@@ -129,6 +130,8 @@ func TestConfigurarRutasRegistersFrontendContractRoutes(t *testing.T) {
 		"POST /api/clients/members",
 		"PUT /api/clients/members/:user_id",
 		"DELETE /api/clients/members/:user_id",
+		"GET /api/clients/:id/member-applications/:user_id",
+		"PUT /api/clients/:id/member-applications/:user_id/:application_code",
 		"GET /api/users",
 		"PUT /api/users",
 		"DELETE /api/users",

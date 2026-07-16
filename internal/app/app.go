@@ -27,8 +27,10 @@ import (
 	invitationsController "events-stocks/controllers/invitations"
 	momentsController "events-stocks/controllers/moments"
 	resourcesController "events-stocks/controllers/resources"
+	sessionsController "events-stocks/controllers/sessions"
 	usersController "events-stocks/controllers/users"
 	"events-stocks/internal/authz"
+	"events-stocks/middleware/applicationaccess"
 	customValidator "events-stocks/middleware/validator"
 	"events-stocks/models"
 	authproviderrepository "events-stocks/repositories/authproviderrepository"
@@ -60,6 +62,7 @@ import (
 	templatesrepository "events-stocks/repositories/templatesrepository"
 	userrepository "events-stocks/repositories/userrepository"
 	"events-stocks/routes"
+	applicationsService "events-stocks/services/applications"
 	clientrolesService "events-stocks/services/clientroles"
 	clientsService "events-stocks/services/clients"
 	clienttypesService "events-stocks/services/clienttypes"
@@ -335,6 +338,19 @@ func wireDependencies(cfg *models.Config) {
 	})
 	momentSvc := momentsService.NewMomentService(momentRepo, redisRepo, mediaPublisher)
 	userSvc := usersService.NewUserService(userRepo, authProviderRepo, cfg, resourceSvc)
+	applicationSessionSvc := applicationsService.NewSessionService(
+		gormrepository.DB(),
+		userSvc.SyncUser,
+		func(user *models.User) string {
+			if user == nil || strings.TrimSpace(user.ProfileImage) == "" {
+				return ""
+			}
+			url, _ := resourceSvc.WithBucket(user.ProfileImageBucket).GetAvatarPresignedURL(user.ProfileImage)
+			return url
+		},
+	)
+	applicationaccess.Configure(applicationSessionSvc)
+	sessionsController.Configure(applicationSessionSvc)
 	adminSvc := usersService.NewAdminUserService(userRepo, clientRepo, authProviderRepo)
 	clientSvc := clientsService.NewClientService(clientRepo, clientRoleRepo, clientTypeRepo, resourceSvc, redisRepo, transactor)
 	clientRoleSvc := clientrolesService.NewClientRoleService(clientRoleRepo)

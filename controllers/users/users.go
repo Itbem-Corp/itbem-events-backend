@@ -1,6 +1,7 @@
 package users
 
 import (
+	"errors"
 	"events-stocks/dtos"
 	"events-stocks/internal/authz"
 	"events-stocks/internal/tenantresources"
@@ -485,8 +486,12 @@ func InviteUser(c echo.Context) error {
 		return utils.Error(c, http.StatusBadRequest, "Invalid data", err.Error())
 	}
 
-	user, err := adminSvc.InviteUser(req.Email, req.FirstName, req.LastName)
+	tenantCode, _ := c.Get("tenant_code").(string)
+	user, err := adminSvc.InviteUserForTenant(req.Email, req.FirstName, req.LastName, tenantCode)
 	if err != nil {
+		if errors.Is(err, users.ErrInvalidInviteIdentity) {
+			return utils.Error(c, http.StatusBadRequest, "Invalid invitation", err.Error())
+		}
 		return utils.Error(c, http.StatusInternalServerError, "Invite failed", err.Error())
 	}
 
