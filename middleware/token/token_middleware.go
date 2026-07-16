@@ -164,7 +164,7 @@ func Autenticacion(cfg *models.Config) echo.MiddlewareFunc {
 			}
 
 			// Obtenemos el ID único de usuario (SUB)
-			cognitoSub, ok := claims["sub"].(string)
+			_, ok = claims["sub"].(string)
 			if !ok {
 				return utils.Error(c, http.StatusUnauthorized, "Token incompleto", "El claim 'sub' es requerido")
 			}
@@ -174,7 +174,7 @@ func Autenticacion(cfg *models.Config) echo.MiddlewareFunc {
 			if validationErr != nil {
 				return utils.Error(c, http.StatusUnauthorized, "Token no confiable", validationErr.Error())
 			}
-			cognitoSub = validatedSub
+			cognitoSub := validatedSub
 			c.Set("cognito_sub", cognitoSub)
 			c.Set("auth_client_id", audience)
 			if tenantCode != "" {
