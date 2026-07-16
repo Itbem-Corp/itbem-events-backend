@@ -293,7 +293,7 @@ func effectiveApplicationCapabilities(
 			capabilities.add("metrics:view")
 		}
 		if moduleEnabled(application.Modules, "events") {
-			capabilities.add("events:view", "guests:manage", "checkin:run", "analytics:view")
+			capabilities.add("events:view", "guests:manage", "checkin:run", "analytics:view", "members:manage")
 			if user.IsPrimaryRoot() {
 				capabilities.add("events:manage")
 			}

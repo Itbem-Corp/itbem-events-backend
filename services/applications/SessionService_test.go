@@ -117,7 +117,7 @@ func TestEffectiveApplicationCapabilitiesEnforcesRootCeilings(t *testing.T) {
 			user: &models.User{RootLevel: models.RootLevelPrimary},
 			want: []string{
 				"events:manage", "platform:users:manage", "platform:users:root-manage",
-				"organizations:manage", "applications:manage",
+				"organizations:manage", "applications:manage", "members:manage",
 			},
 		},
 		{
@@ -208,4 +208,27 @@ func TestOrganizationCapabilitiesRespectProductModules(t *testing.T) {
 	assert.Contains(t, itbemOwner, "organizations:manage")
 	assert.NotContains(t, itbemOwner, "events:view")
 	assert.NotContains(t, itbemOwner, "events:manage")
+}
+
+func TestEventProductRootsCanManageTeamsOnlyWithinAuthorizedRequests(t *testing.T) {
+	eventiapp := models.Application{
+		Modules:             models.StringList{"home", "events", "metrics"},
+		AllowsPlatformAdmin: true,
+	}
+
+	primary := effectiveApplicationCapabilities(
+		eventiapp,
+		&models.User{RootLevel: models.RootLevelPrimary},
+		nil,
+	)
+	operational := effectiveApplicationCapabilities(
+		eventiapp,
+		&models.User{RootLevel: models.RootLevelOperational},
+		nil,
+	)
+
+	assert.Contains(t, primary, "members:manage")
+	assert.Contains(t, operational, "members:manage")
+	assert.NotContains(t, operational, "events:manage")
+	assert.NotContains(t, primary, "organizations:manage")
 }
