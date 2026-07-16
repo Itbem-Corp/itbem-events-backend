@@ -3,6 +3,7 @@ package moments
 import (
 	"crypto/subtle"
 	"errors"
+	"events-stocks/configuration"
 	"events-stocks/dtos"
 	"events-stocks/internal/authz"
 	"events-stocks/models"
@@ -407,6 +408,37 @@ func BatchReoptimizeMoments(c echo.Context) error {
 	})
 }
 
+// BackfillMomentVariants discovers a bounded batch of legacy image moments and
+// reuses the monotonic reoptimization flow. Repeated calls skip queued/done
+// variant rows, so operators can drain history without a one-shot migration.
+func BackfillMomentVariants(c echo.Context) error {
+	if _, err := authz.RequireRoot(c); err != nil {
+		return authz.Respond(c, err)
+	}
+	var body struct {
+		Limit int `json:"limit"`
+	}
+	_ = c.Bind(&body)
+	if body.Limit <= 0 {
+		body.Limit = 100
+	}
+	if body.Limit > 200 {
+		body.Limit = 200
+	}
+	var ids []uuid.UUID
+	err := configuration.DB.Model(&models.Moment{}).
+		Where("content_type LIKE 'image/%' AND content_url <> '' AND processing_status IN ('', 'done') AND jsonb_array_length(COALESCE(media_variants, '[]'::jsonb)) = 0").
+		Order("updated_at ASC").Limit(body.Limit).Pluck("id", &ids).Error
+	if err != nil {
+		return utils.Error(c, http.StatusInternalServerError, "Failed to load moment backfill candidates", err.Error())
+	}
+	succeeded, skipped, failed, err := momentSvc.BatchReoptimize(ids)
+	if err != nil {
+		return utils.Error(c, http.StatusInternalServerError, "Error backfilling moment variants", err.Error())
+	}
+	return utils.Success(c, http.StatusAccepted, "Moment variant backfill batch evaluated", dtos.MomentBatchResultResponse{Succeeded: succeeded, Skipped: skipped, Failed: failed})
+}
+
 // POST /moments
 func CreateMoment(c echo.Context) error {
 	var moment models.Moment
@@ -514,44 +546,45 @@ func UpdateMomentContent(c echo.Context) error {
 	}
 
 	var body struct {
-		EventID                    string `json:"event_id"`
-		EventIDCamel               string `json:"eventId"`
-		EventIDPascal              string `json:"EventID"`
-		JobID                      string `json:"job_id"`
-		JobIDCamel                 string `json:"jobId"`
-		JobIDPascal                string `json:"JobID"`
-		Generation                 int64  `json:"generation"`
-		GenerationPascal           int64  `json:"Generation"`
-		ObjectKey                  string `json:"object_key"`
-		ObjectKeyCamel             string `json:"objectKey"`
-		ObjectKeyPascal            string `json:"ObjectKey"`
-		ContentURL                 string `json:"content_url"`
-		ContentURLCamel            string `json:"contentUrl"`
-		ContentURLUpperCamel       string `json:"contentURL"`
-		ContentURLPascal           string `json:"ContentURL"`
-		ProcessingStatus           string `json:"processing_status"`
-		ProcessingStatusCamel      string `json:"processingStatus"`
-		ProcessingStatusPascal     string `json:"ProcessingStatus"`
-		ThumbnailObjectKey         string `json:"thumbnail_object_key"`
-		ThumbnailObjectKeyCamel    string `json:"thumbnailObjectKey"`
-		ThumbnailObjectKeyPascal   string `json:"ThumbnailObjectKey"`
-		ThumbnailURL               string `json:"thumbnail_url"`
-		ThumbnailURLCamel          string `json:"thumbnailUrl"`
-		ThumbnailURLUpperCamel     string `json:"thumbnailURL"`
-		ThumbnailURLPascal         string `json:"ThumbnailURL"`
-		ProcessingDurationMs       int64  `json:"processing_duration_ms"`
-		ProcessingDurationMsCamel  int64  `json:"processingDurationMs"`
-		ProcessingDurationMsMS     int64  `json:"processingDurationMS"`
-		ProcessingDurationMsPascal int64  `json:"ProcessingDurationMs"`
-		OriginalSizeBytes          int64  `json:"original_size_bytes"`
-		OriginalSizeBytesCamel     int64  `json:"originalSizeBytes"`
-		OriginalSizeBytesPascal    int64  `json:"OriginalSizeBytes"`
-		OptimizedSizeBytes         int64  `json:"optimized_size_bytes"`
-		OptimizedSizeBytesCamel    int64  `json:"optimizedSizeBytes"`
-		OptimizedSizeBytesPascal   int64  `json:"OptimizedSizeBytes"`
-		ErrorMessage               string `json:"error_message"`
-		ErrorMessageCamel          string `json:"errorMessage"`
-		ErrorMessagePascal         string `json:"ErrorMessage"`
+		EventID                    string              `json:"event_id"`
+		EventIDCamel               string              `json:"eventId"`
+		EventIDPascal              string              `json:"EventID"`
+		JobID                      string              `json:"job_id"`
+		JobIDCamel                 string              `json:"jobId"`
+		JobIDPascal                string              `json:"JobID"`
+		Generation                 int64               `json:"generation"`
+		GenerationPascal           int64               `json:"Generation"`
+		ObjectKey                  string              `json:"object_key"`
+		ObjectKeyCamel             string              `json:"objectKey"`
+		ObjectKeyPascal            string              `json:"ObjectKey"`
+		ContentURL                 string              `json:"content_url"`
+		ContentURLCamel            string              `json:"contentUrl"`
+		ContentURLUpperCamel       string              `json:"contentURL"`
+		ContentURLPascal           string              `json:"ContentURL"`
+		ProcessingStatus           string              `json:"processing_status"`
+		ProcessingStatusCamel      string              `json:"processingStatus"`
+		ProcessingStatusPascal     string              `json:"ProcessingStatus"`
+		ThumbnailObjectKey         string              `json:"thumbnail_object_key"`
+		ThumbnailObjectKeyCamel    string              `json:"thumbnailObjectKey"`
+		ThumbnailObjectKeyPascal   string              `json:"ThumbnailObjectKey"`
+		ThumbnailURL               string              `json:"thumbnail_url"`
+		ThumbnailURLCamel          string              `json:"thumbnailUrl"`
+		ThumbnailURLUpperCamel     string              `json:"thumbnailURL"`
+		ThumbnailURLPascal         string              `json:"ThumbnailURL"`
+		ProcessingDurationMs       int64               `json:"processing_duration_ms"`
+		ProcessingDurationMsCamel  int64               `json:"processingDurationMs"`
+		ProcessingDurationMsMS     int64               `json:"processingDurationMS"`
+		ProcessingDurationMsPascal int64               `json:"ProcessingDurationMs"`
+		OriginalSizeBytes          int64               `json:"original_size_bytes"`
+		OriginalSizeBytesCamel     int64               `json:"originalSizeBytes"`
+		OriginalSizeBytesPascal    int64               `json:"OriginalSizeBytes"`
+		OptimizedSizeBytes         int64               `json:"optimized_size_bytes"`
+		OptimizedSizeBytesCamel    int64               `json:"optimizedSizeBytes"`
+		OptimizedSizeBytesPascal   int64               `json:"OptimizedSizeBytes"`
+		ErrorMessage               string              `json:"error_message"`
+		ErrorMessageCamel          string              `json:"errorMessage"`
+		ErrorMessagePascal         string              `json:"ErrorMessage"`
+		MediaVariants              []dtos.MediaVariant `json:"media_variants"`
 	}
 	if err := c.Bind(&body); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
@@ -580,6 +613,7 @@ func UpdateMomentContent(c echo.Context) error {
 		ProcessingDurationMs: durationMs,
 		OriginalSizeBytes:    originalBytes,
 		OptimizedSizeBytes:   optimizedBytes,
+		MediaVariants:        body.MediaVariants,
 	}); err != nil {
 		if errors.Is(err, momentsService.ErrInvalidMomentProcessingStatus) {
 			return utils.Error(c, http.StatusBadRequest, "Invalid processing status", err.Error())

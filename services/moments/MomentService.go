@@ -291,13 +291,17 @@ func (s *MomentService) ApplyMediaProcessingCallback(callback dtos.MediaProcessi
 	if err := validateMediaCallbackKeys(moment, status, callback.ObjectKey, callback.ThumbnailObjectKey); err != nil {
 		return err
 	}
+	mediaVariants, err := validateMediaVariants(moment, status, callback.MediaVariants)
+	if err != nil {
+		return err
+	}
 	if len(callback.ErrorMessage) > 500 {
 		return fmt.Errorf("%w: error_message exceeds 500 bytes", ErrInvalidMomentProcessingCallback)
 	}
 
 	currentStatus := strings.ToLower(strings.TrimSpace(moment.ProcessingStatus))
 	if currentStatus == "done" || currentStatus == "failed" {
-		if currentStatus == status && (status != "done" || (moment.ContentURL == callback.ObjectKey && (callback.ThumbnailObjectKey == "" || moment.ThumbnailURL == callback.ThumbnailObjectKey))) {
+		if currentStatus == status && (status != "done" || (moment.ContentURL == callback.ObjectKey && (callback.ThumbnailObjectKey == "" || moment.ThumbnailURL == callback.ThumbnailObjectKey) && mediaVariantsEqual(moment.MediaVariants, mediaVariants))) {
 			return nil // exact terminal replay is idempotent
 		}
 		return fmt.Errorf("%w: terminal state %s cannot transition to %s", ErrStaleMomentProcessingCallback, currentStatus, status)
@@ -311,6 +315,7 @@ func (s *MomentService) ApplyMediaProcessingCallback(callback dtos.MediaProcessi
 		[]string{"pending", "processing"},
 		callback.ObjectKey, status, callback.ThumbnailObjectKey, callback.ErrorMessage,
 		callback.ProcessingDurationMs, callback.OriginalSizeBytes, callback.OptimizedSizeBytes,
+		mediaVariants,
 	)
 	if err != nil {
 		return err
@@ -320,6 +325,46 @@ func (s *MomentService) ApplyMediaProcessingCallback(callback dtos.MediaProcessi
 	}
 	s.invalidateWallCache(eventID)
 	return s.invalidateMomentsCache()
+}
+
+func validateMediaVariants(moment *models.Moment, status string, variants []dtos.MediaVariant) (models.MediaVariants, error) {
+	if status != "done" || len(variants) == 0 {
+		return models.MediaVariants{}, nil
+	}
+	if moment == nil || moment.EventID == nil || detectMediaIsVideo(moment.ContentType, moment.ProcessingInputKey) {
+		return nil, fmt.Errorf("%w: media_variants are only valid for images", ErrInvalidMomentProcessingCallback)
+	}
+	if len(variants) > 6 {
+		return nil, fmt.Errorf("%w: too many media_variants", ErrInvalidMomentProcessingCallback)
+	}
+	result := make(models.MediaVariants, 0, len(variants))
+	seen := map[int]bool{}
+	for _, variant := range variants {
+		key := strings.TrimSpace(variant.ObjectKey)
+		format := strings.ToLower(strings.TrimSpace(variant.Format))
+		if variant.Width < 160 || variant.Width > 4096 || variant.Bytes < 0 || seen[variant.Width] || (format != "webp" && format != "avif") {
+			return nil, fmt.Errorf("%w: invalid media variant metadata", ErrInvalidMomentProcessingCallback)
+		}
+		expected := fmt.Sprintf("moments/%s/photos/%s-%d.%s", moment.EventID.String(), moment.ID.String(), variant.Width, format)
+		if key != expected {
+			return nil, fmt.Errorf("%w: media variant key is outside the moment prefix", ErrInvalidMomentProcessingCallback)
+		}
+		seen[variant.Width] = true
+		result = append(result, models.MediaVariant{ObjectKey: key, Width: variant.Width, Format: format, Bytes: variant.Bytes})
+	}
+	return result, nil
+}
+
+func mediaVariantsEqual(left, right models.MediaVariants) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func validateMediaCallbackKeys(moment *models.Moment, status, objectKey, thumbnailKey string) error {
@@ -441,7 +486,7 @@ func (s *MomentService) failMediaProcessingJob(moment *models.Moment, cause erro
 	if processingRepo, ok := s.repo.(ports.MomentProcessingRepository); ok {
 		applied, err := processingRepo.ApplyMediaProcessingUpdate(
 			moment.ID, *moment.EventID, moment.ProcessingJobID, moment.ProcessingGeneration,
-			[]string{"pending"}, moment.ContentURL, "failed", "", publicFailure, 0, 0, 0,
+			[]string{"pending"}, moment.ContentURL, "failed", "", publicFailure, 0, 0, 0, models.MediaVariants{},
 		)
 		if err != nil || !applied {
 			slog.Error("failed to persist media enqueue failure", "momentId", moment.ID, "cause", cause, "error", err, "applied", applied)
@@ -466,7 +511,7 @@ func (s *MomentService) restoreReoptimizationJob(moment *models.Moment, status, 
 	if processingRepo, ok := s.repo.(ports.MomentProcessingRepository); ok {
 		applied, err := processingRepo.ApplyMediaProcessingUpdate(
 			moment.ID, *moment.EventID, moment.ProcessingJobID, moment.ProcessingGeneration,
-			[]string{"pending"}, moment.ContentURL, status, "", errorMessage, 0, 0, 0,
+			[]string{"pending"}, moment.ContentURL, status, "", errorMessage, 0, 0, 0, models.MediaVariants{},
 		)
 		if err != nil || !applied {
 			slog.Error("failed to restore reoptimization state", "momentId", moment.ID, "cause", cause, "error", err, "applied", applied)

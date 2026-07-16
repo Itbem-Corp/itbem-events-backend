@@ -10,27 +10,47 @@ import (
 
 // PublicMoment is the safe media shape exposed to the public event frontend.
 type PublicMoment struct {
-	ID                        uuid.UUID  `json:"id"`
-	Title                     string     `json:"title,omitempty"`
-	Description               string     `json:"description,omitempty"`
-	ContentURL                string     `json:"content_url"`
-	ThumbnailURL              string     `json:"thumbnail_url,omitempty"`
-	ContentURLExpiresAt       *time.Time `json:"content_url_expires_at,omitempty"`
-	ThumbnailURLExpiresAt     *time.Time `json:"thumbnail_url_expires_at,omitempty"`
-	ContentViewURL            string     `json:"content_view_url,omitempty"`
-	ThumbnailViewURL          string     `json:"thumbnail_view_url,omitempty"`
-	ContentViewURLExpiresAt   *time.Time `json:"content_view_url_expires_at,omitempty"`
-	ThumbnailViewURLExpiresAt *time.Time `json:"thumbnail_view_url_expires_at,omitempty"`
-	ContentType               string     `json:"content_type,omitempty"`
-	Order                     int        `json:"order,omitempty"`
-	CreatedAt                 time.Time  `json:"created_at"`
-	ApprovalStatus            string     `json:"approval_status,omitempty"`
-	PublicationStatus         string     `json:"publication_status,omitempty"`
-	ProcessingStatus          string     `json:"processing_status,omitempty"`
-	ProcessingDurationMs      int64      `json:"processing_duration_ms,omitempty"`
-	OriginalSizeBytes         int64      `json:"original_size_bytes,omitempty"`
-	OptimizedSizeBytes        int64      `json:"optimized_size_bytes,omitempty"`
-	ErrorMessage              string     `json:"error_message,omitempty"`
+	ID                        uuid.UUID            `json:"id"`
+	Title                     string               `json:"title,omitempty"`
+	Description               string               `json:"description,omitempty"`
+	ContentURL                string               `json:"content_url"`
+	ThumbnailURL              string               `json:"thumbnail_url,omitempty"`
+	ContentURLExpiresAt       *time.Time           `json:"content_url_expires_at,omitempty"`
+	ThumbnailURLExpiresAt     *time.Time           `json:"thumbnail_url_expires_at,omitempty"`
+	ContentViewURL            string               `json:"content_view_url,omitempty"`
+	ThumbnailViewURL          string               `json:"thumbnail_view_url,omitempty"`
+	ContentViewURLExpiresAt   *time.Time           `json:"content_view_url_expires_at,omitempty"`
+	ThumbnailViewURLExpiresAt *time.Time           `json:"thumbnail_view_url_expires_at,omitempty"`
+	ContentType               string               `json:"content_type,omitempty"`
+	Order                     int                  `json:"order,omitempty"`
+	CreatedAt                 time.Time            `json:"created_at"`
+	ApprovalStatus            string               `json:"approval_status,omitempty"`
+	PublicationStatus         string               `json:"publication_status,omitempty"`
+	ProcessingStatus          string               `json:"processing_status,omitempty"`
+	ProcessingDurationMs      int64                `json:"processing_duration_ms,omitempty"`
+	OriginalSizeBytes         int64                `json:"original_size_bytes,omitempty"`
+	OptimizedSizeBytes        int64                `json:"optimized_size_bytes,omitempty"`
+	ErrorMessage              string               `json:"error_message,omitempty"`
+	MediaVariants             []PublicMediaVariant `json:"media_variants,omitempty"`
+}
+
+type PublicMediaVariant struct {
+	URL       string     `json:"url"`
+	ViewURL   string     `json:"view_url,omitempty"`
+	ExpiresAt *time.Time `json:"view_url_expires_at,omitempty"`
+	Width     int        `json:"width"`
+	Format    string     `json:"format"`
+	Bytes     int64      `json:"bytes,omitempty"`
+}
+
+func NewPublicMediaVariants(variants models.MediaVariants) []PublicMediaVariant {
+	result := make([]PublicMediaVariant, 0, len(variants))
+	for _, variant := range variants {
+		result = append(result, PublicMediaVariant{
+			URL: variant.ObjectKey, Width: variant.Width, Format: variant.Format, Bytes: variant.Bytes,
+		})
+	}
+	return result
 }
 
 type PublicMomentsPage struct {
@@ -64,6 +84,7 @@ type PublicMomentUploadResponse struct {
 }
 
 func NewPublicMoment(moment models.Moment) PublicMoment {
+	variants := NewPublicMediaVariants(moment.MediaVariants)
 	return PublicMoment{
 		ID:                        moment.ID,
 		Title:                     moment.Title,
@@ -86,6 +107,7 @@ func NewPublicMoment(moment models.Moment) PublicMoment {
 		OriginalSizeBytes:         moment.OriginalSizeBytes,
 		OptimizedSizeBytes:        moment.OptimizedSizeBytes,
 		ErrorMessage:              moment.ErrorMessage,
+		MediaVariants:             variants,
 	}
 }
 

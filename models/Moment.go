@@ -7,18 +7,19 @@ import (
 )
 
 type Moment struct {
-	ID           uuid.UUID  `gorm:"type:uuid;default:uuid_generate_v4();primaryKey" json:"id"`
-	EventID      *uuid.UUID `gorm:"type:uuid;index" json:"event_id,omitempty"`
-	InvitationID *uuid.UUID `gorm:"type:uuid;index" json:"invitation_id,omitempty"`                   // nullable for shared QR uploads
-	Invitation   Invitation `gorm:"foreignKey:InvitationID" validate:"-" json:"invitation,omitempty"` // omit if nil
-	MomentTypeID *uuid.UUID `gorm:"type:uuid;index" json:"moment_type_id,omitempty"`
-	MomentType   MomentType `gorm:"foreignKey:MomentTypeID" validate:"-" json:"moment_type,omitempty"`
-	GuestID      *uuid.UUID `json:"guest_id,omitempty"`
-	Guest        *Guest     `gorm:"foreignKey:GuestID" json:"guest,omitempty"`
-	Title        string     `json:"title"`
-	Description  string     `json:"description"`                                                 // texto, caption o nota del invitado
-	ContentURL   string     `json:"content_url"`                                                 // imagen, video o audio en S3
-	ThumbnailURL string     `gorm:"type:varchar(500);default:''" json:"thumbnail_url,omitempty"` // WebP thumbnail for videos (extracted by Lambda)
+	ID            uuid.UUID     `gorm:"type:uuid;default:uuid_generate_v4();primaryKey" json:"id"`
+	EventID       *uuid.UUID    `gorm:"type:uuid;index" json:"event_id,omitempty"`
+	InvitationID  *uuid.UUID    `gorm:"type:uuid;index" json:"invitation_id,omitempty"`                   // nullable for shared QR uploads
+	Invitation    Invitation    `gorm:"foreignKey:InvitationID" validate:"-" json:"invitation,omitempty"` // omit if nil
+	MomentTypeID  *uuid.UUID    `gorm:"type:uuid;index" json:"moment_type_id,omitempty"`
+	MomentType    MomentType    `gorm:"foreignKey:MomentTypeID" validate:"-" json:"moment_type,omitempty"`
+	GuestID       *uuid.UUID    `json:"guest_id,omitempty"`
+	Guest         *Guest        `gorm:"foreignKey:GuestID" json:"guest,omitempty"`
+	Title         string        `json:"title"`
+	Description   string        `json:"description"`                                                 // texto, caption o nota del invitado
+	ContentURL    string        `json:"content_url"`                                                 // imagen, video o audio en S3
+	ThumbnailURL  string        `gorm:"type:varchar(500);default:''" json:"thumbnail_url,omitempty"` // WebP thumbnail for videos (extracted by Lambda)
+	MediaVariants MediaVariants `gorm:"type:jsonb;default:'[]';not null" json:"media_variants,omitempty"`
 	// Signed URL expirations are response-only metadata for admin/public clients.
 	ContentURLExpiresAt   *time.Time `gorm:"-" json:"content_url_expires_at,omitempty"`
 	ThumbnailURLExpiresAt *time.Time `gorm:"-" json:"thumbnail_url_expires_at,omitempty"`

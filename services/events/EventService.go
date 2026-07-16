@@ -11,8 +11,14 @@ import (
 	"events-stocks/utils"
 	"fmt"
 	"github.com/gofrs/uuid"
+	"path/filepath"
 	"strings"
 	"time"
+)
+
+var (
+	ErrStaleCoverProcessing             = ports.ErrStaleCoverProcessing
+	ErrInvalidCoverProcessingTransition = ports.ErrInvalidCoverProcessingTransition
 )
 
 var ErrEventNotFound = errors.New("event not found")
@@ -283,32 +289,107 @@ func (s *EventService) UpdateEvent(obj *models.Event) error {
 }
 
 func (s *EventService) ReplaceCoverImage(eventID uuid.UUID, s3Path string) (string, error) {
+	oldPath, _, err := s.ReplaceCoverImageWithVariants(eventID, s3Path, models.MediaVariants{})
+	return oldPath, err
+}
+
+func (s *EventService) ReplaceCoverImageWithVariants(eventID uuid.UUID, s3Path string, variants models.MediaVariants) (string, models.MediaVariants, error) {
 	event, err := s.repo.GetEventByIDRaw(eventID)
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrEventNotFound, err)
+		return "", nil, fmt.Errorf("%w: %v", ErrEventNotFound, err)
 	}
 	oldPath := event.CoverImageURL
-	if err := s.repo.UpdateEventCover(eventID, s3Path); err != nil {
-		return "", err
+	oldVariants := event.CoverVariants
+	if repo, ok := s.repo.(ports.EventCoverVariantsRepository); ok {
+		err = repo.UpdateEventCoverWithVariants(eventID, s3Path, variants)
+	} else {
+		err = s.repo.UpdateEventCover(eventID, s3Path)
+	}
+	if err != nil {
+		return "", nil, err
 	}
 	_ = invalidateEventsCache(s.cache)
-	return oldPath, nil
+	return oldPath, oldVariants, nil
+}
+
+func (s *EventService) BeginCoverProcessing(eventID uuid.UUID, pendingURL, jobID string) (*models.Event, string, error) {
+	repo, ok := s.repo.(ports.EventCoverProcessingRepository)
+	if !ok {
+		return nil, "", fmt.Errorf("event cover processing repository is not configured")
+	}
+	if strings.TrimSpace(pendingURL) == "" || strings.TrimSpace(jobID) == "" {
+		return nil, "", fmt.Errorf("pending cover URL and job ID are required")
+	}
+	event, previousPending, err := repo.BeginEventCoverProcessing(eventID, pendingURL, jobID)
+	if err != nil {
+		return nil, "", err
+	}
+	_ = invalidateEventsCache(s.cache)
+	return event, previousPending, nil
+}
+
+func (s *EventService) ApplyCoverProcessingCallback(eventID uuid.UUID, callback dtos.MediaProcessingCallback) (*models.Event, string, models.MediaVariants, error) {
+	repo, ok := s.repo.(ports.EventCoverProcessingRepository)
+	if !ok {
+		return nil, "", nil, fmt.Errorf("event cover processing repository is not configured")
+	}
+	callback.ProcessingStatus = strings.ToLower(strings.TrimSpace(callback.ProcessingStatus))
+	callback.JobID = strings.TrimSpace(callback.JobID)
+	callback.ObjectKey = strings.TrimSpace(callback.ObjectKey)
+	if callback.JobID == "" || callback.Generation <= 0 {
+		return nil, "", nil, fmt.Errorf("%w: job_id and generation are required", ErrInvalidCoverProcessingTransition)
+	}
+	if callback.ProcessingStatus != "processing" && callback.ProcessingStatus != "done" && callback.ProcessingStatus != "failed" {
+		return nil, "", nil, fmt.Errorf("%w: unsupported status", ErrInvalidCoverProcessingTransition)
+	}
+	if callback.ProcessingStatus == "done" {
+		expectedStem := fmt.Sprintf("events/%s/covers/%s", eventID, callback.JobID)
+		if callback.ObjectKey != expectedStem+".webp" {
+			return nil, "", nil, fmt.Errorf("%w: output key is not owned by this cover job", ErrInvalidCoverProcessingTransition)
+		}
+		seen := map[int]bool{}
+		for _, variant := range callback.MediaVariants {
+			if variant.Width < 160 || variant.Width > 4096 || variant.Format != "webp" || variant.Bytes < 0 || seen[variant.Width] {
+				return nil, "", nil, fmt.Errorf("%w: invalid cover variant", ErrInvalidCoverProcessingTransition)
+			}
+			seen[variant.Width] = true
+			if variant.ObjectKey != fmt.Sprintf("%s-%d.webp", expectedStem, variant.Width) || filepath.Ext(variant.ObjectKey) != ".webp" {
+				return nil, "", nil, fmt.Errorf("%w: variant key is not owned by this cover job", ErrInvalidCoverProcessingTransition)
+			}
+		}
+	}
+	event, oldCover, oldVariants, err := repo.ApplyEventCoverProcessing(eventID, callback)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	_ = invalidateEventsCache(s.cache)
+	return event, oldCover, oldVariants, nil
 }
 
 func (s *EventService) ClearCoverImage(eventID uuid.UUID) (string, error) {
+	oldPath, _, err := s.ClearCoverImageWithVariants(eventID)
+	return oldPath, err
+}
+
+func (s *EventService) ClearCoverImageWithVariants(eventID uuid.UUID) (string, models.MediaVariants, error) {
 	event, err := s.repo.GetEventByIDRaw(eventID)
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrEventNotFound, err)
+		return "", nil, fmt.Errorf("%w: %v", ErrEventNotFound, err)
 	}
 	oldPath := event.CoverImageURL
-	if oldPath == "" {
-		return "", nil
+	if oldPath == "" && len(event.CoverVariants) == 0 {
+		return "", event.CoverVariants, nil
 	}
-	if err := s.repo.UpdateEventCover(eventID, ""); err != nil {
-		return "", err
+	if repo, ok := s.repo.(ports.EventCoverVariantsRepository); ok {
+		err = repo.UpdateEventCoverWithVariants(eventID, "", models.MediaVariants{})
+	} else {
+		err = s.repo.UpdateEventCover(eventID, "")
+	}
+	if err != nil {
+		return "", nil, err
 	}
 	_ = invalidateEventsCache(s.cache)
-	return oldPath, nil
+	return oldPath, event.CoverVariants, nil
 }
 
 func (s *EventService) DeleteEvent(id uuid.UUID) error {

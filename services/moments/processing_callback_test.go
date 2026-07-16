@@ -22,7 +22,7 @@ func (r *casMomentRepo) BeginMediaProcessingJob(id, eventID uuid.UUID, inputKey,
 	return r.beginFunc(id, eventID, inputKey, jobID)
 }
 
-func (r *casMomentRepo) ApplyMediaProcessingUpdate(id, eventID uuid.UUID, jobID string, generation int64, allowedCurrentStatuses []string, contentURL, processingStatus, thumbnailURL, errorMessage string, durationMs, originalBytes, optimizedBytes int64) (bool, error) {
+func (r *casMomentRepo) ApplyMediaProcessingUpdate(id, eventID uuid.UUID, jobID string, generation int64, allowedCurrentStatuses []string, contentURL, processingStatus, thumbnailURL, errorMessage string, durationMs, originalBytes, optimizedBytes int64, _ models.MediaVariants) (bool, error) {
 	return r.applyFunc(id, eventID, jobID, generation, allowedCurrentStatuses, contentURL, processingStatus, thumbnailURL, errorMessage, durationMs, originalBytes, optimizedBytes)
 }
 
@@ -213,6 +213,47 @@ func TestApplyMediaProcessingCallbackUsesValidatedCAS(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.True(t, applied)
+}
+
+func TestValidateMediaVariantsAcceptsOwnedResponsiveImages(t *testing.T) {
+	momentID := uuid.Must(uuid.NewV4())
+	eventID := uuid.Must(uuid.NewV4())
+	moment := &models.Moment{
+		ID: momentID, EventID: &eventID, ContentType: "image/jpeg",
+		ProcessingInputKey: "moments/" + eventID.String() + "/raw/photo.jpg",
+	}
+	variants, err := validateMediaVariants(moment, "done", []dtos.MediaVariant{
+		{ObjectKey: "moments/" + eventID.String() + "/photos/" + momentID.String() + "-480.webp", Width: 480, Format: "WEBP", Bytes: 1200},
+		{ObjectKey: "moments/" + eventID.String() + "/photos/" + momentID.String() + "-960.webp", Width: 960, Format: "webp", Bytes: 3200},
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, models.MediaVariants{
+		{ObjectKey: "moments/" + eventID.String() + "/photos/" + momentID.String() + "-480.webp", Width: 480, Format: "webp", Bytes: 1200},
+		{ObjectKey: "moments/" + eventID.String() + "/photos/" + momentID.String() + "-960.webp", Width: 960, Format: "webp", Bytes: 3200},
+	}, variants)
+}
+
+func TestValidateMediaVariantsRejectsUnsafeMetadata(t *testing.T) {
+	momentID := uuid.Must(uuid.NewV4())
+	eventID := uuid.Must(uuid.NewV4())
+	moment := &models.Moment{ID: momentID, EventID: &eventID, ContentType: "image/jpeg"}
+	validKey := "moments/" + eventID.String() + "/photos/" + momentID.String() + "-480.webp"
+
+	tests := []struct {
+		name     string
+		variants []dtos.MediaVariant
+	}{
+		{name: "foreign key", variants: []dtos.MediaVariant{{ObjectKey: "moments/other/photos/other-480.webp", Width: 480, Format: "webp"}}},
+		{name: "duplicate width", variants: []dtos.MediaVariant{{ObjectKey: validKey, Width: 480, Format: "webp"}, {ObjectKey: validKey, Width: 480, Format: "webp"}}},
+		{name: "negative bytes", variants: []dtos.MediaVariant{{ObjectKey: validKey, Width: 480, Format: "webp", Bytes: -1}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := validateMediaVariants(moment, "done", test.variants)
+			require.ErrorIs(t, err, ErrInvalidMomentProcessingCallback)
+		})
+	}
 }
 
 func TestApplyMediaProcessingCallbackRejectsStaleJobAndForeignKey(t *testing.T) {

@@ -54,8 +54,12 @@
 - `POST /api/events` → `events.CreateEvent`
 - `PUT /api/events/:id` → `events.UpdateEvent`
 - `DELETE /api/events/:id` → `events.DeleteEvent`
-- `POST /api/events/:id/cover` → `events.UploadEventCover` — Uploads/replaces the cover image and returns both the stored S3 key and presigned `view_url`.
+- `POST /api/events/:id/cover` → `events.UploadEventCover` — Stores a validated source, returns `202` plus a signed pending preview, and queues responsive processing. The previous public cover remains active until a generation-matched terminal callback succeeds. Local environments without SQS retain a synchronous fallback.
 - `DELETE /api/events/:id/cover` → `events.DeleteEventCover` — Clears `cover_image_url` and best-effort deletes the old S3 object.
+- `POST /api/events/covers/backfill` → `events.BackfillEventCovers` — Root-only bounded/idempotent backfill for legacy covers without responsive variants.
+- `PUT /api/events/:id/cover/content` → `events.UpdateEventCoverContent` — Internal authenticated media callback; rejects stale generations with `409`.
+- `POST /api/moments/backfill` → `moments.BackfillMomentVariants` — Root-only bounded/idempotent discovery and requeue of legacy image moments without variants.
+- `POST /api/events/:identifier/performance` → `events.TrackPerformance` — Public aggregate-only RUM ingestion with anonymous five-minute operational histograms retained for 48 hours.
 - `GET /api/events/:id/analytics` → `events.GetEventAnalytics` — GetEventAnalytics — returns EventAnalytics for the event
 
 - `GET /api/events/:id/detail` -> `events.GetEvent` - protected event detail by UUID for dashboard pages

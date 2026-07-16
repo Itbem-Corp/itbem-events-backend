@@ -154,6 +154,7 @@ func (r *MomentRepo) ApplyMediaProcessingUpdate(
 	allowedCurrentStatuses []string,
 	contentURL, processingStatus, thumbnailURL, errorMessage string,
 	durationMs, originalBytes, optimizedBytes int64,
+	mediaVariants models.MediaVariants,
 ) (bool, error) {
 	updates := map[string]interface{}{
 		"content_url":       contentURL,
@@ -167,6 +168,9 @@ func (r *MomentRepo) ApplyMediaProcessingUpdate(
 		updates["processing_duration_ms"] = durationMs
 		updates["original_size_bytes"] = originalBytes
 		updates["optimized_size_bytes"] = optimizedBytes
+	}
+	if processingStatus == "done" {
+		updates["media_variants"] = mediaVariants
 	}
 
 	query := configuration.DB.Model(&models.Moment{}).

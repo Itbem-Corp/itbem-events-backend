@@ -12,6 +12,11 @@ import (
 
 type ImageOptimizerService struct{}
 
+type ResponsiveImageVariant struct {
+	Width int
+	Bytes []byte
+}
+
 func NewImageOptimizerService() *ImageOptimizerService {
 	return &ImageOptimizerService{}
 }
@@ -63,4 +68,35 @@ func (s *ImageOptimizerService) OptimizeIfImage(file multipart.File, header *mul
 	}
 
 	return newImage, "image/webp", nil
+}
+
+func (s *ImageOptimizerService) ResponsiveWebPVariants(content []byte, widths []int, quality int) ([]ResponsiveImageVariant, error) {
+	image := bimg.NewImage(content)
+	size, err := image.Size()
+	if err != nil {
+		return nil, fmt.Errorf("read responsive image dimensions: %w", err)
+	}
+	result := make([]ResponsiveImageVariant, 0, len(widths))
+	for _, width := range widths {
+		if width <= 0 || width > size.Width {
+			continue
+		}
+		processed, processErr := image.Process(bimg.Options{
+			Width: width, Type: bimg.WEBP, Quality: quality,
+			Compression: 6, StripMetadata: true,
+		})
+		if processErr != nil {
+			return nil, fmt.Errorf("generate %dpx responsive image: %w", width, processErr)
+		}
+		result = append(result, ResponsiveImageVariant{Width: width, Bytes: processed})
+	}
+	return result, nil
+}
+
+func (s *ImageOptimizerService) ImageWidth(content []byte) (int, error) {
+	size, err := bimg.NewImage(content).Size()
+	if err != nil {
+		return 0, fmt.Errorf("read image dimensions: %w", err)
+	}
+	return size.Width, nil
 }

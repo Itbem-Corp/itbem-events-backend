@@ -1627,6 +1627,35 @@ func TestTrackView_PublicEventIncrementsViews(t *testing.T) {
 	}
 }
 
+func TestTrackPerformanceRejectsUnknownRouteBeforePersistence(t *testing.T) {
+	c, rec := newEchoCtx(http.MethodPost, "/api/events/boda-demo/performance", `{"route":"admin","metrics":[{"name":"lcp","value":1200}]}`)
+	c.SetParamNames("identifier")
+	c.SetParamValues("boda-demo")
+
+	require.NoError(t, TrackPerformance(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "Invalid performance route")
+}
+
+func TestTrackPerformanceUnknownEventUsesNonEnumeratingContract(t *testing.T) {
+	restoreEventSvc := eventSvc
+	t.Cleanup(func() { eventSvc = restoreEventSvc })
+	eventSvc = eventsService.NewEventService(&mockEventsRepo{
+		GetEventByIdentifierFunc: func(identifier string) (*models.Event, error) {
+			require.Equal(t, "missing-event", identifier)
+			return nil, errors.New("not found")
+		},
+	}, &mockCacheRepo{})
+
+	c, rec := newEchoCtx(http.MethodPost, "/api/events/missing-event/performance", `{"route":"event","metrics":[{"name":"lcp","value":1200}]}`)
+	c.SetParamNames("identifier")
+	c.SetParamValues("missing-event")
+
+	require.NoError(t, TrackPerformance(c))
+	assert.Equal(t, http.StatusAccepted, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"accepted":false`)
+}
+
 func TestTrackView_PrivateEventWithoutTokenDoesNotIncrementViews(t *testing.T) {
 	restoreEventSvc := eventSvc
 	restoreEventConfigSvc := eventConfigSvc

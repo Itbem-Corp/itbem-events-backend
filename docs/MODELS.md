@@ -16,6 +16,12 @@ DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
 Event     Event          `gorm:"foreignKey:EventID" json:"event,omitempty"`
 ```
 
+## Async cover and public experience aggregates
+
+- `Event` keeps the last completed `cover_image_url` and `cover_variants` public while a replacement is represented by `cover_pending_url`, `cover_processing_status`, `cover_processing_job_id`, and a monotonic `cover_processing_generation`.
+- Only the matching job/generation can advance `pending -> processing -> done|failed`; failure never removes the last completed cover.
+- `PublicPerformanceWindowBucket` is a global five-minute histogram keyed by window, route, metric, and fixed bucket. It contains no event, visitor, credential, IP, user-agent, or URL identifier and is pruned after 48 hours.
+
 ## Core Domain Models
 
 ### Event
