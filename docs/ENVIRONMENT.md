@@ -39,6 +39,8 @@ go run ./cmd/api
 | `COGNITO_USER_POOL_ID` | **yes** | Cognito User Pool ID (`us-east-1_XXXXXXXXX`) |
 | `COGNITO_CLIENT_ID` | no | **Deprecated backend alias** for a static AWS IAM access key. Used only when `COGNITO_CLIENT_SECRET` is also present. It is not the dashboard Cognito App Client ID. |
 | `COGNITO_CLIENT_SECRET` | no | **Deprecated backend alias** for a static AWS IAM secret key. Used only as a complete pair with `COGNITO_CLIENT_ID`. |
+| `COGNITO_ALLOWED_CLIENT_IDS` | production | Comma-separated Cognito App Client IDs whose signed ID tokens the API accepts. |
+| `COGNITO_TENANT_CLIENT_MAP` | production | Audience-to-tenant binding, for example `clientA=eventiapp,clientB=itbem`. |
 | `S3_CLIENT_ID` | no | **Deprecated backend alias** for a static AWS IAM access key used by S3/SQS. Used only with `S3_CLIENT_SECRET`. |
 | `S3_CLIENT_SECRET` | no | **Deprecated backend alias** for a static AWS IAM secret key used by S3/SQS. Used only as a complete pair with `S3_CLIENT_ID`. |
 | `AWS_BUCKET_NAME` | **yes** | S3 bucket name for file storage |

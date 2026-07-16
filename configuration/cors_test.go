@@ -47,6 +47,7 @@ func TestGetCORSConfigAllowsProductionOrigins(t *testing.T) {
 		"https://eventiapp.com.mx",
 		"https://www.eventiapp.com.mx",
 		"https://dashboard.eventiapp.com.mx",
+		"https://dashboard.itbem.com",
 	} {
 		rec := performCORSRequest(e, origin)
 
