@@ -132,7 +132,7 @@ jobs:
           IMAGE_TAG: ${{ env.IMAGE_REPOSITORY }}:sha-${{ needs.validate.outputs.revision }}
         run: |
           docker build --pull --build-arg "SOURCE_REVISION=$REVISION" --tag "$IMAGE_TAG" .
-          [[ "$(docker image inspect --format '{{ index .Config.Labels \"org.opencontainers.image.revision\" }}' "$IMAGE_TAG")" == "$REVISION" ]]
+          [[ "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE_TAG")" == "$REVISION" ]]
 
       - name: Require the provisioned production deployment boundary
         env:
