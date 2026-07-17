@@ -289,6 +289,9 @@ func effectiveApplicationCapabilities(
 	}
 	platformAuthority := application.AllowsPlatformAdmin && user != nil && user.IsPlatformAdmin()
 	if platformAuthority {
+		if user.IsPrimaryRoot() {
+			capabilities.add("audit:view")
+		}
 		if moduleEnabled(application.Modules, "metrics") {
 			capabilities.add("metrics:view")
 		}

@@ -17,6 +17,8 @@ type AuditLog struct {
 	TenantCode      string     `gorm:"type:varchar(32);not null;index" json:"tenant_code"`
 	Method          string     `gorm:"type:varchar(12);not null" json:"method"`
 	Route           string     `gorm:"type:varchar(512);not null;index" json:"route"`
+	ResourceType    string     `gorm:"type:varchar(64);not null;default:'';index" json:"resource_type,omitempty"`
+	ResourceID      string     `gorm:"type:varchar(128);not null;default:'';index" json:"resource_id,omitempty"`
 	Status          int        `gorm:"not null;index" json:"status"`
 	Succeeded       bool       `gorm:"not null;index" json:"succeeded"`
 	RequestID       string     `gorm:"type:varchar(64);not null;index" json:"request_id"`

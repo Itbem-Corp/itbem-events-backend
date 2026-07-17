@@ -20,12 +20,12 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.13'
 
@@ -48,7 +48,7 @@ jobs:
           [[ "$TLS_MONITOR_TOPIC_ARN" == arn:aws*:sns:us-east-1:*:eventiapp-backend-public-health-alerts-prod ]] || { echo "Invalid TLS_MONITOR_TOPIC_ARN"; exit 1; }
           [[ "$TLS_MONITOR_ALERT_EMAIL" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]] || { echo "TLS_MONITOR_ALERT_EMAIL is missing or invalid"; exit 1; }
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ vars.AWS_TLS_MONITOR_ROLE_ARN }}
           role-session-name: eventiapp-backend-tls-monitor-${{ github.run_id }}
