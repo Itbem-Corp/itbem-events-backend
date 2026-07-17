@@ -15,15 +15,16 @@ import (
 const maxUserAgentLength = 512
 
 // Mutations persists a body-free, append-only audit record for every
-// authenticated state-changing request.
+// authenticated state-changing request and every denied authenticated read.
+// The historical name is retained because routes already register it.
 func Mutations(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		if !shouldAudit(c.Request().Method) {
-			return next(c)
-		}
-
 		err := next(c)
-		entry := newEntry(c, responseStatus(c, err))
+		status := responseStatus(c, err)
+		if !shouldAudit(c.Request().Method, status) {
+			return err
+		}
+		entry := newEntry(c, status)
 		if configuration.DB == nil {
 			slog.Error("security audit unavailable", "request_id", entry.RequestID, "route", entry.Route)
 			return err
@@ -42,7 +43,10 @@ func Mutations(next echo.HandlerFunc) echo.HandlerFunc {
 	}
 }
 
-func shouldAudit(method string) bool {
+func shouldAudit(method string, status int) bool {
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		return true
+	}
 	switch strings.ToUpper(strings.TrimSpace(method)) {
 	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
 		return true
@@ -70,6 +74,8 @@ func newEntry(c echo.Context, status int) *models.AuditLog {
 		TenantCode:      stringContext(c, "tenant_code"),
 		Method:          strings.ToUpper(c.Request().Method),
 		Route:           auditRoute(c),
+		ResourceType:    resourceType(c),
+		ResourceID:      resourceID(c),
 		Status:          status,
 		Succeeded:       status >= 200 && status < 400,
 		RequestID:       c.Response().Header().Get(echo.HeaderXRequestID),
@@ -81,6 +87,29 @@ func newEntry(c echo.Context, status int) *models.AuditLog {
 		entry.ActorUserID = &actorUserID
 	}
 	return entry
+}
+
+func resourceType(c echo.Context) string {
+	route := strings.Trim(strings.TrimPrefix(auditRoute(c), "/api/"), "/")
+	if route == "" {
+		return ""
+	}
+	return bounded(strings.Split(route, "/")[0], 64)
+}
+
+func resourceID(c echo.Context) string {
+	names := c.ParamNames()
+	values := c.ParamValues()
+	for i, name := range names {
+		if i >= len(values) {
+			break
+		}
+		normalized := strings.ToLower(strings.TrimSpace(name))
+		if normalized == "id" || strings.HasSuffix(normalized, "_id") || strings.HasSuffix(normalized, "id") {
+			return bounded(strings.TrimSpace(values[i]), 128)
+		}
+	}
+	return ""
 }
 
 func auditRoute(c echo.Context) string {

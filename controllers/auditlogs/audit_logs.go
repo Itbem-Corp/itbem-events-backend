@@ -43,6 +43,19 @@ func List(c echo.Context) error {
 	if route := strings.TrimSpace(c.QueryParam("route")); route != "" {
 		query = query.Where("route = ?", route)
 	}
+	if resourceType := strings.TrimSpace(c.QueryParam("resource_type")); resourceType != "" {
+		query = query.Where("resource_type = ?", resourceType)
+	}
+	if resourceID := strings.TrimSpace(c.QueryParam("resource_id")); resourceID != "" {
+		query = query.Where("resource_id = ?", resourceID)
+	}
+	if succeededText := strings.TrimSpace(c.QueryParam("succeeded")); succeededText != "" {
+		succeeded, err := strconv.ParseBool(succeededText)
+		if err != nil {
+			return utils.Error(c, http.StatusBadRequest, "Invalid succeeded filter", "succeeded must be true or false")
+		}
+		query = query.Where("succeeded = ?", succeeded)
+	}
 	if statusText := strings.TrimSpace(c.QueryParam("status")); statusText != "" {
 		status, err := strconv.Atoi(statusText)
 		if err != nil || status < 100 || status > 599 {

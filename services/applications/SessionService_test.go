@@ -116,6 +116,7 @@ func TestEffectiveApplicationCapabilitiesEnforcesRootCeilings(t *testing.T) {
 			name: "primary root governs platform and product",
 			user: &models.User{RootLevel: models.RootLevelPrimary},
 			want: []string{
+				"audit:view",
 				"events:create", "events:manage", "events:delete",
 				"platform:users:manage", "platform:users:root-manage",
 				"organizations:manage", "applications:manage", "members:manage",
@@ -129,6 +130,7 @@ func TestEffectiveApplicationCapabilitiesEnforcesRootCeilings(t *testing.T) {
 				"platform:users:view", "platform:users:support", "organizations:view", "members:manage",
 			},
 			notAllowed: []string{
+				"audit:view",
 				"events:create", "events:manage", "events:delete",
 				"platform:users:manage", "platform:users:root-manage",
 				"organizations:manage", "applications:manage",
