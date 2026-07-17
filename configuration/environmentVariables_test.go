@@ -20,6 +20,7 @@ func TestFieldToEnvVarHandlesAcronyms(t *testing.T) {
 		"SQSImageQueueURL":          "SQS_IMAGE_QUEUE_URL",
 		"SQSVideoQueueURL":          "SQS_VIDEO_QUEUE_URL",
 		"SQSWorkerQueueURL":         "SQS_WORKER_QUEUE_URL",
+		"SNSWorkerTopicARN":         "SNS_WORKER_TOPIC_ARN",
 		"InternalAPISecret":         "INTERNAL_API_SECRET",
 		"InternalAPISecretPrevious": "INTERNAL_API_SECRET_PREVIOUS",
 		"DbLogLevel":                "DB_LOG_LEVEL",

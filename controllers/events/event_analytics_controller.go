@@ -1,11 +1,13 @@
 package events
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"events-stocks/configuration"
 	"events-stocks/dtos"
 	"events-stocks/internal/authz"
+	"events-stocks/internal/observability"
 	"events-stocks/models"
 	"log/slog"
 	"math"
@@ -77,7 +79,7 @@ func GetEventAnalytics(c echo.Context) error {
 			response.Guests = guestSummary
 			response.Performance = performance
 			if rollup.ComputedAt.IsZero() || time.Since(rollup.ComputedAt) >= analyticsRollupMaxAge {
-				requestAnalyticsRollup(eventID, tenantCodeFromContext(c))
+				requestAnalyticsRollup(c.Request().Context(), eventID, tenantCodeFromContext(c))
 			}
 			return utils.Success(c, http.StatusOK, "Analytics loaded", response)
 		} else {
@@ -94,7 +96,7 @@ func GetEventAnalytics(c echo.Context) error {
 		return utils.Error(c, http.StatusInternalServerError, "Error fetching analytics", err.Error())
 	}
 	response.Performance = performance
-	requestAnalyticsRollup(eventID, tenantCodeFromContext(c))
+	requestAnalyticsRollup(c.Request().Context(), eventID, tenantCodeFromContext(c))
 	return utils.Success(c, http.StatusOK, "Analytics loaded", response)
 }
 
@@ -272,10 +274,11 @@ func tenantCodeFromContext(c echo.Context) string {
 	return tenantCode
 }
 
-func requestAnalyticsRollup(eventID uuid.UUID, tenantCode string) {
+func requestAnalyticsRollup(ctx context.Context, eventID uuid.UUID, tenantCode string) {
+	ctx = context.WithoutCancel(ctx)
 	go func() {
-		if _, err := outboxService.EnqueueAnalyticsRollup(configuration.DB, eventID, tenantCode); err != nil {
-			slog.Warn("analytics rollup outbox enqueue failed", "event_id", eventID, "error", err)
+		if _, err := outboxService.EnqueueAnalyticsRollup(ctx, configuration.DB, eventID, tenantCode); err != nil {
+			slog.WarnContext(ctx, "analytics rollup outbox enqueue failed", "event", "outbox_enqueue_failed", "component", "outbox", "event_id", eventID, "correlation_id", observability.CorrelationID(ctx), "error", err)
 		}
 	}()
 }

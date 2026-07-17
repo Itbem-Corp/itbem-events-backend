@@ -30,6 +30,7 @@ import (
 	sessionsController "events-stocks/controllers/sessions"
 	usersController "events-stocks/controllers/users"
 	"events-stocks/internal/authz"
+	"events-stocks/internal/observability"
 	"events-stocks/middleware/applicationaccess"
 	customValidator "events-stocks/middleware/validator"
 	"events-stocks/models"
@@ -88,7 +89,11 @@ import (
 func Run() error {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
-	})))
+	})).With(
+		"service", "eventiapp-backend",
+		"environment", strings.TrimSpace(os.Getenv("ENV")),
+		"source_revision", strings.TrimSpace(os.Getenv("SOURCE_REVISION")),
+	))
 
 	cfg := configuration.LoadConfig()
 	if err := configuration.ValidateSecurityConfiguration(); err != nil {
@@ -111,7 +116,7 @@ func Run() error {
 	}
 	configuration.InitAwsServices(cfg)
 	sqsrepository.Init(cfg.AwsRegion, cfg.S3ClientId, cfg.S3ClientSecret, cfg.SQSImageQueueURL, cfg.SQSVideoQueueURL)
-	jobqueuerepository.Init(cfg.AwsRegion, cfg.S3ClientId, cfg.S3ClientSecret, cfg.SQSWorkerQueueURL)
+	jobqueuerepository.Init(cfg.AwsRegion, cfg.S3ClientId, cfg.S3ClientSecret, cfg.SQSWorkerQueueURL, cfg.SNSWorkerTopicARN)
 	dispatcherCtx, stopDispatcher := context.WithCancel(context.Background())
 	defer stopDispatcher()
 	outboxService.StartDispatcher(dispatcherCtx, configuration.DB)
@@ -174,6 +179,13 @@ func newServer(cfg *models.Config) *echo.Echo {
 
 	e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
+			requestID := c.Response().Header().Get(echo.HeaderXRequestID)
+			correlationID := observability.NormalizeCorrelationID(c.Request().Header.Get("X-Correlation-ID"))
+			if correlationID == "" {
+				correlationID = requestID
+			}
+			request := c.Request()
+			c.SetRequest(request.WithContext(observability.WithCorrelationID(request.Context(), correlationID)))
 			start := time.Now()
 			err := next(c)
 
@@ -186,13 +198,24 @@ func newServer(cfg *models.Config) *echo.Echo {
 				}
 			}
 
-			slog.Info("request",
-				"id", c.Response().Header().Get(echo.HeaderXRequestID),
+			if c.Path() == "/health" && status < http.StatusBadRequest {
+				return err
+			}
+			level := slog.LevelInfo
+			if status >= http.StatusInternalServerError {
+				level = slog.LevelError
+			} else if status >= http.StatusBadRequest {
+				level = slog.LevelWarn
+			}
+			slog.Log(c.Request().Context(), level, "http request completed",
+				"event", "http_request_completed",
+				"component", "http",
+				"request_id", requestID,
+				"correlation_id", correlationID,
 				"method", c.Request().Method,
-				"uri", redactedRequestURI(c),
+				"route", redactedRequestURI(c),
 				"status", status,
 				"latency_ms", time.Since(start).Milliseconds(),
-				"ip", c.RealIP(),
 			)
 			return err
 		}

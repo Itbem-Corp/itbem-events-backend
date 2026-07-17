@@ -133,6 +133,9 @@ Resources:
                   - !Sub 'arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:itbem-media-images-prod'
                   - !Sub 'arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:itbem-media-videos-prod'
                   - !Sub 'arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:eventiapp-workers-prod'
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Sub 'arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:eventiapp-prod-worker-jobs'
               - Sid: PublishOnlyBackendOperationalLogs
                 Effect: Allow
                 Action:
@@ -185,6 +188,58 @@ Resources:
       TreatMissingData: notBreaching
       AlarmActions: [!Ref AlertTopicArn]
       OKActions: [!Ref AlertTopicArn]
+
+  CorrelationTraceQuery:
+    Type: AWS::Logs::QueryDefinition
+    Properties:
+      Name: EventiApp/Operations/Trace correlation ID
+      LogGroupNames:
+        - !Ref BackendApplicationLogGroup
+        - /ec2/eventiapp-workers/prod
+        - /aws/lambda/itbem-media-processor-image-prod
+        - /aws/lambda/itbem-media-processor-video-prod
+      QueryString: |
+        fields @timestamp, service, component, event, correlation_id, request_id, job_id, application, lane, level, msg
+        | filter correlation_id = "REPLACE_CORRELATION_ID"
+        | sort @timestamp asc
+        | limit 500
+
+  OperationalErrorsQuery:
+    Type: AWS::Logs::QueryDefinition
+    Properties:
+      Name: EventiApp/Operations/Errors by component
+      LogGroupNames:
+        - !Ref BackendApplicationLogGroup
+        - /ec2/eventiapp-workers/prod
+        - /aws/lambda/itbem-media-processor-image-prod
+        - /aws/lambda/itbem-media-processor-video-prod
+      QueryString: |
+        fields @timestamp, service, component, event, application, lane, job_id, correlation_id, level, msg, error
+        | filter level = "ERROR" or event like /failed/
+        | sort @timestamp desc
+        | limit 200
+
+  SlowRequestsQuery:
+    Type: AWS::Logs::QueryDefinition
+    Properties:
+      Name: EventiApp/Backend/Slow HTTP requests
+      LogGroupNames: [!Ref BackendApplicationLogGroup]
+      QueryString: |
+        fields @timestamp, route, method, status, latency_ms, correlation_id
+        | filter event = "http_request_completed" and latency_ms >= 1000
+        | sort latency_ms desc
+        | limit 200
+
+  WorkerFailuresQuery:
+    Type: AWS::Logs::QueryDefinition
+    Properties:
+      Name: EventiApp/Workers/Failed jobs
+      LogGroupNames: [/ec2/eventiapp-workers/prod]
+      QueryString: |
+        fields @timestamp, application, lane, job_type, job_id, correlation_id, tenant_code, error
+        | filter event = "job_processing_failed"
+        | sort @timestamp desc
+        | limit 200
 
   RdsFreeStorageAlarm:
     Type: AWS::CloudWatch::Alarm

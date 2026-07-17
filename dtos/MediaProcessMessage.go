@@ -2,16 +2,19 @@ package dtos
 
 // MediaProcessMessage is the payload sent to the async media processor.
 type MediaProcessMessage struct {
-	TargetType  string `json:"target_type,omitempty"`
-	MomentID    string `json:"moment_id"`
-	EventID     string `json:"event_id"`
-	JobID       string `json:"job_id,omitempty"`
-	Generation  int64  `json:"generation,omitempty"`
-	ObjectKey   string `json:"object_key,omitempty"`
-	RawS3Key    string `json:"raw_s3_key"`
-	Bucket      string `json:"bucket"`
-	ContentType string `json:"content_type"`
-	IsVideo     bool   `json:"is_video"`
+	Application    string `json:"application,omitempty"`
+	CorrelationID  string `json:"correlation_id,omitempty"`
+	SourceRevision string `json:"source_revision,omitempty"`
+	TargetType     string `json:"target_type,omitempty"`
+	MomentID       string `json:"moment_id"`
+	EventID        string `json:"event_id"`
+	JobID          string `json:"job_id,omitempty"`
+	Generation     int64  `json:"generation,omitempty"`
+	ObjectKey      string `json:"object_key,omitempty"`
+	RawS3Key       string `json:"raw_s3_key"`
+	Bucket         string `json:"bucket"`
+	ContentType    string `json:"content_type"`
+	IsVideo        bool   `json:"is_video"`
 }
 
 const (

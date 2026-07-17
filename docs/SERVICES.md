@@ -12,6 +12,12 @@
 
 ## Available Services
 
+### Notifications (`services/notifications/`)
+
+| File | Purpose |
+|---|---|
+| `SlackNotificationService.go` | Persists Slack notification jobs for asynchronous Block Kit delivery by `itbem-events-workers`. See `docs/SLACK_NOTIFICATIONS.md`. |
+
 ### Events Domain (`services/events/`)
 
 | File | Purpose |

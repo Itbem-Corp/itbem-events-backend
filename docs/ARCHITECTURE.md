@@ -423,6 +423,12 @@ if !ok || cfg == nil {
 
 ## Monitoring & Health
 
+- Application notifications use `services/notifications` with the durable
+  outbox and worker queue. `itbem-events-workers` owns Block Kit,
+  SSM webhook access, HTTP delivery, retry, and DLQ behavior. The worker is
+  assigned one immutable destination; callers cannot select another channel.
+  Encrypted webhook URLs are resolved from SSM and never enter business-layer code.
+
 - Health check endpoint: `GET /health`
 - Startup validation: database connection, Redis connection
 - Graceful shutdown on `SIGINT`/`SIGTERM` — 10s timeout before force-stop (`internal/app/app.go`)

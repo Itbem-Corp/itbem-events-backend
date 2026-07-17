@@ -51,6 +51,7 @@ func InitAwsServices(cfg *models.Config) {
 		os.Exit(1)
 	}
 	SetCognitoClient(cognitoidentityprovider.NewFromConfig(cognitoConfig))
+
 }
 
 // BuildS3Client creates a region-correct S3 client. AWS returns PermanentRedirect

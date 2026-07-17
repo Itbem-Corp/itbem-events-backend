@@ -69,6 +69,7 @@ type Config struct {
 	SQSVideoQueueURL string `required:"false"` // itbem-media-videos queue
 	// Business/data jobs consumed by itbem-events-workers (never media jobs).
 	SQSWorkerQueueURL string `required:"false"`
+	SNSWorkerTopicARN string `required:"false"`
 
 	// Internal API secret — used by Lambda to call PUT /api/moments/:id/content
 	// Generate with: openssl rand -hex 32

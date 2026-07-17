@@ -6,6 +6,9 @@ set -Eeuo pipefail
 : "${CANDIDATE_PORT:?CANDIDATE_PORT is required}"
 : "${DEPLOY_ID:?DEPLOY_ID is required}"
 : "${ENV_FILE:?ENV_FILE is required}"
+: "${AWS_REGION:?AWS_REGION is required}"
+: "${LOG_GROUP:?LOG_GROUP is required}"
+: "${INSTANCE_ID:?INSTANCE_ID is required}"
 
 [[ "$BACKEND_PORT" =~ ^[0-9]+$ ]] || { echo "BACKEND_PORT must be numeric" >&2; exit 2; }
 [[ "$CANDIDATE_PORT" =~ ^[0-9]+$ ]] || { echo "CANDIDATE_PORT must be numeric" >&2; exit 2; }
@@ -91,8 +94,10 @@ d run -d \
   --restart no \
   --init \
   --env-file "$ENV_FILE" \
-  --log-opt max-size=20m \
-  --log-opt max-file=5 \
+  --log-driver awslogs \
+  --log-opt "awslogs-region=$AWS_REGION" \
+  --log-opt "awslogs-group=$LOG_GROUP" \
+  --log-opt "awslogs-stream=backend/$INSTANCE_ID/$CANDIDATE_NAME-$DEPLOY_ID" \
   -p "127.0.0.1:${CANDIDATE_PORT}:${BACKEND_PORT}" \
   "$IMAGE_TAG" >/dev/null
 
@@ -117,8 +122,10 @@ if ! d run -d \
   --restart always \
   --init \
   --env-file "$ENV_FILE" \
-  --log-opt max-size=20m \
-  --log-opt max-file=5 \
+  --log-driver awslogs \
+  --log-opt "awslogs-region=$AWS_REGION" \
+  --log-opt "awslogs-group=$LOG_GROUP" \
+  --log-opt "awslogs-stream=backend/$INSTANCE_ID/$APP_NAME" \
   -p "${BACKEND_PORT}:${BACKEND_PORT}" \
   "$IMAGE_TAG" >/dev/null; then
   echo "Promoted container could not start; rolling back" >&2

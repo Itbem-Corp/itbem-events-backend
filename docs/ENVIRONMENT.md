@@ -61,6 +61,7 @@ go run ./cmd/api
 | `SQS_IMAGE_QUEUE_URL` | no | AWS SQS queue URL for async image processing. Leave empty to disable. |
 | `SQS_VIDEO_QUEUE_URL` | no | AWS SQS queue URL for async video processing. Leave empty to disable. |
 | `SQS_WORKER_QUEUE_URL` | no | AWS SQS queue URL for derived business/data jobs handled by `itbem-events-workers`. Leave empty to keep the live analytics fallback and disable publishing. |
+| `SNS_WORKER_TOPIC_ARN` | no | EventiApp producer topic. SNS routes each workload lane to the shared Rust worker without exposing another app's topic. Production deployments require it. |
 | `EVENT_PREVIEW_SECRET` | deployed | Dedicated HMAC secret for signed dashboard preview URLs. It never falls back to another credential. Production/staging require at least 32 bytes. Generate with `openssl rand -hex 32`. |
 | `EVENT_ACCESS_SECRET` | deployed | Dedicated HMAC secret for password-gate access proofs (`X-Event-Access-Token`). It never falls back to another credential. Production/staging require at least 32 bytes. Generate with `openssl rand -hex 32`. |
 | `INTERNAL_API_SECRET` | deployed | Dedicated shared secret for Lambda → backend callbacks (`PUT /api/moments/:id/content`). Production/staging require at least 32 bytes. Generate with `openssl rand -hex 32`. |
@@ -72,6 +73,16 @@ The production workflow runs `cmd/security-preflight` before taking a database
 snapshot or opening an EC2 deployment session.
 
 ## AWS credential resolution
+
+### Slack notification parameters
+
+Slack Incoming Webhook URLs are not environment variables. They are encrypted
+SSM `SecureString` parameters under
+`/eventiapp/notifications/slack/<application>/<section>`. Every application has
+its own `general` section; the cross-application operational destination is
+`operations/general`.
+The workload role needs `ssm:GetParameter` only for those exact paths. See
+`docs/SLACK_NOTIFICATIONS.md`.
 
 S3, SQS, and the Cognito Admin API use the AWS SDK default credential chain.
 This supports standard environment credentials, shared profiles and SSO,
@@ -125,6 +136,7 @@ The deploy workflow (`deploy-backend.yml`) maps GitHub Secrets → container env
 | `SQS_IMAGE_QUEUE_URL` | `SQS_IMAGE_QUEUE_URL` |
 | `SQS_VIDEO_QUEUE_URL` | `SQS_VIDEO_QUEUE_URL` |
 | `SQS_WORKER_QUEUE_URL` | `SQS_WORKER_QUEUE_URL` |
+| `SNS_WORKER_TOPIC_ARN` | `SNS_WORKER_TOPIC_ARN` |
 
 > `CORS_ALLOW_ORIGINS` is typically empty in production — production only allows the hardcoded domains in `configuration/cors.go`.
 
