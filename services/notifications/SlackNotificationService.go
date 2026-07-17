@@ -38,7 +38,7 @@ func Send(ctx context.Context, notification dtos.SlackNotification) error {
 		return ErrNotConfigured
 	}
 	if strings.TrimSpace(notification.Title) == "" || strings.TrimSpace(notification.Summary) == "" {
-		return errors.New("Slack notification title and summary are required")
+		return errors.New("slack notification title and summary are required")
 	}
 	now := time.Now().UTC()
 	jobID := uuid.Must(uuid.NewV4())
@@ -56,7 +56,7 @@ func Send(ctx context.Context, notification dtos.SlackNotification) error {
 		return fmt.Errorf("enqueue Slack notification: %w", err)
 	}
 	if !inserted {
-		return errors.New("Slack notification was already queued")
+		return errors.New("slack notification was already queued")
 	}
 	return nil
 }
