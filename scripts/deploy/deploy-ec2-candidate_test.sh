@@ -112,6 +112,9 @@ run_deploy() {
     IMAGE_TAG=itbem-events-backend:test \
     BACKEND_PORT=8080 \
     CANDIDATE_PORT=18080 \
+    AWS_REGION=us-east-2 \
+    LOG_GROUP=/ec2/eventiapp-backend/test \
+    INSTANCE_ID=i-test \
     DEPLOY_ID="$case_name" \
     ENV_FILE="${case_dir}/backend.env" \
     bash "$DEPLOY_SCRIPT" >"${case_dir}/stdout" 2>"${case_dir}/stderr"
