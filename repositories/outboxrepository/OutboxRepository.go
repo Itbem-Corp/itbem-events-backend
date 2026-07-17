@@ -3,6 +3,7 @@ package outboxrepository
 import (
 	"time"
 
+	"events-stocks/internal/observability"
 	"events-stocks/models"
 
 	"gorm.io/gorm"
@@ -82,10 +83,7 @@ func MarkCompleted(db *gorm.DB, id interface{}) error {
 func ScheduleRetry(db *gorm.DB, event models.OutboxEvent, cause error) error {
 	message := ""
 	if cause != nil {
-		message = cause.Error()
-		if len(message) > 1024 {
-			message = message[:1024]
-		}
+		message = observability.SanitizeError(cause)
 	}
 	return db.Model(&models.OutboxEvent{}).
 		Where("id = ? AND state = ?", event.ID, StateProcessing).

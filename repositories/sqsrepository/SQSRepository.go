@@ -17,6 +17,8 @@ import (
 	"events-stocks/dtos"
 	"fmt"
 	"log/slog"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -82,6 +84,15 @@ func Init(region, accessKeyID, secretAccessKey, imgQueue, vidQueue string) {
 // Returns (enqueued, error): enqueued is true only when the message was actually
 // sent to SQS. When SQS is not configured the call is a no-op (false, nil).
 func PublishMediaJob(msg MediaProcessMessage) (bool, error) {
+	if strings.TrimSpace(msg.Application) == "" {
+		msg.Application = "eventiapp"
+	}
+	if strings.TrimSpace(msg.CorrelationID) == "" {
+		msg.CorrelationID = strings.TrimSpace(msg.JobID)
+	}
+	if strings.TrimSpace(msg.SourceRevision) == "" {
+		msg.SourceRevision = strings.TrimSpace(os.Getenv("SOURCE_REVISION"))
+	}
 	if sqsClient == nil {
 		return false, nil
 	}

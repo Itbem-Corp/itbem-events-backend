@@ -70,7 +70,7 @@ func TestBuildAnalyticsRollupMessageReturnsPersistableDeterministicEnvelope(t *t
 	eventID := uuid.Must(uuid.FromString("7c9e6679-7425-40de-944b-e07fc1f90ae7"))
 	now := time.Date(2026, 7, 16, 17, 5, 42, 0, time.UTC)
 
-	body, dedupeKey, tenant, err := BuildAnalyticsRollupMessage(eventID, " ItBeM ", now)
+	body, dedupeKey, tenant, err := BuildAnalyticsRollupMessage(eventID, " ItBeM ", now, "request-123")
 	require.NoError(t, err)
 	assert.Equal(t, "itbem", tenant)
 
@@ -80,4 +80,5 @@ func TestBuildAnalyticsRollupMessageReturnsPersistableDeterministicEnvelope(t *t
 	require.NoError(t, json.Unmarshal([]byte(body), &decoded))
 	assert.Equal(t, dedupeKey, decoded["job_id"])
 	assert.Equal(t, analyticsJobType, decoded["type"])
+	assert.Equal(t, "request-123", decoded["correlation_id"])
 }

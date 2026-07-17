@@ -267,6 +267,7 @@ jobs:
           AWS_REGION: ${{ secrets.BACKEND_AWS_REGION }}
           S3_REGION: ${{ secrets.BACKEND_S3_REGION }}
           ENV: production
+          SOURCE_REVISION: ${{ needs.validate.outputs.revision }}
           COGNITO_USER_POOL_ID: ${{ secrets.BACKEND_COGNITO_USER_POOL_ID }}
           COGNITO_CLIENT_ID: ${{ secrets.BACKEND_COGNITO_CLIENT_ID }}
           COGNITO_CLIENT_SECRET: ${{ secrets.BACKEND_COGNITO_CLIENT_SECRET }}
@@ -297,6 +298,7 @@ jobs:
           SQS_IMAGE_QUEUE_URL: ${{ secrets.SQS_IMAGE_QUEUE_URL }}
           SQS_VIDEO_QUEUE_URL: ${{ secrets.SQS_VIDEO_QUEUE_URL }}
           SQS_WORKER_QUEUE_URL: ${{ secrets.SQS_WORKER_QUEUE_URL }}
+          SNS_WORKER_TOPIC_ARN: ${{ secrets.SNS_WORKER_TOPIC_ARN }}
         run: |
           set -euo pipefail
           LOCAL_ENV_FILE="${RUNNER_TEMP}/eventiapp-backend-${GITHUB_RUN_ID}.env"
@@ -306,6 +308,7 @@ jobs:
             --required AWS_REGION \
             --required S3_REGION \
             --required ENV \
+            --required SOURCE_REVISION \
             --required COGNITO_USER_POOL_ID \
             --required COGNITO_AWS_REGION \
             --required AWS_BUCKET_NAME \
@@ -337,7 +340,8 @@ jobs:
             --optional CORS_ALLOW_ORIGINS \
             --optional REDIS_PASSWORD \
             --optional INTERNAL_API_SECRET_PREVIOUS \
-            --optional SQS_WORKER_QUEUE_URL
+            --optional SQS_WORKER_QUEUE_URL \
+            --required SNS_WORKER_TOPIC_ARN
 
       - name: Snapshot database before startup migrations
         id: database_snapshot
@@ -405,7 +409,7 @@ jobs:
           ECR_REGISTRY="${IMAGE_REFERENCE%%/*}"
           aws ecr get-login-password --region us-east-2 | sudo docker login --username AWS --password-stdin "\$ECR_REGISTRY"
           sudo docker pull '${IMAGE_REFERENCE}'
-          IMAGE_TAG='${IMAGE_REFERENCE}' BACKEND_PORT='${BACKEND_PORT}' CANDIDATE_PORT='${BACKEND_CANDIDATE_PORT}' DEPLOY_ID='${GITHUB_RUN_ID}' ENV_FILE="\$deploy_dir/runtime.env" bash "\$deploy_dir/deploy.sh"
+          IMAGE_TAG='${IMAGE_REFERENCE}' BACKEND_PORT='${BACKEND_PORT}' CANDIDATE_PORT='${BACKEND_CANDIDATE_PORT}' DEPLOY_ID='${GITHUB_RUN_ID}' ENV_FILE="\$deploy_dir/runtime.env" AWS_REGION='us-east-2' LOG_GROUP='/ec2/eventiapp-backend/prod' INSTANCE_ID='${{ vars.EC2_INSTANCE_ID }}' bash "\$deploy_dir/deploy.sh"
           deployed_revision="\$(sudo docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' itbem-events-backend)"
           [[ "\$deployed_revision" == '${REVISION}' ]]
           printf 'deployed_revision=%s\n' "\$deployed_revision"

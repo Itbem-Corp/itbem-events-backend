@@ -118,6 +118,7 @@ itbem-events-backend/
 | `services/fonts/FontSetService.go` | Font sets |
 | `services/fonts/FontSetPatternService.go` | FontSet patterns |
 | `services/cacheutil/json_cache.go` | Generic JSON cache-aside helper |
+| `services/notifications/SlackNotificationService.go` | Durable producer for `notification.slack` worker jobs |
 | `services/validations/Validations.go` | Shared validators |
 
 ## Repositories (`repositories/<domain>repository/`)

@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/sns"
+	snstypes "github.com/aws/aws-sdk-go-v2/service/sns/types"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/gofrs/uuid"
@@ -38,6 +40,7 @@ type analyticsRollupEnvelope struct {
 	JobID         uuid.UUID              `json:"job_id"`
 	OccurredAt    time.Time              `json:"occurred_at"`
 	TenantCode    string                 `json:"tenant_code,omitempty"`
+	CorrelationID string                 `json:"correlation_id,omitempty"`
 	Type          string                 `json:"type"`
 	Payload       analyticsRollupPayload `json:"payload"`
 }
@@ -58,7 +61,9 @@ type performanceRollupEnvelope struct {
 
 var (
 	client                     *sqs.Client
+	notificationClient         *sns.Client
 	queueURL                   string
+	notificationTopicARN       string
 	once                       sync.Once
 	publishMu                  sync.Mutex
 	publishedBuckets           = map[uuid.UUID]time.Time{}
@@ -73,9 +78,12 @@ func IsConfigured() bool {
 
 // Init is fail-open so local/API operation remains available without workers.
 // Analytics reads retain their synchronous fallback until a snapshot exists.
-func Init(region, accessKeyID, secretAccessKey, workerQueueURL string) {
+func Init(region, accessKeyID, secretAccessKey, workerQueueURL string, notificationTopicARNs ...string) {
 	once.Do(func() {
 		queueURL = strings.TrimSpace(workerQueueURL)
+		if len(notificationTopicARNs) > 0 {
+			notificationTopicARN = strings.TrimSpace(notificationTopicARNs[0])
+		}
 		if queueURL == "" {
 			slog.Info("jobqueuerepository: worker queue not configured — derived jobs disabled")
 			return
@@ -86,6 +94,7 @@ func Init(region, accessKeyID, secretAccessKey, workerQueueURL string) {
 			return
 		}
 		client = sqs.NewFromConfig(cfg)
+		notificationClient = sns.NewFromConfig(cfg)
 		slog.Info("jobqueuerepository: worker queue publisher initialized")
 	})
 }
@@ -182,12 +191,15 @@ func PublishAnalyticsRollup(eventID uuid.UUID, tenantCodes ...string) (bool, err
 
 // BuildAnalyticsRollupMessage exposes the stable worker contract so the API
 // can persist the exact envelope before attempting SQS delivery.
-func BuildAnalyticsRollupMessage(eventID uuid.UUID, tenantCode string, now time.Time) (body, dedupeKey, normalizedTenant string, err error) {
+func BuildAnalyticsRollupMessage(eventID uuid.UUID, tenantCode string, now time.Time, correlationIDs ...string) (body, dedupeKey, normalizedTenant string, err error) {
 	if eventID == uuid.Nil {
 		return "", "", "", fmt.Errorf("event ID is required")
 	}
 	normalizedTenant = strings.ToLower(strings.TrimSpace(tenantCode))
 	envelope := buildAnalyticsRollupEnvelope(eventID, normalizedTenant, now)
+	if len(correlationIDs) > 0 {
+		envelope.CorrelationID = strings.TrimSpace(correlationIDs[0])
+	}
 	encoded, marshalErr := json.Marshal(envelope)
 	if marshalErr != nil {
 		return "", "", "", fmt.Errorf("marshal analytics rollup job: %w", marshalErr)
@@ -198,13 +210,37 @@ func BuildAnalyticsRollupMessage(eventID uuid.UUID, tenantCode string, now time.
 // PublishRaw delivers a worker envelope that was already committed to the
 // database outbox.
 func PublishRaw(body, tenantCode string) error {
+	return PublishRawWorkload(body, tenantCode, false)
+}
+
+func PublishRawWorkload(body, tenantCode string, notification bool) error {
 	if client == nil || queueURL == "" {
 		return ErrQueueUnavailable
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), publishTimeout)
 	defer cancel()
+	target := queueURL
+	if notification {
+		if notificationClient == nil || notificationTopicARN == "" {
+			return ErrQueueUnavailable
+		}
+		attributes := map[string]snstypes.MessageAttributeValue{
+			"lane": {DataType: aws.String("String"), StringValue: aws.String("fast")},
+		}
+		if tenant := strings.ToLower(strings.TrimSpace(tenantCode)); tenant != "" {
+			attributes["tenant_code"] = snstypes.MessageAttributeValue{DataType: aws.String("String"), StringValue: aws.String(tenant)}
+		}
+		if _, err := notificationClient.Publish(ctx, &sns.PublishInput{
+			TopicArn:          aws.String(notificationTopicARN),
+			Message:           aws.String(body),
+			MessageAttributes: attributes,
+		}); err != nil {
+			return fmt.Errorf("publish persisted notification job: %w", err)
+		}
+		return nil
+	}
 	input := &sqs.SendMessageInput{
-		QueueUrl:    aws.String(queueURL),
+		QueueUrl:    aws.String(target),
 		MessageBody: aws.String(body),
 	}
 	tenantCode = strings.ToLower(strings.TrimSpace(tenantCode))
