@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"events-stocks/internal/products"
 	"events-stocks/models"
 	"events-stocks/services/productmetrics"
 	"events-stocks/utils"
@@ -139,9 +140,7 @@ func CurrentUser(c echo.Context) (*models.User, error) {
 // control plane; branded customer portals use explicit memberships and roles.
 func scopeUserToTenant(c echo.Context, user *models.User) *models.User {
 	tenantCode, _ := c.Get("tenant_code").(string)
-	if user == nil || tenantCode == "" ||
-		strings.EqualFold(tenantCode, "eventiapp") ||
-		strings.EqualFold(tenantCode, "itbem") {
+	if user == nil || tenantCode == "" || products.AllowsPlatformAuthority(tenantCode) {
 		return user
 	}
 	scoped := *user
@@ -244,7 +243,7 @@ func RequireClientCapability(user *models.User, clientID uuid.UUID, capability C
 }
 
 func requireTenantClientBoundary(user *models.User, clientID uuid.UUID) error {
-	if user == nil || strings.TrimSpace(user.AuthTenantCode) == "" || strings.EqualFold(user.AuthTenantCode, "eventiapp") {
+	if user == nil || strings.TrimSpace(user.AuthTenantCode) == "" || products.NormalizeOrDefault(user.AuthTenantCode) == products.DefaultCode {
 		return nil
 	}
 	if hooks.GetClientByID == nil {
@@ -313,6 +312,10 @@ func roleHasCapability(role string, capability Capability) bool {
 }
 
 func RequireEventAccess(c echo.Context, eventID uuid.UUID) (*models.User, *models.Event, error) {
+	tenantCode, _ := c.Get("tenant_code").(string)
+	if strings.TrimSpace(tenantCode) != "" && !products.SupportsEventOperations(tenantCode) {
+		return nil, nil, &Failure{Status: http.StatusForbidden, Message: "Application surface denied", Detail: "Event operations are only available in the EventiApp application"}
+	}
 	cognitoSub, err := cognitoSubFromContext(c)
 	if err != nil {
 		return nil, nil, err

@@ -32,6 +32,10 @@ Parameters:
     Type: String
     Default: eventiapp-backend-delivery-752279076974-us-east-2
     AllowedPattern: '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$'
+  RuntimeSecretParameterName:
+    Type: String
+    Default: /eventiapp/backend/prod/redis-auth-token
+    AllowedPattern: '^/eventiapp/backend/prod/[A-Za-z0-9_.\-/]+$'
 
 Resources:
   BackendProductionDeployRole:
@@ -101,6 +105,10 @@ Resources:
                 Resource:
                   - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}::document/AWS-RunShellScript'
                   - !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/${BackendEc2InstanceId}'
+              - Sid: ReadOnlyBackendRuntimeSecret
+                Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${RuntimeSecretParameterName}'
               - Sid: ReadOnlyOwnSsmCommandResult
                 Effect: Allow
                 Action: ssm:GetCommandInvocation

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"events-stocks/configuration"
+	"events-stocks/internal/products"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -123,7 +124,7 @@ func PublishPerformanceRollup() (bool, error) {
 	}
 	envelope := performanceRollupEnvelope{
 		SchemaVersion: jobSchemaVersion,
-		JobID:         uuid.NewV5(uuid.NamespaceURL, fmt.Sprintf("eventiapp:%s:%s", performanceJobType, bucket.Format(time.RFC3339))),
+		JobID:         uuid.NewV5(uuid.NamespaceURL, fmt.Sprintf("%s:%s:%s", products.DefaultCode, performanceJobType, bucket.Format(time.RFC3339))),
 		OccurredAt:    now,
 		Type:          performanceJobType,
 		Payload:       performanceRollupPayload{RequestedAt: now, LookbackMinutes: 15, Trigger: "rum_sample"},
@@ -195,7 +196,7 @@ func BuildAnalyticsRollupMessage(eventID uuid.UUID, tenantCode string, now time.
 	if eventID == uuid.Nil {
 		return "", "", "", fmt.Errorf("event ID is required")
 	}
-	normalizedTenant = strings.ToLower(strings.TrimSpace(tenantCode))
+	normalizedTenant = products.NormalizeOrDefault(tenantCode).String()
 	envelope := buildAnalyticsRollupEnvelope(eventID, normalizedTenant, now)
 	if len(correlationIDs) > 0 {
 		envelope.CorrelationID = strings.TrimSpace(correlationIDs[0])
@@ -282,13 +283,13 @@ func buildAnalyticsRollupEnvelope(eventID uuid.UUID, tenantCode string, now time
 	bucket := now.Truncate(analyticsJobBucket)
 	jobID := uuid.NewV5(
 		uuid.NamespaceURL,
-		fmt.Sprintf("eventiapp:%s:%s:%s", analyticsJobType, eventID, bucket.Format(time.RFC3339)),
+		fmt.Sprintf("%s:%s:%s:%s", products.NormalizeOrDefault(tenantCode), analyticsJobType, eventID, bucket.Format(time.RFC3339)),
 	)
 	return analyticsRollupEnvelope{
 		SchemaVersion: jobSchemaVersion,
 		JobID:         jobID,
 		OccurredAt:    now,
-		TenantCode:    strings.ToLower(strings.TrimSpace(tenantCode)),
+		TenantCode:    products.NormalizeOrDefault(tenantCode).String(),
 		Type:          analyticsJobType,
 		Payload: analyticsRollupPayload{
 			EventID:     eventID,

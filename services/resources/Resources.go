@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 )
 
 const (
@@ -29,6 +30,8 @@ const (
 	MaxMomentImageFileSizeBytes   = MaxMomentImageFileSizeMB * 1024 * 1024
 	MaxVideoFileSizeMB            = 200 // moment video uploads
 	MaxVideoFileSizeBytes         = MaxVideoFileSizeMB * 1024 * 1024
+	maxMomentMultipartParts       = MaxVideoFileSizeBytes / (5 * 1024 * 1024)
+	maxS3ETagLength               = 128
 	ErrPrefixValidate             = "validation_error:"
 	ResourceViewURLTTLMinutes     = 720
 	ResourceMutationURLTTLMinutes = 60
@@ -685,6 +688,17 @@ func (rs *ResourceService) UploadRawToMomentsFolder(
 	header *multipart.FileHeader,
 	eventID string,
 ) (s3Key string, contentType string, err error) {
+	return rs.UploadRawToMomentsFolderContext(context.Background(), file, header, eventID)
+}
+
+// UploadRawToMomentsFolderContext is the request-aware variant used by HTTP
+// handlers so a disconnected client cancels the remaining S3 transfer.
+func (rs *ResourceService) UploadRawToMomentsFolderContext(
+	ctx context.Context,
+	file multipart.File,
+	header *multipart.FileHeader,
+	eventID string,
+) (s3Key string, contentType string, err error) {
 	ct, err := normalizeMomentUploadContentType(header.Filename, header.Header.Get("Content-Type"))
 	if err != nil {
 		return "", "", err
@@ -707,19 +721,6 @@ func (rs *ResourceService) UploadRawToMomentsFolder(
 		return "", "", services.ValidationError{Msg: fmt.Sprintf("file size exceeds %d MB", limitMB)}
 	}
 
-	// Read raw bytes without optimization
-	raw, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
-	if err != nil {
-		return "", "", fmt.Errorf("failed to read uploaded file: %w", err)
-	}
-	if int64(len(raw)) > maxBytes {
-		limitMB := MaxMomentImageFileSizeMB
-		if isVid {
-			limitMB = MaxVideoFileSizeMB
-		}
-		return "", "", services.ValidationError{Msg: fmt.Sprintf("file size exceeds %d MB", limitMB)}
-	}
-
 	// Build a UUID-based filename preserving extension
 	u, _ := uuid.NewV4()
 	ext := ""
@@ -734,8 +735,22 @@ func (rs *ResourceService) UploadRawToMomentsFolder(
 	if err != nil {
 		return "", "", err
 	}
-	if err := storage.UploadRawBytesSimple(raw, filename, ct, folder, rs.Bucket, rs.Provider); err != nil {
-		return "", "", fmt.Errorf("failed to upload raw moment: %w", err)
+	var uploadErr error
+	if streamUploader, ok := storage.(ports.ObjectStorageStreamUploader); ok {
+		uploadErr = streamUploader.UploadStream(ctx, io.LimitReader(file, maxBytes+1), header.Size, filename, ct, folder, rs.Bucket, rs.Provider)
+	} else {
+		// Compatibility path for lightweight and third-party storage adapters.
+		raw, readErr := io.ReadAll(io.LimitReader(file, maxBytes+1))
+		if readErr != nil {
+			return "", "", fmt.Errorf("failed to read uploaded file: %w", readErr)
+		}
+		if int64(len(raw)) > maxBytes {
+			return "", "", services.ValidationError{Msg: fmt.Sprintf("file size exceeds %d MB", maxBytes/(1024*1024))}
+		}
+		uploadErr = storage.UploadRawBytesSimple(raw, filename, ct, folder, rs.Bucket, rs.Provider)
+	}
+	if uploadErr != nil {
+		return "", "", fmt.Errorf("failed to upload raw moment: %w", uploadErr)
 	}
 
 	return fmt.Sprintf("%s/%s", folder, filename), ct, nil
@@ -801,6 +816,14 @@ func (rs *ResourceService) CompleteMomentMultipartUpload(s3Key, uploadID string,
 	if len(normalizedParts) != len(parts) {
 		return services.ValidationError{Msg: "invalid multipart parts"}
 	}
+	if len(normalizedParts) > maxMomentMultipartParts {
+		return services.ValidationError{Msg: "too many multipart parts"}
+	}
+	for index, part := range normalizedParts {
+		if part.PartNumber != index+1 || len(part.ETag) > maxS3ETagLength || strings.IndexFunc(part.ETag, unicode.IsControl) >= 0 {
+			return services.ValidationError{Msg: "invalid multipart parts"}
+		}
+	}
 	storage, err := rs.requireStorage()
 	if err != nil {
 		return err
@@ -848,6 +871,10 @@ func (rs *ResourceService) ValidateMomentRawKey(eventID, s3Key string) error {
 // Moment record is created. Real storage implementations additionally expose
 // object size and Content-Type; lightweight test adapters fall back to exists.
 func (rs *ResourceService) VerifyMomentUpload(s3Key, requestedContentType string) (string, error) {
+	return rs.VerifyMomentUploadSize(s3Key, requestedContentType, 0)
+}
+
+func (rs *ResourceService) VerifyMomentUploadSize(s3Key, requestedContentType string, expectedSize int64) (string, error) {
 	contentType, err := normalizeMomentUploadContentType(s3Key, requestedContentType)
 	if err != nil {
 		return "", err
@@ -868,6 +895,9 @@ func (rs *ResourceService) VerifyMomentUpload(s3Key, requestedContentType string
 		}
 		if metadata.Size <= 0 {
 			return "", services.ValidationError{Msg: "uploaded file is empty"}
+		}
+		if expectedSize > 0 && metadata.Size != expectedSize {
+			return "", services.ValidationError{Msg: "uploaded file size does not match the upload request"}
 		}
 		storedType := canonicalUploadContentType(metadata.ContentType)
 		if storedType != "" && storedType != "application/octet-stream" {
@@ -909,6 +939,22 @@ func (rs *ResourceService) DeleteMomentUpload(s3Key string) error {
 		return services.ValidationError{Msg: "invalid upload key"}
 	}
 	return storage.DeleteFile(filename, folder, rs.Bucket, rs.Provider)
+}
+
+func (rs *ResourceService) MarkMomentUploadConfirmed(ctx context.Context, s3Key string) error {
+	storage, err := rs.requireStorage()
+	if err != nil {
+		return err
+	}
+	confirmer, ok := storage.(ports.ObjectStorageUploadConfirmer)
+	if !ok {
+		return nil
+	}
+	folder, filename := resourceStoragePathParts(s3Key, "moments")
+	if filename == "" {
+		return services.ValidationError{Msg: "invalid upload key"}
+	}
+	return confirmer.MarkUploadConfirmed(ctx, filename, folder, rs.Bucket, rs.Provider)
 }
 
 func momentUploadLimit(contentType string) (int64, int) {

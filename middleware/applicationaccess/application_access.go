@@ -2,15 +2,28 @@ package applicationaccess
 
 import (
 	"errors"
+	"events-stocks/internal/organizationcontext"
+	"events-stocks/internal/products"
+	requestcontract "events-stocks/internal/requestcontext"
 	"events-stocks/services/applications"
 	"events-stocks/utils"
 	"net/http"
 	"strings"
 
+	"github.com/gofrs/uuid"
 	"github.com/labstack/echo/v4"
 )
 
 const ContextKey = "application_session"
+
+const (
+	HeaderApplicationCode     = requestcontract.HeaderApplicationCode
+	HeaderWorkspaceMode       = requestcontract.HeaderWorkspaceMode
+	HeaderOrganizationID      = requestcontract.HeaderOrganizationID
+	HeaderOrganizationContext = requestcontract.HeaderOrganizationContext
+	ContextWorkspaceMode      = "workspace_mode"
+	ContextOrganizationID     = "organization_id"
+)
 
 var sessionService *applications.SessionService
 
@@ -35,8 +48,14 @@ func Require(next echo.HandlerFunc) echo.HandlerFunc {
 			return utils.Error(c, http.StatusServiceUnavailable, "Application access unavailable", err.Error())
 		}
 		c.Set(ContextKey, session)
+		if err := validateRequestContext(c, tenant, session); err != nil {
+			return utils.Error(c, http.StatusForbidden, "Application context denied", err.Error())
+		}
+		if products.RequiresEventOperationsPath(c.Request().URL.Path) && !products.SupportsEventOperations(tenant) {
+			return utils.Error(c, http.StatusForbidden, "Application surface denied", "Event operations are only available in the EventiApp application")
+		}
 		if required := requiredSurfaceCapability(c.Request().Method, c.Request().URL.Path); required != "" &&
-			!sessionHasAnyCapability(session, strings.Split(required, "|")...) {
+			!session.HasAnyCapability(strings.Split(required, "|")...) {
 			return utils.Error(
 				c,
 				http.StatusForbidden,
@@ -48,18 +67,52 @@ func Require(next echo.HandlerFunc) echo.HandlerFunc {
 	}
 }
 
-func sessionHasAnyCapability(session *applications.Session, expected ...string) bool {
+func validateRequestContext(c echo.Context, tenant string, session *applications.Session) error {
 	if session == nil {
-		return false
+		return errors.New("application session does not match the authenticated tenant")
 	}
-	for _, actual := range session.Capabilities {
-		for _, candidate := range expected {
-			if actual == candidate {
-				return true
-			}
+	resolved, err := requestcontract.Resolve(requestcontract.Input{
+		AuthenticatedApplication: tenant,
+		RequestedApplication:     c.Request().Header.Get(HeaderApplicationCode),
+		SessionApplication:       session.Application.Code,
+		RequestedWorkspaceMode:   c.Request().Header.Get(HeaderWorkspaceMode),
+		RequestedOrganizationID:  c.Request().Header.Get(HeaderOrganizationID),
+		AllowsPlatformAdmin:      session.Application.AllowsPlatformAdmin,
+		IsRoot:                   session.User.IsRoot,
+		OrganizationAllowed: func(candidate uuid.UUID) bool {
+			return session.AllowsOrganization(candidate)
+		},
+	})
+	if err != nil {
+		return err
+	}
+	c.Set(ContextWorkspaceMode, resolved.WorkspaceMode)
+	if resolved.HasOrganization {
+		contextToken := strings.TrimSpace(c.Request().Header.Get(HeaderOrganizationContext))
+		if contextToken == "" && requiresOrganizationCredential(c.Request().URL.Path) {
+			return errors.New("organization context token is required")
 		}
+		if contextToken != "" && !organizationcontext.Validate(contextToken, stringContext(c, "cognito_sub"), tenant, resolved.OrganizationID) {
+			return errors.New("organization context token is invalid or expired")
+		}
+		c.Set(ContextOrganizationID, resolved.OrganizationID)
+	} else if strings.TrimSpace(c.Request().Header.Get(HeaderOrganizationContext)) != "" {
+		return errors.New("organization context token requires an organization workspace")
 	}
-	return false
+	return nil
+}
+
+// Session bootstrap and credential issuance must remain reachable when a
+// credential is absent or expired. Both are still protected by Cognito and the
+// application membership resolved above; neither exposes organization data.
+func requiresOrganizationCredential(path string) bool {
+	path = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(path)), "/")
+	return path != "/api/session" && path != "/api/session/organization-context"
+}
+
+func stringContext(c echo.Context, key string) string {
+	value, _ := c.Get(key).(string)
+	return value
 }
 
 // requiredSurfaceCapability prevents a valid token for one product from
@@ -94,17 +147,8 @@ func requiredSurfaceCapability(method, path string) string {
 		}
 		return "organizations:manage"
 	}
-	eventPrefixes := []string{
-		"/api/events", "/api/guests", "/api/moments", "/api/invitations",
-		"/api/sections", "/api/tables", "/api/resources", "/api/admin/resources",
-		"/api/fonts", "/api/catalogs/design-templates", "/api/catalogs/color-palettes",
-		"/api/catalogs/font-sets", "/api/catalogs/resource-types",
-		"/api/catalogs/guest-statuses", "/api/event-types",
-	}
-	for _, prefix := range eventPrefixes {
-		if strings.HasPrefix(path, prefix) {
-			return "events:view"
-		}
+	if products.RequiresEventOperationsPath(path) {
+		return "events:view"
 	}
 	return ""
 }

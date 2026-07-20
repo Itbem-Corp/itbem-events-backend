@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -170,6 +171,7 @@ func newServer(cfg *models.Config) *echo.Echo {
 	e := echo.New()
 	e.HideBanner = true
 	e.HTTPErrorHandler = handleHTTPError
+	e.IPExtractor = trustedProxyIPExtractor(cfg.TrustedProxyCidrs)
 
 	e.Use(middleware.RequestIDWithConfig(middleware.RequestIDConfig{
 		Generator: func() string {
@@ -251,6 +253,28 @@ func newServer(cfg *models.Config) *echo.Echo {
 	e.Validator = customValidator.New()
 
 	return e
+}
+
+func trustedProxyIPExtractor(raw string) echo.IPExtractor {
+	options := []echo.TrustOption{
+		echo.TrustLoopback(true),
+		echo.TrustLinkLocal(false),
+		echo.TrustPrivateNet(false),
+	}
+	for _, candidate := range strings.Split(raw, ",") {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		_, network, err := net.ParseCIDR(candidate)
+		if err != nil {
+			// Deployed environments reject malformed CIDRs during the security
+			// preflight. Ignoring one here keeps local startup fail-safe.
+			continue
+		}
+		options = append(options, echo.TrustIPRange(network))
+	}
+	return echo.ExtractIPFromXFFHeader(options...)
 }
 
 func handleHTTPError(err error, c echo.Context) {

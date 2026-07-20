@@ -39,14 +39,11 @@ import (
 
 // publicRateLimiter protege endpoints públicos: 20 req/s por IP, burst 40
 func publicRateLimiter() echo.MiddlewareFunc {
+	fallback := middleware.NewRateLimiterMemoryStoreWithConfig(
+		middleware.RateLimiterMemoryStoreConfig{Rate: 20, Burst: 40, ExpiresIn: 3 * time.Minute},
+	)
 	return middleware.RateLimiterWithConfig(middleware.RateLimiterConfig{
-		Store: middleware.NewRateLimiterMemoryStoreWithConfig(
-			middleware.RateLimiterMemoryStoreConfig{
-				Rate:      20,
-				Burst:     40,
-				ExpiresIn: 3 * time.Minute,
-			},
-		),
+		Store: newDistributedRateLimitStore("public", 40, 2*time.Second, false, fallback),
 		IdentifierExtractor: func(c echo.Context) (string, error) {
 			return c.RealIP(), nil
 		},
@@ -58,14 +55,11 @@ func publicRateLimiter() echo.MiddlewareFunc {
 
 // sensitiveRateLimiter: ~10 req/min por IP para endpoints de alto valor (RSVP, invitaciones)
 func sensitiveRateLimiter() echo.MiddlewareFunc {
+	fallback := middleware.NewRateLimiterMemoryStoreWithConfig(
+		middleware.RateLimiterMemoryStoreConfig{Rate: 0.17, Burst: 5, ExpiresIn: 5 * time.Minute},
+	)
 	return middleware.RateLimiterWithConfig(middleware.RateLimiterConfig{
-		Store: middleware.NewRateLimiterMemoryStoreWithConfig(
-			middleware.RateLimiterMemoryStoreConfig{
-				Rate:      0.17,
-				Burst:     5,
-				ExpiresIn: 5 * time.Minute,
-			},
-		),
+		Store: newDistributedRateLimitStore("sensitive", 5, time.Minute, true, fallback),
 		IdentifierExtractor: func(c echo.Context) (string, error) {
 			return c.RealIP(), nil
 		},
@@ -78,14 +72,11 @@ func sensitiveRateLimiter() echo.MiddlewareFunc {
 // uploadRateLimiter allows short upload bursts from the QR batch uploader.
 // Per-event/IP upload quotas are enforced in the moments controller.
 func uploadRateLimiter() echo.MiddlewareFunc {
+	fallback := middleware.NewRateLimiterMemoryStoreWithConfig(
+		middleware.RateLimiterMemoryStoreConfig{Rate: 5, Burst: 30, ExpiresIn: 3 * time.Minute},
+	)
 	return middleware.RateLimiterWithConfig(middleware.RateLimiterConfig{
-		Store: middleware.NewRateLimiterMemoryStoreWithConfig(
-			middleware.RateLimiterMemoryStoreConfig{
-				Rate:      5,
-				Burst:     30,
-				ExpiresIn: 3 * time.Minute,
-			},
-		),
+		Store: newDistributedRateLimitStore("upload", 30, 6*time.Second, false, fallback),
 		IdentifierExtractor: func(c echo.Context) (string, error) {
 			return c.RealIP(), nil
 		},
@@ -184,14 +175,11 @@ func appendVaryHeader(headers http.Header, values ...string) {
 
 // protectedRateLimiter is more permissive for dashboard traffic.
 func protectedRateLimiter() echo.MiddlewareFunc {
+	fallback := middleware.NewRateLimiterMemoryStoreWithConfig(
+		middleware.RateLimiterMemoryStoreConfig{Rate: 60, Burst: 100, ExpiresIn: 3 * time.Minute},
+	)
 	return middleware.RateLimiterWithConfig(middleware.RateLimiterConfig{
-		Store: middleware.NewRateLimiterMemoryStoreWithConfig(
-			middleware.RateLimiterMemoryStoreConfig{
-				Rate:      60,
-				Burst:     100,
-				ExpiresIn: 3 * time.Minute,
-			},
-		),
+		Store: newDistributedRateLimitStore("protected", 100, 2*time.Second, false, fallback),
 		IdentifierExtractor: func(c echo.Context) (string, error) {
 			return c.RealIP(), nil
 		},
@@ -229,24 +217,32 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	// Public moments: read-only wall endpoint with the public body limit/rate limit.
 	public.GET("/events/:identifier/moments", moments.ListPublicMoments)
 
-	// Upload endpoints get a SEPARATE top-level group so they are NOT limited by the
-	// 2M body limit on the public group. They run their own rate limiting only.
-	// 225M supports video uploads up to 200 MB plus multipart overhead.
-	uploadsGroup := e.Group("/api")
-	uploadsGroup.Use(middleware.BodyLimit("225M"))
-	uploadsGroup.Use(productmetricsService.CaptureTenant("eventiapp"))
-	uploadsGroup.Use(publicAccessCacheControl())
-	uploadsGroup.Use(uploadRateLimiter())
-	uploadsGroup.POST("/events/:identifier/moments", moments.CreatePublicMoment)
-	uploadsGroup.POST("/events/:identifier/moments/upload-url", moments.RequestPublicMomentUploadURL)
-	uploadsGroup.POST("/events/:identifier/moments/confirm", moments.ConfirmPublicMoment)
-	uploadsGroup.POST("/events/:identifier/moments/shared", moments.CreateSharedMoment) // QR shared upload
-	uploadsGroup.POST("/events/:identifier/moments/shared/upload-url", moments.RequestSharedUploadURL)
-	uploadsGroup.POST("/events/:identifier/moments/shared/batch-upload-urls", moments.RequestBatchSharedUploadURLs)
-	uploadsGroup.POST("/events/:identifier/moments/shared/confirm", moments.ConfirmSharedMoment)
-	uploadsGroup.POST("/events/:identifier/moments/shared/multipart/start", moments.StartSharedMultipartUpload)
-	uploadsGroup.POST("/events/:identifier/moments/shared/multipart/abort", moments.AbortSharedMultipartUpload)
-	uploadsGroup.POST("/events/:identifier/moments/shared/multipart/complete", moments.CompleteSharedMultipartUpload)
+	// Only the two legacy multipart/form-data routes need a large request body.
+	// Presign and confirmation routes carry small JSON documents; keeping their
+	// limit low prevents an attacker from making the API buffer 225 MB before a
+	// request that ultimately uploads directly from the browser to S3.
+	uploadsLimiter := uploadRateLimiter()
+	legacyUploadsGroup := e.Group("/api")
+	legacyUploadsGroup.Use(middleware.BodyLimit("225M"))
+	legacyUploadsGroup.Use(productmetricsService.CaptureTenant("eventiapp"))
+	legacyUploadsGroup.Use(publicAccessCacheControl())
+	legacyUploadsGroup.Use(uploadsLimiter)
+	legacyUploadsGroup.POST("/events/:identifier/moments", moments.CreatePublicMoment)
+	legacyUploadsGroup.POST("/events/:identifier/moments/shared", moments.CreateSharedMoment)
+
+	presignedUploadsGroup := e.Group("/api")
+	presignedUploadsGroup.Use(middleware.BodyLimit("2M"))
+	presignedUploadsGroup.Use(productmetricsService.CaptureTenant("eventiapp"))
+	presignedUploadsGroup.Use(publicAccessCacheControl())
+	presignedUploadsGroup.Use(uploadsLimiter)
+	presignedUploadsGroup.POST("/events/:identifier/moments/upload-url", moments.RequestPublicMomentUploadURL)
+	presignedUploadsGroup.POST("/events/:identifier/moments/confirm", moments.ConfirmPublicMoment)
+	presignedUploadsGroup.POST("/events/:identifier/moments/shared/upload-url", moments.RequestSharedUploadURL)
+	presignedUploadsGroup.POST("/events/:identifier/moments/shared/batch-upload-urls", moments.RequestBatchSharedUploadURLs)
+	presignedUploadsGroup.POST("/events/:identifier/moments/shared/confirm", moments.ConfirmSharedMoment)
+	presignedUploadsGroup.POST("/events/:identifier/moments/shared/multipart/start", moments.StartSharedMultipartUpload)
+	presignedUploadsGroup.POST("/events/:identifier/moments/shared/multipart/abort", moments.AbortSharedMultipartUpload)
+	presignedUploadsGroup.POST("/events/:identifier/moments/shared/multipart/complete", moments.CompleteSharedMultipartUpload)
 
 	// Resources
 	public.GET("/resources/:id", resources.GetResource)
@@ -272,6 +268,7 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	protected.Use(audit.Mutations)
 
 	protected.GET("/session", sessions.GetSession)
+	protected.POST("/session/organization-context", sessions.IssueOrganizationContext)
 	protected.GET("/audit-logs", auditlogs.List)
 	protected.GET("/metrics/portfolio", productmetricsController.Portfolio)
 

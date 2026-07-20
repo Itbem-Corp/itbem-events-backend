@@ -114,6 +114,9 @@ type momentUploadObjectRequest struct {
 	ContentTypeCamel  string `json:"contentType"`
 	ContentTypePascal string `json:"ContentType"`
 	Description       string `json:"description"`
+	FileSize          int64  `json:"file_size"`
+	FileSizeCamel     int64  `json:"fileSize"`
+	FileSizePascal    int64  `json:"FileSize"`
 }
 
 func (r momentUploadObjectRequest) objectKey() string {
@@ -122,6 +125,10 @@ func (r momentUploadObjectRequest) objectKey() string {
 
 func (r momentUploadObjectRequest) contentType() string {
 	return firstNonEmpty(r.ContentType, r.ContentTypeCamel, r.ContentTypePascal)
+}
+
+func (r momentUploadObjectRequest) fileSize() int64 {
+	return firstNonZeroInt64(r.FileSize, r.FileSizeCamel, r.FileSizePascal)
 }
 
 type multipartUploadReferenceRequest struct {
@@ -879,7 +886,7 @@ func CreatePublicMoment(c echo.Context) error {
 	}
 
 	eventResSvc := publicResourceServiceForEvent(event)
-	rawKey, contentType, err := eventResSvc.UploadRawToMomentsFolder(file, header, event.ID.String())
+	rawKey, contentType, err := eventResSvc.UploadRawToMomentsFolderContext(c.Request().Context(), file, header, event.ID.String())
 	if err != nil {
 		return respondMomentUploadError(c, "Error uploading file", err)
 	}
@@ -944,7 +951,7 @@ func CreateSharedMoment(c echo.Context) error {
 	}
 
 	eventResSvc := publicResourceServiceForEvent(event)
-	rawKey, contentType, err := eventResSvc.UploadRawToMomentsFolder(file, header, event.ID.String())
+	rawKey, contentType, err := eventResSvc.UploadRawToMomentsFolderContext(c.Request().Context(), file, header, event.ID.String())
 	if err != nil {
 		return respondMomentUploadError(c, "Error uploading file", err)
 	}
@@ -1019,7 +1026,7 @@ func ConfirmPublicMoment(c echo.Context) error {
 	if ok, err := requireUploadsOpen(c, cfg); !ok {
 		return err
 	}
-	moment, err := confirmPresignedMoment(c, event, cfg, invID, body.objectKey(), body.contentType(), publicMomentDescription(cfg, body.Description))
+	moment, err := confirmPresignedMoment(c, event, cfg, invID, body.objectKey(), body.contentType(), body.fileSize(), publicMomentDescription(cfg, body.Description))
 	if c.Response().Committed {
 		return nil
 	}
@@ -1095,7 +1102,7 @@ func ConfirmSharedMoment(c echo.Context) error {
 	if err := c.Bind(&body); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
 	}
-	moment, err := confirmPresignedMoment(c, event, cfg, nil, body.objectKey(), body.contentType(), publicMomentDescription(cfg, body.Description))
+	moment, err := confirmPresignedMoment(c, event, cfg, nil, body.objectKey(), body.contentType(), body.fileSize(), publicMomentDescription(cfg, body.Description))
 	if c.Response().Committed {
 		return nil
 	}
@@ -1218,7 +1225,7 @@ func CompleteSharedMultipartUpload(c echo.Context) error {
 	if contentType == "" {
 		contentType = publicMomentContentTypeFromObjectKey(objectKey)
 	}
-	moment, confirmErr := confirmPresignedMoment(c, event, cfg, nil, objectKey, contentType, publicMomentDescription(cfg, body.Description))
+	moment, confirmErr := confirmPresignedMoment(c, event, cfg, nil, objectKey, contentType, body.fileSize(), publicMomentDescription(cfg, body.Description))
 	if c.Response().Committed {
 		return nil
 	}
@@ -1394,7 +1401,7 @@ func loadSharedUploadContext(c echo.Context) (*models.Event, *models.EventConfig
 	return event, cfg, true
 }
 
-func confirmPresignedMoment(c echo.Context, event *models.Event, cfg *models.EventConfig, invitationID *uuid.UUID, objectKey, contentType, description string) (*models.Moment, error) {
+func confirmPresignedMoment(c echo.Context, event *models.Event, cfg *models.EventConfig, invitationID *uuid.UUID, objectKey, contentType string, expectedSize int64, description string) (*models.Moment, error) {
 	if publicResSvc == nil {
 		return nil, utils.Error(c, http.StatusInternalServerError, "Resource service unavailable", "")
 	}
@@ -1410,9 +1417,12 @@ func confirmPresignedMoment(c echo.Context, event *models.Event, cfg *models.Eve
 		return nil, utils.Error(c, http.StatusInternalServerError, "Error checking upload confirmation", lookupErr.Error())
 	}
 	if existing != nil {
+		if tagErr := eventResSvc.MarkMomentUploadConfirmed(c.Request().Context(), objectKey); tagErr != nil {
+			slog.Warn("could not mark existing moment upload as confirmed", "event_id", event.ID, "object_key", objectKey, "error", tagErr)
+		}
 		return existing, nil
 	}
-	verifiedContentType, verifyErr := eventResSvc.VerifyMomentUpload(objectKey, contentType)
+	verifiedContentType, verifyErr := eventResSvc.VerifyMomentUploadSize(objectKey, contentType, expectedSize)
 	if verifyErr != nil {
 		cleanupMomentUpload(event.ID.String(), c.RealIP(), objectKey, false, eventResSvc)
 		return nil, respondMomentUploadError(c, "Upload verification failed", verifyErr)
@@ -1443,6 +1453,9 @@ func confirmPresignedMoment(c echo.Context, event *models.Event, cfg *models.Eve
 	if err := momentsService.CreateMoment(&moment); err != nil {
 		cleanupMomentUpload(event.ID.String(), ip, objectKey, quotaReserved, eventResSvc)
 		return nil, utils.Error(c, http.StatusInternalServerError, "Error saving moment", err.Error())
+	}
+	if tagErr := eventResSvc.MarkMomentUploadConfirmed(ctx, objectKey); tagErr != nil {
+		slog.Warn("could not mark moment upload as confirmed", "event_id", event.ID, "moment_id", moment.ID, "object_key", objectKey, "error", tagErr)
 	}
 	momentsService.EnqueueMediaProcessing(&moment, objectKey, eventResSvc.Bucket, contentType)
 	go recordMomentCreatedAnalytics(eventID, description)

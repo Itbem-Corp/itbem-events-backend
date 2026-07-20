@@ -90,19 +90,21 @@ func NewUploadQuotaMetadata(limit, used, remaining int64) UploadQuotaMetadata {
 }
 
 type MomentUploadURLResponse struct {
-	UploadURL   string `json:"upload_url"`
-	ObjectKey   string `json:"object_key"`
-	S3Key       string `json:"s3_key"`
-	ContentType string `json:"content_type,omitempty"`
+	UploadURL     string            `json:"upload_url"`
+	ObjectKey     string            `json:"object_key"`
+	S3Key         string            `json:"s3_key"`
+	ContentType   string            `json:"content_type,omitempty"`
+	UploadHeaders map[string]string `json:"upload_headers,omitempty"`
 	UploadQuotaMetadata
 }
 
 func NewMomentUploadURLResponse(uploadURL, objectKey, contentType string) MomentUploadURLResponse {
 	return MomentUploadURLResponse{
-		UploadURL:   uploadURL,
-		ObjectKey:   objectKey,
-		S3Key:       objectKey,
-		ContentType: contentType,
+		UploadURL:     uploadURL,
+		ObjectKey:     objectKey,
+		S3Key:         objectKey,
+		ContentType:   contentType,
+		UploadHeaders: map[string]string{"x-amz-tagging": "upload-state=unconfirmed"},
 	}
 }
 

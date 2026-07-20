@@ -66,9 +66,11 @@ go run ./cmd/api
 | `EVENT_ACCESS_SECRET` | deployed | Dedicated HMAC secret for password-gate access proofs (`X-Event-Access-Token`). It never falls back to another credential. Production/staging require at least 32 bytes. Generate with `openssl rand -hex 32`. |
 | `INTERNAL_API_SECRET` | deployed | Dedicated shared secret for Lambda → backend callbacks (`PUT /api/moments/:id/content`). Production/staging require at least 32 bytes. Generate with `openssl rand -hex 32`. |
 | `INTERNAL_API_SECRET_PREVIOUS` | no | Temporary second callback secret used only during rotation. Remove it after all old callbacks and retries have drained. |
+| `ORGANIZATION_CONTEXT_SECRET` | deployed | Dedicated HMAC secret for short-lived organization-context tokens. Production/staging require at least 32 bytes and an independent value. |
+| `ORGANIZATION_CONTEXT_SECRET_PREVIOUS` | no | Temporary previous organization-context secret used during key rotation. Remove it after issued tokens have expired (currently at most 10 minutes). |
 
-`EVENT_PREVIEW_SECRET`, `EVENT_ACCESS_SECRET`, `INTERNAL_API_SECRET`, and any
-temporary `INTERNAL_API_SECRET_PREVIOUS` value must be generated independently.
+`EVENT_PREVIEW_SECRET`, `EVENT_ACCESS_SECRET`, `INTERNAL_API_SECRET`, `ORGANIZATION_CONTEXT_SECRET`, and any
+temporary `INTERNAL_API_SECRET_PREVIOUS` or `ORGANIZATION_CONTEXT_SECRET_PREVIOUS` value must be generated independently.
 The production workflow runs `cmd/security-preflight` before taking a database
 snapshot or opening an EC2 deployment session.
 
@@ -132,6 +134,8 @@ The deploy workflow (`deploy-backend.yml`) maps GitHub Secrets → container env
 | `INTERNAL_API_SECRET` | `INTERNAL_API_SECRET` |
 | `INTERNAL_API_SECRET_PREVIOUS` | `INTERNAL_API_SECRET_PREVIOUS` |
 | `EVENT_PREVIEW_SECRET` | `EVENT_PREVIEW_SECRET` |
+| `ORGANIZATION_CONTEXT_SECRET` | `ORGANIZATION_CONTEXT_SECRET` |
+| `ORGANIZATION_CONTEXT_SECRET_PREVIOUS` | `ORGANIZATION_CONTEXT_SECRET_PREVIOUS` |
 | `EVENT_ACCESS_SECRET` | `EVENT_ACCESS_SECRET` |
 | `SQS_IMAGE_QUEUE_URL` | `SQS_IMAGE_QUEUE_URL` |
 | `SQS_VIDEO_QUEUE_URL` | `SQS_VIDEO_QUEUE_URL` |
@@ -244,3 +248,7 @@ cfg := configuration.LoadConfig()
 - All secrets live in GitHub Secrets → never in code or workflow files
 - Rotate AWS credentials if accidentally exposed
 - `REDIS_TLS=true` is required for any Redis not on localhost
+### Network trust
+
+- `CORS_ALLOW_ORIGINS`: optional comma-separated additional browser origins. Staging and production accept only exact HTTPS origins and reject `*`, URL paths, query strings and fragments.
+- `TRUSTED_PROXY_CIDRS`: optional comma-separated CIDRs of reverse proxies allowed to provide `X-Forwarded-For`. Loopback is always trusted for the host-local reverse proxy. Production rejects malformed CIDRs and `0.0.0.0/0`/`::/0`.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"events-stocks/configuration"
 	"events-stocks/dtos"
+	"events-stocks/internal/products"
 	"fmt"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider"
@@ -163,11 +164,11 @@ func InviteCognitoUserForTenant(
 ) (*dtos.AuthUser, error) {
 	cfg := configuration.LoadConfig()
 	client := configuration.GetCognitoClient()
-	switch tenantCode {
-	case "eventiapp", "itbem", "cafettonhouse":
-	default:
+	definition, known := products.Resolve(tenantCode)
+	if !known {
 		return nil, fmt.Errorf("unsupported invitation tenant %q", tenantCode)
 	}
+	tenantCode = definition.Code.String()
 
 	out, err := client.AdminCreateUser(ctx, &cognitoidentityprovider.AdminCreateUserInput{
 		UserPoolId: aws.String(cfg.CognitoUserPoolId),

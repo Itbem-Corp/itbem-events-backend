@@ -79,6 +79,19 @@ func TestResolveDeniesIdentityWithoutApplicationMembership(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestResolveDeniesInactiveIdentityBeforeLoadingOrganizationAccess(t *testing.T) {
+	db, mock := applicationServiceTestDB(t)
+	expectApplication(mock, "eventiapp", true)
+	service := NewSessionService(db, func(string) (*models.User, error) {
+		return &models.User{ID: uuid.Must(uuid.NewV4()), IsActive: false}, nil
+	})
+
+	_, err := service.Resolve("disabled-sub", "eventiapp")
+
+	assert.True(t, errors.Is(err, ErrApplicationAccessDenied))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestResolveReturnsExplicitOrganizationAccessAndCachesSession(t *testing.T) {
 	db, mock := applicationServiceTestDB(t)
 	userID := uuid.Must(uuid.NewV4())
@@ -99,6 +112,17 @@ func TestResolveReturnsExplicitOrganizationAccessAndCachesSession(t *testing.T) 
 	assert.Equal(t, clientID, first.Organizations[0].ID)
 	assert.Same(t, first, second)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestApplicationSessionCacheKeyIsVersionedAndProductScoped(t *testing.T) {
+	first := applicationSessionCacheKey("itbem", "member-sub")
+	second := applicationSessionCacheKey("cafettonhouse", "member-sub")
+	if first == second {
+		t.Fatal("a shared Cognito identity cannot share process-local sessions across products")
+	}
+	if want := "v1:application-session:itbem:subject:member-sub"; first != want {
+		t.Fatalf("session key = %q, want %q", first, want)
+	}
 }
 
 func TestEffectiveApplicationCapabilitiesEnforcesRootCeilings(t *testing.T) {

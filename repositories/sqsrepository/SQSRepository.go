@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"events-stocks/configuration"
 	"events-stocks/dtos"
+	"events-stocks/internal/products"
 	"fmt"
 	"log/slog"
 	"os"
@@ -85,7 +86,11 @@ func Init(region, accessKeyID, secretAccessKey, imgQueue, vidQueue string) {
 // sent to SQS. When SQS is not configured the call is a no-op (false, nil).
 func PublishMediaJob(msg MediaProcessMessage) (bool, error) {
 	if strings.TrimSpace(msg.Application) == "" {
-		msg.Application = "eventiapp"
+		msg.Application = products.DefaultCode.String()
+	} else if definition, known := products.Resolve(msg.Application); known {
+		msg.Application = definition.Code.String()
+	} else {
+		return false, fmt.Errorf("unsupported media job product %q", msg.Application)
 	}
 	if strings.TrimSpace(msg.CorrelationID) == "" {
 		msg.CorrelationID = strings.TrimSpace(msg.JobID)

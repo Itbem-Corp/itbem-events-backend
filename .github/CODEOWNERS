@@ -1,0 +1,10 @@
+# Default ownership
+* @anditbem
+
+# Security-sensitive surfaces
+/.github/ @anditbem
+/SECURITY.md @anditbem
+/Dockerfile* @anditbem
+/infra/ @anditbem
+/templates/ @anditbem
+

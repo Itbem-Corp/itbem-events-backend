@@ -1,10 +1,10 @@
 {
   "Rules": [
     {
-      "ID": "expire-unconfirmed-uploads",
+      "ID": "ExpireUnconfirmedUploads",
       "Status": "Enabled",
-      "Filter": { "Prefix": "moments/uploads/tmp/" },
-      "Expiration": { "Days": 1 }
+      "Filter": { "Tag": { "Key": "upload-state", "Value": "unconfirmed" } },
+      "Expiration": { "Days": 7 }
     },
     {
       "ID": "AbortIncompleteMultipartMoments",

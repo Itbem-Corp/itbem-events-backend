@@ -55,6 +55,16 @@ type ObjectStorageMetadataReader interface {
 	GetObjectMetadata(filename, folder, bucket, provider string) (ObjectStorageMetadata, error)
 }
 
+// ObjectStorageStreamUploader is optional so adapters can add bounded-memory
+// uploads without expanding the core storage contract or its test doubles.
+type ObjectStorageStreamUploader interface {
+	UploadStream(ctx context.Context, body io.Reader, contentLength int64, filename, contentType, folder, bucket, provider string) error
+}
+
+type ObjectStorageUploadConfirmer interface {
+	MarkUploadConfirmed(ctx context.Context, filename, folder, bucket, provider string) error
+}
+
 // Transactor allows atomic multi-table writes without importing configuration.DB directly.
 type Transactor interface {
 	Transaction(fn func(tx *gorm.DB) error) error

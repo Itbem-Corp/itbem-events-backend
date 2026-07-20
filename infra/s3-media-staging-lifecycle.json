@@ -1,6 +1,12 @@
 {
   "Rules": [
     {
+      "ID": "ExpireUnconfirmedUploads",
+      "Status": "Enabled",
+      "Filter": { "Tag": { "Key": "upload-state", "Value": "unconfirmed" } },
+      "Expiration": { "Days": 7 }
+    },
+    {
       "ID": "ExpireNoncurrentMediaVersions",
       "Status": "Enabled",
       "Filter": { "Prefix": "" },

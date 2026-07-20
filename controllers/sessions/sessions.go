@@ -3,6 +3,7 @@ package sessions
 import (
 	"errors"
 	"events-stocks/internal/authz"
+	"events-stocks/internal/organizationcontext"
 	"events-stocks/middleware/applicationaccess"
 	"events-stocks/models"
 	"events-stocks/services/applications"
@@ -26,6 +27,36 @@ func GetSession(c echo.Context) error {
 		return utils.Error(c, http.StatusServiceUnavailable, "Application session unavailable", "")
 	}
 	return utils.Success(c, http.StatusOK, "Application session", session)
+}
+
+func IssueOrganizationContext(c echo.Context) error {
+	session, ok := c.Get(applicationaccess.ContextKey).(*applications.Session)
+	if !ok || session == nil {
+		return utils.Error(c, http.StatusServiceUnavailable, "Application session unavailable", "")
+	}
+	var request struct {
+		OrganizationID string `json:"organization_id"`
+	}
+	if err := c.Bind(&request); err != nil {
+		return utils.Error(c, http.StatusBadRequest, "Invalid organization context", err.Error())
+	}
+	organizationID, err := uuid.FromString(request.OrganizationID)
+	if err != nil {
+		return utils.Error(c, http.StatusBadRequest, "Invalid organization context", "organization_id must be a UUID")
+	}
+	if !session.AllowsOrganization(organizationID) {
+		return utils.Error(c, http.StatusForbidden, "Organization context denied", "organization is not enabled for this application session")
+	}
+	sub, _ := c.Get("cognito_sub").(string)
+	token, expiresAt, err := organizationcontext.Generate(sub, session.Application.Code, organizationID, organizationcontext.DefaultTTL)
+	if err != nil {
+		return utils.Error(c, http.StatusServiceUnavailable, "Organization context unavailable", "credential could not be issued")
+	}
+	return utils.Success(c, http.StatusOK, "Organization context created", map[string]any{
+		"token":           token,
+		"expires_at":      expiresAt,
+		"organization_id": organizationID,
+	})
 }
 
 func ListMemberApplications(c echo.Context) error {

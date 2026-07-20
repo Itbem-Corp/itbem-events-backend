@@ -96,13 +96,13 @@ func TestGetCORSConfigAllowsFrontendRequestHeaders(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rec := performCORSPreflight(e, tt.origin, tt.method, echo.HeaderContentType, echo.HeaderAuthorization, "Idempotency-Key", utils.HeaderEventAccessToken)
+			rec := performCORSPreflight(e, tt.origin, tt.method, echo.HeaderContentType, echo.HeaderAuthorization, "Idempotency-Key", utils.HeaderEventAccessToken, "X-Application-Code", "X-Workspace-Mode", "X-Organization-ID", "X-Organization-Context")
 
 			if got := rec.Header().Get(echo.HeaderAccessControlAllowOrigin); got != tt.origin {
 				t.Fatalf("expected origin %q to be allowed, got %q", tt.origin, got)
 			}
 			allowedHeaders := rec.Header().Get(echo.HeaderAccessControlAllowHeaders)
-			for _, header := range []string{echo.HeaderContentType, echo.HeaderAuthorization, "Idempotency-Key", utils.HeaderEventAccessToken} {
+			for _, header := range []string{echo.HeaderContentType, echo.HeaderAuthorization, "Idempotency-Key", utils.HeaderEventAccessToken, "X-Application-Code", "X-Workspace-Mode", "X-Organization-ID", "X-Organization-Context"} {
 				if !strings.Contains(strings.ToLower(allowedHeaders), strings.ToLower(header)) {
 					t.Fatalf("expected %s to be allowed in preflight headers, got %q", header, allowedHeaders)
 				}

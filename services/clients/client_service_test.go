@@ -1389,7 +1389,7 @@ func TestUpdateClientDetails_InvalidatesAllMyClients(t *testing.T) {
 	patternDeleted := false
 	cache := &mockCacheRepo{
 		DeleteKeysByPatternFunc: func(ctx context.Context, pattern string) error {
-			if pattern == "*:myclients" {
+			if pattern == "v1:tenant:*:user:*:myclients" {
 				patternDeleted = true
 			}
 			return nil
@@ -1409,7 +1409,7 @@ func TestUpdateClientDetails_InvalidatesAllMyClients(t *testing.T) {
 	_, err := svc.UpdateClientDetails(uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4()), "New Name", "", false)
 
 	require.NoError(t, err)
-	assert.True(t, patternDeleted, "UpdateClientDetails should invalidate *:myclients")
+	assert.True(t, patternDeleted, "UpdateClientDetails should invalidate versioned tenant client caches")
 }
 
 func TestAddUserToClient_InvalidatesCache(t *testing.T) {
@@ -1418,7 +1418,7 @@ func TestAddUserToClient_InvalidatesCache(t *testing.T) {
 
 	cache := &mockCacheRepo{
 		InvalidateFunc: func(resource, key string) error {
-			if resource == "myclients" && key == "eventiapp:"+userID.String() {
+			if resource == "myclients" && key == "v1:tenant:eventiapp:user:"+userID.String() {
 				invalidated = true
 			}
 			return nil
@@ -1443,7 +1443,7 @@ func TestRemoveClientMember_InvalidatesTargetUserCache(t *testing.T) {
 
 	cache := &mockCacheRepo{
 		InvalidateFunc: func(resource, key string) error {
-			if resource == "myclients" && key == "eventiapp:"+targetID.String() {
+			if resource == "myclients" && key == "v1:tenant:eventiapp:user:"+targetID.String() {
 				invalidated = true
 			}
 			return nil
@@ -1470,7 +1470,7 @@ func TestDeleteClient_InvalidatesAllMyClients(t *testing.T) {
 	patternDeleted := false
 	cache := &mockCacheRepo{
 		DeleteKeysByPatternFunc: func(ctx context.Context, pattern string) error {
-			if pattern == "*:myclients" {
+			if pattern == "v1:tenant:*:user:*:myclients" {
 				patternDeleted = true
 			}
 			return nil
@@ -1587,7 +1587,7 @@ func TestMyClientsCacheKeyIsIsolatedByTenant(t *testing.T) {
 	itbemKey := svc.WithTenantScope("itbem", "").myClientsKey(userID)
 	cafettonKey := svc.WithTenantScope("cafettonhouse", "").myClientsKey(userID)
 
-	assert.Equal(t, "itbem:"+userID.String()+":myclients", itbemKey)
-	assert.Equal(t, "cafettonhouse:"+userID.String()+":myclients", cafettonKey)
+	assert.Equal(t, "v1:tenant:itbem:user:"+userID.String()+":myclients", itbemKey)
+	assert.Equal(t, "v1:tenant:cafettonhouse:user:"+userID.String()+":myclients", cafettonKey)
 	assert.NotEqual(t, itbemKey, cafettonKey)
 }

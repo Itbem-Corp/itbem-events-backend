@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"events-stocks/configuration/constants"
 	"events-stocks/dtos"
+	"events-stocks/internal/products"
 	"events-stocks/models"
+	"events-stocks/services/cacheutil"
 	"events-stocks/services/ports"
 	ResourceService "events-stocks/services/resources"
 	"fmt"
@@ -135,11 +137,7 @@ func (s *ClientService) WithTenantScope(tenantCode, bucket string) *ClientServic
 }
 
 func normalizeTenantCode(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	if value == "" {
-		return "eventiapp"
-	}
-	return value
+	return products.NormalizeOrDefault(value).String()
 }
 
 func (s *ClientService) CreateClient(name string, clientTypeID uuid.UUID, ownerUserID uuid.UUID, parentID *uuid.UUID) (*models.Client, error) {
@@ -317,7 +315,7 @@ func (s *ClientService) updateClientDetails(
 }
 
 func (s *ClientService) myClientsKey(userID uuid.UUID) string {
-	return normalizeTenantCode(s.tenantCode) + ":" + userID.String() + ":myclients"
+	return cacheutil.TenantKey(s.tenantCode, "user:"+userID.String(), "myclients")
 }
 
 func (s *ClientService) GetMyClients(userID uuid.UUID) ([]models.Client, error) {
@@ -386,13 +384,13 @@ func (s *ClientService) rollbackCreatedClient(client *models.Client, ownerUserID
 
 func (s *ClientService) invalidateMyClients(userID uuid.UUID) {
 	if s.cache != nil {
-		_ = s.cache.Invalidate("myclients", normalizeTenantCode(s.tenantCode)+":"+userID.String())
+		_ = s.cache.Invalidate("myclients", cacheutil.TenantNamespace(s.tenantCode, "user:"+userID.String()))
 	}
 }
 
 func (s *ClientService) invalidateAllMyClients() {
 	if s.cache != nil {
-		_ = s.cache.DeleteKeysByPattern(context.Background(), "*:myclients")
+		_ = s.cache.DeleteKeysByPattern(context.Background(), "v1:tenant:*:user:*:myclients")
 	}
 }
 
