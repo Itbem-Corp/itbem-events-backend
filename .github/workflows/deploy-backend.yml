@@ -44,7 +44,19 @@ jobs:
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Install libvips
-        run: sudo apt-get update && sudo apt-get install -y libvips-dev
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if timeout 180s sudo apt-get -o Acquire::Retries=3 update && \
+              timeout 180s sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends libvips-dev; then
+              exit 0
+            fi
+            echo "libvips installation attempt ${attempt} failed; retrying" >&2
+            sleep $((attempt * 5))
+          done
+          exit 1
 
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
