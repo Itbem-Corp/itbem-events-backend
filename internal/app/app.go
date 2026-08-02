@@ -444,7 +444,7 @@ func wireDependencies(cfg *models.Config) {
 	fontsController.InitFontsController(fontSvc)
 	designtemplatesController.InitDesignTemplatesController(resourceSvc)
 	eventsController.InitEventsController(eventSvc, eventConfigSvc, accessTokenRepo, invitationRepo, guestSvc)
-	eventsController.InitCoverController(resourceSvc)
+	eventsController.InitCoverController(resourceSvc, mediaPublisher)
 	eventsController.InitDuplicateController(duplicateSvc)
 	eventsController.InitRepairController(repairSvc)
 	eventmembersController.InitEventMembersController(eventMemberSvc)
