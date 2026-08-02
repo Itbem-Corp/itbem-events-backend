@@ -23,12 +23,12 @@ import (
 	"events-stocks/controllers/resources"
 	"events-stocks/controllers/sessions"
 	"events-stocks/controllers/users"
+	productmetricshttp "events-stocks/internal/observability/productmetricshttp"
 	"events-stocks/middleware/applicationaccess"
 	"events-stocks/middleware/audit"
 	"events-stocks/middleware/idempotency"
 	"events-stocks/middleware/token"
 	"events-stocks/models"
-	productmetricsService "events-stocks/services/productmetrics"
 	"events-stocks/utils"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
@@ -199,7 +199,7 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	// ==========================================
 	public := e.Group("/api")
 	public.Use(middleware.BodyLimit("2M")) // Protege endpoints públicos no-upload
-	public.Use(productmetricsService.CaptureTenant("eventiapp"))
+	public.Use(productmetricshttp.CaptureTenant("eventiapp"))
 	public.Use(publicAccessCacheControl())
 	public.Use(publicRateLimiter())
 
@@ -224,7 +224,7 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	uploadsLimiter := uploadRateLimiter()
 	legacyUploadsGroup := e.Group("/api")
 	legacyUploadsGroup.Use(middleware.BodyLimit("225M"))
-	legacyUploadsGroup.Use(productmetricsService.CaptureTenant("eventiapp"))
+	legacyUploadsGroup.Use(productmetricshttp.CaptureTenant("eventiapp"))
 	legacyUploadsGroup.Use(publicAccessCacheControl())
 	legacyUploadsGroup.Use(uploadsLimiter)
 	legacyUploadsGroup.POST("/events/:identifier/moments", moments.CreatePublicMoment)
@@ -232,7 +232,7 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 
 	presignedUploadsGroup := e.Group("/api")
 	presignedUploadsGroup.Use(middleware.BodyLimit("2M"))
-	presignedUploadsGroup.Use(productmetricsService.CaptureTenant("eventiapp"))
+	presignedUploadsGroup.Use(productmetricshttp.CaptureTenant("eventiapp"))
 	presignedUploadsGroup.Use(publicAccessCacheControl())
 	presignedUploadsGroup.Use(uploadsLimiter)
 	presignedUploadsGroup.POST("/events/:identifier/moments/upload-url", moments.RequestPublicMomentUploadURL)
@@ -263,7 +263,7 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	protected.Use(token.Autenticacion(cfg))
 	protected.Use(protectedRateLimiter())
 	protected.Use(applicationaccess.Require)
-	protected.Use(productmetricsService.Capture)
+	protected.Use(productmetricshttp.Capture)
 	protected.Use(idempotency.CriticalMutations)
 	protected.Use(audit.Mutations)
 
