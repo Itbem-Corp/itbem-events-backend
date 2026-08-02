@@ -130,6 +130,13 @@ type EventAnalyticsRepository interface {
 	ListEventAnalyticss() ([]models.EventAnalytics, error)
 }
 
+// EventMemberRepository isolates event-member persistence from application use cases.
+type EventMemberRepository interface {
+	List(eventID uuid.UUID) ([]models.EventMember, error)
+	Upsert(eventID, userID uuid.UUID, role string) (*models.EventMember, error)
+	Remove(eventID, userID uuid.UUID) error
+}
+
 // EventSectionRepository is the data access contract for EventSection records.
 type EventSectionRepository interface {
 	CreateEventSection(m *models.EventSection) error

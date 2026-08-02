@@ -69,6 +69,7 @@ import (
 	clientsService "events-stocks/services/clients"
 	clienttypesService "events-stocks/services/clienttypes"
 	colorsService "events-stocks/services/colors"
+	eventmembersService "events-stocks/services/eventmembers"
 	eventsService "events-stocks/services/events"
 	fontsService "events-stocks/services/fonts"
 	guestsService "events-stocks/services/guests"
@@ -409,6 +410,7 @@ func wireDependencies(cfg *models.Config) {
 	sessionsController.Configure(applicationSessionSvc)
 	adminSvc := usersService.NewAdminUserService(userRepo, clientRepo, authProviderRepo)
 	clientSvc := clientsService.NewClientService(clientRepo, clientRoleRepo, clientTypeRepo, resourceSvc, redisRepo, transactor)
+	eventMemberSvc := eventmembersService.NewEventMemberService(eventMemberRepo, clientSvc)
 	clientRoleSvc := clientrolesService.NewClientRoleService(clientRoleRepo)
 	clientTypeSvc := clienttypesService.NewClientTypeService(clientTypeRepo)
 	colorSvc := colorsService.NewColorService(colorRepo, redisRepo)
@@ -445,7 +447,7 @@ func wireDependencies(cfg *models.Config) {
 	eventsController.InitCoverController(resourceSvc)
 	eventsController.InitDuplicateController(duplicateSvc)
 	eventsController.InitRepairController(repairSvc)
-	eventmembersController.InitEventMembersController(eventMemberRepo, clientSvc)
+	eventmembersController.InitEventMembersController(eventMemberSvc)
 	eventconfigController.InitEventConfigController(eventConfigSvc, resourceSvc)
 	eventsectionController.InitEventSectionController(eventSectSvc)
 	eventtablesController.InitEventTablesController(eventTableSvc, guestSvc)
