@@ -454,9 +454,41 @@ jobs:
             --parameters "$ssm_parameters" \
             --timeout-seconds 1800 \
             --query 'Command.CommandId' --output text)"
-          aws ssm wait command-executed --command-id "$command_id" --instance-id '${{ vars.EC2_INSTANCE_ID }}'
+          # The AWS CLI's built-in command-executed waiter gives up after
+          # roughly 100 seconds, while an image pull plus a candidate health
+          # gate may legitimately take longer. Poll explicitly up to the same
+          # 30-minute bound passed to SSM and preserve output on every terminal
+          # outcome.
+          for attempt in {1..180}; do
+            command_status="$(aws ssm get-command-invocation \
+              --command-id "$command_id" \
+              --instance-id '${{ vars.EC2_INSTANCE_ID }}' \
+              --query Status \
+              --output text 2>/dev/null || true)"
+            case "$command_status" in
+              Success)
+                break
+                ;;
+              Pending|InProgress|Delayed|"")
+                sleep 10
+                ;;
+              *)
+                aws ssm get-command-invocation --command-id "$command_id" --instance-id '${{ vars.EC2_INSTANCE_ID }}' \
+                  --query '{status:Status,stdout:StandardOutputContent,stderr:StandardErrorContent}' --output json
+                exit 1
+                ;;
+            esac
+          done
+          [[ "$command_status" == Success ]] || {
+            echo "SSM command did not complete within 30 minutes" >&2
+            aws ssm get-command-invocation --command-id "$command_id" --instance-id '${{ vars.EC2_INSTANCE_ID }}' \
+              --query '{status:Status,stdout:StandardOutputContent,stderr:StandardErrorContent}' --output json || true
+            exit 1
+          }
           invocation_output="$(aws ssm get-command-invocation --command-id "$command_id" --instance-id '${{ vars.EC2_INSTANCE_ID }}' --query StandardOutputContent --output text)"
+          invocation_error="$(aws ssm get-command-invocation --command-id "$command_id" --instance-id '${{ vars.EC2_INSTANCE_ID }}' --query StandardErrorContent --output text)"
           printf '%s\n' "$invocation_output"
+          [[ -z "$invocation_error" || "$invocation_error" == None ]] || printf '%s\n' "$invocation_error" >&2
           grep -Fqx "deployed_revision=$REVISION" <<<"$invocation_output"
 
       - name: Remove ephemeral delivery artifacts
