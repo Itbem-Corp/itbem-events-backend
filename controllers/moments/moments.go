@@ -7,7 +7,6 @@ import (
 	"events-stocks/dtos"
 	"events-stocks/internal/authz"
 	"events-stocks/models"
-	"events-stocks/repositories/awsrepository"
 	eventsService "events-stocks/services/events"
 	momentsService "events-stocks/services/moments"
 	resourcesService "events-stocks/services/resources"
@@ -105,7 +104,7 @@ func canonicalMomentStoragePath(resSvc *resourcesService.ResourceService, path s
 	if strings.HasPrefix(trimmed, "//") {
 		return path
 	}
-	normalized := awsrepository.S3KeyFromURL(trimmed, resSvc.Bucket)
+	normalized := resSvc.CanonicalObjectKey(trimmed)
 	if normalized == "" {
 		return path
 	}

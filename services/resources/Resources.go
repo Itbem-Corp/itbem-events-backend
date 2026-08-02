@@ -6,6 +6,7 @@ import (
 	"events-stocks/configuration/constants"
 	"events-stocks/dtos"
 	"events-stocks/models"
+	"events-stocks/repositories/awsrepository"
 	"events-stocks/services/cacheutil"
 	"events-stocks/services/ports"
 	services "events-stocks/services/validations"
@@ -167,6 +168,12 @@ func (rs *ResourceService) scopedObjectPath(path string) string {
 		return path
 	}
 	return root + "/" + path
+}
+
+// CanonicalObjectKey normalizes legacy S3/CDN URLs at the storage boundary.
+// HTTP handlers and domain services can therefore operate only on object keys.
+func (rs *ResourceService) CanonicalObjectKey(raw string) string {
+	return awsrepository.S3KeyFromURL(raw, rs.Bucket)
 }
 
 func resourceServiceUnavailable() error {
