@@ -10,7 +10,7 @@ import (
 	"events-stocks/services/ports"
 	"fmt"
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
@@ -155,12 +155,18 @@ func UploadStreamToS3(ctx context.Context, body io.Reader, contentLength int64, 
 	if contentLength >= 0 && contentLength <= singlePutThreshold {
 		_, err = s3Client.PutObject(ctx, input)
 	} else {
-		uploader := manager.NewUploader(s3Client, func(options *manager.Uploader) {
-			options.PartSize = multipartPartSize
+		uploader := transfermanager.New(s3Client, func(options *transfermanager.Options) {
+			options.PartSizeBytes = multipartPartSize
+			options.MultipartUploadThreshold = singlePutThreshold
 			options.Concurrency = 4
-			options.LeavePartsOnError = false
 		})
-		_, err = uploader.Upload(ctx, input)
+		_, err = uploader.UploadObject(ctx, &transfermanager.UploadObjectInput{
+			Bucket:        input.Bucket,
+			Key:           input.Key,
+			Body:          input.Body,
+			ContentType:   input.ContentType,
+			ContentLength: input.ContentLength,
+		})
 	}
 	if err != nil {
 		return "", wrapStorageError("upload", err)
