@@ -1,7 +1,7 @@
 # ---------- Etapa de compilación ----------
 FROM golang:1.25.12-bookworm AS build-env
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get -o Acquire::Retries=3 update && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
     libvips-dev pkg-config && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
@@ -22,7 +22,7 @@ FROM debian:bookworm-slim
 ARG SOURCE_REVISION
 LABEL org.opencontainers.image.revision=$SOURCE_REVISION
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get -o Acquire::Retries=3 update && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
     libvips curl ca-certificates && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
