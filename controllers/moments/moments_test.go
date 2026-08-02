@@ -3825,7 +3825,7 @@ func TestConfirmPresignedMomentRetryReturnsExistingWithoutQuotaOrCreate(t *testi
 	setupConfirmMomentTest(t, repo, storage, counter)
 	c, _ := newEchoCtx(http.MethodPost, "/confirm", "")
 
-	moment, err := confirmPresignedMoment(c, &models.Event{ID: eventID}, &models.EventConfig{MaxUploadsPerGuest: 5}, nil, key, "image/webp", "")
+	moment, err := confirmPresignedMoment(c, &models.Event{ID: eventID}, &models.EventConfig{MaxUploadsPerGuest: 5}, nil, key, "image/webp", 0, "")
 
 	require.NoError(t, err)
 	assert.Equal(t, existing.ID, moment.ID)
@@ -3893,7 +3893,7 @@ func TestConfirmPresignedMomentDatabaseFailureDeletesObjectAndReleasesQuota(t *t
 	setupConfirmMomentTest(t, repo, storage, counter)
 	c, rec := newEchoCtx(http.MethodPost, "/confirm", "")
 
-	_, err := confirmPresignedMoment(c, &models.Event{ID: eventID}, &models.EventConfig{MaxUploadsPerGuest: 5}, nil, key, "image/jpeg", "")
+	_, err := confirmPresignedMoment(c, &models.Event{ID: eventID}, &models.EventConfig{MaxUploadsPerGuest: 5}, nil, key, "image/jpeg", 0, "")
 
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
@@ -3918,7 +3918,7 @@ func TestConfirmPresignedMomentQuotaFailureDeletesObjectAndReleasesReservation(t
 	setupConfirmMomentTest(t, repo, storage, counter)
 	c, rec := newEchoCtx(http.MethodPost, "/confirm", "")
 
-	_, err := confirmPresignedMoment(c, &models.Event{ID: eventID, Name: "Evento"}, &models.EventConfig{MaxUploadsPerGuest: 1}, nil, key, "image/jpeg", "")
+	_, err := confirmPresignedMoment(c, &models.Event{ID: eventID, Name: "Evento"}, &models.EventConfig{MaxUploadsPerGuest: 1}, nil, key, "image/jpeg", 0, "")
 
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
@@ -3939,7 +3939,7 @@ func TestConfirmPresignedMomentVerificationFailureDeletesObjectWithoutConsumingQ
 	setupConfirmMomentTest(t, repo, storage, counter)
 	c, rec := newEchoCtx(http.MethodPost, "/confirm", "")
 
-	_, err := confirmPresignedMoment(c, &models.Event{ID: eventID}, &models.EventConfig{MaxUploadsPerGuest: 5}, nil, key, "image/jpeg", "")
+	_, err := confirmPresignedMoment(c, &models.Event{ID: eventID}, &models.EventConfig{MaxUploadsPerGuest: 5}, nil, key, "image/jpeg", 0, "")
 
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)

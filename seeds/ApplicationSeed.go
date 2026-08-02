@@ -1,6 +1,7 @@
 package seeds
 
 import (
+	"events-stocks/internal/products"
 	"events-stocks/models"
 	"fmt"
 	"strings"
@@ -9,30 +10,19 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-var firstPartyApplications = []models.Application{
-	{
-		Code: "eventiapp", Name: "EventiApp", ProductLabel: "Event operations",
-		Modules:             models.StringList{"home", "events", "metrics"},
-		AllowsPlatformAdmin: true, IsActive: true,
-	},
-	{
-		Code: "itbem", Name: "ITBEM", ProductLabel: "Platform control plane",
-		Modules:             models.StringList{"home", "users", "organizations", "metrics"},
-		AllowsPlatformAdmin: true, IsActive: true,
-	},
-	{
-		Code: "cafettonhouse", Name: "Cafetton House", ProductLabel: "Client operations",
-		Modules:             models.StringList{"home", "users", "organizations", "metrics"},
-		AllowsPlatformAdmin: false, IsActive: true,
-	},
-}
-
 // SeedApplications publishes the product catalog and reconciles the current
 // organization memberships into explicit per-application entitlements.
 func SeedApplications(db *gorm.DB) error {
 	return db.Transaction(func(tx *gorm.DB) error {
-		for _, definition := range firstPartyApplications {
-			application := definition
+		for _, definition := range products.All() {
+			application := models.Application{
+				Code:                definition.Code.String(),
+				Name:                definition.Name,
+				ProductLabel:        definition.ProductLabel,
+				Modules:             models.StringList(definition.Modules),
+				AllowsPlatformAdmin: definition.AllowsPlatformAuthority,
+				IsActive:            true,
+			}
 			if err := tx.Clauses(clause.OnConflict{
 				Columns: []clause.Column{{Name: "code"}},
 				DoUpdates: clause.AssignmentColumns([]string{
@@ -43,7 +33,7 @@ func SeedApplications(db *gorm.DB) error {
 			}
 
 			var root models.Client
-			if err := tx.Where("LOWER(code) = ?", strings.ToLower(definition.Code)).First(&root).Error; err != nil {
+			if err := tx.Where("LOWER(code) = ?", strings.ToLower(definition.Code.String())).First(&root).Error; err != nil {
 				return fmt.Errorf("load application root %s: %w", definition.Code, err)
 			}
 			assignment := models.ClientApplication{

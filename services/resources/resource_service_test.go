@@ -14,6 +14,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/textproto"
+	"strings"
 	"testing"
 	"time"
 
@@ -269,6 +270,21 @@ func TestVerifyMomentUploadRejectsOversizedStoredObject(t *testing.T) {
 	_, err := svc.VerifyMomentUpload("moments/event-1/raw/photo.jpg", "image/jpeg")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "file size exceeds 25 MB")
+}
+
+func TestVerifyMomentUploadSizeRejectsTruncatedObject(t *testing.T) {
+	storage := &metadataObjectStorage{
+		mockObjectStorage: &mockObjectStorage{},
+		metadata: ports.ObjectStorageMetadata{
+			Size:        1023,
+			ContentType: "image/jpeg",
+		},
+	}
+	svc := newTestResourceService(nil, nil, storage)
+
+	_, err := svc.VerifyMomentUploadSize("moments/event-1/raw/photo.jpg", "image/jpeg", 1024)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "size does not match")
 }
 
 func TestVerifyMomentUploadRejectsContentTypeMismatch(t *testing.T) {
@@ -1002,6 +1018,39 @@ func TestCompleteMomentMultipartUploadRejectsInvalidPartsBeforeStorage(t *testin
 			{PartNumber: 1, ETag: " "},
 			{PartNumber: 2, ETag: "etag-2"},
 		},
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid multipart parts")
+	assert.Empty(t, storage.completedObjectKey)
+}
+
+func TestCompleteMomentMultipartUploadRejectsNonContiguousParts(t *testing.T) {
+	storage := &mockObjectStorage{}
+	svc := newTestResourceService(nil, nil, storage)
+
+	err := svc.CompleteMomentMultipartUpload(
+		"moments/event/raw/video.mp4",
+		"upload-123",
+		[]dtos.CompletedUploadPart{
+			{PartNumber: 1, ETag: "etag-1"},
+			{PartNumber: 3, ETag: "etag-3"},
+		},
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid multipart parts")
+	assert.Empty(t, storage.completedObjectKey)
+}
+
+func TestCompleteMomentMultipartUploadRejectsOversizedETag(t *testing.T) {
+	storage := &mockObjectStorage{}
+	svc := newTestResourceService(nil, nil, storage)
+
+	err := svc.CompleteMomentMultipartUpload(
+		"moments/event/raw/video.mp4",
+		"upload-123",
+		[]dtos.CompletedUploadPart{{PartNumber: 1, ETag: strings.Repeat("a", maxS3ETagLength+1)}},
 	)
 
 	require.Error(t, err)

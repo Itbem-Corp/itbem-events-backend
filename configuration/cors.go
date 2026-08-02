@@ -1,6 +1,7 @@
 package configuration
 
 import (
+	requestcontract "events-stocks/internal/requestcontext"
 	"events-stocks/models"
 	"events-stocks/utils"
 	"github.com/labstack/echo/v4"
@@ -40,6 +41,10 @@ func GetCORSConfig(cfg *models.Config) echo.MiddlewareFunc {
 			echo.HeaderAuthorization,
 			"Idempotency-Key",
 			utils.HeaderEventAccessToken,
+			requestcontract.HeaderApplicationCode,
+			requestcontract.HeaderWorkspaceMode,
+			requestcontract.HeaderOrganizationID,
+			requestcontract.HeaderOrganizationContext,
 		},
 		ExposeHeaders: []string{"Idempotency-Replayed", "Idempotency-Status"},
 		AllowMethods: []string{

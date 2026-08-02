@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"events-stocks/configuration"
 	"events-stocks/dtos"
+	"events-stocks/internal/products"
 	"fmt"
 	"log/slog"
 	"os"
@@ -56,7 +57,7 @@ func (p *Publisher) PublishMediaJob(msg MediaProcessMessage) (bool, error) {
 
 // Init initialises the SQS client with separate image and video queue URLs.
 // Must be called once at server startup. Missing queue URLs disable that type of processing.
-func Init(region, accessKeyID, secretAccessKey, imgQueue, vidQueue string) {
+func Init(region, accessKeyID, secretAccessKey, imgQueue, vidQueue string, endpoints ...string) {
 	once.Do(func() {
 		imageQueueURL = imgQueue
 		videoQueueURL = vidQueue
@@ -71,7 +72,11 @@ func Init(region, accessKeyID, secretAccessKey, imgQueue, vidQueue string) {
 			slog.Error("sqsrepository: failed to load AWS config", "error", err)
 			return
 		}
-		sqsClient = sqs.NewFromConfig(cfg)
+		endpoint := ""
+		if len(endpoints) > 0 {
+			endpoint = endpoints[0]
+		}
+		sqsClient = sqs.NewFromConfig(cfg, configuration.SQSClientOptions(endpoint))
 		slog.Info("sqsrepository: SQS client initialised",
 			"image_queue", imgQueue != "",
 			"video_queue", vidQueue != "",
@@ -85,7 +90,11 @@ func Init(region, accessKeyID, secretAccessKey, imgQueue, vidQueue string) {
 // sent to SQS. When SQS is not configured the call is a no-op (false, nil).
 func PublishMediaJob(msg MediaProcessMessage) (bool, error) {
 	if strings.TrimSpace(msg.Application) == "" {
-		msg.Application = "eventiapp"
+		msg.Application = products.DefaultCode.String()
+	} else if definition, known := products.Resolve(msg.Application); known {
+		msg.Application = definition.Code.String()
+	} else {
+		return false, fmt.Errorf("unsupported media job product %q", msg.Application)
 	}
 	if strings.TrimSpace(msg.CorrelationID) == "" {
 		msg.CorrelationID = strings.TrimSpace(msg.JobID)

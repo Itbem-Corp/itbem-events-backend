@@ -1,7 +1,6 @@
 package bucketrepository
 
 import (
-	"bytes"
 	"context"
 	"events-stocks/dtos"
 	"events-stocks/repositories/awsrepository"
@@ -82,12 +81,6 @@ func AbortMultipartUpload(objectKey, bucket, provider, uploadID string) error {
 func UploadFile(file multipart.File, fileHeader *multipart.FileHeader, folder string, bucket string, provider string) (string, error) {
 	ctx := context.Background()
 
-	buffer := new(bytes.Buffer)
-	_, err := buffer.ReadFrom(file)
-	if err != nil {
-		return "", err
-	}
-
 	fileExt := filepath.Ext(fileHeader.Filename)
 	fileName := fmt.Sprintf("%s%s", uuid.New().String(), fileExt)
 
@@ -98,7 +91,7 @@ func UploadFile(file multipart.File, fileHeader *multipart.FileHeader, folder st
 
 	switch strings.ToLower(provider) {
 	case "aws":
-		return awsrepository.UploadToS3(ctx, buffer.Bytes(), objectKey, fileHeader.Header.Get("Content-Type"), bucket)
+		return awsrepository.UploadStreamToS3(ctx, file, fileHeader.Size, objectKey, fileHeader.Header.Get("Content-Type"), bucket)
 	default:
 		return "", fmt.Errorf("unsupported provider: %s", provider)
 	}
@@ -218,7 +211,35 @@ func UploadRawBytesSimple(content []byte, filename, contentType, folder, bucket,
 	}
 }
 
+func UploadStream(ctx context.Context, body io.Reader, contentLength int64, filename, contentType, folder, bucket, provider string) error {
+	if folder == "" {
+		folder = defaultUploadDir
+	}
+	objectKey := fmt.Sprintf("%s/%s", folder, filename)
+
+	switch strings.ToLower(provider) {
+	case "aws":
+		_, err := awsrepository.UploadStreamToS3(ctx, body, contentLength, objectKey, contentType, bucket)
+		return err
+	default:
+		return fmt.Errorf("unsupported provider: %s", provider)
+	}
+}
+
+func MarkUploadConfirmed(ctx context.Context, filename, folder, bucket, provider string) error {
+	objectKey := fmt.Sprintf("%s/%s", folder, filename)
+	switch strings.ToLower(provider) {
+	case "aws":
+		return awsrepository.MarkS3ObjectUploadConfirmed(ctx, objectKey, bucket)
+	default:
+		return fmt.Errorf("unsupported provider: %s", provider)
+	}
+}
+
 type BucketRepo struct{}
+
+var _ ports.ObjectStorageStreamUploader = (*BucketRepo)(nil)
+var _ ports.ObjectStorageUploadConfirmer = (*BucketRepo)(nil)
 
 func NewBucketRepo() *BucketRepo { return &BucketRepo{} }
 
@@ -251,6 +272,12 @@ func (r *BucketRepo) UpdateFile(content []byte, filename, contentType, folder, b
 }
 func (r *BucketRepo) UploadRawBytesSimple(content []byte, filename, contentType, folder, bucket, provider string) error {
 	return UploadRawBytesSimple(content, filename, contentType, folder, bucket, provider)
+}
+func (r *BucketRepo) UploadStream(ctx context.Context, body io.Reader, contentLength int64, filename, contentType, folder, bucket, provider string) error {
+	return UploadStream(ctx, body, contentLength, filename, contentType, folder, bucket, provider)
+}
+func (r *BucketRepo) MarkUploadConfirmed(ctx context.Context, filename, folder, bucket, provider string) error {
+	return MarkUploadConfirmed(ctx, filename, folder, bucket, provider)
 }
 func (r *BucketRepo) DeleteFile(filename, folder, bucket, provider string) error {
 	return DeleteFile(filename, folder, bucket, provider)

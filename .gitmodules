@@ -1,0 +1,4 @@
+[submodule ".contracts/itbem-product-contract"]
+	path = .contracts/itbem-product-contract
+	url = https://github.com/Itbem-Corp/itbem-product-contract.git
+	branch = main

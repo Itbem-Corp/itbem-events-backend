@@ -2,6 +2,8 @@ package jobqueuerepository
 
 import (
 	"encoding/json"
+	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -9,6 +11,53 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestIntegrationPublishesRuntimeFixtureWhenConfigured(t *testing.T) {
+	contractPath, queue := os.Getenv("EVENTIAPP_RUNTIME_CONTRACT"), os.Getenv("EVENTIAPP_INTEGRATION_QUEUE_URL")
+	if contractPath == "" || queue == "" { t.Skip("integration queue is not configured") }
+	contents, err := os.ReadFile(contractPath)
+	require.NoError(t, err)
+	var contract struct { WorkerJobs []struct { Envelope json.RawMessage `json:"envelope"` } `json:"workerJobs"` }
+	require.NoError(t, json.Unmarshal(contents, &contract))
+	require.NotEmpty(t, contract.WorkerJobs)
+
+	client, queueURL, once = nil, "", sync.Once{}
+	t.Cleanup(func() { client, queueURL, once = nil, "", sync.Once{} })
+	Init("us-east-2", "test", "test", queue)
+	require.NoError(t, PublishRaw(string(contract.WorkerJobs[0].Envelope), "itbem"))
+}
+
+func TestRuntimeContractAnalyticsFixtureIsAcceptedByAPIPublisher(t *testing.T) {
+	contractPath := os.Getenv("EVENTIAPP_RUNTIME_CONTRACT")
+	if contractPath == "" {
+		t.Skip("runtime contract fixture is only required by the cross-service gate")
+	}
+
+	contents, err := os.ReadFile(contractPath)
+	require.NoError(t, err)
+	var contract struct {
+		WorkerJobs []struct {
+			Name     string          `json:"name"`
+			Envelope json.RawMessage `json:"envelope"`
+		} `json:"workerJobs"`
+	}
+	require.NoError(t, json.Unmarshal(contents, &contract))
+	require.NotEmpty(t, contract.WorkerJobs)
+
+	fixture := contract.WorkerJobs[0]
+	assert.Equal(t, "analytics-rollup-v2", fixture.Name)
+	var envelope analyticsRollupEnvelope
+	require.NoError(t, json.Unmarshal(fixture.Envelope, &envelope))
+	assert.Equal(t, jobSchemaVersion, envelope.SchemaVersion)
+	assert.Equal(t, analyticsJobType, envelope.Type)
+	assert.NotEqual(t, uuid.Nil, envelope.JobID)
+	assert.Equal(t, "itbem", envelope.TenantCode)
+	assert.Equal(t, "analytics_read", envelope.Payload.Trigger)
+
+	serialized, err := json.Marshal(envelope)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(fixture.Envelope), string(serialized))
+}
 
 func TestBuildAnalyticsRollupEnvelopeMatchesRustContractAndDeduplicatesMinute(t *testing.T) {
 	eventID := uuid.Must(uuid.FromString("7c9e6679-7425-40de-944b-e07fc1f90ae7"))

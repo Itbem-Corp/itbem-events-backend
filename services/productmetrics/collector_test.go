@@ -1,6 +1,7 @@
 package productmetrics
 
 import (
+	"events-stocks/middleware/applicationaccess"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -18,6 +19,27 @@ func TestOrganizationIDPrefersExplicitScope(t *testing.T) {
 	ScopeOrganization(context, explicit)
 
 	assert.Equal(t, explicit, organizationID(context))
+}
+
+func TestOrganizationIDReadsValidatedApplicationContext(t *testing.T) {
+	e := echo.New()
+	request := httptest.NewRequest(http.MethodGet, "/api/events", nil)
+	context := e.NewContext(request, httptest.NewRecorder())
+	expected := uuid.Must(uuid.NewV4())
+	context.Set(applicationaccess.ContextOrganizationID, expected)
+
+	assert.Equal(t, expected, organizationID(context))
+}
+
+func TestOrganizationIDPrefersExplicitQueryTargetOverWorkspaceContext(t *testing.T) {
+	e := echo.New()
+	target := uuid.Must(uuid.NewV4())
+	workspace := uuid.Must(uuid.NewV4())
+	request := httptest.NewRequest(http.MethodGet, "/api/events?client_id="+target.String(), nil)
+	context := e.NewContext(request, httptest.NewRecorder())
+	context.Set(applicationaccess.ContextOrganizationID, workspace)
+
+	assert.Equal(t, target, organizationID(context))
 }
 
 func TestOrganizationIDReadsClientRoute(t *testing.T) {

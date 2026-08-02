@@ -61,6 +61,10 @@ type Config struct {
 
 	// CORS — comma-separated extra origins (e.g. local dev: http://localhost:4321,http://localhost:3000)
 	CorsAllowOrigins string `required:"false"`
+	// TrustedProxyCidrs is the comma-separated list of reverse-proxy networks
+	// allowed to supply X-Forwarded-For. When empty, only loopback proxies are
+	// trusted. Never add broad client networks such as 0.0.0.0/0.
+	TrustedProxyCidrs string `required:"false"`
 
 	// Media processing — separate SQS queues for images and videos (Lambda).
 	// Leave empty to disable async processing for that type.
@@ -69,6 +73,9 @@ type Config struct {
 	SQSVideoQueueURL string `required:"false"` // itbem-media-videos queue
 	// Business/data jobs consumed by itbem-events-workers (never media jobs).
 	SQSWorkerQueueURL string `required:"false"`
+	// SQSEndpoint is only for isolated SQS-compatible integration environments.
+	// Leave empty in AWS deployments so the SDK resolves the normal AWS endpoint.
+	SQSEndpoint       string `required:"false"`
 	SNSWorkerTopicARN string `required:"false"`
 
 	// Internal API secret — used by Lambda to call PUT /api/moments/:id/content

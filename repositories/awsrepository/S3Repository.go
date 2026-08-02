@@ -30,6 +30,7 @@ const (
 	multipartPartSize  = 16 * 1024 * 1024
 	metadataTimeout    = 30 * time.Second
 	uploadTimeout      = 2 * time.Minute
+	unconfirmedTagging = "upload-state=unconfirmed"
 )
 
 type StorageError struct {
@@ -124,21 +125,34 @@ func Init(_ *models.Config) {
 }
 
 func UploadToS3(ctx context.Context, content []byte, key, contentType, bucket string) (string, error) {
+	return UploadStreamToS3(ctx, bytes.NewReader(content), int64(len(content)), key, contentType, bucket)
+}
+
+// UploadStreamToS3 uploads without first materializing the complete object in
+// memory. This is important for the legacy API upload path, where several
+// concurrent videos would otherwise each require an additional file-sized
+// byte slice before the SDK could begin sending data to S3.
+func UploadStreamToS3(ctx context.Context, body io.Reader, contentLength int64, key, contentType, bucket string) (string, error) {
 	s3Client := configuration.GetS3Client(nil)
 	if s3Client == nil {
 		return "", wrapStorageError("upload", fmt.Errorf("S3 client is not initialized"))
 	}
+	if body == nil {
+		return "", wrapStorageError("upload", fmt.Errorf("upload body is required"))
+	}
 	ctx, cancel := withStorageTimeout(ctx, uploadTimeout)
 	defer cancel()
 	input := &s3.PutObjectInput{
-		Bucket:        aws.String(bucket),
-		Key:           aws.String(key),
-		Body:          bytes.NewReader(content),
-		ContentType:   aws.String(contentType),
-		ContentLength: aws.Int64(int64(len(content))),
+		Bucket:      aws.String(bucket),
+		Key:         aws.String(key),
+		Body:        body,
+		ContentType: aws.String(contentType),
+	}
+	if contentLength >= 0 {
+		input.ContentLength = aws.Int64(contentLength)
 	}
 	var err error
-	if len(content) <= singlePutThreshold {
+	if contentLength >= 0 && contentLength <= singlePutThreshold {
 		_, err = s3Client.PutObject(ctx, input)
 	} else {
 		uploader := manager.NewUploader(s3Client, func(options *manager.Uploader) {
@@ -293,6 +307,9 @@ func customEndpointObjectURL(endpoint, bucket, key string, usePathStyle bool) (s
 
 func CheckS3ObjectExists(ctx context.Context, key, bucket string) (bool, error) {
 	s3Client := configuration.GetS3Client(nil)
+	if s3Client == nil {
+		return false, wrapStorageError("check object", fmt.Errorf("S3 client is not initialized"))
+	}
 	ctx, cancel := withStorageTimeout(ctx, metadataTimeout)
 	defer cancel()
 	_, err := s3Client.HeadObject(ctx, &s3.HeadObjectInput{
@@ -319,6 +336,9 @@ func CheckS3ObjectExists(ctx context.Context, key, bucket string) (bool, error) 
 
 func GetS3ObjectMetadata(ctx context.Context, key, bucket string) (int64, string, error) {
 	s3Client := configuration.GetS3Client(nil)
+	if s3Client == nil {
+		return 0, "", wrapStorageError("read object metadata", fmt.Errorf("S3 client is not initialized"))
+	}
 	ctx, cancel := withStorageTimeout(ctx, metadataTimeout)
 	defer cancel()
 	response, err := s3Client.HeadObject(ctx, &s3.HeadObjectInput{
@@ -333,6 +353,9 @@ func GetS3ObjectMetadata(ctx context.Context, key, bucket string) (int64, string
 
 func DeleteS3Object(ctx context.Context, key, bucket string) error {
 	s3Client := configuration.GetS3Client(nil)
+	if s3Client == nil {
+		return wrapStorageError("delete object", fmt.Errorf("S3 client is not initialized"))
+	}
 	ctx, cancel := withStorageTimeout(ctx, metadataTimeout)
 	defer cancel()
 	_, err := s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{
@@ -342,9 +365,30 @@ func DeleteS3Object(ctx context.Context, key, bucket string) error {
 	return wrapStorageError("delete object", err)
 }
 
+func MarkS3ObjectUploadConfirmed(ctx context.Context, key, bucket string) error {
+	s3Client := configuration.GetS3Client(nil)
+	if s3Client == nil {
+		return wrapStorageError("confirm object upload", fmt.Errorf("S3 client is not initialized"))
+	}
+	ctx, cancel := withStorageTimeout(ctx, metadataTimeout)
+	defer cancel()
+	_, err := s3Client.PutObjectTagging(ctx, &s3.PutObjectTaggingInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+		Tagging: &s3types.Tagging{TagSet: []s3types.Tag{{
+			Key:   aws.String("upload-state"),
+			Value: aws.String("confirmed"),
+		}}},
+	})
+	return wrapStorageError("confirm object upload", err)
+}
+
 func ListS3ObjectsWithPrefix(ctx context.Context, prefix, bucket string) ([]string, error) {
 	var keys []string
 	s3Client := configuration.GetS3Client(nil)
+	if s3Client == nil {
+		return nil, wrapStorageError("list objects", fmt.Errorf("S3 client is not initialized"))
+	}
 	ctx, cancel := withStorageTimeout(ctx, uploadTimeout)
 	defer cancel()
 
@@ -370,6 +414,9 @@ func ListS3ObjectsWithPrefix(ctx context.Context, prefix, bucket string) ([]stri
 
 func GetS3Object(ctx context.Context, key, bucket string) (io.ReadCloser, error) {
 	s3Client := configuration.GetS3Client(nil)
+	if s3Client == nil {
+		return nil, wrapStorageError("get object", fmt.Errorf("S3 client is not initialized"))
+	}
 	ctx, cancel := withStorageTimeout(ctx, uploadTimeout)
 	resp, err := s3Client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(bucket),
@@ -384,6 +431,9 @@ func GetS3Object(ctx context.Context, key, bucket string) (io.ReadCloser, error)
 
 func GeneratePresignedURL(ctx context.Context, key, bucket string, expiresInMinutes int) (string, error) {
 	s3Client := configuration.GetS3Client(nil)
+	if s3Client == nil {
+		return "", wrapStorageError("presign download", fmt.Errorf("S3 client is not initialized"))
+	}
 	ctx, cancel := withStorageTimeout(ctx, metadataTimeout)
 	defer cancel()
 
@@ -407,12 +457,16 @@ func GeneratePresignedURL(ctx context.Context, key, bucket string, expiresInMinu
 
 func GeneratePresignedPutURL(ctx context.Context, key, bucket, contentType string, expiresInMinutes int) (string, error) {
 	s3Client := configuration.GetS3Client(nil)
+	if s3Client == nil {
+		return "", wrapStorageError("presign upload", fmt.Errorf("S3 client is not initialized"))
+	}
 	ctx, cancel := withStorageTimeout(ctx, metadataTimeout)
 	defer cancel()
 	input := &s3.PutObjectInput{
 		Bucket:      aws.String(bucket),
 		Key:         aws.String(key),
 		ContentType: aws.String(contentType),
+		Tagging:     aws.String(unconfirmedTagging),
 	}
 
 	presignClient := s3.NewPresignClient(s3Client)
@@ -427,12 +481,16 @@ func GeneratePresignedPutURL(ctx context.Context, key, bucket, contentType strin
 
 func CreateMultipartUpload(ctx context.Context, key, bucket, contentType string) (string, error) {
 	s3Client := configuration.GetS3Client(nil)
+	if s3Client == nil {
+		return "", wrapStorageError("start multipart upload", fmt.Errorf("S3 client is not initialized"))
+	}
 	ctx, cancel := withStorageTimeout(ctx, metadataTimeout)
 	defer cancel()
 	resp, err := s3Client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
 		Bucket:      aws.String(bucket),
 		Key:         aws.String(key),
 		ContentType: aws.String(contentType),
+		Tagging:     aws.String(unconfirmedTagging),
 	})
 	if err != nil {
 		return "", wrapStorageError("start multipart upload", err)
@@ -442,6 +500,9 @@ func CreateMultipartUpload(ctx context.Context, key, bucket, contentType string)
 
 func GeneratePresignedUploadPartURL(ctx context.Context, key, bucket, uploadID string, partNumber, expiresInMinutes int) (string, error) {
 	s3Client := configuration.GetS3Client(nil)
+	if s3Client == nil {
+		return "", wrapStorageError("presign multipart part", fmt.Errorf("S3 client is not initialized"))
+	}
 	ctx, cancel := withStorageTimeout(ctx, metadataTimeout)
 	defer cancel()
 	presignClient := s3.NewPresignClient(s3Client)
@@ -461,6 +522,9 @@ func GeneratePresignedUploadPartURL(ctx context.Context, key, bucket, uploadID s
 
 func CompleteMultipartUpload(ctx context.Context, key, bucket, uploadID string, parts []dtos.CompletedUploadPart) error {
 	s3Client := configuration.GetS3Client(nil)
+	if s3Client == nil {
+		return wrapStorageError("complete multipart upload", fmt.Errorf("S3 client is not initialized"))
+	}
 	ctx, cancel := withStorageTimeout(ctx, uploadTimeout)
 	defer cancel()
 	completedParts := make([]s3types.CompletedPart, 0, len(parts))
@@ -492,6 +556,9 @@ func isMultipartUploadNotFound(err error) bool {
 
 func AbortMultipartUpload(ctx context.Context, key, bucket, uploadID string) error {
 	s3Client := configuration.GetS3Client(nil)
+	if s3Client == nil {
+		return wrapStorageError("abort multipart upload", fmt.Errorf("S3 client is not initialized"))
+	}
 	ctx, cancel := withStorageTimeout(ctx, metadataTimeout)
 	defer cancel()
 	_, err := s3Client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{

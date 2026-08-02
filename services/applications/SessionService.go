@@ -3,6 +3,7 @@ package applications
 import (
 	"errors"
 	"events-stocks/dtos"
+	"events-stocks/internal/products"
 	"events-stocks/models"
 	"fmt"
 	"sort"
@@ -68,11 +69,12 @@ func (service *SessionService) Resolve(cognitoSub, tenantCode string) (*Session,
 	if service == nil || service.db == nil || service.syncUser == nil {
 		return nil, fmt.Errorf("application session service is not configured")
 	}
-	code := strings.ToLower(strings.TrimSpace(tenantCode))
-	if code == "" {
-		return nil, fmt.Errorf("application code is required")
+	definition, known := products.Resolve(tenantCode)
+	if !known {
+		return nil, ErrApplicationAccessDenied
 	}
-	cacheKey := code + ":" + cognitoSub
+	code := definition.Code.String()
+	cacheKey := applicationSessionCacheKey(code, cognitoSub)
 	if session := service.cached(cacheKey); session != nil {
 		return session, nil
 	}
@@ -117,6 +119,13 @@ func (service *SessionService) Resolve(cognitoSub, tenantCode string) (*Session,
 	service.cache[cacheKey] = cachedSession{session: session, expiresAt: time.Now().Add(sessionCacheTTL)}
 	service.cacheMu.Unlock()
 	return session, nil
+}
+
+// applicationSessionCacheKey is process-local, but remains versioned and
+// product-scoped so an identity that belongs to multiple products can never
+// receive a session calculated for another application.
+func applicationSessionCacheKey(productCode, cognitoSub string) string {
+	return "v1:application-session:" + productCode + ":subject:" + strings.TrimSpace(cognitoSub)
 }
 
 func (service *SessionService) cached(key string) *Session {

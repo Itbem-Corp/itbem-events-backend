@@ -11,6 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -144,6 +145,14 @@ func LoadAWSConfig(ctx context.Context, region, legacyAccessKeyID, legacySecretA
 		options = append(options, config.WithCredentialsProvider(provider))
 	}
 	return config.LoadDefaultConfig(ctx, options...)
+}
+
+func SQSClientOptions(endpoint string) func(*sqs.Options) {
+	return func(options *sqs.Options) {
+		if endpoint = strings.TrimSpace(endpoint); endpoint != "" {
+			options.BaseEndpoint = aws.String(endpoint)
+		}
+	}
 }
 
 func legacyStaticCredentialsProvider(accessKeyID, secretAccessKey string) aws.CredentialsProvider {

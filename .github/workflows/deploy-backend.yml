@@ -33,7 +33,7 @@ jobs:
       revision: ${{ steps.revision.outputs.sha }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -46,7 +46,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libvips-dev
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: '1.25.12'
           cache: true
@@ -103,13 +103,13 @@ jobs:
 
     steps:
       - name: Checkout validated revision
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           ref: ${{ needs.validate.outputs.revision }}
           persist-credentials: false
 
       - name: Setup Go for production security preflight
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: '1.25.12'
           cache: true
@@ -120,8 +120,9 @@ jobs:
           EVENT_PREVIEW_SECRET: ${{ secrets.EVENT_PREVIEW_SECRET }}
           EVENT_ACCESS_SECRET: ${{ secrets.EVENT_ACCESS_SECRET }}
           INTERNAL_API_SECRET: ${{ secrets.INTERNAL_API_SECRET }}
+          ORGANIZATION_CONTEXT_SECRET: ${{ secrets.ORGANIZATION_CONTEXT_SECRET }}
+          ORGANIZATION_CONTEXT_SECRET_PREVIOUS: ${{ secrets.ORGANIZATION_CONTEXT_SECRET_PREVIOUS }}
           INTERNAL_API_SECRET_PREVIOUS: ${{ secrets.INTERNAL_API_SECRET_PREVIOUS }}
-          COGNITO_CLIENT_SECRET: ${{ secrets.BACKEND_COGNITO_CLIENT_SECRET }}
         run: go run ./cmd/security-preflight
 
       # Build the immutable image on the runner. The EC2 host no longer clones
@@ -159,7 +160,7 @@ jobs:
           [[ "$BACKEND_PORT" != "$BACKEND_CANDIDATE_PORT" ]] || { echo "candidate and production ports must differ"; exit 1; }
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v6
+        uses: aws-actions/configure-aws-credentials@f79bc868ee9ca4687c7db10f05fe6a46cdcda892 # v6
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           role-session-name: eventiapp-backend-${{ github.run_id }}
@@ -261,6 +262,19 @@ jobs:
           [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo "ECR did not return an immutable digest" >&2; exit 1; }
           echo "reference=${ECR_URI}@${DIGEST}" >> "$GITHUB_OUTPUT"
 
+      - name: Load runtime secret from Parameter Store
+        shell: bash
+        run: |
+          set -euo pipefail
+          redis_password="$(aws ssm get-parameter \
+            --name /eventiapp/backend/prod/redis-auth-token \
+            --with-decryption \
+            --query 'Parameter.Value' \
+            --output text)"
+          test "${#redis_password}" -ge 32
+          echo "::add-mask::$redis_password"
+          echo "REDIS_PASSWORD=$redis_password" >> "$GITHUB_ENV"
+
       - name: Render runtime environment without shell interpolation
         env:
           PORT: ${{ vars.BACKEND_PORT }}
@@ -269,8 +283,6 @@ jobs:
           ENV: production
           SOURCE_REVISION: ${{ needs.validate.outputs.revision }}
           COGNITO_USER_POOL_ID: ${{ secrets.BACKEND_COGNITO_USER_POOL_ID }}
-          COGNITO_CLIENT_ID: ${{ secrets.BACKEND_COGNITO_CLIENT_ID }}
-          COGNITO_CLIENT_SECRET: ${{ secrets.BACKEND_COGNITO_CLIENT_SECRET }}
           COGNITO_AWS_REGION: ${{ secrets.BACKEND_COGNITO_AWS_REGION }}
           COGNITO_ALLOWED_CLIENT_IDS: ${{ secrets.BACKEND_COGNITO_ALLOWED_CLIENT_IDS }}
           COGNITO_TENANT_CLIENT_MAP: ${{ secrets.BACKEND_COGNITO_TENANT_CLIENT_MAP }}
@@ -285,7 +297,6 @@ jobs:
           DB_PORT: ${{ secrets.BACKEND_DB_PORT }}
           DB_TIMEZONE: ${{ secrets.BACKEND_DB_TIMEZONE }}
           REDIS_HOST: ${{ secrets.BACKEND_REDIS_HOST }}
-          REDIS_PASSWORD: ${{ secrets.BACKEND_REDIS_PASSWORD }}
           REDIS_DB: ${{ secrets.BACKEND_REDIS_DB }}
           REDIS_TLS: ${{ secrets.BACKEND_REDIS_TLS }}
           GOOGLE_CLIENT_ID: ${{ secrets.BACKEND_GOOGLE_CLIENT_ID }}
@@ -295,6 +306,8 @@ jobs:
           INTERNAL_API_SECRET_PREVIOUS: ${{ secrets.INTERNAL_API_SECRET_PREVIOUS }}
           EVENT_PREVIEW_SECRET: ${{ secrets.EVENT_PREVIEW_SECRET }}
           EVENT_ACCESS_SECRET: ${{ secrets.EVENT_ACCESS_SECRET }}
+          ORGANIZATION_CONTEXT_SECRET: ${{ secrets.ORGANIZATION_CONTEXT_SECRET }}
+          ORGANIZATION_CONTEXT_SECRET_PREVIOUS: ${{ secrets.ORGANIZATION_CONTEXT_SECRET_PREVIOUS }}
           SQS_IMAGE_QUEUE_URL: ${{ secrets.SQS_IMAGE_QUEUE_URL }}
           SQS_VIDEO_QUEUE_URL: ${{ secrets.SQS_VIDEO_QUEUE_URL }}
           SQS_WORKER_QUEUE_URL: ${{ secrets.SQS_WORKER_QUEUE_URL }}
@@ -327,15 +340,13 @@ jobs:
             --required INTERNAL_API_SECRET \
             --required EVENT_PREVIEW_SECRET \
             --required EVENT_ACCESS_SECRET \
+            --required ORGANIZATION_CONTEXT_SECRET \
+            --optional ORGANIZATION_CONTEXT_SECRET_PREVIOUS \
             --required SQS_IMAGE_QUEUE_URL \
             --required SQS_VIDEO_QUEUE_URL \
-            --optional COGNITO_CLIENT_ID \
-            --optional COGNITO_CLIENT_SECRET \
             --required COGNITO_ALLOWED_CLIENT_IDS \
             --required COGNITO_TENANT_CLIENT_MAP \
             --required TENANT_HOST_MAP \
-            --optional S3_CLIENT_ID \
-            --optional S3_CLIENT_SECRET \
             --optional CDN_BASE_URL \
             --optional CORS_ALLOW_ORIGINS \
             --optional REDIS_PASSWORD \

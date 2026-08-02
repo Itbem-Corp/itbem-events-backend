@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"events-stocks/internal/products"
 	"events-stocks/models"
 	"github.com/labstack/echo/v4"
 )
@@ -31,13 +32,20 @@ func ResolveBucket(cfg *models.Config, tenant string) (string, error) {
 		return "", fmt.Errorf("configuration unavailable")
 	}
 	tenant = strings.ToLower(strings.TrimSpace(tenant))
-	if tenant == "" || tenant == "eventiapp" {
+	if tenant == "" {
+		tenant = products.DefaultCode.String()
+	}
+	definition, known := products.Resolve(tenant)
+	if !known {
+		return "", fmt.Errorf("no registered product for tenant %s", tenant)
+	}
+	if definition.Code == products.DefaultCode {
 		if bucket := ParseBucketMap(cfg.TenantBucketMap)["eventiapp"]; bucket != "" {
 			return bucket, nil
 		}
 		return strings.TrimSpace(cfg.AwsBucketName), nil
 	}
-	bucket := ParseBucketMap(cfg.TenantBucketMap)[tenant]
+	bucket := ParseBucketMap(cfg.TenantBucketMap)[definition.Code.String()]
 	if bucket == "" {
 		return "", fmt.Errorf("no media bucket configured for tenant %s", tenant)
 	}

@@ -16,6 +16,10 @@ Parameters:
   DatabaseInstanceId:
     Type: String
     Default: eventiapp-private-database
+  CognitoUserPoolId:
+    Type: String
+    Default: us-east-1_WIAV72FKe
+    AllowedPattern: '^us-east-1_[A-Za-z0-9]+$'
 
 Resources:
   DeliveryArtifactBucket:
@@ -107,6 +111,10 @@ Resources:
                 Effect: Allow
                 Action: s3:GetObject
                 Resource: !Sub '${DeliveryArtifactBucket.Arn}/releases/*'
+              - Sid: ReadOnlyBackendRuntimeSecret
+                Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/eventiapp/backend/prod/redis-auth-token'
               - Sid: LocateTenantMediaBuckets
                 Effect: Allow
                 Action:
@@ -120,12 +128,24 @@ Resources:
                 Action:
                   - s3:GetObject
                   - s3:PutObject
+                  - s3:PutObjectTagging
                   - s3:DeleteObject
                   - s3:AbortMultipartUpload
                   - s3:ListMultipartUploadParts
                 Resource:
                   - arn:aws:s3:::itbem-events-bucket-prod/*
                   - !Sub 'arn:${AWS::Partition}:s3:::eventiapp-*-media-prod-${AWS::AccountId}-${AWS::Region}/*'
+              - Sid: ManageOnlyProductionCognitoUsers
+                Effect: Allow
+                Action:
+                  - cognito-idp:AdminCreateUser
+                  - cognito-idp:AdminDeleteUser
+                  - cognito-idp:AdminDisableUser
+                  - cognito-idp:AdminEnableUser
+                  - cognito-idp:AdminGetUser
+                  - cognito-idp:AdminSetUserPassword
+                  - cognito-idp:AdminUpdateUserAttributes
+                Resource: !Sub 'arn:${AWS::Partition}:cognito-idp:us-east-1:${AWS::AccountId}:userpool/${CognitoUserPoolId}'
               - Sid: PublishOnlyBackendQueues
                 Effect: Allow
                 Action: sqs:SendMessage

@@ -1,5 +1,15 @@
 # Architecture Overview
 
+## Frontend integration contract
+
+Language-neutral request contracts live in `itbem-product-contract`. Backend runtime constants are projected into `internal/requestcontext`, while middleware and CORS depend on that package instead of repeating frontend-facing strings. A contract test compares the projection with the pinned `.contracts` revision, so integration drift fails before deployment.
+
+Controllers own HTTP translation, services own use cases, repositories own persistence, and `internal/requestcontext` owns only transport vocabulary and invariants. Product authorization remains in application access and product capability layers; request headers never grant access.
+
+Request-context resolution is a pure core policy with no Echo, database, or service dependency. HTTP middleware only adapts headers and the resolved session into that policy, then stores the validated result in the request context. New applications reuse the policy and extend product capabilities instead of copying middleware branches. The organization check is callback-based to avoid allocating a temporary membership map on every request.
+
+Clients exchange an authenticated application session for a five-minute organization-context token at `POST /api/session/organization-context`. The token supplements Cognito rather than replacing it and is cryptographically bound to the Cognito subject, application code, and organization ID. Business requests selecting an organization through `X-Organization-ID` must also send `X-Organization-Context`; middleware fails closed when the credential is missing, tampered, expired, or bound to another subject, application, or organization. `GET /api/session` and the credential-issuance endpoint permit an absent credential to avoid a bootstrap or renewal cycle, but still require Cognito, application access, and organization membership. A credential explicitly presented to either endpoint is always validated. Platform workspaces do not use an organization token.
+
 ## System Architecture
 
 This is a Go-based events management backend following **clean architecture** principles with clear separation of concerns.
@@ -260,8 +270,15 @@ cfg := c.Get("config").(*models.Config)      // App configuration
 
 ### Protected Routes (`/api`)
 1. Token authentication middleware (JWT validation)
-2. Dashboard body/rate limits
-3. Service-level Redis cache only inside handlers/services that explicitly opt in
+2. Application-access middleware resolves the product session and validates
+   optional dashboard context headers against the signed-token tenant.
+3. Dashboard body/rate limits
+4. Service-level Redis cache only inside handlers/services that explicitly opt in
+
+The dashboard context headers are `X-Application-Code`, `X-Workspace-Mode`,
+and `X-Organization-ID`. They cannot grant access: platform mode requires root
+authority enabled by the application, and organization mode is checked against
+the resolved application membership before resource-level authorization runs.
 
 ## Database Strategy
 

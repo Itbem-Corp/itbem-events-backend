@@ -3,6 +3,7 @@ package clients
 import (
 	"events-stocks/dtos"
 	"events-stocks/internal/authz"
+	"events-stocks/internal/products"
 	"events-stocks/internal/tenantresources"
 	"events-stocks/models"
 	"events-stocks/services/clients"
@@ -165,7 +166,7 @@ func ListMyClients(c echo.Context) error {
 	}
 	tenantCode, _ := c.Get("tenant_code").(string)
 	tenantCode = strings.ToLower(strings.TrimSpace(tenantCode))
-	if tenantCode == "eventiapp" || tenantCode == "itbem" {
+	if products.AllowsPlatformAuthority(tenantCode) {
 		tenantCode = ""
 	}
 	if c.QueryParam("page_size") != "" {

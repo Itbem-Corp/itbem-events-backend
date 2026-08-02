@@ -232,6 +232,9 @@ func organizationID(c echo.Context) uuid.UUID {
 			return parsed
 		}
 	}
+	if value, ok := c.Get(applicationaccess.ContextOrganizationID).(uuid.UUID); ok {
+		return value
+	}
 	return uuid.Nil
 }
 
