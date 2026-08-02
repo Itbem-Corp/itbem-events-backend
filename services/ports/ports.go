@@ -30,6 +30,16 @@ type MediaJobPublisher interface {
 	PublishMediaJob(msg dtos.MediaProcessMessage) (bool, error)
 }
 
+// PerformanceRollupPublisher schedules recomputable performance aggregation.
+type PerformanceRollupPublisher interface {
+	PublishPerformanceRollup() (bool, error)
+}
+
+// EventPhraseRepository provides the optional, tenant-managed phrase catalog.
+type EventPhraseRepository interface {
+	ListByEventType(ctx context.Context, eventType string) ([]string, error)
+}
+
 type ObjectStorageRepository interface {
 	FileExists(filename, folder, bucket, provider string) (bool, string, error)
 	GetPresignedFileURL(filename, folder, bucket, provider string, minutes int) (string, error)

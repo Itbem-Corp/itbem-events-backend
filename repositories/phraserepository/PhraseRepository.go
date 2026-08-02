@@ -9,6 +9,15 @@ import (
 	"events-stocks/models"
 )
 
+// Repository adapts the persisted phrase catalog to the application port.
+type Repository struct{}
+
+func NewRepository() *Repository { return &Repository{} }
+
+func (*Repository) ListByEventType(ctx context.Context, eventType string) ([]string, error) {
+	return ListByEventType(ctx, eventType)
+}
+
 func ListByEventType(ctx context.Context, eventType string) ([]string, error) {
 	if configuration.DB == nil {
 		return nil, errors.New("phrase repository is not initialized")

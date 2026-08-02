@@ -58,6 +58,7 @@ import (
 	jobqueuerepository "events-stocks/repositories/jobqueuerepository"
 	momentrepository "events-stocks/repositories/momentrepository"
 	momenttyperepository "events-stocks/repositories/momenttyperepository"
+	"events-stocks/repositories/phraserepository"
 	redisrepository "events-stocks/repositories/redisrepository"
 	resourcerepository "events-stocks/repositories/resourcerepository"
 	sqsrepository "events-stocks/repositories/sqsrepository"
@@ -328,6 +329,7 @@ func wireDependencies(cfg *models.Config) {
 	eventAnalyticsRepo := eventanalyticsrepository.NewEventAnalyticsRepo()
 	eventConfigRepo := eventconfigrepository.NewEventConfigRepo()
 	eventMemberRepo := eventmemberrepository.NewEventMemberRepo(gormrepository.DB())
+	phraseRepo := phraserepository.NewRepository()
 	eventSectionRepo := eventsectionrepository.NewEventSectionRepo()
 	eventTableRepo := eventtablerepository.NewEventTableRepo()
 	guestRepo := guestrepository.NewGuestRepo()
@@ -347,6 +349,7 @@ func wireDependencies(cfg *models.Config) {
 	templateRepo := templatesrepository.NewDesignTemplateRepo()
 	authProviderRepo := authproviderrepository.NewAuthProviderRepo()
 	mediaPublisher := sqsrepository.NewPublisher()
+	workerJobPublisher := jobqueuerepository.NewPublisher()
 	resourceRepo := resourcerepository.NewResourceRepo()
 	bucketRepo := bucketrepository.NewBucketRepo()
 
@@ -443,7 +446,7 @@ func wireDependencies(cfg *models.Config) {
 	cacheController.InitCacheController(redisRepo)
 	fontsController.InitFontsController(fontSvc)
 	designtemplatesController.InitDesignTemplatesController(resourceSvc)
-	eventsController.InitEventsController(eventSvc, eventConfigSvc, accessTokenRepo, invitationRepo, guestSvc)
+	eventsController.InitEventsController(eventSvc, eventConfigSvc, accessTokenRepo, invitationRepo, guestSvc, workerJobPublisher, phraseRepo)
 	eventsController.InitCoverController(resourceSvc, mediaPublisher)
 	eventsController.InitDuplicateController(duplicateSvc)
 	eventsController.InitRepairController(repairSvc)
