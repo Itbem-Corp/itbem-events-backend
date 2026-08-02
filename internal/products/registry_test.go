@@ -20,3 +20,25 @@ func TestProductRegistryKeepsPlatformAndEventBoundariesExplicit(t *testing.T) {
 		t.Fatalf("default product = %q, want %q", got, core.EventiApp)
 	}
 }
+
+func TestProductDefinitionsDoNotExposeRegistryModuleSlices(t *testing.T) {
+	all := All()
+	all[0].Modules[0] = "mutated"
+
+	resolved, ok := Resolve(all[0].Code.String())
+	if !ok {
+		t.Fatalf("product %q was not resolvable", all[0].Code)
+	}
+	if resolved.Modules[0] == "mutated" {
+		t.Fatal("All exposed the registry's module slice")
+	}
+
+	resolved.Modules[0] = "mutated-again"
+	again, ok := Resolve(resolved.Code.String())
+	if !ok {
+		t.Fatalf("product %q was not resolvable", resolved.Code)
+	}
+	if again.Modules[0] == "mutated-again" {
+		t.Fatal("Resolve exposed the registry's module slice")
+	}
+}
