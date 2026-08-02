@@ -58,6 +58,7 @@ import (
 	jobqueuerepository "events-stocks/repositories/jobqueuerepository"
 	momentrepository "events-stocks/repositories/momentrepository"
 	momenttyperepository "events-stocks/repositories/momenttyperepository"
+	"events-stocks/repositories/phraserepository"
 	redisrepository "events-stocks/repositories/redisrepository"
 	resourcerepository "events-stocks/repositories/resourcerepository"
 	sqsrepository "events-stocks/repositories/sqsrepository"
@@ -69,6 +70,7 @@ import (
 	clientsService "events-stocks/services/clients"
 	clienttypesService "events-stocks/services/clienttypes"
 	colorsService "events-stocks/services/colors"
+	eventmembersService "events-stocks/services/eventmembers"
 	eventsService "events-stocks/services/events"
 	fontsService "events-stocks/services/fonts"
 	guestsService "events-stocks/services/guests"
@@ -327,6 +329,7 @@ func wireDependencies(cfg *models.Config) {
 	eventAnalyticsRepo := eventanalyticsrepository.NewEventAnalyticsRepo()
 	eventConfigRepo := eventconfigrepository.NewEventConfigRepo()
 	eventMemberRepo := eventmemberrepository.NewEventMemberRepo(gormrepository.DB())
+	phraseRepo := phraserepository.NewRepository()
 	eventSectionRepo := eventsectionrepository.NewEventSectionRepo()
 	eventTableRepo := eventtablerepository.NewEventTableRepo()
 	guestRepo := guestrepository.NewGuestRepo()
@@ -346,6 +349,7 @@ func wireDependencies(cfg *models.Config) {
 	templateRepo := templatesrepository.NewDesignTemplateRepo()
 	authProviderRepo := authproviderrepository.NewAuthProviderRepo()
 	mediaPublisher := sqsrepository.NewPublisher()
+	workerJobPublisher := jobqueuerepository.NewPublisher()
 	resourceRepo := resourcerepository.NewResourceRepo()
 	bucketRepo := bucketrepository.NewBucketRepo()
 
@@ -409,6 +413,7 @@ func wireDependencies(cfg *models.Config) {
 	sessionsController.Configure(applicationSessionSvc)
 	adminSvc := usersService.NewAdminUserService(userRepo, clientRepo, authProviderRepo)
 	clientSvc := clientsService.NewClientService(clientRepo, clientRoleRepo, clientTypeRepo, resourceSvc, redisRepo, transactor)
+	eventMemberSvc := eventmembersService.NewEventMemberService(eventMemberRepo, clientSvc)
 	clientRoleSvc := clientrolesService.NewClientRoleService(clientRoleRepo)
 	clientTypeSvc := clienttypesService.NewClientTypeService(clientTypeRepo)
 	colorSvc := colorsService.NewColorService(colorRepo, redisRepo)
@@ -441,11 +446,11 @@ func wireDependencies(cfg *models.Config) {
 	cacheController.InitCacheController(redisRepo)
 	fontsController.InitFontsController(fontSvc)
 	designtemplatesController.InitDesignTemplatesController(resourceSvc)
-	eventsController.InitEventsController(eventSvc, eventConfigSvc, accessTokenRepo, invitationRepo, guestSvc)
-	eventsController.InitCoverController(resourceSvc)
+	eventsController.InitEventsController(eventSvc, eventConfigSvc, accessTokenRepo, invitationRepo, guestSvc, workerJobPublisher, phraseRepo)
+	eventsController.InitCoverController(resourceSvc, mediaPublisher)
 	eventsController.InitDuplicateController(duplicateSvc)
 	eventsController.InitRepairController(repairSvc)
-	eventmembersController.InitEventMembersController(eventMemberRepo, clientSvc)
+	eventmembersController.InitEventMembersController(eventMemberSvc)
 	eventconfigController.InitEventConfigController(eventConfigSvc, resourceSvc)
 	eventsectionController.InitEventSectionController(eventSectSvc)
 	eventtablesController.InitEventTablesController(eventTableSvc, guestSvc)

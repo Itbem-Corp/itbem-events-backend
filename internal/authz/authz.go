@@ -6,9 +6,9 @@ import (
 	"net/http"
 	"strings"
 
+	productmetricshttp "events-stocks/internal/observability/productmetricshttp"
 	"events-stocks/internal/products"
 	"events-stocks/models"
-	"events-stocks/services/productmetrics"
 	"events-stocks/utils"
 
 	"github.com/gofrs/uuid"
@@ -337,7 +337,7 @@ func RequireEventAccess(c echo.Context, eventID uuid.UUID) (*models.User, *model
 		return nil, nil, err
 	}
 	if event.ClientID != nil {
-		productmetrics.ScopeOrganization(c, *event.ClientID)
+		productmetricshttp.ScopeOrganization(c, *event.ClientID)
 	}
 	return user, event, nil
 }

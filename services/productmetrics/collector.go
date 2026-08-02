@@ -8,15 +8,9 @@ import (
 	"sync"
 	"time"
 
-	"events-stocks/middleware/applicationaccess"
-	"events-stocks/services/applications"
-
 	"github.com/gofrs/uuid"
-	"github.com/labstack/echo/v4"
 	"gorm.io/gorm"
 )
-
-const OrganizationContextKey = "metrics_organization_id"
 
 type metricKey struct {
 	Day        string
@@ -46,6 +40,15 @@ type Collector struct {
 
 var defaultCollector *Collector
 
+// RequestObservation is framework-neutral input collected by transport adapters.
+type RequestObservation struct {
+	TenantCode, Method     string
+	OrganizationID, UserID uuid.UUID
+	Status                 int
+	Duration               time.Duration
+	RequestBytes           int64
+}
+
 func NewCollector(db *gorm.DB) *Collector {
 	return &Collector{
 		db:      db,
@@ -55,66 +58,30 @@ func NewCollector(db *gorm.DB) *Collector {
 }
 
 func Configure(collector *Collector) { defaultCollector = collector }
+func DefaultCollector() *Collector   { return defaultCollector }
 
-func Capture(next echo.HandlerFunc) echo.HandlerFunc {
-	if defaultCollector == nil {
-		return next
-	}
-	return defaultCollector.Middleware(next)
-}
-
-func CaptureTenant(tenantCode string) echo.MiddlewareFunc {
-	return func(next echo.HandlerFunc) echo.HandlerFunc {
-		if defaultCollector == nil {
-			return next
-		}
-		return func(c echo.Context) error {
-			if current, _ := c.Get("tenant_code").(string); strings.TrimSpace(current) == "" {
-				c.Set("tenant_code", strings.ToLower(strings.TrimSpace(tenantCode)))
-			}
-			return defaultCollector.Middleware(next)(c)
-		}
-	}
-}
-
-func ScopeOrganization(c echo.Context, clientID uuid.UUID) {
-	if c != nil && clientID != uuid.Nil {
-		c.Set(OrganizationContextKey, clientID)
-	}
-}
-
-func (collector *Collector) Middleware(next echo.HandlerFunc) echo.HandlerFunc {
-	return func(c echo.Context) error {
-		started := time.Now()
-		err := next(c)
-		collector.record(c, statusCode(c, err), time.Since(started))
-		return err
-	}
-}
-
-func (collector *Collector) record(c echo.Context, status int, duration time.Duration) {
+func (collector *Collector) Record(observation RequestObservation) {
 	if collector == nil || collector.db == nil {
 		return
 	}
-	tenant, _ := c.Get("tenant_code").(string)
-	tenant = strings.ToLower(strings.TrimSpace(tenant))
+	tenant := strings.ToLower(strings.TrimSpace(observation.TenantCode))
 	if tenant == "" {
 		return
 	}
 	key := metricKey{
 		Day:        time.Now().UTC().Format("2006-01-02"),
 		TenantCode: tenant,
-		ClientID:   organizationID(c),
+		ClientID:   observation.OrganizationID,
 	}
 	value := counters{
 		Requests:     1,
-		DurationMS:   duration.Milliseconds(),
-		RequestBytes: max(c.Request().ContentLength, 0),
+		DurationMS:   observation.Duration.Milliseconds(),
+		RequestBytes: max(observation.RequestBytes, 0),
 	}
-	if isMutation(c.Request().Method) && status >= http.StatusOK && status < http.StatusBadRequest {
+	if isMutation(observation.Method) && observation.Status >= http.StatusOK && observation.Status < http.StatusBadRequest {
 		value.Mutations = 1
 	}
-	if status >= http.StatusInternalServerError {
+	if observation.Status >= http.StatusInternalServerError {
 		value.Errors = 1
 	}
 
@@ -126,9 +93,8 @@ func (collector *Collector) record(c echo.Context, status int, duration time.Dur
 	current.DurationMS += value.DurationMS
 	current.RequestBytes += value.RequestBytes
 	collector.pending[key] = current
-	if session, ok := c.Get(applicationaccess.ContextKey).(*applications.Session); ok &&
-		session != nil && session.User.ID != uuid.Nil {
-		collector.active[activeUserKey{metricKey: key, UserID: session.User.ID}] = struct{}{}
+	if observation.UserID != uuid.Nil {
+		collector.active[activeUserKey{metricKey: key, UserID: observation.UserID}] = struct{}{}
 	}
 	collector.mu.Unlock()
 }
@@ -219,25 +185,6 @@ func (collector *Collector) restore(key metricKey, value counters) {
 	collector.pending[key] = current
 }
 
-func organizationID(c echo.Context) uuid.UUID {
-	if value, ok := c.Get(OrganizationContextKey).(uuid.UUID); ok {
-		return value
-	}
-	raw := strings.TrimSpace(c.QueryParam("client_id"))
-	if parsed, err := uuid.FromString(raw); err == nil {
-		return parsed
-	}
-	if strings.HasPrefix(strings.ToLower(c.Path()), "/api/clients/:id") {
-		if parsed, err := uuid.FromString(strings.TrimSpace(c.Param("id"))); err == nil {
-			return parsed
-		}
-	}
-	if value, ok := c.Get(applicationaccess.ContextOrganizationID).(uuid.UUID); ok {
-		return value
-	}
-	return uuid.Nil
-}
-
 func isMutation(method string) bool {
 	switch strings.ToUpper(method) {
 	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
@@ -245,17 +192,4 @@ func isMutation(method string) bool {
 	default:
 		return false
 	}
-}
-
-func statusCode(c echo.Context, err error) int {
-	if err != nil {
-		if httpError, ok := err.(*echo.HTTPError); ok {
-			return httpError.Code
-		}
-		return http.StatusInternalServerError
-	}
-	if c.Response().Status > 0 {
-		return c.Response().Status
-	}
-	return http.StatusOK
 }
