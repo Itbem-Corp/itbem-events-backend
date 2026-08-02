@@ -73,6 +73,9 @@ type Config struct {
 	SQSVideoQueueURL string `required:"false"` // itbem-media-videos queue
 	// Business/data jobs consumed by itbem-events-workers (never media jobs).
 	SQSWorkerQueueURL string `required:"false"`
+	// SQSEndpoint is only for isolated SQS-compatible integration environments.
+	// Leave empty in AWS deployments so the SDK resolves the normal AWS endpoint.
+	SQSEndpoint       string `required:"false"`
 	SNSWorkerTopicARN string `required:"false"`
 
 	// Internal API secret — used by Lambda to call PUT /api/moments/:id/content

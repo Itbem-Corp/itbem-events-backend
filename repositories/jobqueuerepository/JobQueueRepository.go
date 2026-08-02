@@ -9,6 +9,7 @@ import (
 	"events-stocks/internal/products"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -94,7 +95,7 @@ func Init(region, accessKeyID, secretAccessKey, workerQueueURL string, notificat
 			slog.Error("jobqueuerepository: failed to load AWS config", "error", err)
 			return
 		}
-		client = sqs.NewFromConfig(cfg)
+		client = sqs.NewFromConfig(cfg, configuration.SQSClientOptions(os.Getenv("SQS_ENDPOINT")))
 		notificationClient = sns.NewFromConfig(cfg)
 		slog.Info("jobqueuerepository: worker queue publisher initialized")
 	})

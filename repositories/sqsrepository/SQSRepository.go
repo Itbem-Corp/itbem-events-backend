@@ -57,7 +57,7 @@ func (p *Publisher) PublishMediaJob(msg MediaProcessMessage) (bool, error) {
 
 // Init initialises the SQS client with separate image and video queue URLs.
 // Must be called once at server startup. Missing queue URLs disable that type of processing.
-func Init(region, accessKeyID, secretAccessKey, imgQueue, vidQueue string) {
+func Init(region, accessKeyID, secretAccessKey, imgQueue, vidQueue string, endpoints ...string) {
 	once.Do(func() {
 		imageQueueURL = imgQueue
 		videoQueueURL = vidQueue
@@ -72,7 +72,11 @@ func Init(region, accessKeyID, secretAccessKey, imgQueue, vidQueue string) {
 			slog.Error("sqsrepository: failed to load AWS config", "error", err)
 			return
 		}
-		sqsClient = sqs.NewFromConfig(cfg)
+		endpoint := ""
+		if len(endpoints) > 0 {
+			endpoint = endpoints[0]
+		}
+		sqsClient = sqs.NewFromConfig(cfg, configuration.SQSClientOptions(endpoint))
 		slog.Info("sqsrepository: SQS client initialised",
 			"image_queue", imgQueue != "",
 			"video_queue", vidQueue != "",
