@@ -9,10 +9,10 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.43.3
 	github.com/aws/aws-sdk-go-v2/config v1.32.34
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.33
-	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.22.38
-	github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager v0.3.8
+	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.22.39
+	github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager v0.3.9
 	github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider v1.67.3
-	github.com/aws/aws-sdk-go-v2/service/s3 v1.106.3
+	github.com/aws/aws-sdk-go-v2/service/s3 v1.106.4
 	github.com/aws/aws-sdk-go-v2/service/sns v1.42.3
 	github.com/aws/aws-sdk-go-v2/service/sqs v1.46.3
 	github.com/aws/smithy-go v1.27.6
@@ -23,7 +23,7 @@ require (
 	github.com/h2non/bimg v1.1.9
 	github.com/joho/godotenv v1.5.1
 	github.com/labstack/echo/v4 v4.15.4
-	github.com/redis/go-redis/v9 v9.21.0
+	github.com/redis/go-redis/v9 v9.22.0
 	github.com/stretchr/testify v1.11.1
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.43.0
 	golang.org/x/sync v0.22.0
