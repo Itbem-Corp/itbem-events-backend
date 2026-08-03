@@ -241,6 +241,24 @@ func newTestResourceService(repo ports.ResourceRepository, cache ports.CacheRepo
 	)
 }
 
+func TestResourceObjectStoragePreservesNestedPathAndDefaultTTL(t *testing.T) {
+	storage := &mockObjectStorage{exists: true}
+	svc := newTestResourceService(nil, nil, storage)
+	path := "organizations/acme/assets/logo.webp"
+
+	url, err := svc.GetPresignedURL(path)
+
+	require.NoError(t, err)
+	assert.Equal(t, "https://signed.example.com/organizations/acme/assets/logo.webp", url)
+	assert.Equal(t, "logo.webp", storage.lastPresignFilename)
+	assert.Equal(t, "organizations/acme/assets", storage.lastPresignFolder)
+	assert.Equal(t, ResourceViewURLTTLMinutes, storage.lastPresignMinutes)
+
+	require.NoError(t, svc.DeleteObjectByPath(path))
+	assert.Equal(t, "logo.webp", storage.deletedFilename)
+	assert.Equal(t, "organizations/acme/assets", storage.deletedFolder)
+}
+
 func TestVerifyMomentUploadUsesStoredMetadata(t *testing.T) {
 	storage := &metadataObjectStorage{
 		mockObjectStorage: &mockObjectStorage{},
