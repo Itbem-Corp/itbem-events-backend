@@ -48,7 +48,7 @@ jobs:
           [[ "$TLS_MONITOR_TOPIC_ARN" == arn:aws*:sns:us-east-1:*:eventiapp-backend-public-health-alerts-prod ]] || { echo "Invalid TLS_MONITOR_TOPIC_ARN"; exit 1; }
           [[ "$TLS_MONITOR_ALERT_EMAIL" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]] || { echo "TLS_MONITOR_ALERT_EMAIL is missing or invalid"; exit 1; }
 
-      - uses: aws-actions/configure-aws-credentials@f79bc868ee9ca4687c7db10f05fe6a46cdcda892 # v6
+      - uses: aws-actions/configure-aws-credentials@451ce2a72e8d729a59ebeaacab82dbce58e7af4c # v6
         with:
           role-to-assume: ${{ vars.AWS_TLS_MONITOR_ROLE_ARN }}
           role-session-name: eventiapp-backend-tls-monitor-${{ github.run_id }}

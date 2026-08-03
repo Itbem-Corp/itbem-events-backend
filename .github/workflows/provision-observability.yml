@@ -82,7 +82,7 @@ jobs:
             exit 1
           }
 
-      - uses: aws-actions/configure-aws-credentials@f79bc868ee9ca4687c7db10f05fe6a46cdcda892 # v6
+      - uses: aws-actions/configure-aws-credentials@451ce2a72e8d729a59ebeaacab82dbce58e7af4c # v6
         with:
           role-to-assume: ${{ vars.AWS_OBSERVABILITY_DEPLOY_ROLE_ARN }}
           role-session-name: eventiapp-backend-observability-${{ github.run_id }}
