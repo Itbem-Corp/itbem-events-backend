@@ -26,17 +26,25 @@ var definitions = func() map[core.Code]core.Definition {
 	return items
 }()
 
-// All returns a copy in a stable order for setup code such as application
-// seeding. Callers must not mutate the returned product catalog.
+// All returns independent definitions in a stable order for setup code such as
+// application seeding. Product metadata is a core registry, so callers cannot
+// accidentally mutate the catalog that later authorization decisions use.
 func All() []core.Definition {
 	items := make([]core.Definition, len(orderedDefinitions))
-	copy(items, orderedDefinitions)
+	for i, definition := range orderedDefinitions {
+		items[i] = cloneDefinition(definition)
+	}
 	return items
 }
 
 func Resolve(value string) (core.Definition, bool) {
 	definition, ok := definitions[core.Normalize(value)]
-	return definition, ok
+	return cloneDefinition(definition), ok
+}
+
+func cloneDefinition(definition core.Definition) core.Definition {
+	definition.Modules = append([]string(nil), definition.Modules...)
+	return definition
 }
 
 func NormalizeOrDefault(value string) core.Code {
