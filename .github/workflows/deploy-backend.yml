@@ -33,7 +33,7 @@ jobs:
       revision: ${{ steps.revision.outputs.sha }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -116,7 +116,7 @@ jobs:
 
     steps:
       - name: Checkout validated revision
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ needs.validate.outputs.revision }}
           persist-credentials: false
@@ -174,7 +174,7 @@ jobs:
           [[ "$BACKEND_PORT" != "$BACKEND_CANDIDATE_PORT" ]] || { echo "candidate and production ports must differ"; exit 1; }
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@f79bc868ee9ca4687c7db10f05fe6a46cdcda892 # v6
+        uses: aws-actions/configure-aws-credentials@451ce2a72e8d729a59ebeaacab82dbce58e7af4c # v6
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           role-session-name: eventiapp-backend-${{ github.run_id }}
