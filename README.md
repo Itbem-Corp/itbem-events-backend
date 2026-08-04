@@ -46,6 +46,10 @@ go test ./... -timeout 180s
 go vet ./...
 ```
 
+CI also runs `go test -race ./...` on Linux to detect unsynchronized access.
+The race detector needs CGO, so use a local Go installation with a C compiler
+when reproducing that gate outside CI.
+
 For a coordinated cross-repository change, run the relevant commands from
 `eventiapp-platform`; service ownership and release governance remain in this
 repository's CI.
