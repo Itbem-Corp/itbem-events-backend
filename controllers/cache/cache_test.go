@@ -16,6 +16,8 @@ type recordingCacheStore struct {
 	flushContext  context.Context
 }
 
+type requestContextKey struct{}
+
 func (store *recordingCacheStore) DeleteKey(ctx context.Context, _ string) error {
 	store.deleteContext = ctx
 	return nil
@@ -48,7 +50,7 @@ func TestCacheFlushHandlersUseRequestContext(t *testing.T) {
 	cacheStore := &recordingCacheStore{}
 	InitCacheController(cacheStore)
 
-	keyContext := context.WithValue(context.Background(), "request", "delete")
+	keyContext := context.WithValue(context.Background(), requestContextKey{}, "delete")
 	deleteRequest := httptest.NewRequest(http.MethodDelete, "/cache/flush/events", nil).WithContext(keyContext)
 	deleteContext := primaryRootContext(t, deleteRequest)
 	deleteContext.SetParamNames("key")
@@ -60,7 +62,7 @@ func TestCacheFlushHandlersUseRequestContext(t *testing.T) {
 		t.Fatal("FlushKey did not propagate the request context to the cache store")
 	}
 
-	allContext := context.WithValue(context.Background(), "request", "flush-all")
+	allContext := context.WithValue(context.Background(), requestContextKey{}, "flush-all")
 	allRequest := httptest.NewRequest(http.MethodDelete, "/cache/flush-all", nil).WithContext(allContext)
 	if err := FlushAll(primaryRootContext(t, allRequest)); err != nil {
 		t.Fatalf("FlushAll returned an error: %v", err)
