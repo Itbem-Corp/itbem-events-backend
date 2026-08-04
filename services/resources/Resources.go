@@ -75,23 +75,6 @@ var AllowedMimeTypes = map[string]bool{
 	"font/sfnt":                     true,
 }
 
-var momentUploadAllowedMimeTypes = map[string]bool{
-	"image/jpeg":       true,
-	"image/png":        true,
-	"image/gif":        true,
-	"image/webp":       true,
-	"image/heic":       true,
-	"image/heif":       true,
-	"image/avif":       true,
-	"video/mp4":        true,
-	"video/webm":       true,
-	"video/quicktime":  true,
-	"video/x-m4v":      true,
-	"video/3gpp":       true,
-	"video/x-msvideo":  true,
-	"video/x-matroska": true,
-}
-
 type ResourceService struct {
 	Bucket     string
 	Provider   string
@@ -962,45 +945,6 @@ func (rs *ResourceService) MarkMomentUploadConfirmed(ctx context.Context, s3Key 
 		return services.ValidationError{Msg: "invalid upload key"}
 	}
 	return confirmer.MarkUploadConfirmed(ctx, filename, folder, rs.Bucket, rs.Provider)
-}
-
-func momentUploadLimit(contentType string) (int64, int) {
-	if strings.HasPrefix(contentType, "video/") {
-		return int64(MaxVideoFileSizeBytes), MaxVideoFileSizeMB
-	}
-	return int64(MaxMomentImageFileSizeBytes), MaxMomentImageFileSizeMB
-}
-
-func (rs *ResourceService) buildMomentRawKey(eventID, filename string) string {
-	u, _ := uuid.NewV4()
-	ext := ""
-	if idx := strings.LastIndex(filename, "."); idx != -1 {
-		ext = strings.ToLower(filename[idx:])
-	}
-	return rs.scopedObjectPath(fmt.Sprintf("moments/%s/raw/%s%s", eventID, u.String(), ext))
-}
-
-func normalizeMomentUploadContentType(filename, contentType string) (string, error) {
-	ct := canonicalUploadContentType(contentType)
-	if ct == "" || ct == "application/octet-stream" {
-		ext := ""
-		if idx := strings.LastIndex(filename, "."); idx != -1 {
-			ext = strings.ToLower(filename[idx+1:])
-		}
-		ct = canonicalUploadContentType(guessMimeType(ext))
-	}
-	if !momentUploadAllowedMimeTypes[ct] {
-		return "", services.ValidationError{Msg: fmt.Sprintf("unsupported file type for moments: %s", ct)}
-	}
-	return ct, nil
-}
-
-func canonicalUploadContentType(contentType string) string {
-	ct := strings.TrimSpace(strings.ToLower(contentType))
-	if ct == "image/jpg" {
-		return "image/jpeg"
-	}
-	return ct
 }
 
 // UploadToMomentsFolder is kept for backward compatibility.
