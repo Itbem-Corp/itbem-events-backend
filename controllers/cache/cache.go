@@ -43,7 +43,7 @@ func FlushKey(c echo.Context) error {
 		return utils.Error(c, http.StatusBadRequest, "Key is required", "")
 	}
 
-	if err := cacheStore.DeleteKey(context.Background(), key); err != nil {
+	if err := cacheStore.DeleteKey(c.Request().Context(), key); err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Failed to delete cache key", err.Error())
 	}
 
@@ -60,7 +60,7 @@ func FlushAll(c echo.Context) error {
 		return utils.Error(c, http.StatusInternalServerError, "Cache unavailable", err.Error())
 	}
 
-	if err := cacheStore.FlushAll(context.Background()); err != nil {
+	if err := cacheStore.FlushAll(c.Request().Context()); err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Failed to flush cache", err.Error())
 	}
 	return utils.Success(c, http.StatusOK, "Cache flushed successfully", nil)
