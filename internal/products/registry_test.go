@@ -16,6 +16,9 @@ func TestProductRegistryKeepsPlatformAndEventBoundariesExplicit(t *testing.T) {
 	if !SupportsEventOperations("eventiapp") || SupportsEventOperations("itbem") || SupportsEventOperations("cafettonhouse") {
 		t.Fatal("event operations must remain exclusive to EventiApp")
 	}
+	if SupportsAutomation("eventiapp") || !SupportsAutomation("itbem") || SupportsAutomation("cafettonhouse") {
+		t.Fatal("automation must remain exclusive to ITBEM")
+	}
 	if got := NormalizeOrDefault("unknown"); got != core.EventiApp {
 		t.Fatalf("default product = %q, want %q", got, core.EventiApp)
 	}

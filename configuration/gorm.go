@@ -51,11 +51,32 @@ var modelsWithoutSeed = []interface{}{
 	&models.Application{},
 	&models.ClientApplication{},
 	&models.ClientMemberApplication{},
+	&models.UserApplicationPolicy{},
 	&models.AuditLog{},
 	&models.ProductMetricDaily{},
 	&models.ProductActiveUserDaily{},
 	&models.IdempotencyRecord{},
 	&models.OutboxEvent{},
+	&models.AutomationTask{},
+	&models.AutomationExecution{},
+	&models.AutomationToolExecution{},
+	&models.AutomationAgentHeartbeat{},
+	&models.DeliveryClientProfile{},
+	&models.DeliveryProject{},
+	&models.DeliveryProjectMember{},
+	&models.DeliveryContextSource{},
+	&models.DeliveryRequest{},
+	&models.DeliveryDecomposition{},
+	&models.DeliveryWorkItem{},
+	&models.DeliveryWorkItemDependency{},
+	&models.DeliveryContextSnapshot{},
+	&models.DeliveryPlan{},
+	&models.DeliveryChangeSet{},
+	&models.DeliveryPublicationGrant{},
+	&models.DeliveryGate{},
+	&models.DeliveryEvidence{},
+	&models.DeliveryMessage{},
+	&models.DeliveryRelease{},
 	&models.EventPhrase{},
 }
 
@@ -177,8 +198,13 @@ func migrateModels(db *gorm.DB) error {
 			}
 		}
 
-		if err := tx.AutoMigrate(GetAllModels()...); err != nil {
-			return fmt.Errorf("auto migrate: %w", err)
+		// Run models one by one so a failed deployment names the exact schema
+		// owner. This retains the surrounding all-or-nothing transaction while
+		// making local and production migration failures diagnosable.
+		for _, model := range GetAllModels() {
+			if err := tx.AutoMigrate(model); err != nil {
+				return fmt.Errorf("auto migrate %T: %w", model, err)
+			}
 		}
 		// Early worker prototypes created this table and let Postgres choose the
 		// foreign-key name. The backend now owns the shared schema and GORM creates
@@ -191,6 +217,20 @@ func migrateModels(db *gorm.DB) error {
 		// Allow invitation_id to be NULL (needed for shared QR uploads without a personal token).
 		if err := tx.Exec("ALTER TABLE IF EXISTS moments ALTER COLUMN invitation_id DROP NOT NULL").Error; err != nil {
 			return fmt.Errorf("relax moments invitation constraint: %w", err)
+		}
+		// The original ledger deduplicated by an optional provider response ID.
+		// Some providers legitimately omit that value, and a task can make more
+		// than one billable call. AutoMigrate creates automation_execution_run;
+		// remove the legacy index only after that replacement exists.
+		if err := tx.Exec("DROP INDEX IF EXISTS automation_execution_response").Error; err != nil {
+			return fmt.Errorf("remove legacy automation execution response index: %w", err)
+		}
+		// The first Stagehand ledger shape allowed only one tool call per run.
+		// Keep the immutable ledger, but let a pinned tool account for each
+		// individual provider call by replacing that old triplet key with the
+		// AutoMigrate-created call-key index.
+		if err := tx.Exec("DROP INDEX IF EXISTS automation_tool_execution_run").Error; err != nil {
+			return fmt.Errorf("remove legacy automation tool execution index: %w", err)
 		}
 		// Security audit rows are append-only. Even application code running
 		// with the normal database owner cannot rewrite or delete history
@@ -210,6 +250,30 @@ func migrateModels(db *gorm.DB) error {
 		for _, statement := range auditStatements {
 			if err := tx.Exec(statement).Error; err != nil {
 				return fmt.Errorf("protect audit log: %w", err)
+			}
+		}
+		// Both provider ledgers are append-only financial records. A task may be
+		// retried, but it may never rewrite the cost, usage, model, or private
+		// evidence linkage of a completed primary or tool call.
+		ledgerStatements := []string{
+			`CREATE OR REPLACE FUNCTION prevent_automation_ledger_mutation()
+			 RETURNS trigger AS $$
+			 BEGIN
+			   RAISE EXCEPTION 'automation execution ledgers are append-only';
+			 END;
+			 $$ LANGUAGE plpgsql`,
+			"DROP TRIGGER IF EXISTS automation_executions_append_only ON automation_executions",
+			`CREATE TRIGGER automation_executions_append_only
+			 BEFORE UPDATE OR DELETE ON automation_executions
+			 FOR EACH ROW EXECUTE FUNCTION prevent_automation_ledger_mutation()`,
+			"DROP TRIGGER IF EXISTS automation_tool_executions_append_only ON automation_tool_executions",
+			`CREATE TRIGGER automation_tool_executions_append_only
+			 BEFORE UPDATE OR DELETE ON automation_tool_executions
+			 FOR EACH ROW EXECUTE FUNCTION prevent_automation_ledger_mutation()`,
+		}
+		for _, statement := range ledgerStatements {
+			if err := tx.Exec(statement).Error; err != nil {
+				return fmt.Errorf("protect automation ledger: %w", err)
 			}
 		}
 		return nil

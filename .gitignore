@@ -1,4 +1,7 @@
 .env
+.env.ai.local
+/.local/github/*.private-key.pem
+tools/stagehand-qa/node_modules/
 
 # Claude Code — personal settings (no subir al repo)
 .claude/settings.local.json

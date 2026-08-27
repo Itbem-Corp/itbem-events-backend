@@ -2,21 +2,21 @@ package outbox
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"time"
 
 	"events-stocks/internal/observability"
 	"events-stocks/models"
+	automationqueue "events-stocks/repositories/automationqueuerepository"
 	"events-stocks/repositories/jobqueuerepository"
 	"events-stocks/repositories/outboxrepository"
+	sqsrepository "events-stocks/repositories/sqsrepository"
 
 	"github.com/gofrs/uuid"
 	"gorm.io/gorm"
 )
-
-const analyticsRollupType = "analytics.rollup"
-const slackNotificationType = "notification.slack"
 
 type Publisher interface {
 	Publish(eventType, body, tenantCode string) error
@@ -25,7 +25,48 @@ type Publisher interface {
 type workerQueuePublisher struct{}
 
 func (workerQueuePublisher) Publish(eventType, body, tenantCode string) error {
-	return jobqueuerepository.PublishRawWorkload(body, tenantCode, eventType == slackNotificationType)
+	route, err := RouteFor(eventType)
+	if err != nil {
+		return err
+	}
+	if err := ValidateRoute(route, tenantCode); err != nil {
+		return err
+	}
+	switch route.Runtime {
+	case RuntimeLocalAgent:
+		return automationqueue.PublishSerialized(body)
+	case RuntimeRustWorker:
+		return jobqueuerepository.PublishRawWorkload(body, tenantCode, route.NotificationLane)
+	case RuntimeMediaLambda:
+		return sqsrepository.PublishSerialized(body)
+	default:
+		return fmt.Errorf("outbox route %s targets unsupported runtime %s", route.EventType, route.Runtime)
+	}
+}
+
+// EnqueueAutomationProcess durably couples a task to its local-agent handoff.
+// Callers must provide the transaction that created the task, so a task can
+// never commit without a retryable delivery record.
+func EnqueueAutomationProcess(ctx context.Context, db *gorm.DB, message automationqueue.Message) (bool, error) {
+	if db == nil {
+		return false, fmt.Errorf("outbox database is unavailable")
+	}
+	if err := automationqueue.Validate(message); err != nil {
+		return false, err
+	}
+	body, err := json.Marshal(message)
+	if err != nil {
+		return false, fmt.Errorf("marshal automation outbox message: %w", err)
+	}
+	return outboxrepository.Enqueue(db, &models.OutboxEvent{
+		EventType:     automationProcessType,
+		DedupeKey:     message.JobID,
+		TenantCode:    "itbem",
+		CorrelationID: observability.NormalizeCorrelationID(message.CorrelationID),
+		Payload:       string(body),
+		State:         outboxrepository.StatePending,
+		AvailableAt:   time.Now().UTC(),
+	})
 }
 
 func EnqueueAnalyticsRollup(ctx context.Context, db *gorm.DB, eventID uuid.UUID, tenantCode string) (bool, error) {
@@ -85,20 +126,16 @@ func dispatchOnce(ctx context.Context, db *gorm.DB, publisher Publisher) {
 		if ctx.Err() != nil {
 			return
 		}
-		if event.EventType != analyticsRollupType && event.EventType != slackNotificationType {
-			err = fmt.Errorf("unsupported outbox event type %s", event.EventType)
-		} else {
-			err = publisher.Publish(event.EventType, event.Payload, event.TenantCode)
-		}
+		err = publisher.Publish(event.EventType, event.Payload, event.TenantCode)
 		if err != nil {
-			slog.Warn("outbox delivery failed", "event", "outbox_delivery_failed", "component", "outbox", "outbox_id", event.ID, "job_id", event.DedupeKey, "correlation_id", event.CorrelationID, "application", event.TenantCode, "job_type", event.EventType, "attempt", event.Attempts, "error", err)
+			slog.Warn("outbox delivery failed", "event", "outbox_delivery_failed", "component", "outbox", "outbox_id", event.ID, "job_id", event.DedupeKey, "correlation_id", event.CorrelationID, "application", event.TenantCode, "job_type", event.EventType, "target_runtime", event.TargetRuntime, "queue_namespace", event.QueueNamespace, "attempt", event.Attempts, "error", err)
 			_ = outboxrepository.ScheduleRetry(db, event, err)
 			continue
 		}
 		if markErr := outboxrepository.MarkCompleted(db, event.ID); markErr != nil {
 			slog.Error("outbox completion failed", "event", "outbox_completion_failed", "component", "outbox", "outbox_id", event.ID, "job_id", event.DedupeKey, "correlation_id", event.CorrelationID, "error", markErr)
 		} else {
-			slog.Info("outbox delivery completed", "event", "outbox_delivery_completed", "component", "outbox", "outbox_id", event.ID, "job_id", event.DedupeKey, "correlation_id", event.CorrelationID, "application", event.TenantCode, "job_type", event.EventType, "attempt", event.Attempts)
+			slog.Info("outbox delivery completed", "event", "outbox_delivery_completed", "component", "outbox", "outbox_id", event.ID, "job_id", event.DedupeKey, "correlation_id", event.CorrelationID, "application", event.TenantCode, "job_type", event.EventType, "target_runtime", event.TargetRuntime, "queue_namespace", event.QueueNamespace, "attempt", event.Attempts)
 		}
 	}
 }

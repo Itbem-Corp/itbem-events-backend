@@ -15,10 +15,11 @@ func TestPinnedProductContractMatchesBackendRegistry(t *testing.T) {
 	var contract struct {
 		SchemaVersion int `json:"schemaVersion"`
 		Products      []struct {
-			Code string `json:"code"`
+			Code         string `json:"code"`
 			Capabilities struct {
 				AllowsPlatformAuthority bool `json:"allowsPlatformAuthority"`
 				SupportsEventOperations bool `json:"supportsEventOperations"`
+				SupportsAutomation      bool `json:"supportsAutomation"`
 			} `json:"capabilities"`
 			Modules []string `json:"modules"`
 		} `json:"products"`
@@ -34,7 +35,7 @@ func TestPinnedProductContractMatchesBackendRegistry(t *testing.T) {
 	}
 	for _, external := range contract.Products {
 		local, ok := Resolve(external.Code)
-		if !ok || local.AllowsPlatformAuthority != external.Capabilities.AllowsPlatformAuthority || local.SupportsEventOperations != external.Capabilities.SupportsEventOperations {
+		if !ok || local.AllowsPlatformAuthority != external.Capabilities.AllowsPlatformAuthority || local.SupportsEventOperations != external.Capabilities.SupportsEventOperations || local.SupportsAutomation != external.Capabilities.SupportsAutomation {
 			t.Fatalf("backend registry diverged for product %q", external.Code)
 		}
 	}

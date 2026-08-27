@@ -6,7 +6,6 @@ import (
 	"errors"
 	"events-stocks/configuration"
 	"events-stocks/dtos"
-	"events-stocks/models"
 	"events-stocks/services/ports"
 	"fmt"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -22,8 +21,6 @@ import (
 	"strings"
 	"time"
 )
-
-var s3Client *s3.Client
 
 const (
 	singlePutThreshold = 16 * 1024 * 1024
@@ -120,12 +117,30 @@ func withStorageTimeout(ctx context.Context, timeout time.Duration) (context.Con
 	return context.WithTimeout(ctx, timeout)
 }
 
-func Init(_ *models.Config) {
-	s3Client = configuration.GetS3Client(nil)
-}
-
 func UploadToS3(ctx context.Context, content []byte, key, contentType, bucket string) (string, error) {
 	return UploadStreamToS3(ctx, bytes.NewReader(content), int64(len(content)), key, contentType, bucket)
+}
+
+// UploadEncryptedJSON writes small control-plane inputs with explicit S3
+// server-side encryption. Automation input buckets must also retain their own
+// default encryption policy; this setting makes the application intent clear
+// and protects the object even if a bucket default is later misconfigured.
+func UploadEncryptedJSON(ctx context.Context, content []byte, key, bucket string) error {
+	s3Client := configuration.GetS3Client(nil)
+	if s3Client == nil {
+		return wrapStorageError("upload encrypted JSON", fmt.Errorf("S3 client is not initialized"))
+	}
+	ctx, cancel := withStorageTimeout(ctx, uploadTimeout)
+	defer cancel()
+	_, err := s3Client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:               aws.String(bucket),
+		Key:                  aws.String(key),
+		Body:                 bytes.NewReader(content),
+		ContentLength:        aws.Int64(int64(len(content))),
+		ContentType:          aws.String("application/json"),
+		ServerSideEncryption: s3types.ServerSideEncryptionAes256,
+	})
+	return wrapStorageError("upload encrypted JSON", err)
 }
 
 // UploadStreamToS3 uploads without first materializing the complete object in

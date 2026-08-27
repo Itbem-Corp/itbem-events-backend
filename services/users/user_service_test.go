@@ -413,6 +413,150 @@ func TestSyncUser_AuthProviderError(t *testing.T) {
 	assert.Nil(t, result)
 }
 
+func TestSyncUser_UsesExistingLocalUserOnlyWithExplicitLocalFallback(t *testing.T) {
+	t.Setenv("ENV", "local")
+	local := &models.User{ID: uuid.Must(uuid.NewV4()), CognitoSub: "known-sub", Email: "known@example.com", IsActive: true}
+	userRepo := &mockUserRepo{
+		GetUserByCognitoSubFunc: func(string) (*models.User, error) { return local, nil },
+	}
+	authRepo := &mockAuthRepo{
+		GetUserFunc: func(string, string) (*dtos.AuthUser, error) { return nil, errors.New("credentials unavailable") },
+	}
+
+	svc := NewUserService(userRepo, authRepo, &models.Config{AllowLocalUserSyncFallback: "true"})
+	result, err := svc.SyncUser(local.CognitoSub)
+
+	require.NoError(t, err)
+	assert.Same(t, local, result)
+}
+
+func TestSyncUser_DoesNotUseLocalFallbackOutsideExplicitLocalMode(t *testing.T) {
+	t.Setenv("ENV", "production")
+	local := &models.User{ID: uuid.Must(uuid.NewV4()), CognitoSub: "known-sub", Email: "known@example.com", IsActive: true}
+	userRepo := &mockUserRepo{
+		GetUserByCognitoSubFunc: func(string) (*models.User, error) { return local, nil },
+	}
+	authRepo := &mockAuthRepo{
+		GetUserFunc: func(string, string) (*dtos.AuthUser, error) { return nil, errors.New("credentials unavailable") },
+	}
+
+	svc := NewUserService(userRepo, authRepo, &models.Config{AllowLocalUserSyncFallback: "true"})
+	result, err := svc.SyncUser(local.CognitoSub)
+
+	require.Error(t, err)
+	assert.Nil(t, result)
+}
+
+func TestSyncUser_GrantsConfiguredLocalBootstrapRootOnFirstLocalSync(t *testing.T) {
+	t.Setenv("ENV", "local")
+	const email = "admin@example.com"
+	var created *models.User
+	userRepo := &mockUserRepo{
+		GetUserByCognitoSubFunc: func(string) (*models.User, error) { return nil, errors.New("record not found") },
+		CreateUserFunc: func(user *models.User) error {
+			created = user
+			return nil
+		},
+	}
+	authRepo := &mockAuthRepo{GetUserFunc: func(sub, provider string) (*dtos.AuthUser, error) {
+		return &dtos.AuthUser{Sub: sub, Email: email, FirstName: "Local", LastName: "Admin", IsActive: true}, nil
+	}}
+
+	svc := NewUserService(userRepo, authRepo, &models.Config{LocalBootstrapRootEmails: "other@example.com, ADMIN@example.com"})
+	result, err := svc.SyncUser("admin-sub")
+
+	require.NoError(t, err)
+	require.Same(t, created, result)
+	assert.True(t, result.IsRoot)
+	assert.Equal(t, models.RootLevelPrimary, result.RootLevel)
+}
+
+func TestSyncUser_LocalBootstrapRootIsIgnoredOutsideLocalEnvironment(t *testing.T) {
+	t.Setenv("ENV", "production")
+	var created *models.User
+	userRepo := &mockUserRepo{
+		GetUserByCognitoSubFunc: func(string) (*models.User, error) { return nil, errors.New("record not found") },
+		CreateUserFunc: func(user *models.User) error {
+			created = user
+			return nil
+		},
+	}
+	authRepo := &mockAuthRepo{GetUserFunc: func(sub, provider string) (*dtos.AuthUser, error) {
+		return &dtos.AuthUser{Sub: sub, Email: "admin@example.com", IsActive: true}, nil
+	}}
+
+	svc := NewUserService(userRepo, authRepo, &models.Config{LocalBootstrapRootEmails: "admin@example.com"})
+	result, err := svc.SyncUser("admin-sub")
+
+	require.NoError(t, err)
+	require.Same(t, created, result)
+	assert.False(t, result.IsRoot)
+	assert.Equal(t, models.RootLevelNone, result.RootLevel)
+}
+
+func TestSyncUser_PromotesExistingConfiguredLocalBootstrapRoot(t *testing.T) {
+	t.Setenv("ENV", "local")
+	local := &models.User{ID: uuid.Must(uuid.NewV4()), CognitoSub: "known-sub", Email: "admin@example.com", IsActive: true}
+	var fields map[string]interface{}
+	userRepo := &mockUserRepo{
+		GetUserByCognitoSubFunc: func(string) (*models.User, error) { return local, nil },
+		UpdateUserFieldsFunc: func(_ uuid.UUID, received map[string]interface{}) error {
+			fields = received
+			return nil
+		},
+	}
+	authRepo := &mockAuthRepo{GetUserFunc: func(sub, provider string) (*dtos.AuthUser, error) {
+		return &dtos.AuthUser{Sub: sub, Email: "admin@example.com", IsActive: true}, nil
+	}}
+
+	svc := NewUserService(userRepo, authRepo, &models.Config{LocalBootstrapRootEmails: "admin@example.com"})
+	result, err := svc.SyncUser(local.CognitoSub)
+
+	require.NoError(t, err)
+	assert.True(t, result.IsPrimaryRoot())
+	require.NotNil(t, fields)
+	assert.Equal(t, true, fields["is_root"])
+	assert.Equal(t, models.RootLevelPrimary, fields["root_level"])
+}
+
+func TestBootstrapConfiguredLocalRootCreatesOnlyAllowListedLocalIdentity(t *testing.T) {
+	t.Setenv("ENV", "local")
+	var created *models.User
+	userRepo := &mockUserRepo{
+		GetUserByCognitoSubFunc: func(string) (*models.User, error) { return nil, errors.New("record not found") },
+		CreateUserFunc: func(user *models.User) error {
+			created = user
+			return nil
+		},
+	}
+	svc := NewUserService(userRepo, &mockAuthRepo{}, &models.Config{LocalBootstrapRootEmails: "admin@example.com"})
+
+	result, err := svc.BootstrapConfiguredLocalRoot("trusted-sub", "ADMIN@example.com")
+
+	require.NoError(t, err)
+	require.Same(t, created, result)
+	assert.True(t, result.IsPrimaryRoot())
+	assert.True(t, result.IsActive)
+
+	_, err = svc.BootstrapConfiguredLocalRoot("untrusted-sub", "other@example.com")
+	require.Error(t, err)
+}
+
+func TestBootstrapConfiguredLocalRootFailsClosedOutsideLocalEnvironment(t *testing.T) {
+	t.Setenv("ENV", "production")
+	created := false
+	userRepo := &mockUserRepo{CreateUserFunc: func(*models.User) error {
+		created = true
+		return nil
+	}}
+	svc := NewUserService(userRepo, &mockAuthRepo{}, &models.Config{LocalBootstrapRootEmails: "admin@example.com"})
+
+	_, err := svc.BootstrapConfiguredLocalRoot("trusted-sub", "admin@example.com")
+
+	require.Error(t, err)
+	assert.False(t, created)
+}
+
 func TestSyncUser_DBError_NonRecordNotFound(t *testing.T) {
 	// Scenario: DB returns a real error (not "record not found") — must propagate.
 	sub := "cognito-sub-err"

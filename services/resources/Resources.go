@@ -1227,10 +1227,6 @@ func (rs *ResourceService) DownloadFile(filename string) (io.ReadCloser, error) 
 	return storage.GetFileStream(filename, rs.UploadPath, rs.Bucket, rs.Provider)
 }
 
-func isAllowed(contentType string) bool {
-	return AllowedMimeTypes[canonicalUploadContentType(contentType)]
-}
-
 func requireImageUploadContentType(contentType string) error {
 	normalized := canonicalUploadContentType(contentType)
 	if strings.HasPrefix(normalized, "image/") {

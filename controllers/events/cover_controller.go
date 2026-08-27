@@ -57,7 +57,9 @@ func uploadEventCoverForService(c echo.Context, eventID uuid.UUID, existingEvent
 		return utils.Error(c, status, "Failed to upload cover", detail)
 	}
 	jobID := uuid.Must(uuid.NewV4()).String()
-	event, supersededPending, err := eventSvc.BeginCoverProcessing(eventID, rawPath, jobID)
+	message := dtos.NewMediaProcessMessage(eventID.String(), eventID.String(), rawPath, svc.Bucket, contentType, false)
+	message.TargetType, message.JobID = dtos.MediaTargetEventCover, jobID
+	event, supersededPending, durable, err := eventSvc.BeginCoverProcessingWithOutbox(eventID, rawPath, message)
 	if err != nil {
 		_ = svc.DeleteObjectByPath(rawPath)
 		if errors.Is(err, eventsService.ErrEventNotFound) {
@@ -65,9 +67,11 @@ func uploadEventCoverForService(c echo.Context, eventID uuid.UUID, existingEvent
 		}
 		return utils.Error(c, http.StatusInternalServerError, "Failed to start cover processing", err.Error())
 	}
-	message := dtos.NewMediaProcessMessage(eventID.String(), eventID.String(), rawPath, svc.Bucket, contentType, false)
-	message.TargetType, message.JobID, message.Generation = dtos.MediaTargetEventCover, jobID, event.CoverProcessingGeneration
-	enqueued, publishErr := sqsrepository.PublishMediaJob(message)
+	enqueued, publishErr := durable, error(nil)
+	if !durable {
+		message.Generation = event.CoverProcessingGeneration
+		enqueued, publishErr = sqsrepository.PublishMediaJob(message)
+	}
 	if publishErr != nil {
 		_, _, _, _ = eventSvc.ApplyCoverProcessingCallback(eventID, dtos.MediaProcessingCallback{JobID: jobID, Generation: event.CoverProcessingGeneration, ProcessingStatus: "failed", ErrorMessage: "processing queue unavailable"})
 		return utils.Error(c, http.StatusServiceUnavailable, "Cover upload is safe but processing could not start", publishErr.Error())
@@ -130,14 +134,18 @@ func BackfillEventCovers(c echo.Context) error {
 	for _, candidate := range candidates {
 		svc := coverResourceSvc.WithBucket(candidate.MediaBucket)
 		jobID := uuid.Must(uuid.NewV4()).String()
-		event, _, err := eventSvc.BeginCoverProcessing(candidate.ID, candidate.CoverImageURL, jobID)
+		message := dtos.NewMediaProcessMessage(candidate.ID.String(), candidate.ID.String(), candidate.CoverImageURL, svc.Bucket, "image/webp", false)
+		message.TargetType, message.JobID = dtos.MediaTargetEventCover, jobID
+		event, _, durable, err := eventSvc.BeginCoverProcessingWithOutbox(candidate.ID, candidate.CoverImageURL, message)
 		if err != nil {
 			failed++
 			continue
 		}
-		message := dtos.NewMediaProcessMessage(candidate.ID.String(), candidate.ID.String(), candidate.CoverImageURL, svc.Bucket, "image/webp", false)
-		message.TargetType, message.JobID, message.Generation = dtos.MediaTargetEventCover, jobID, event.CoverProcessingGeneration
-		enqueued, publishErr := sqsrepository.PublishMediaJob(message)
+		enqueued, publishErr := durable, error(nil)
+		if !durable {
+			message.Generation = event.CoverProcessingGeneration
+			enqueued, publishErr = sqsrepository.PublishMediaJob(message)
+		}
 		if publishErr != nil || !enqueued {
 			failed++
 			_, _, _, _ = eventSvc.ApplyCoverProcessingCallback(candidate.ID, dtos.MediaProcessingCallback{JobID: jobID, Generation: event.CoverProcessingGeneration, ProcessingStatus: "failed", ErrorMessage: "backfill queue unavailable"})

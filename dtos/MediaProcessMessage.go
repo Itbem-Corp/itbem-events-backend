@@ -18,6 +18,10 @@ type MediaProcessMessage struct {
 }
 
 const (
+	// MediaProcessEventType is the durable outbox event consumed exclusively by
+	// the media Lambda adapter. It must never be sent to the Rust or local AI
+	// worker queues.
+	MediaProcessEventType = "media.process"
 	MediaTargetMoment     = "moment"
 	MediaTargetEventCover = "event_cover"
 )

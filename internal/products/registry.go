@@ -56,8 +56,19 @@ func SupportsEventOperations(value string) bool {
 	return ok && definition.SupportsEventOperations
 }
 
+func SupportsAutomation(value string) bool {
+	definition, ok := Resolve(value)
+	return ok && definition.SupportsAutomation
+}
+
 // RequiresEventOperationsPath keeps EventiApp-owned HTTP surfaces in the
 // EventiApp module while callers keep a generic product-boundary check.
 func RequiresEventOperationsPath(path string) bool {
 	return eventiapp.OwnsProtectedSurface(path)
+}
+
+// RequiresAutomationPath keeps orchestration and local-agent operations out
+// of the EventiApp API domain even though both products share core services.
+func RequiresAutomationPath(path string) bool {
+	return itbem.OwnsAutomationSurface(path)
 }

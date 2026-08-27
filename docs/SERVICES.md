@@ -12,6 +12,18 @@
 
 ## Available Services
 
+### Delivery workflow (`services/deliveryworkflow/`)
+
+| File | Purpose |
+|---|---|
+| `workflow.go` | Pure state machine for private ITBEM delivery work. Plan, code review, QA review, and release require matching human gate decisions. Code approval authorizes only a preview; `preview_ready` is required before QA begins. |
+
+The delivery controller queues a phase only from its matching lifecycle state
+and writes a short, explicitly encrypted JSON input object. Submitting a plan,
+code review, or QA review requires a completed linked agent task; its private
+output is persisted as report evidence, never copied into Postgres. `preview_ready`
+requires an explicit HTTP(S) preview URL before QA can start.
+
 ### Notifications (`services/notifications/`)
 
 | File | Purpose |
@@ -168,3 +180,10 @@ All interfaces are defined in `services/ports/ports.go`.
 services/<domain>/<Domain>Service.go
 services/ports/ports.go    ← all repository interfaces
 ```
+# Delivery workflow service
+
+- **File**: `services/deliveryworkflow/workflow.go`
+- **Purpose**: Enforces the ITBEM private delivery state machine without a
+  database dependency. `plan`, `code_review`, `qa_review`, and `release`
+  transitions require a matching human `DeliveryGate`; an agent or controller
+  cannot skip directly to QA or production release.

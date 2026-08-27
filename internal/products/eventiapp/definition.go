@@ -9,4 +9,5 @@ var Definition = core.Definition{
 	Modules:                 []string{"home", "events", "metrics"},
 	AllowsPlatformAuthority: true,
 	SupportsEventOperations: true,
+	SupportsAutomation:      false,
 }

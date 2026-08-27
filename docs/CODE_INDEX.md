@@ -58,6 +58,8 @@ itbem-events-backend/
 | Resource | `models/Resource.go` |
 | ResourceType | `models/ResourceType.go` |
 | DesignTemplate | `models/DesignTemplate.go` |
+| DeliveryProject / work-item workflow | `models/DeliveryWorkflow.go` |
+| AutomationTask | `models/AutomationTask.go` |
 | Moment | `models/Moment.go` |
 | MomentType | `models/MomentType.go` |
 | Color | `models/Color.go` |
@@ -82,6 +84,7 @@ itbem-events-backend/
 | clienttypes | `controllers/clienttypes/clientTypes.go` | `/api/catalogs/client-types` |
 | clientroles | `controllers/clientroles/clientRoles.go` | `/api/catalogs/roles` |
 | cache | `controllers/cache/cache.go` | `/api/cache*` |
+| delivery | `controllers/delivery/delivery.go`, `controllers/delivery/agent_runs.go` | `/api/automation/projects*`, `/api/automation/work-items*` |
 
 ## Services (`services/<domain>/`)
 
@@ -118,6 +121,7 @@ itbem-events-backend/
 | `services/fonts/FontSetService.go` | Font sets |
 | `services/fonts/FontSetPatternService.go` | FontSet patterns |
 | `services/cacheutil/json_cache.go` | Generic JSON cache-aside helper |
+| `services/deliveryworkflow/workflow.go` | Pure, human-gated delivery state machine |
 | `services/notifications/SlackNotificationService.go` | Durable producer for `notification.slack` worker jobs |
 | `services/validations/Validations.go` | Shared validators |
 

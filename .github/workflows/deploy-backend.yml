@@ -311,6 +311,10 @@ jobs:
           SQS_IMAGE_QUEUE_URL: ${{ secrets.SQS_IMAGE_QUEUE_URL }}
           SQS_VIDEO_QUEUE_URL: ${{ secrets.SQS_VIDEO_QUEUE_URL }}
           SQS_WORKER_QUEUE_URL: ${{ secrets.SQS_WORKER_QUEUE_URL }}
+          SQS_AUTOMATION_QUEUE_URL: ${{ secrets.SQS_AUTOMATION_QUEUE_URL }}
+          AUTOMATION_INPUT_BUCKET: ${{ secrets.AUTOMATION_INPUT_BUCKET }}
+          AUTOMATION_OUTPUT_BUCKET: ${{ secrets.AUTOMATION_OUTPUT_BUCKET }}
+          AUTOMATION_CALLBACK_SECRET: ${{ secrets.AUTOMATION_CALLBACK_SECRET }}
           SNS_WORKER_TOPIC_ARN: ${{ secrets.SNS_WORKER_TOPIC_ARN }}
         run: |
           set -euo pipefail
@@ -352,6 +356,10 @@ jobs:
             --optional REDIS_PASSWORD \
             --optional INTERNAL_API_SECRET_PREVIOUS \
             --optional SQS_WORKER_QUEUE_URL \
+            --optional SQS_AUTOMATION_QUEUE_URL \
+            --optional AUTOMATION_INPUT_BUCKET \
+            --optional AUTOMATION_OUTPUT_BUCKET \
+            --optional AUTOMATION_CALLBACK_SECRET \
             --required SNS_WORKER_TOPIC_ARN
 
       - name: Snapshot database before startup migrations

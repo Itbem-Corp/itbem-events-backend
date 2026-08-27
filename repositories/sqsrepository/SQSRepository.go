@@ -13,6 +13,7 @@ package sqsrepository
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"events-stocks/configuration"
 	"events-stocks/dtos"
 	"events-stocks/internal/products"
@@ -43,6 +44,10 @@ var (
 
 const mediaPublishTimeout = 5 * time.Second
 
+// ErrQueueUnavailable is returned by durable callers when their committed
+// outbox event cannot yet be handed to its dedicated Lambda queue.
+var ErrQueueUnavailable = errors.New("media processing queue unavailable")
+
 func newMediaPublishContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), mediaPublishTimeout)
 }
@@ -53,6 +58,18 @@ func NewPublisher() *Publisher { return &Publisher{} }
 
 func (p *Publisher) PublishMediaJob(msg MediaProcessMessage) (bool, error) {
 	return PublishMediaJob(msg)
+}
+
+// IsConfiguredFor reports whether the dedicated Lambda queue for this media
+// kind is ready. It intentionally does not expose any queue URL.
+func IsConfiguredFor(isVideo bool) bool {
+	if sqsClient == nil {
+		return false
+	}
+	if isVideo {
+		return strings.TrimSpace(videoQueueURL) != ""
+	}
+	return strings.TrimSpace(imageQueueURL) != ""
 }
 
 // Init initialises the SQS client with separate image and video queue URLs.
@@ -89,18 +106,10 @@ func Init(region, accessKeyID, secretAccessKey, imgQueue, vidQueue string, endpo
 // Returns (enqueued, error): enqueued is true only when the message was actually
 // sent to SQS. When SQS is not configured the call is a no-op (false, nil).
 func PublishMediaJob(msg MediaProcessMessage) (bool, error) {
-	if strings.TrimSpace(msg.Application) == "" {
-		msg.Application = products.DefaultCode.String()
-	} else if definition, known := products.Resolve(msg.Application); known {
-		msg.Application = definition.Code.String()
-	} else {
-		return false, fmt.Errorf("unsupported media job product %q", msg.Application)
-	}
-	if strings.TrimSpace(msg.CorrelationID) == "" {
-		msg.CorrelationID = strings.TrimSpace(msg.JobID)
-	}
-	if strings.TrimSpace(msg.SourceRevision) == "" {
-		msg.SourceRevision = strings.TrimSpace(os.Getenv("SOURCE_REVISION"))
+	var err error
+	msg, err = NormalizeMediaJob(msg)
+	if err != nil {
+		return false, err
 	}
 	if sqsClient == nil {
 		return false, nil
@@ -133,4 +142,48 @@ func PublishMediaJob(msg MediaProcessMessage) (bool, error) {
 		return false, fmt.Errorf("SQS publish failed: %w", err)
 	}
 	return true, nil
+}
+
+// NormalizeMediaJob produces the canonical payload before it enters either a
+// direct queue send or the durable outbox. This makes replayed deliveries
+// byte-for-byte compatible with the Lambda contract.
+func NormalizeMediaJob(msg MediaProcessMessage) (MediaProcessMessage, error) {
+	if strings.TrimSpace(msg.Application) == "" {
+		msg.Application = products.DefaultCode.String()
+	} else if definition, known := products.Resolve(msg.Application); known {
+		msg.Application = definition.Code.String()
+	} else {
+		return MediaProcessMessage{}, fmt.Errorf("unsupported media job product %q", msg.Application)
+	}
+	if strings.TrimSpace(msg.CorrelationID) == "" {
+		msg.CorrelationID = strings.TrimSpace(msg.JobID)
+	}
+	if strings.TrimSpace(msg.SourceRevision) == "" {
+		msg.SourceRevision = strings.TrimSpace(os.Getenv("SOURCE_REVISION"))
+	}
+	if strings.TrimSpace(msg.JobID) == "" || strings.TrimSpace(msg.EventID) == "" || strings.TrimSpace(msg.StorageObjectKey()) == "" || strings.TrimSpace(msg.Bucket) == "" {
+		return MediaProcessMessage{}, fmt.Errorf("media job requires job, event, object key and bucket")
+	}
+	return msg, nil
+}
+
+// PublishSerialized is used only by the outbox dispatcher. A false result
+// from the legacy publisher is converted into an error so the durable record
+// is retried instead of being accidentally marked completed.
+func PublishSerialized(body string) error {
+	var message MediaProcessMessage
+	if err := json.Unmarshal([]byte(body), &message); err != nil {
+		return fmt.Errorf("decode persisted media job: %w", err)
+	}
+	if _, err := NormalizeMediaJob(message); err != nil {
+		return err
+	}
+	enqueued, err := PublishMediaJob(message)
+	if err != nil {
+		return err
+	}
+	if !enqueued {
+		return ErrQueueUnavailable
+	}
+	return nil
 }

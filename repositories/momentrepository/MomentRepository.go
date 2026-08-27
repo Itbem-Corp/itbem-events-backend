@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 	"events-stocks/dtos"
 	"events-stocks/models"
 	"events-stocks/repositories/gormrepository"
+	"events-stocks/repositories/outboxrepository"
 	"github.com/gofrs/uuid"
 	"golang.org/x/sync/errgroup"
 	"gorm.io/gorm"
@@ -115,9 +118,49 @@ func (r *MomentRepo) UpdateMomentContent(id uuid.UUID, contentURL, processingSta
 // new job identity. The compare-and-swap prevents concurrent requeues from
 // publishing two jobs with the same generation.
 func (r *MomentRepo) BeginMediaProcessingJob(id, eventID uuid.UUID, inputKey, jobID string) (int64, error) {
+	return beginMediaProcessingJob(configuration.DB, id, eventID, inputKey, jobID)
+}
+
+// BeginMediaProcessingJobWithOutbox keeps the local state transition and the
+// Lambda handoff in one transaction. If either half fails, neither a pending
+// generation nor a durable message is committed.
+func (r *MomentRepo) BeginMediaProcessingJobWithOutbox(id, eventID uuid.UUID, inputKey, jobID string, message dtos.MediaProcessMessage) (int64, error) {
+	var generation int64
+	err := configuration.DB.Transaction(func(tx *gorm.DB) error {
+		var err error
+		generation, err = beginMediaProcessingJob(tx, id, eventID, inputKey, jobID)
+		if err != nil {
+			return err
+		}
+		message.Generation = generation
+		body, err := json.Marshal(message)
+		if err != nil {
+			return fmt.Errorf("marshal durable media job: %w", err)
+		}
+		inserted, err := outboxrepository.Enqueue(tx, &models.OutboxEvent{
+			EventType:     dtos.MediaProcessEventType,
+			DedupeKey:     strings.TrimSpace(message.JobID),
+			TenantCode:    strings.TrimSpace(message.Application),
+			CorrelationID: strings.TrimSpace(message.CorrelationID),
+			Payload:       string(body),
+			State:         outboxrepository.StatePending,
+			AvailableAt:   time.Now().UTC(),
+		})
+		if err != nil {
+			return fmt.Errorf("enqueue durable media job: %w", err)
+		}
+		if !inserted {
+			return fmt.Errorf("durable media job %s already exists", message.JobID)
+		}
+		return nil
+	})
+	return generation, err
+}
+
+func beginMediaProcessingJob(db *gorm.DB, id, eventID uuid.UUID, inputKey, jobID string) (int64, error) {
 	for attempt := 0; attempt < 5; attempt++ {
 		var current models.Moment
-		if err := configuration.DB.
+		if err := db.
 			Select("id", "processing_generation").
 			Where("id = ? AND event_id = ?", id, eventID).
 			First(&current).Error; err != nil {
@@ -125,7 +168,7 @@ func (r *MomentRepo) BeginMediaProcessingJob(id, eventID uuid.UUID, inputKey, jo
 		}
 
 		nextGeneration := current.ProcessingGeneration + 1
-		result := configuration.DB.Model(&models.Moment{}).
+		result := db.Model(&models.Moment{}).
 			Where("id = ? AND event_id = ? AND processing_generation = ?", id, eventID, current.ProcessingGeneration).
 			Updates(map[string]interface{}{
 				"processing_generation": nextGeneration,

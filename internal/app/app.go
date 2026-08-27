@@ -36,6 +36,7 @@ import (
 	customValidator "events-stocks/middleware/validator"
 	"events-stocks/models"
 	authproviderrepository "events-stocks/repositories/authproviderrepository"
+	automationqueuerepository "events-stocks/repositories/automationqueuerepository"
 	bucketrepository "events-stocks/repositories/bucketrepository"
 	clientrepository "events-stocks/repositories/clientrepository"
 	clientrolerepository "events-stocks/repositories/clientrolerepository"
@@ -118,6 +119,7 @@ func Run() error {
 	configuration.InitAwsServices(cfg)
 	sqsrepository.Init(cfg.AwsRegion, cfg.S3ClientId, cfg.S3ClientSecret, cfg.SQSImageQueueURL, cfg.SQSVideoQueueURL, cfg.SQSEndpoint)
 	jobqueuerepository.Init(cfg.AwsRegion, cfg.S3ClientId, cfg.S3ClientSecret, cfg.SQSWorkerQueueURL, cfg.SNSWorkerTopicARN)
+	automationqueuerepository.Init(cfg.AwsRegion, cfg.S3ClientId, cfg.S3ClientSecret, cfg.SQSAutomationQueueURL, cfg.SQSAutomationDeadLetterQueueURL, cfg.SQSEndpoint)
 	dispatcherCtx, stopDispatcher := context.WithCancel(context.Background())
 	defer stopDispatcher()
 	outboxService.StartDispatcher(dispatcherCtx, configuration.DB)
@@ -405,6 +407,7 @@ func wireDependencies(cfg *models.Config) {
 			return url
 		},
 	)
+	applicationSessionSvc.ConfigureLocalBootstrap(userSvc.BootstrapConfiguredLocalRoot)
 	applicationaccess.Configure(applicationSessionSvc)
 	sessionsController.Configure(applicationSessionSvc)
 	adminSvc := usersService.NewAdminUserService(userRepo, clientRepo, authProviderRepo)
