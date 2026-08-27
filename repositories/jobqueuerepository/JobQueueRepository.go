@@ -74,6 +74,14 @@ var (
 
 var ErrQueueUnavailable = fmt.Errorf("worker queue is unavailable")
 
+// Publisher adapts the package-level worker queue functions to application ports.
+// Queue client lifecycle remains owned by Init; consumers only receive publishing behaviour.
+type Publisher struct{}
+
+func NewPublisher() *Publisher { return &Publisher{} }
+
+func (*Publisher) PublishPerformanceRollup() (bool, error) { return PublishPerformanceRollup() }
+
 func IsConfigured() bool {
 	return queueURL != ""
 }

@@ -30,6 +30,16 @@ type MediaJobPublisher interface {
 	PublishMediaJob(msg dtos.MediaProcessMessage) (bool, error)
 }
 
+// PerformanceRollupPublisher schedules recomputable performance aggregation.
+type PerformanceRollupPublisher interface {
+	PublishPerformanceRollup() (bool, error)
+}
+
+// EventPhraseRepository provides the optional, tenant-managed phrase catalog.
+type EventPhraseRepository interface {
+	ListByEventType(ctx context.Context, eventType string) ([]string, error)
+}
+
 type ObjectStorageRepository interface {
 	FileExists(filename, folder, bucket, provider string) (bool, string, error)
 	GetPresignedFileURL(filename, folder, bucket, provider string, minutes int) (string, error)
@@ -135,6 +145,13 @@ type EventAnalyticsRepository interface {
 	GetEventAnalyticsByID(id uuid.UUID) (*models.EventAnalytics, error)
 	GetEventAnalyticsByEventID(eventID uuid.UUID) (*models.EventAnalytics, error)
 	ListEventAnalyticss() ([]models.EventAnalytics, error)
+}
+
+// EventMemberRepository isolates event-member persistence from application use cases.
+type EventMemberRepository interface {
+	List(eventID uuid.UUID) ([]models.EventMember, error)
+	Upsert(eventID, userID uuid.UUID, role string) (*models.EventMember, error)
+	Remove(eventID, userID uuid.UUID) error
 }
 
 // EventSectionRepository is the data access contract for EventSection records.

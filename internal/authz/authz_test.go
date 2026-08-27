@@ -212,7 +212,10 @@ func TestEventAssignmentCanNarrowButNeverElevateOrganizationPermissions(t *testi
 
 	memberRole = "EVENT_MANAGER"
 	// The assignment cannot elevate a Viewer organization role.
-	hooks.CheckAccessRecursive = func(uuid.UUID, uuid.UUID) (bool, string) { return true, "Guest" }
+	restoreGuestRole := ReplaceHooksForTest(Hooks{
+		CheckAccessRecursive: func(uuid.UUID, uuid.UUID) (bool, string) { return true, "Guest" },
+	})
+	t.Cleanup(restoreGuestRole)
 	_, _, err = RequireEventCapability(c, eventID, CapabilityEventManage)
 	require.Error(t, err)
 }

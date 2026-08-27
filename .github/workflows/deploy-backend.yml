@@ -33,20 +33,33 @@ jobs:
       revision: ${{ steps.revision.outputs.sha }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+          submodules: recursive
 
       - name: Record validated revision
         id: revision
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Install libvips
-        run: sudo apt-get update && sudo apt-get install -y libvips-dev
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if timeout 180s sudo apt-get -o Acquire::Retries=3 update && \
+              timeout 180s sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends libvips-dev; then
+              exit 0
+            fi
+            echo "libvips installation attempt ${attempt} failed; retrying" >&2
+            sleep $((attempt * 5))
+          done
+          exit 1
 
       - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.25.12'
           cache: true
@@ -103,13 +116,14 @@ jobs:
 
     steps:
       - name: Checkout validated revision
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ needs.validate.outputs.revision }}
           persist-credentials: false
+          submodules: recursive
 
       - name: Setup Go for production security preflight
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.25.12'
           cache: true
@@ -160,7 +174,7 @@ jobs:
           [[ "$BACKEND_PORT" != "$BACKEND_CANDIDATE_PORT" ]] || { echo "candidate and production ports must differ"; exit 1; }
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@f79bc868ee9ca4687c7db10f05fe6a46cdcda892 # v6
+        uses: aws-actions/configure-aws-credentials@451ce2a72e8d729a59ebeaacab82dbce58e7af4c # v6
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           role-session-name: eventiapp-backend-${{ github.run_id }}
@@ -311,10 +325,6 @@ jobs:
           SQS_IMAGE_QUEUE_URL: ${{ secrets.SQS_IMAGE_QUEUE_URL }}
           SQS_VIDEO_QUEUE_URL: ${{ secrets.SQS_VIDEO_QUEUE_URL }}
           SQS_WORKER_QUEUE_URL: ${{ secrets.SQS_WORKER_QUEUE_URL }}
-          SQS_AUTOMATION_QUEUE_URL: ${{ secrets.SQS_AUTOMATION_QUEUE_URL }}
-          AUTOMATION_INPUT_BUCKET: ${{ secrets.AUTOMATION_INPUT_BUCKET }}
-          AUTOMATION_OUTPUT_BUCKET: ${{ secrets.AUTOMATION_OUTPUT_BUCKET }}
-          AUTOMATION_CALLBACK_SECRET: ${{ secrets.AUTOMATION_CALLBACK_SECRET }}
           SNS_WORKER_TOPIC_ARN: ${{ secrets.SNS_WORKER_TOPIC_ARN }}
         run: |
           set -euo pipefail
@@ -356,10 +366,6 @@ jobs:
             --optional REDIS_PASSWORD \
             --optional INTERNAL_API_SECRET_PREVIOUS \
             --optional SQS_WORKER_QUEUE_URL \
-            --optional SQS_AUTOMATION_QUEUE_URL \
-            --optional AUTOMATION_INPUT_BUCKET \
-            --optional AUTOMATION_OUTPUT_BUCKET \
-            --optional AUTOMATION_CALLBACK_SECRET \
             --required SNS_WORKER_TOPIC_ARN
 
       - name: Snapshot database before startup migrations
@@ -448,9 +454,41 @@ jobs:
             --parameters "$ssm_parameters" \
             --timeout-seconds 1800 \
             --query 'Command.CommandId' --output text)"
-          aws ssm wait command-executed --command-id "$command_id" --instance-id '${{ vars.EC2_INSTANCE_ID }}'
+          # The AWS CLI's built-in command-executed waiter gives up after
+          # roughly 100 seconds, while an image pull plus a candidate health
+          # gate may legitimately take longer. Poll explicitly up to the same
+          # 30-minute bound passed to SSM and preserve output on every terminal
+          # outcome.
+          for attempt in {1..180}; do
+            command_status="$(aws ssm get-command-invocation \
+              --command-id "$command_id" \
+              --instance-id '${{ vars.EC2_INSTANCE_ID }}' \
+              --query Status \
+              --output text 2>/dev/null || true)"
+            case "$command_status" in
+              Success)
+                break
+                ;;
+              Pending|InProgress|Delayed|"")
+                sleep 10
+                ;;
+              *)
+                aws ssm get-command-invocation --command-id "$command_id" --instance-id '${{ vars.EC2_INSTANCE_ID }}' \
+                  --query '{status:Status,stdout:StandardOutputContent,stderr:StandardErrorContent}' --output json
+                exit 1
+                ;;
+            esac
+          done
+          [[ "$command_status" == Success ]] || {
+            echo "SSM command did not complete within 30 minutes" >&2
+            aws ssm get-command-invocation --command-id "$command_id" --instance-id '${{ vars.EC2_INSTANCE_ID }}' \
+              --query '{status:Status,stdout:StandardOutputContent,stderr:StandardErrorContent}' --output json || true
+            exit 1
+          }
           invocation_output="$(aws ssm get-command-invocation --command-id "$command_id" --instance-id '${{ vars.EC2_INSTANCE_ID }}' --query StandardOutputContent --output text)"
+          invocation_error="$(aws ssm get-command-invocation --command-id "$command_id" --instance-id '${{ vars.EC2_INSTANCE_ID }}' --query StandardErrorContent --output text)"
           printf '%s\n' "$invocation_output"
+          [[ -z "$invocation_error" || "$invocation_error" == None ]] || printf '%s\n' "$invocation_error" >&2
           grep -Fqx "deployed_revision=$REVISION" <<<"$invocation_output"
 
       - name: Remove ephemeral delivery artifacts

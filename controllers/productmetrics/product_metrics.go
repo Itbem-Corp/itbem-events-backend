@@ -7,7 +7,7 @@ import (
 
 	"events-stocks/configuration"
 	"events-stocks/internal/authz"
-	"events-stocks/services/productmetrics"
+	productmetricshttp "events-stocks/internal/observability/productmetricshttp"
 	"events-stocks/utils"
 
 	"github.com/gofrs/uuid"
@@ -70,7 +70,7 @@ func Portfolio(c echo.Context) error {
 		if err := authz.RequireClientCapability(user, clientID, authz.CapabilityAnalyticsView); err != nil {
 			return authz.Respond(c, err)
 		}
-		productmetrics.ScopeOrganization(c, clientID)
+		productmetricshttp.ScopeOrganization(c, clientID)
 	} else if !user.IsPlatformAdmin() {
 		return utils.Error(c, http.StatusForbidden, "Organization required", "Select an organization to view metrics")
 	}

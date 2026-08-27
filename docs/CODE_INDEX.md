@@ -105,7 +105,8 @@ itbem-events-backend/
 | `services/clienttypes/clientTypeService.go` | ClientType catalog |
 | `services/users/UserService.go` | User profile |
 | `services/users/AdminUserService.go` | Admin user ops |
-| `services/resources/Resources.go` | Resource CRUD + S3 |
+| `services/resources/Resources.go` | Resource CRUD, upload orchestration, and cache invalidation |
+| `services/resources/ResourceObjectStorage.go` | Presigned URLs and object deletion boundary |
 | `services/resources/ResourceTypes.go` | Resource types |
 | `services/resources/ImageOptimizer.go` | libvips pipeline |
 | `services/resources/ImageOptimizer_fallback.go` | Windows/no-cgo optimizer fallback |

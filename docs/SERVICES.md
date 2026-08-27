@@ -79,7 +79,8 @@ requires an explicit HTTP(S) preview URL before QA can start.
 
 | File | Purpose |
 |------|---------|
-| `Resources.go` | Core resource CRUD + S3 upload |
+| `Resources.go` | Resource CRUD, upload orchestration, and cache invalidation |
+| `ResourceObjectStorage.go` | Presigned URLs and object deletion |
 | `ResourceTypes.go` | Resource type catalog |
 | `ImageOptimizer.go` | libvips image compression pipeline |
 | `ResourcesUsers.go` | User-specific resource operations (avatar) |

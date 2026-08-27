@@ -1,7 +1,7 @@
 # ---------- Etapa de compilación ----------
-FROM golang:1.25.12-bookworm AS build-env
+FROM golang:1.25.12-bookworm@sha256:ea341baa9bd5ba6784f6d7161ace70544349a6242d54d34a0fbfd2c4d51c9d58 AS build-env
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get -o Acquire::Retries=3 update && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
     libvips-dev pkg-config && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
@@ -17,12 +17,12 @@ COPY . ./
 RUN go build -v -trimpath -ldflags="-s -w" -o main ./cmd/api | tee /dev/stderr
 
 # ---------- Etapa de ejecución ----------
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 
 ARG SOURCE_REVISION
 LABEL org.opencontainers.image.revision=$SOURCE_REVISION
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get -o Acquire::Retries=3 update && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
     libvips curl ca-certificates && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 

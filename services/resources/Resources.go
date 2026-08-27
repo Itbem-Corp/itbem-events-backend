@@ -6,6 +6,7 @@ import (
 	"events-stocks/configuration/constants"
 	"events-stocks/dtos"
 	"events-stocks/models"
+	"events-stocks/repositories/awsrepository"
 	"events-stocks/services/cacheutil"
 	"events-stocks/services/ports"
 	services "events-stocks/services/validations"
@@ -100,6 +101,12 @@ type ResourceService struct {
 	repo       ports.ResourceRepository
 	cache      ports.CacheRepository
 	storage    ports.ObjectStorageRepository
+}
+
+// CanonicalObjectKey normalizes legacy S3/CDN URLs at the storage boundary so
+// callers never use a user-controlled URL as an object identifier.
+func (rs *ResourceService) CanonicalObjectKey(raw string) string {
+	return awsrepository.S3KeyFromURL(raw, rs.Bucket)
 }
 
 type ResourceServiceDeps struct {

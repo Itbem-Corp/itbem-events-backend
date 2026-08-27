@@ -12,8 +12,6 @@ import (
 	"events-stocks/internal/publicaccessproof"
 	"events-stocks/internal/tenantresources"
 	"events-stocks/models"
-	jobqueuerepository "events-stocks/repositories/jobqueuerepository"
-	"events-stocks/repositories/phraserepository"
 	eventsService "events-stocks/services/events"
 	guestsService "events-stocks/services/guests"
 	"events-stocks/services/ports"
@@ -71,6 +69,8 @@ var (
 	eventAccessTokenRepo ports.AccessTokenRepository
 	eventInvitationRepo  ports.InvitationRepository
 	eventGuestSvc        *guestsService.GuestService
+	performancePublisher ports.PerformanceRollupPublisher
+	phraseRepo           ports.EventPhraseRepository
 )
 
 const eventCoverViewURLTTLMinutes = 720
@@ -82,12 +82,16 @@ func InitEventsController(
 	accessTokenRepo ports.AccessTokenRepository,
 	invitationRepo ports.InvitationRepository,
 	guestSvc *guestsService.GuestService,
+	rollupPublisher ports.PerformanceRollupPublisher,
+	phrases ports.EventPhraseRepository,
 ) {
 	eventSvc = svc
 	eventConfigSvc = cfgSvc
 	eventAccessTokenRepo = accessTokenRepo
 	eventInvitationRepo = invitationRepo
 	eventGuestSvc = guestSvc
+	performancePublisher = rollupPublisher
+	phraseRepo = phrases
 }
 
 func coverViewURLWithExpiry(path string, buckets ...string) (string, *time.Time) {
@@ -751,8 +755,10 @@ func TrackPerformance(c echo.Context) error {
 			}
 		}
 		if persisted {
-			if _, err := jobqueuerepository.PublishPerformanceRollup(); err != nil {
-				slog.Warn("failed to publish performance rollup", "error", err)
+			if performancePublisher != nil {
+				if _, err := performancePublisher.PublishPerformanceRollup(); err != nil {
+					slog.Warn("failed to publish performance rollup", "error", err)
+				}
 			}
 			cleanupPublicPerformanceWindows()
 		}
@@ -970,8 +976,10 @@ func ListPhrases(c echo.Context) error {
 		count = 50
 	}
 	source := phrasesByType(phraseType)
-	if stored, err := phraserepository.ListByEventType(c.Request().Context(), storedPhraseType(phraseType)); err == nil && len(stored) > 0 {
-		source = stored
+	if phraseRepo != nil {
+		if stored, err := phraseRepo.ListByEventType(c.Request().Context(), storedPhraseType(phraseType)); err == nil && len(stored) > 0 {
+			source = stored
+		}
 	}
 	phrases := selectPhrases(source, count)
 	c.Response().Header().Set(echo.HeaderCacheControl, "public, max-age=3600, stale-while-revalidate=86400")
