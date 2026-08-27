@@ -321,13 +321,21 @@ func RequireEventAccess(c echo.Context, eventID uuid.UUID) (*models.User, *model
 		return nil, nil, err
 	}
 
+	eventLookup := hooks.GetEventByIDRaw
 	user, event, err := loadEventAccessInputs(
 		func() (*models.User, error) {
 			user, loadErr := currentUserByCognitoSub(cognitoSub)
 			return scopeUserToTenant(c, user), loadErr
 		},
 		func() (*models.Event, error) {
-			return lookupEventByID(eventID)
+			if eventLookup == nil {
+				return nil, dependencyFailure("GetEventByIDRaw")
+			}
+			event, lookupErr := eventLookup(eventID)
+			if lookupErr != nil {
+				return nil, lookupFailure("Event", lookupErr)
+			}
+			return event, nil
 		},
 	)
 	if err != nil {

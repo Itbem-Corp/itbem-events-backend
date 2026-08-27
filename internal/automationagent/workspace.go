@@ -345,7 +345,8 @@ func approvedSemanticRuntime(command string) bool {
 	if command == "npx" || command == "node" || command == "go" {
 		return true
 	}
-	return filepath.IsAbs(command) && strings.EqualFold(filepath.Base(command), "node.exe")
+	windowsAbsolute := len(command) >= 3 && command[1] == ':' && (command[2] == '/' || command[2] == '\\')
+	return (filepath.IsAbs(command) || windowsAbsolute) && strings.EqualFold(filepath.Base(command), "node.exe")
 }
 
 type WorkspaceContext struct {
