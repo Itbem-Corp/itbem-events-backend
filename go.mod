@@ -15,7 +15,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.106.4
 	github.com/aws/aws-sdk-go-v2/service/sns v1.42.3
 	github.com/aws/aws-sdk-go-v2/service/sqs v1.46.3
-	github.com/aws/smithy-go v1.27.6
+	github.com/aws/smithy-go v1.27.9
 	github.com/go-playground/validator/v10 v10.30.3
 	github.com/gofrs/uuid v4.4.0+incompatible
 	github.com/golang-jwt/jwt/v5 v5.3.1
