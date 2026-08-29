@@ -437,7 +437,7 @@ func validReviewSHA(value string) bool {
 		return false
 	}
 	for _, character := range value {
-		if !(character >= '0' && character <= '9') && !(character >= 'a' && character <= 'f') {
+		if !isLowercaseHex(character) {
 			return false
 		}
 	}
@@ -449,11 +449,15 @@ func validReviewDigest(value string) bool {
 		return false
 	}
 	for _, character := range value {
-		if !(character >= '0' && character <= '9') && !(character >= 'a' && character <= 'f') {
+		if !isLowercaseHex(character) {
 			return false
 		}
 	}
 	return true
+}
+
+func isLowercaseHex(character rune) bool {
+	return (character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')
 }
 
 // ParseCodeReview turns a model response into a bounded, actionable review

@@ -433,11 +433,15 @@ func validGitHubCommitSHA(value string) bool {
 		return false
 	}
 	for _, character := range value {
-		if !(character >= '0' && character <= '9') && !(character >= 'a' && character <= 'f') && !(character >= 'A' && character <= 'F') {
+		if !isGitHubHex(character) {
 			return false
 		}
 	}
 	return true
+}
+
+func isGitHubHex(character rune) bool {
+	return (character >= '0' && character <= '9') || (character >= 'a' && character <= 'f') || (character >= 'A' && character <= 'F')
 }
 
 func githubAppRequest(ctx context.Context, method, endpoint, token string, body io.Reader) (*http.Request, error) {
@@ -698,7 +702,7 @@ func normalizeGitHubAPIBaseURL(value string) (string, error) {
 	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return "", fmt.Errorf("ITBEM_GITHUB_API_BASE_URL is invalid")
 	}
-	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && isGitHubAPILoopbackHost(parsed.Hostname())) {
+	if parsed.Scheme != "https" && (parsed.Scheme != "http" || !isGitHubAPILoopbackHost(parsed.Hostname())) {
 		return "", fmt.Errorf("ITBEM_GITHUB_API_BASE_URL must use HTTPS")
 	}
 	return strings.TrimRight(parsed.String(), "/"), nil

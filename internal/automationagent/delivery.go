@@ -734,9 +734,10 @@ func jsonObjectEnd(value string) (int, bool) {
 				escaped = false
 				continue
 			}
-			if character == '\\' {
+			switch character {
+			case '\\':
 				escaped = true
-			} else if character == '"' {
+			case '"':
 				inString = false
 			}
 			continue

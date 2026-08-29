@@ -170,11 +170,13 @@ func UploadStreamToS3(ctx context.Context, body io.Reader, contentLength int64, 
 	if contentLength >= 0 && contentLength <= singlePutThreshold {
 		_, err = s3Client.PutObject(ctx, input)
 	} else {
+		//nolint:staticcheck // transfermanager migration requires a separate storage compatibility rollout.
 		uploader := manager.NewUploader(s3Client, func(options *manager.Uploader) {
 			options.PartSize = multipartPartSize
 			options.Concurrency = 4
 			options.LeavePartsOnError = false
 		})
+		//nolint:staticcheck // See the compatibility note on the uploader construction above.
 		_, err = uploader.Upload(ctx, input)
 	}
 	if err != nil {

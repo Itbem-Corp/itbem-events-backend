@@ -278,9 +278,10 @@ func (p *httpProviderClient) payload(messages []Message, maxTokens int) (map[str
 	if p.config.Provider == ProviderAnthropic {
 		system, conversation := make([]string, 0), make([]Message, 0, len(messages))
 		for _, message := range messages {
-			if message.Role == "system" {
+			switch message.Role {
+			case "system":
 				system = append(system, message.Content)
-			} else if message.Role == "user" || message.Role == "assistant" {
+			case "user", "assistant":
 				conversation = append(conversation, message)
 			}
 		}

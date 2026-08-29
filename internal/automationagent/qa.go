@@ -482,11 +482,11 @@ func verifyStagehandEvidenceManifest(report map[string]any, artifacts []LocalArt
 	}
 	evidence, ok := report["evidence"].(map[string]any)
 	if !ok {
-		return fmt.Errorf("Stagehand report is missing its evidence manifest")
+		return fmt.Errorf("stagehand report is missing its evidence manifest")
 	}
 	rawManifest, ok := evidence["artifacts"].([]any)
 	if !ok || len(rawManifest) < 2 || len(rawManifest) > 8 {
-		return fmt.Errorf("Stagehand evidence manifest is invalid")
+		return fmt.Errorf("stagehand evidence manifest is invalid")
 	}
 	images := make(map[string]LocalArtifact)
 	for _, artifact := range artifacts {
@@ -494,25 +494,25 @@ func verifyStagehandEvidenceManifest(report map[string]any, artifacts []LocalArt
 			continue
 		}
 		if _, exists := images[artifact.Name]; exists {
-			return fmt.Errorf("Stagehand evidence contains duplicate image artifacts")
+			return fmt.Errorf("stagehand evidence contains duplicate image artifacts")
 		}
 		images[artifact.Name] = artifact
 	}
 	if len(images) != len(rawManifest) {
-		return fmt.Errorf("Stagehand evidence manifest does not match captured image artifacts")
+		return fmt.Errorf("stagehand evidence manifest does not match captured image artifacts")
 	}
 	seen := make(map[string]struct{}, len(rawManifest))
 	for _, raw := range rawManifest {
 		entry, ok := raw.(map[string]any)
 		if !ok {
-			return fmt.Errorf("Stagehand evidence manifest is invalid")
+			return fmt.Errorf("stagehand evidence manifest is invalid")
 		}
 		name := strings.TrimSpace(fmt.Sprint(entry["name"]))
 		contentType := strings.TrimSpace(fmt.Sprint(entry["content_type"]))
 		expectedSHA := strings.ToLower(strings.TrimSpace(fmt.Sprint(entry["sha256"])))
 		rawBytes, bytesOK := entry["bytes"].(float64)
 		if name == "" || filepath.Base(name) != name || strings.ToLower(filepath.Ext(name)) != ".png" || contentType != "image/png" || !bytesOK || rawBytes < 1 || rawBytes != math.Trunc(rawBytes) || len(expectedSHA) != 64 {
-			return fmt.Errorf("Stagehand evidence manifest is invalid")
+			return fmt.Errorf("stagehand evidence manifest is invalid")
 		}
 		if _, duplicate := seen[name]; duplicate {
 			return fmt.Errorf("Stagehand evidence manifest contains duplicate images")
