@@ -515,16 +515,16 @@ func verifyStagehandEvidenceManifest(report map[string]any, artifacts []LocalArt
 			return fmt.Errorf("stagehand evidence manifest is invalid")
 		}
 		if _, duplicate := seen[name]; duplicate {
-			return fmt.Errorf("Stagehand evidence manifest contains duplicate images")
+			return fmt.Errorf("stagehand evidence manifest contains duplicate images")
 		}
 		seen[name] = struct{}{}
 		artifact, found := images[name]
 		if !found || int64(len(artifact.Body)) != int64(rawBytes) {
-			return fmt.Errorf("Stagehand evidence artifact %q does not match its manifest", name)
+			return fmt.Errorf("stagehand evidence artifact %q does not match its manifest", name)
 		}
 		actualSHA := fmt.Sprintf("%x", sha256.Sum256(artifact.Body))
 		if actualSHA != expectedSHA {
-			return fmt.Errorf("Stagehand evidence artifact %q failed integrity verification", name)
+			return fmt.Errorf("stagehand evidence artifact %q failed integrity verification", name)
 		}
 	}
 	return nil
@@ -561,11 +561,11 @@ func semanticQAEnvironment(command []string, lookup func(string) string) (map[st
 		return nil, nil
 	}
 	if lookup == nil {
-		return nil, fmt.Errorf("Stagehand semantic QA requires a credential lookup")
+		return nil, fmt.Errorf("stagehand semantic QA requires a credential lookup")
 	}
 	apiKey := strings.TrimSpace(lookup("MINIMAX_API_KEY"))
 	if apiKey == "" {
-		return nil, fmt.Errorf("Stagehand semantic QA requires the configured MiniMax credential")
+		return nil, fmt.Errorf("stagehand semantic QA requires the configured MiniMax credential")
 	}
 	return map[string]string{"MINIMAX_API_KEY": apiKey}, nil
 }
