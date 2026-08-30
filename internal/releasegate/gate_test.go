@@ -43,8 +43,21 @@ func validInput(t *testing.T, action Action, revisions []Revision) Input {
 		input.Vault = append(input.Vault, VaultEvidence{Repository: revision.Repository, HeadSHA: revision.SHA, RevisionID: "vault-" + revision.Repository, Reconciled: true})
 		input.Security = append(input.Security, SecurityEvidence{Repository: revision.Repository, HeadSHA: revision.SHA, SecretScanPassed: true})
 	}
-	input.HumanApproval = &HumanApproval{Actor: "delivery-owner", ActorType: "human", SubjectDigest: subjectDigest(action, digest, input.Policy, input.Recovery.Classification), Approved: true}
+	input.HumanApproval = &HumanApproval{Actor: "delivery-owner", ActorType: "human", SubjectDigest: expectedSubjectDigest(t, input), Approved: true}
 	return input
+}
+
+func expectedSubjectDigest(t *testing.T, input Input) string {
+	t.Helper()
+	matrixDigest, err := RevisionMatrixDigest(input.Revisions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vaultDigest, err := VaultEvidenceDigest(input.Vault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return subjectDigest(input.Action, matrixDigest, input.Policy.Digest, vaultDigest, input.Policy.RequiredTestKinds, input.Recovery.Classification)
 }
 
 func hasReason(decision Decision, code string) bool {
@@ -59,8 +72,53 @@ func hasReason(decision Decision, code string) bool {
 func TestEvaluateAllowsCompleteSingleRepositoryMerge(t *testing.T) {
 	input := validInput(t, ActionMerge, []Revision{{Repository: repositoryA, Branch: "trunk", SHA: shaA}})
 	decision := Evaluate(input)
-	if decision.State != "allowed" || len(decision.Reasons) != 0 || !validDigest(decision.MatrixDigest) || !validDigest(decision.SubjectDigest) {
+	if decision.State != "allowed" || len(decision.Reasons) != 0 || !validDigest(decision.MatrixDigest) || !validDigest(decision.PolicyDigest) || !validDigest(decision.VaultDigest) || !validDigest(decision.SubjectDigest) {
 		t.Fatalf("complete exact-SHA evidence must allow merge: %#v", decision)
+	}
+}
+
+func TestVaultEvidenceDigestIsCanonicalAndSensitive(t *testing.T) {
+	forward := []VaultEvidence{
+		{Repository: repositoryA, HeadSHA: shaA, RevisionID: "vault-a", Reconciled: true},
+		{Repository: repositoryB, HeadSHA: shaB, RevisionID: "vault-b", Reconciled: true},
+	}
+	reverse := []VaultEvidence{forward[1], forward[0]}
+	first, err := VaultEvidenceDigest(forward)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := VaultEvidenceDigest(reverse)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatalf("vault input order changed digest: %s != %s", first, second)
+	}
+
+	changedRevision := append([]VaultEvidence(nil), forward...)
+	changedRevision[0].RevisionID = "vault-a-next"
+	third, err := VaultEvidenceDigest(changedRevision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third == first {
+		t.Fatal("changing a Vault revision must invalidate the digest")
+	}
+
+	changedState := append([]VaultEvidence(nil), forward...)
+	changedState[0].Reconciled = false
+	fourth, err := VaultEvidenceDigest(changedState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fourth == first {
+		t.Fatal("changing Vault reconciliation state must invalidate the digest")
+	}
+
+	duplicate := append([]VaultEvidence(nil), forward...)
+	duplicate = append(duplicate, VaultEvidence{Repository: strings.ToLower(repositoryA), HeadSHA: shaA, RevisionID: "duplicate", Reconciled: true})
+	if _, err := VaultEvidenceDigest(duplicate); err == nil {
+		t.Fatal("duplicate Vault repository evidence must be rejected")
 	}
 }
 
@@ -151,11 +209,20 @@ func TestEvaluateRequiresCurrentHumanApprovalForRelease(t *testing.T) {
 	}
 }
 
+func TestEvaluateMakesHumanApprovalStaleWhenVaultRevisionChanges(t *testing.T) {
+	input := validInput(t, ActionRelease, []Revision{{Repository: repositoryA, Branch: "production", SHA: shaA}})
+	input.Vault[0].RevisionID = "vault-next-revision"
+	decision := Evaluate(input)
+	if decision.State != "blocked" || !hasReason(decision, "human_approval_stale") {
+		t.Fatalf("approval bound to an older Vault revision was accepted: %#v", decision)
+	}
+}
+
 func TestEvaluateAllowsResolvedReviewOnlyPolicyWithoutInventedTests(t *testing.T) {
 	input := validInput(t, ActionMerge, []Revision{{Repository: repositoryA, Branch: "review-only", SHA: shaA}})
 	input.Policy.RequiredTestKinds = nil
 	input.Tests = nil
-	input.HumanApproval.SubjectDigest = subjectDigest(input.Action, input.Compatibility.MatrixDigest, input.Policy, input.Recovery.Classification)
+	input.HumanApproval.SubjectDigest = expectedSubjectDigest(t, input)
 	if decision := Evaluate(input); decision.State != "allowed" {
 		t.Fatalf("resolved review-only policy was forced to invent test capability: %#v", decision)
 	}
@@ -168,7 +235,7 @@ func TestEvaluateRequiresHumanApprovalForIrreversibleRecovery(t *testing.T) {
 		t.Fatalf("irreversible recovery was accepted without approval: %#v", decision)
 	}
 	input.Recovery.HumanApproved = true
-	input.HumanApproval.SubjectDigest = subjectDigest(input.Action, input.Compatibility.MatrixDigest, input.Policy, input.Recovery.Classification)
+	input.HumanApproval.SubjectDigest = expectedSubjectDigest(t, input)
 	if decision := Evaluate(input); decision.State != "allowed" {
 		t.Fatalf("approved irreversible recovery was blocked: %#v", decision)
 	}

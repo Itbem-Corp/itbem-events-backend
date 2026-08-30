@@ -15,7 +15,7 @@ import (
 	"strings"
 )
 
-const SchemaVersion = 1
+const SchemaVersion = 2
 const maxInputBytes = 1 << 20
 
 type Action string
@@ -149,6 +149,8 @@ type Decision struct {
 	Action        Action   `json:"action"`
 	ChangeSetID   string   `json:"change_set_id"`
 	MatrixDigest  string   `json:"matrix_digest,omitempty"`
+	PolicyDigest  string   `json:"policy_digest,omitempty"`
+	VaultDigest   string   `json:"vault_digest,omitempty"`
 	SubjectDigest string   `json:"subject_digest,omitempty"`
 	State         string   `json:"state"`
 	Reasons       []Reason `json:"reasons"`
@@ -191,6 +193,38 @@ func RevisionMatrixDigest(revisions []Revision) (string, error) {
 	return hex.EncodeToString(digest[:]), nil
 }
 
+// VaultEvidenceDigest returns the stable identity of the exact curated Vault
+// revisions reconciled against the release matrix. Repository order never
+// changes the digest; revision IDs and reconciliation state always do.
+func VaultEvidenceDigest(values []VaultEvidence) (string, error) {
+	if len(values) == 0 || len(values) > 64 {
+		return "", fmt.Errorf("vault evidence size is invalid")
+	}
+	normalized := make([]VaultEvidence, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		repository := strings.TrimSpace(value.Repository)
+		headSHA := strings.ToLower(strings.TrimSpace(value.HeadSHA))
+		revisionID := strings.TrimSpace(value.RevisionID)
+		key := strings.ToLower(repository)
+		if !validRepository(repository) || !validSHA(headSHA) || revisionID == "" || len(revisionID) > 255 || strings.IndexFunc(revisionID, func(character rune) bool { return character < 0x20 || character == 0x7f }) != -1 {
+			return "", fmt.Errorf("vault evidence is invalid")
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return "", fmt.Errorf("vault repository is duplicated")
+		}
+		seen[key] = struct{}{}
+		normalized = append(normalized, VaultEvidence{Repository: key, HeadSHA: headSHA, RevisionID: revisionID, Reconciled: value.Reconciled})
+	}
+	sort.Slice(normalized, func(left, right int) bool { return normalized[left].Repository < normalized[right].Repository })
+	encoded, err := json.Marshal(normalized)
+	if err != nil {
+		return "", fmt.Errorf("encode vault evidence: %w", err)
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
+}
+
 // Evaluate always fails closed. Missing, malformed, stale, contradictory, or
 // failed evidence yields a blocked decision with stable machine reason codes.
 func Evaluate(input Input) Decision {
@@ -209,11 +243,19 @@ func Evaluate(input Input) Decision {
 		return decision
 	}
 	decision.MatrixDigest, _ = RevisionMatrixDigest(normalized)
-	decision.SubjectDigest = subjectDigest(input.Action, decision.MatrixDigest, input.Policy, input.Recovery.Classification)
 
 	if !input.Policy.Resolved || !validDigest(input.Policy.Digest) || !validUniqueNames(input.Policy.RequiredTestKinds) {
 		add("policy_unresolved", "", "required test policy")
+	} else {
+		decision.PolicyDigest = strings.ToLower(strings.TrimSpace(input.Policy.Digest))
 	}
+	vaultDigest, vaultDigestErr := VaultEvidenceDigest(input.Vault)
+	if vaultDigestErr != nil {
+		add("vault_evidence_digest_invalid", "", "vault")
+	} else {
+		decision.VaultDigest = vaultDigest
+	}
+	decision.SubjectDigest = subjectDigest(input.Action, decision.MatrixDigest, decision.PolicyDigest, decision.VaultDigest, input.Policy.RequiredTestKinds, input.Recovery.Classification)
 
 	branches := uniqueBranches(input.Branches, add)
 	checks := uniqueChecks(input.Checks, add)
@@ -522,8 +564,8 @@ func evaluateRecovery(evidence RecoveryEvidence, matrixDigest string, add func(s
 	}
 }
 
-func subjectDigest(action Action, matrixDigest string, policy Policy, recovery RecoveryClassification) string {
-	kinds := append([]string(nil), policy.RequiredTestKinds...)
+func subjectDigest(action Action, matrixDigest, policyDigest, vaultDigest string, requiredTestKinds []string, recovery RecoveryClassification) string {
+	kinds := append([]string(nil), requiredTestKinds...)
 	for index := range kinds {
 		kinds[index] = strings.ToLower(strings.TrimSpace(kinds[index]))
 	}
@@ -532,9 +574,10 @@ func subjectDigest(action Action, matrixDigest string, policy Policy, recovery R
 		Action       Action                 `json:"action"`
 		MatrixDigest string                 `json:"matrix_digest"`
 		PolicyDigest string                 `json:"policy_digest"`
+		VaultDigest  string                 `json:"vault_digest"`
 		Recovery     RecoveryClassification `json:"recovery"`
 		Tests        []string               `json:"required_test_kinds"`
-	}{Action: action, MatrixDigest: matrixDigest, PolicyDigest: strings.ToLower(strings.TrimSpace(policy.Digest)), Recovery: recovery, Tests: kinds})
+	}{Action: action, MatrixDigest: matrixDigest, PolicyDigest: strings.ToLower(strings.TrimSpace(policyDigest)), VaultDigest: strings.ToLower(strings.TrimSpace(vaultDigest)), Recovery: recovery, Tests: kinds})
 	digest := sha256.Sum256(encoded)
 	return hex.EncodeToString(digest[:])
 }

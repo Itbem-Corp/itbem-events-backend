@@ -124,7 +124,7 @@ func TestProjectGateEvaluationVerifiesIntegrityAndKeepsPrivateEvidenceOut(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if projection.State != "allowed" || projection.Sequence != 7 || projection.SubjectDigest == "" {
+	if projection.State != "allowed" || projection.Sequence != 7 || projection.PolicyDigest == "" || projection.VaultDigest == "" || projection.SubjectDigest == "" {
 		t.Fatalf("unexpected projection: %#v", projection)
 	}
 	encoded, err := json.Marshal(projection)
@@ -146,6 +146,11 @@ func TestProjectGateEvaluationVerifiesIntegrityAndKeepsPrivateEvidenceOut(t *tes
 	invalidEnvelope.WorkItemID = uuid.Nil
 	if _, err := ProjectGateEvaluation(invalidEnvelope); err == nil {
 		t.Fatal("an invalid ledger envelope must fail closed")
+	}
+	legacyEnvelope := event
+	legacyEnvelope.EventType = "delivery.release_gate.evaluated.v1"
+	if _, err := ProjectGateEvaluation(legacyEnvelope); err == nil {
+		t.Fatal("a legacy Gatekeeper event must not authorize the v2 contract")
 	}
 }
 

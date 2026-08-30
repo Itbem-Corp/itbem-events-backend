@@ -19,7 +19,7 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-const EventTypeReleaseGateEvaluated = "delivery.release_gate.evaluated.v1"
+const EventTypeReleaseGateEvaluated = "delivery.release_gate.evaluated.v2"
 
 type gateEvaluationPayload struct {
 	SchemaVersion int                  `json:"schema_version"`
@@ -36,6 +36,8 @@ type GateEvaluation struct {
 	Action        releasegate.Action   `json:"action"`
 	ChangeSetID   string               `json:"change_set_id"`
 	MatrixDigest  string               `json:"matrix_digest,omitempty"`
+	PolicyDigest  string               `json:"policy_digest,omitempty"`
+	VaultDigest   string               `json:"vault_digest,omitempty"`
 	SubjectDigest string               `json:"subject_digest,omitempty"`
 	State         string               `json:"state"`
 	Reasons       []releasegate.Reason `json:"reasons"`
@@ -91,7 +93,7 @@ func newGateEvaluationEvent(workItemID uuid.UUID, input releasegate.Input, occur
 	}
 	input = canonicalGateInput(input)
 	decision := releasegate.Evaluate(input)
-	payload, err := json.Marshal(gateEvaluationPayload{SchemaVersion: 1, Input: input, Decision: decision})
+	payload, err := json.Marshal(gateEvaluationPayload{SchemaVersion: releasegate.SchemaVersion, Input: input, Decision: decision})
 	if err != nil {
 		return models.DeliveryEvent{}, fmt.Errorf("encode delivery gate evaluation: %w", err)
 	}
@@ -99,9 +101,9 @@ func newGateEvaluationEvent(workItemID uuid.UUID, input releasegate.Input, occur
 	payloadDigest := hex.EncodeToString(digest[:])
 	return models.DeliveryEvent{
 		WorkItemID: workItemID, EventType: EventTypeReleaseGateEvaluated,
-		DedupeKey:     workItemID.String() + ":release-gate:" + payloadDigest,
+		DedupeKey:     workItemID.String() + ":release-gate-v2:" + payloadDigest,
 		SubjectDigest: decision.SubjectDigest, PayloadJSON: string(payload), PayloadDigest: payloadDigest,
-		ActorType: "system", ActorID: "release-gate/v1", OccurredAt: occurredAt.UTC(), CreatedAt: occurredAt.UTC(),
+		ActorType: "system", ActorID: "release-gate/v2", OccurredAt: occurredAt.UTC(), CreatedAt: occurredAt.UTC(),
 	}, nil
 }
 
@@ -117,7 +119,7 @@ func ProjectGateEvaluation(event models.DeliveryEvent) (GateEvaluation, error) {
 		return GateEvaluation{}, fmt.Errorf("delivery gate event payload digest does not match")
 	}
 	var decoded gateEvaluationPayload
-	if err := json.Unmarshal(payload, &decoded); err != nil || decoded.SchemaVersion != 1 {
+	if err := json.Unmarshal(payload, &decoded); err != nil || decoded.SchemaVersion != releasegate.SchemaVersion {
 		return GateEvaluation{}, fmt.Errorf("delivery gate event payload is invalid")
 	}
 	if decoded.Decision.SchemaVersion != releasegate.SchemaVersion || decoded.Decision.SubjectDigest != event.SubjectDigest {
@@ -126,6 +128,7 @@ func ProjectGateEvaluation(event models.DeliveryEvent) (GateEvaluation, error) {
 	return GateEvaluation{
 		EventID: event.ID, Sequence: event.Sequence, Action: decoded.Decision.Action,
 		ChangeSetID: decoded.Decision.ChangeSetID, MatrixDigest: decoded.Decision.MatrixDigest,
+		PolicyDigest: decoded.Decision.PolicyDigest, VaultDigest: decoded.Decision.VaultDigest,
 		SubjectDigest: decoded.Decision.SubjectDigest, State: decoded.Decision.State,
 		Reasons: append([]releasegate.Reason(nil), decoded.Decision.Reasons...), OccurredAt: event.OccurredAt.UTC(),
 	}, nil
@@ -152,7 +155,7 @@ func AuthorizeGateEvaluation(event models.DeliveryEvent, workItemID uuid.UUID, a
 		return GateEvaluation{}, err
 	}
 	var decoded gateEvaluationPayload
-	if err := json.Unmarshal([]byte(event.PayloadJSON), &decoded); err != nil || decoded.SchemaVersion != 1 {
+	if err := json.Unmarshal([]byte(event.PayloadJSON), &decoded); err != nil || decoded.SchemaVersion != releasegate.SchemaVersion {
 		return GateEvaluation{}, fmt.Errorf("release gate event payload is invalid")
 	}
 	recomputed := releasegate.Evaluate(decoded.Input)
