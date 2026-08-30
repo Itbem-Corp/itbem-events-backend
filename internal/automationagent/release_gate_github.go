@@ -31,9 +31,9 @@ type githubPullRequestEvidence struct {
 }
 
 // RunReleaseGateWithGitHub replaces every mutable GitHub claim in the
-// control-plane candidate with a fresh repository-scoped API read. This first
-// adapter intentionally leaves branch protection and checks unresolved, so PR
-// metadata and reviews alone can never authorize a release.
+// control-plane candidate with fresh repository-scoped API reads. Pull request,
+// review, protected-branch, ruleset, check-run, and commit-status evidence is
+// bound to the exact published head SHA.
 func RunReleaseGateWithGitHub(ctx context.Context, delivery json.RawMessage, lookup func(string) string) (releasegate.Input, error) {
 	input, err := RunReleaseGate(delivery)
 	if err != nil {
@@ -75,12 +75,18 @@ func RunReleaseGateWithGitHub(ctx context.Context, delivery json.RawMessage, loo
 		if !strings.EqualFold(evidence.HeadSHA, revision.SHA) || !strings.EqualFold(change.CommitSHA, revision.SHA) {
 			return releasegate.Input{}, fmt.Errorf("release Gatekeeper pull request head changed after publication")
 		}
+		branchEvidence, err := ReadGitHubReleaseBranchEvidence(ctx, config, token.Token, repository, evidence.BaseBranch, evidence.HeadSHA)
+		if err != nil {
+			return releasegate.Input{}, err
+		}
 		revision.Branch = evidence.BaseBranch
 		input.Branches = append(input.Branches, releasegate.BranchEvidence{
 			Repository: repository, HeadSHA: evidence.HeadSHA,
 			Mergeable: evidence.Mergeable, ConflictFree: evidence.ConflictFree,
-			ProtectionEvaluated: false, RequiredChecks: []releasegate.RequiredCheck{},
+			ProtectionEvaluated: branchEvidence.ProtectionEvaluated, Protected: branchEvidence.Protected,
+			RequiredChecks: branchEvidence.RequiredChecks,
 		})
+		input.Checks = append(input.Checks, branchEvidence.Checks...)
 		input.Reviews = append(input.Reviews, evidence.Reviews...)
 	}
 	if _, err := releasegate.RevisionMatrixDigest(input.Revisions); err != nil {

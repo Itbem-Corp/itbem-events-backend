@@ -37,7 +37,7 @@ func validInput(t *testing.T, action Action, revisions []Revision) Input {
 	}
 	for index, revision := range revisions {
 		check := "ci/required-" + string(rune('a'+index))
-		input.Branches = append(input.Branches, BranchEvidence{Repository: revision.Repository, HeadSHA: revision.SHA, Mergeable: true, ConflictFree: true, ProtectionEvaluated: true, RequiredChecks: []RequiredCheck{{Name: check}}})
+		input.Branches = append(input.Branches, BranchEvidence{Repository: revision.Repository, HeadSHA: revision.SHA, Mergeable: true, ConflictFree: true, ProtectionEvaluated: true, Protected: true, RequiredChecks: []RequiredCheck{{Name: check}}})
 		input.Checks = append(input.Checks, CheckEvidence{Repository: revision.Repository, Name: check, HeadSHA: revision.SHA, Status: StatusPassed})
 		input.Reviews = append(input.Reviews, ReviewEvidence{Repository: revision.Repository, HeadSHA: revision.SHA, AuthorActor: "engineer-" + revision.Repository, ReviewerActor: "reviewer-" + revision.Repository, Approved: true})
 		input.Vault = append(input.Vault, VaultEvidence{Repository: revision.Repository, HeadSHA: revision.SHA, RevisionID: "vault-" + revision.Repository, Reconciled: true})
@@ -75,6 +75,30 @@ func TestEvaluateBlocksAmbiguousUnpinnedCheckProducer(t *testing.T) {
 	}
 }
 
+func TestEvaluateRequiresAnActuallyProtectedBranch(t *testing.T) {
+	input := validInput(t, ActionRelease, []Revision{{Repository: repositoryA, Branch: "production", SHA: shaA}})
+	input.Branches[0].Protected = false
+	decision := Evaluate(input)
+	if decision.State != "blocked" || !hasReason(decision, "branch_unprotected") || !hasReason(decision, "human_approval_stale") {
+		t.Fatalf("an unprotected branch or its stale approval was accepted: %#v", decision)
+	}
+}
+
+func TestEvaluateRequiresSameNameLegacyStatusAlongsidePinnedCheck(t *testing.T) {
+	input := validInput(t, ActionRelease, []Revision{{Repository: repositoryA, Branch: "production", SHA: shaA}})
+	name := input.Branches[0].RequiredChecks[0].Name
+	input.Branches[0].RequiredChecks[0].IntegrationID = 42
+	input.Checks = []CheckEvidence{
+		{Repository: repositoryA, Name: name, IntegrationID: 42, HeadSHA: shaA, Status: StatusPassed},
+		{Repository: repositoryA, Name: name, HeadSHA: shaA, Status: StatusFailed},
+	}
+	input.HumanApproval.SubjectDigest = expectedSubjectDigest(t, input)
+	decision := Evaluate(input)
+	if decision.State != "blocked" || !hasReason(decision, "required_check_failed") {
+		t.Fatalf("a failing legacy status was hidden by a same-name App check: %#v", decision)
+	}
+}
+
 func TestEvaluateMakesHumanApprovalStaleWhenRequiredCheckIdentityChanges(t *testing.T) {
 	input := validInput(t, ActionRelease, []Revision{{Repository: repositoryA, Branch: "production", SHA: shaA}})
 	input.Branches[0].RequiredChecks[0].IntegrationID = 42
@@ -91,12 +115,12 @@ func TestEvaluateMakesHumanApprovalStaleWhenRequiredCheckIdentityChanges(t *test
 
 func TestBranchRequirementsDigestIsCanonicalAndIntegrationSensitive(t *testing.T) {
 	forward := []BranchEvidence{
-		{Repository: repositoryA, HeadSHA: shaA, ProtectionEvaluated: true, RequiredChecks: []RequiredCheck{{Name: "security", IntegrationID: 42}, {Name: "ci"}}},
-		{Repository: repositoryB, HeadSHA: shaB, ProtectionEvaluated: true, RequiredChecks: []RequiredCheck{{Name: "build", IntegrationID: 7}}},
+		{Repository: repositoryA, HeadSHA: shaA, ProtectionEvaluated: true, Protected: true, RequiredChecks: []RequiredCheck{{Name: "security", IntegrationID: 42}, {Name: "ci"}}},
+		{Repository: repositoryB, HeadSHA: shaB, ProtectionEvaluated: true, Protected: true, RequiredChecks: []RequiredCheck{{Name: "build", IntegrationID: 7}}},
 	}
 	reverse := []BranchEvidence{
-		{Repository: repositoryB, HeadSHA: shaB, ProtectionEvaluated: true, RequiredChecks: []RequiredCheck{{Name: "build", IntegrationID: 7}}},
-		{Repository: repositoryA, HeadSHA: shaA, ProtectionEvaluated: true, RequiredChecks: []RequiredCheck{{Name: "ci"}, {Name: "security", IntegrationID: 42}}},
+		{Repository: repositoryB, HeadSHA: shaB, ProtectionEvaluated: true, Protected: true, RequiredChecks: []RequiredCheck{{Name: "build", IntegrationID: 7}}},
+		{Repository: repositoryA, HeadSHA: shaA, ProtectionEvaluated: true, Protected: true, RequiredChecks: []RequiredCheck{{Name: "ci"}, {Name: "security", IntegrationID: 42}}},
 	}
 	first, err := BranchRequirementsDigest(forward)
 	if err != nil {
@@ -112,6 +136,12 @@ func TestBranchRequirementsDigestIsCanonicalAndIntegrationSensitive(t *testing.T
 	third, err := BranchRequirementsDigest(changed)
 	if err != nil || third == first {
 		t.Fatalf("required integration identity did not change digest: %s / %s / %v", first, third, err)
+	}
+	changedProtection := append([]BranchEvidence(nil), forward...)
+	changedProtection[0].Protected = false
+	fourth, err := BranchRequirementsDigest(changedProtection)
+	if err != nil || fourth == first {
+		t.Fatalf("branch protection state did not change digest: %s / %s / %v", first, fourth, err)
 	}
 }
 

@@ -16,9 +16,10 @@ must carry the same matrix digest. Advancing any repository or changing a
 configured branch invalidates that evidence.
 
 The approval subject also binds the action (`merge` or `release`), resolved
-hierarchical policy digest, protected-branch requirements, GitHub integration
-identity for pinned checks, and recovery classification. A human approval for
-a previous SHA matrix, action, policy, check producer, or recovery posture
+hierarchical policy digest, whether every target branch is actually protected,
+its canonical required-check set, GitHub integration identity for pinned
+checks, and recovery classification. A human approval for a previous SHA
+matrix, action, policy, protection state, check producer, or recovery posture
 cannot be reused.
 
 ## Required evidence
@@ -57,12 +58,21 @@ GitHub's current head/protection/check/review state, QA evidence, and trusted
 human identities. Repository content is data and must never populate policy or
 approval fields.
 
-The release worker now refreshes the published pull request through a
+The release worker refreshes the published pull request through a
 repository-scoped GitHub App token. It requires the PR to remain open and
 non-draft, binds the matrix to its current head SHA and actual base branch, and
-projects only decisive approvals/change requests. Protection rules and checks
-remain intentionally unresolved until their dedicated bounded adapter runs;
-therefore PR metadata alone always produces a blocked decision.
+projects only decisive approvals/change requests. A separate bounded read then
+combines classic branch protection with all active repository/organization
+rulesets and reads both App check runs and legacy commit statuses for that exact
+head SHA. Missing permissions, non-200 responses, pagination, over-limit
+results, malformed producer identities, an unprotected branch, or a changed SHA
+all fail closed. Only GitHub's `success`, `neutral`, and `skipped` check-run
+conclusions (and `success` legacy statuses) project as passing evidence.
+
+The GitHub App installation therefore needs read access to repository metadata,
+contents, checks, commit statuses, pull requests, and branch rules/protection.
+The token remains restricted to one repository and is never serialized into
+the Gatekeeper input, ledger, result, or logs.
 
 An `allowed` decision is not itself a merge or deployment capability. The
 future DevOps executor must:

@@ -67,6 +67,7 @@ type BranchEvidence struct {
 	Mergeable           bool            `json:"mergeable"`
 	ConflictFree        bool            `json:"conflict_free"`
 	ProtectionEvaluated bool            `json:"protection_evaluated"`
+	Protected           bool            `json:"protected"`
 	RequiredChecks      []RequiredCheck `json:"required_checks"`
 }
 
@@ -246,6 +247,7 @@ func BranchRequirementsDigest(values []BranchEvidence) (string, error) {
 		Repository          string          `json:"repository"`
 		HeadSHA             string          `json:"head_sha"`
 		ProtectionEvaluated bool            `json:"protection_evaluated"`
+		Protected           bool            `json:"protected"`
 		RequiredChecks      []RequiredCheck `json:"required_checks"`
 	}
 	normalized := make([]requirement, 0, len(values))
@@ -270,7 +272,7 @@ func BranchRequirementsDigest(values []BranchEvidence) (string, error) {
 			}
 			return checks[left].IntegrationID < checks[right].IntegrationID
 		})
-		normalized = append(normalized, requirement{Repository: repository, HeadSHA: headSHA, ProtectionEvaluated: value.ProtectionEvaluated, RequiredChecks: checks})
+		normalized = append(normalized, requirement{Repository: repository, HeadSHA: headSHA, ProtectionEvaluated: value.ProtectionEvaluated, Protected: value.Protected, RequiredChecks: checks})
 	}
 	sort.Slice(normalized, func(left, right int) bool { return normalized[left].Repository < normalized[right].Repository })
 	encoded, err := json.Marshal(normalized)
@@ -336,6 +338,8 @@ func Evaluate(input Input) Decision {
 			}
 			if !branch.ProtectionEvaluated {
 				add("branch_protection_unknown", revision.Repository, "protection")
+			} else if !branch.Protected {
+				add("branch_unprotected", revision.Repository, "protection")
 			}
 			if !branch.Mergeable || !branch.ConflictFree {
 				add("branch_not_mergeable", revision.Repository, "mergeability")
@@ -370,6 +374,21 @@ func Evaluate(input Input) Decision {
 						add("required_check_stale", revision.Repository, required.Name)
 					} else if check.Status != StatusPassed {
 						add("required_check_failed", revision.Repository, required.Name)
+					}
+					// GitHub requires both a check run and a legacy commit status to
+					// pass when they share a required context. A pinned App check does
+					// not make a same-name legacy failure safe to ignore.
+					if required.IntegrationID > 0 && matched {
+						for _, candidate := range candidates {
+							if candidate.IntegrationID != 0 {
+								continue
+							}
+							if !equalSHA(candidate.HeadSHA, revision.SHA) {
+								add("required_check_stale", revision.Repository, required.Name)
+							} else if candidate.Status != StatusPassed {
+								add("required_check_failed", revision.Repository, required.Name)
+							}
+						}
 					}
 				}
 			}

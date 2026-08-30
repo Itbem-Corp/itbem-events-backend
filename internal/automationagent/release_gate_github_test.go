@@ -52,7 +52,7 @@ func TestReadGitHubReleasePullRequestEvidencePinsHeadBaseAndDecisiveReviews(t *t
 	}
 }
 
-func TestRunReleaseGateWithGitHubNeverTreatsPRMetadataAsCompleteAuthority(t *testing.T) {
+func TestRunReleaseGateWithGitHubCollectsProtectedBranchAndExactChecks(t *testing.T) {
 	head := strings.Repeat("b", 40)
 	key := testGitHubAppKey(t)
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -69,6 +69,22 @@ func TestRunReleaseGateWithGitHubNeverTreatsPRMetadataAsCompleteAuthority(t *tes
 			})
 		case request.Method == http.MethodGet && request.URL.Path == "/repos/example/service/pulls/42/reviews":
 			_ = json.NewEncoder(response).Encode([]map[string]any{{"id": 1, "state": "APPROVED", "commit_id": head, "user": map[string]string{"login": "reviewer"}}})
+		case request.Method == http.MethodGet && request.URL.Path == "/repos/example/service/branches/production":
+			_ = json.NewEncoder(response).Encode(map[string]any{
+				"name": "production", "protected": true,
+				"protection": map[string]any{"required_status_checks": map[string]any{
+					"contexts": []string{"ci"}, "checks": []map[string]any{{"context": "ci", "app_id": 99}},
+				}},
+			})
+		case request.Method == http.MethodGet && request.URL.Path == "/repos/example/service/rules/branches/production":
+			_ = json.NewEncoder(response).Encode([]any{})
+		case request.Method == http.MethodGet && request.URL.Path == "/repos/example/service/commits/"+head+"/check-runs":
+			_ = json.NewEncoder(response).Encode(map[string]any{
+				"total_count": 1,
+				"check_runs":  []map[string]any{{"id": 1, "name": "ci", "head_sha": head, "status": "completed", "conclusion": "success", "app": map[string]int64{"id": 99}}},
+			})
+		case request.Method == http.MethodGet && request.URL.Path == "/repos/example/service/commits/"+head+"/status":
+			_ = json.NewEncoder(response).Encode(map[string]any{"sha": head, "statuses": []any{}})
 		default:
 			t.Fatalf("unexpected GitHub Gatekeeper request: %s %s", request.Method, request.URL.String())
 		}
@@ -92,12 +108,12 @@ func TestRunReleaseGateWithGitHubNeverTreatsPRMetadataAsCompleteAuthority(t *tes
 		"ITBEM_GITHUB_APP_PRIVATE_KEY": testGitHubAppPEM(t, key), "ITBEM_GITHUB_API_BASE_URL": server.URL,
 	}
 	input, err := RunReleaseGateWithGitHub(context.Background(), delivery, func(name string) string { return values[name] })
-	if err != nil || input.Revisions[0].Branch != "production" || len(input.Branches) != 1 || input.Branches[0].ProtectionEvaluated || len(input.Reviews) != 1 || !input.Reviews[0].Approved {
+	if err != nil || input.Revisions[0].Branch != "production" || len(input.Branches) != 1 || !input.Branches[0].ProtectionEvaluated || !input.Branches[0].Protected || len(input.Branches[0].RequiredChecks) != 1 || len(input.Checks) != 1 || input.Checks[0].IntegrationID != 99 || len(input.Reviews) != 1 || !input.Reviews[0].Approved {
 		t.Fatalf("unexpected enriched Gatekeeper candidate: %#v / %v", input, err)
 	}
 	decision := releasegate.Evaluate(input)
-	if decision.State != "blocked" || !releaseGateDecisionHasReason(decision, "branch_protection_unknown") || !releaseGateDecisionHasReason(decision, "policy_unresolved") {
-		t.Fatalf("PR metadata alone must never authorize release: %#v", decision)
+	if decision.State != "blocked" || releaseGateDecisionHasReason(decision, "branch_protection_unknown") || releaseGateDecisionHasReason(decision, "required_check_missing") || !releaseGateDecisionHasReason(decision, "policy_unresolved") {
+		t.Fatalf("authoritative GitHub evidence was not projected correctly: %#v", decision)
 	}
 }
 

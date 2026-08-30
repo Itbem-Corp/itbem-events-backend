@@ -26,8 +26,12 @@ the first configured installation or falling back to a user PAT/SSH key.
 Before a release-gate callback, the release worker also rereads every published
 PR with that repository-scoped token. A changed head, closed/draft PR,
 ambiguous change set or unbounded review history fails the run. Current base
-branch and decisive reviews replace stored mutable claims; branch protection
-and checks remain explicitly unknown until collected separately.
+branch and decisive reviews replace stored mutable claims. The worker then
+combines classic protection and all active rulesets for that base branch, and
+collects bounded App check runs plus legacy commit statuses for the exact head.
+An unprotected branch, missing permission, truncated response, wrong SHA, or
+malformed integration identity fails closed instead of being treated as an
+empty requirement set.
 
 ## Continuous role-lane operation
 

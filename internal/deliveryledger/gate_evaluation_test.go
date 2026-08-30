@@ -38,8 +38,8 @@ func validGateInput(t *testing.T) releasegate.Input {
 			RequiredTestKinds: []string{"unit", "contract"},
 		},
 		Branches: []releasegate.BranchEvidence{
-			{Repository: testRepositoryA, HeadSHA: revisions[0].SHA, Mergeable: true, ConflictFree: true, ProtectionEvaluated: true, RequiredChecks: []releasegate.RequiredCheck{{Name: "security", IntegrationID: 42}, {Name: "ci"}}},
-			{Repository: testRepositoryB, HeadSHA: revisions[1].SHA, Mergeable: true, ConflictFree: true, ProtectionEvaluated: true, RequiredChecks: []releasegate.RequiredCheck{{Name: "build"}}},
+			{Repository: testRepositoryA, HeadSHA: revisions[0].SHA, Mergeable: true, ConflictFree: true, ProtectionEvaluated: true, Protected: true, RequiredChecks: []releasegate.RequiredCheck{{Name: "security", IntegrationID: 42}, {Name: "ci"}}},
+			{Repository: testRepositoryB, HeadSHA: revisions[1].SHA, Mergeable: true, ConflictFree: true, ProtectionEvaluated: true, Protected: true, RequiredChecks: []releasegate.RequiredCheck{{Name: "build"}}},
 		},
 		Checks: []releasegate.CheckEvidence{
 			{Repository: testRepositoryA, Name: "ci", HeadSHA: revisions[0].SHA, Status: releasegate.StatusPassed},
