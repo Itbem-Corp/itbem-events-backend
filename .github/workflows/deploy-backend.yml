@@ -326,6 +326,15 @@ jobs:
           SQS_VIDEO_QUEUE_URL: ${{ secrets.SQS_VIDEO_QUEUE_URL }}
           SQS_WORKER_QUEUE_URL: ${{ secrets.SQS_WORKER_QUEUE_URL }}
           SNS_WORKER_TOPIC_ARN: ${{ secrets.SNS_WORKER_TOPIC_ARN }}
+          SQS_AUTOMATION_QUEUE_URL: ${{ secrets.SQS_AUTOMATION_QUEUE_URL }}
+          AUTOMATION_INPUT_BUCKET: ${{ secrets.AUTOMATION_INPUT_BUCKET }}
+          AUTOMATION_OUTPUT_BUCKET: ${{ secrets.AUTOMATION_OUTPUT_BUCKET }}
+          AUTOMATION_CALLBACK_SECRET: ${{ secrets.AUTOMATION_CALLBACK_SECRET }}
+          ITBEM_GITHUB_APP_ID: ${{ secrets.ITBEM_GITHUB_APP_ID }}
+          ITBEM_GITHUB_INSTALLATION_IDS: ${{ secrets.ITBEM_GITHUB_INSTALLATION_IDS }}
+          ITBEM_GITHUB_APP_PRIVATE_KEY: ${{ secrets.ITBEM_GITHUB_APP_PRIVATE_KEY }}
+          GITHUB_REVIEW_WEBHOOK_SECRET: ${{ secrets.GITHUB_REVIEW_WEBHOOK_SECRET }}
+          GITHUB_REVIEW_REPOSITORIES: ${{ secrets.GITHUB_REVIEW_REPOSITORIES }}
         run: |
           set -euo pipefail
           LOCAL_ENV_FILE="${RUNNER_TEMP}/eventiapp-backend-${GITHUB_RUN_ID}.env"
@@ -366,7 +375,16 @@ jobs:
             --optional REDIS_PASSWORD \
             --optional INTERNAL_API_SECRET_PREVIOUS \
             --optional SQS_WORKER_QUEUE_URL \
-            --required SNS_WORKER_TOPIC_ARN
+            --required SNS_WORKER_TOPIC_ARN \
+            --required SQS_AUTOMATION_QUEUE_URL \
+            --required AUTOMATION_INPUT_BUCKET \
+            --required AUTOMATION_OUTPUT_BUCKET \
+            --required AUTOMATION_CALLBACK_SECRET \
+            --required ITBEM_GITHUB_APP_ID \
+            --required ITBEM_GITHUB_INSTALLATION_IDS \
+            --required ITBEM_GITHUB_APP_PRIVATE_KEY \
+            --required GITHUB_REVIEW_WEBHOOK_SECRET \
+            --required GITHUB_REVIEW_REPOSITORIES
 
       - name: Snapshot database before startup migrations
         id: database_snapshot

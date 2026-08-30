@@ -98,6 +98,22 @@ class RenderDockerEnvTests(unittest.TestCase):
             workflow.index("- name: Snapshot database"),
         )
 
+    def test_production_requires_github_review_and_automation_secrets(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        for name in (
+            "SQS_AUTOMATION_QUEUE_URL",
+            "AUTOMATION_INPUT_BUCKET",
+            "AUTOMATION_OUTPUT_BUCKET",
+            "AUTOMATION_CALLBACK_SECRET",
+            "ITBEM_GITHUB_APP_ID",
+            "ITBEM_GITHUB_INSTALLATION_IDS",
+            "ITBEM_GITHUB_APP_PRIVATE_KEY",
+            "GITHUB_REVIEW_WEBHOOK_SECRET",
+            "GITHUB_REVIEW_REPOSITORIES",
+        ):
+            self.assertIn(f"--required {name}", workflow)
+            self.assertIn(f"{name}: ${{{{ secrets.{name} }}}}", workflow)
+
     def test_automatic_promotion_keeps_rollback_snapshots_bounded(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("github.event_name == 'push'", workflow)
