@@ -32,7 +32,7 @@ func ValidateSecurityConfiguration() error {
 		"INTERNAL_API_SECRET",
 		"ORGANIZATION_CONTEXT_SECRET",
 	}
-	if securityEnvironmentValue("SQS_AUTOMATION_QUEUE_URL") != "" {
+	if securityEnvironmentValue("SQS_AUTOMATION_QUEUE_URL") != "" || securityEnvironmentValue("SQS_AUTOMATION_QUEUE_LANES_JSON") != "" {
 		required = append(required, "AUTOMATION_CALLBACK_SECRET")
 		if bucket := securityEnvironmentValue("AUTOMATION_INPUT_BUCKET"); !strings.HasPrefix(bucket, "itbem-ai-inputs-") {
 			return fmt.Errorf("AUTOMATION_INPUT_BUCKET must identify the dedicated ITBEM automation input bucket")

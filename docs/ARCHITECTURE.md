@@ -440,6 +440,15 @@ if !ok || cfg == nil {
 
 ## Monitoring & Health
 
+- Local engineering automation is handed off through a durable outbox. The
+  publisher supports a backward-compatible combined SQS queue or an atomic
+  five-lane map (`orchestration`, `engineering`, `review`, `qa`, `release`).
+  Routing is derived only from the fail-closed operation contract in
+  `internal/agentwork`; callers cannot select a lane. A configured lane map
+  must be complete and use distinct queues, and aggregate health includes a
+  per-lane projection plus the role DLQ. Queue membership never grants source,
+  merge, release, deployment, secret, or production authority.
+
 - Application notifications use `services/notifications` with the durable
   outbox and worker queue. `itbem-events-workers` owns Block Kit,
   SSM webhook access, HTTP delivery, retry, and DLQ behavior. The worker is

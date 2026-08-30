@@ -62,6 +62,9 @@ go run ./cmd/api
 | `SQS_VIDEO_QUEUE_URL` | no | AWS SQS queue URL for async video processing. Leave empty to disable. |
 | `SQS_WORKER_QUEUE_URL` | no | AWS SQS queue URL for derived business/data jobs handled by `itbem-events-workers`. Leave empty to keep the live analytics fallback and disable publishing. |
 | `SQS_AUTOMATION_QUEUE_URL` | no | ITBEM-only SQS pull queue consumed by the local AI agent. When set in staging/production, `AUTOMATION_CALLBACK_SECRET`, `AUTOMATION_INPUT_BUCKET`, and `AUTOMATION_OUTPUT_BUCKET` are mandatory. |
+| `SQS_AUTOMATION_QUEUE_LANES_JSON` | no | Atomic role-lane routing map with exactly `orchestration`, `engineering`, `review`, `qa`, and `release` queue URLs. When present, every automation message is routed from its allow-listed operation and the combined queue is retained only for migration; partial, unknown, empty, or duplicate lanes fail startup. |
+| `SQS_AUTOMATION_DEAD_LETTER_QUEUE_URL` | no | Read-only health target for the combined legacy queue DLQ. The API never consumes or replays it. |
+| `SQS_AUTOMATION_ROLE_DEAD_LETTER_QUEUE_URL` | no | Required with the role-lane map. Read-only health target for the shared role-lane DLQ; it must differ from every input queue. |
 | `AUTOMATION_INPUT_BUCKET` | no | Dedicated `itbem-ai-inputs-*` private bucket used by the dashboard to upload AI task input JSON through a short-lived signed URL. In `ENV=local` only, the authenticated control plane can proxy a bounded 256 KB JSON handoff when a browser cannot reach LocalStack; deployed environments never enable that fallback. |
 | `AUTOMATION_OUTPUT_BUCKET` | no | Dedicated `itbem-ai-outputs-*` private bucket containing agent results. The backend accepts only the deterministic task-result prefix. |
 | `AUTOMATION_CALLBACK_SECRET` | no | Dedicated 32+ byte secret used only by the local agent to report task lifecycle and MiniMax usage. Never reuse media or EventiApp secrets. |

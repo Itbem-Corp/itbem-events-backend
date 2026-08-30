@@ -140,6 +140,7 @@ itbem-events-backend/
 | `repositories/awsrepository/CognitoRepository.go` | Cognito admin |
 | `repositories/bucketrepository/BucketRepository.go` | Bucket/URL helpers |
 | `repositories/sqsrepository/SQSRepository.go` | Async media job publisher |
+| `repositories/automationqueuerepository/AutomationQueueRepository.go` | Local-agent outbox publisher and role-lane queue router |
 | `repositories/authproviderrepository/AuthProviderRepository.go` | Token validation |
 | `repositories/eventsrepository/EventsRepository.go` | Events DB |
 | `repositories/eventconfigrepository/EventConfigRepository.go` | EventConfig DB |

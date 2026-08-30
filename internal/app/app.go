@@ -121,7 +121,9 @@ func Run() error {
 	configuration.InitAwsServices(cfg)
 	sqsrepository.Init(cfg.AwsRegion, cfg.S3ClientId, cfg.S3ClientSecret, cfg.SQSImageQueueURL, cfg.SQSVideoQueueURL, cfg.SQSEndpoint)
 	jobqueuerepository.Init(cfg.AwsRegion, cfg.S3ClientId, cfg.S3ClientSecret, cfg.SQSWorkerQueueURL, cfg.SNSWorkerTopicARN)
-	automationqueuerepository.Init(cfg.AwsRegion, cfg.S3ClientId, cfg.S3ClientSecret, cfg.SQSAutomationQueueURL, cfg.SQSAutomationDeadLetterQueueURL, cfg.SQSEndpoint)
+	if err := automationqueuerepository.Init(cfg.AwsRegion, cfg.S3ClientId, cfg.S3ClientSecret, cfg.SQSAutomationQueueURL, cfg.SQSAutomationDeadLetterQueueURL, cfg.SQSAutomationQueueLanesJSON, cfg.SQSAutomationRoleDeadLetterQueueURL, cfg.SQSEndpoint); err != nil {
+		return fmt.Errorf("automation queue configuration: %w", err)
+	}
 	dispatcherCtx, stopDispatcher := context.WithCancel(context.Background())
 	defer stopDispatcher()
 	outboxService.StartDispatcher(dispatcherCtx, configuration.DB)
