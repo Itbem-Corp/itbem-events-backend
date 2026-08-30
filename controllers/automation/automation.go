@@ -11,6 +11,8 @@ import (
 	"events-stocks/internal/agentwork"
 	"events-stocks/internal/authz"
 	"events-stocks/internal/automationagent"
+	"events-stocks/internal/deliveryledger"
+	"events-stocks/internal/releasegate"
 	"events-stocks/models"
 	automationqueue "events-stocks/repositories/automationqueuerepository"
 	awsrepository "events-stocks/repositories/awsrepository"
@@ -54,6 +56,7 @@ var allowedOperations = map[string]struct{}{
 	"delivery.plan":           {},
 	"delivery.implementation": {},
 	"delivery.publish":        {},
+	"delivery.release_gate":   {},
 	"delivery.qa":             {},
 	"delivery.summary":        {},
 }
@@ -2010,12 +2013,19 @@ func Complete(c echo.Context) error {
 		return utils.Error(c, http.StatusBadRequest, "Invalid automation evidence", err.Error())
 	}
 	if len(request.Execution) > 0 {
-		if request.Status != "completed" || (task.Operation != "delivery.implementation" && task.Operation != "delivery.publish") || len(request.Execution) > 32*1024 || !json.Valid(request.Execution) {
-			return utils.Error(c, http.StatusBadRequest, "Invalid automation execution", "only a bounded completed delivery implementation or publication may register execution metadata")
+		limit := 32 * 1024
+		if task.Operation == "delivery.release_gate" {
+			limit = 256 * 1024
+		}
+		if request.Status != "completed" || (task.Operation != "delivery.implementation" && task.Operation != "delivery.publish" && task.Operation != "delivery.release_gate") || len(request.Execution) > limit || !json.Valid(request.Execution) {
+			return utils.Error(c, http.StatusBadRequest, "Invalid automation execution", "only a bounded completed delivery implementation, publication, or release Gatekeeper run may register execution metadata")
 		}
 	}
-	if request.Deterministic && (request.Status != "completed" || task.Operation != "delivery.publish") {
-		return utils.Error(c, http.StatusBadRequest, "Invalid automation result", "only delivery publication may be deterministic")
+	if request.Deterministic && (request.Status != "completed" || (task.Operation != "delivery.publish" && task.Operation != "delivery.release_gate")) {
+		return utils.Error(c, http.StatusBadRequest, "Invalid automation result", "only delivery publication or release Gatekeeper may be deterministic")
+	}
+	if task.Operation == "delivery.release_gate" && request.Status == "completed" && (!request.Deterministic || len(request.Execution) == 0) {
+		return utils.Error(c, http.StatusBadRequest, "Invalid automation result", "release Gatekeeper completion requires deterministic execution evidence")
 	}
 	toolExecutionRows, toolExecutionErr := buildToolExecutionLedger(cfg, &task, ledgerRunID, request.Status, request.ToolExecutions, request.Artifacts, time.Now().UTC())
 	if toolExecutionErr != nil {
@@ -2125,6 +2135,11 @@ func Complete(c echo.Context) error {
 					return err
 				}
 			}
+			if task.Operation == "delivery.release_gate" {
+				if err := persistReleaseGateEvaluation(tx, &task, request.Execution, completedAt); err != nil {
+					return err
+				}
+			}
 		}
 		return nil
 	})
@@ -2135,6 +2150,48 @@ func Complete(c echo.Context) error {
 		return utils.Error(c, http.StatusConflict, "Automation result ignored", "Task is not awaiting a result")
 	}
 	return c.NoContent(http.StatusNoContent)
+}
+
+func persistReleaseGateEvaluation(tx *gorm.DB, task *models.AutomationTask, raw json.RawMessage, completedAt time.Time) error {
+	if tx == nil || completedAt.IsZero() {
+		return fmt.Errorf("only a bounded release Gatekeeper task may append an evaluation")
+	}
+	workItemID, input, err := releaseGateEvaluationForTask(task, raw)
+	if err != nil {
+		return err
+	}
+	if _, _, err := deliveryledger.RecordGateEvaluation(tx, workItemID, input, completedAt.UTC()); err != nil {
+		return err
+	}
+	return nil
+}
+
+func releaseGateEvaluationForTask(task *models.AutomationTask, raw json.RawMessage) (uuid.UUID, releasegate.Input, error) {
+	if task == nil || task.Operation != "delivery.release_gate" || task.DeliveryWorkItemID == nil || *task.DeliveryWorkItemID == uuid.Nil {
+		return uuid.Nil, releasegate.Input{}, fmt.Errorf("only a bounded release Gatekeeper task may append an evaluation")
+	}
+	actor := strings.TrimSpace(task.RequestedBy)
+	if actor == "" || actor == "github-app-review" || actor == "itbem-local-agent" || actor == "itbem-github-app" {
+		return uuid.Nil, releasegate.Input{}, fmt.Errorf("release Gatekeeper task does not have an authenticated human requester")
+	}
+	var handoff map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &handoff); err != nil || len(handoff) != 2 {
+		return uuid.Nil, releasegate.Input{}, fmt.Errorf("release Gatekeeper execution metadata is invalid")
+	}
+	var schemaVersion int
+	if err := json.Unmarshal(handoff["schema_version"], &schemaVersion); err != nil || schemaVersion != 1 {
+		return uuid.Nil, releasegate.Input{}, fmt.Errorf("release Gatekeeper execution schema is invalid")
+	}
+	input, err := releasegate.DecodeInput(handoff["gatekeeper_input"])
+	if err != nil || input.SchemaVersion != releasegate.SchemaVersion || input.Action != releasegate.ActionRelease || input.ChangeSetID != task.DeliveryWorkItemID.String() || input.HumanApproval != nil {
+		return uuid.Nil, releasegate.Input{}, fmt.Errorf("release Gatekeeper execution candidate is invalid")
+	}
+	preApproval := releasegate.Evaluate(input)
+	if preApproval.SubjectDigest == "" {
+		return uuid.Nil, releasegate.Input{}, fmt.Errorf("release Gatekeeper execution has no exact subject")
+	}
+	input.HumanApproval = &releasegate.HumanApproval{Actor: actor, ActorType: "human", SubjectDigest: preApproval.SubjectDigest, Approved: true}
+	return *task.DeliveryWorkItemID, input, nil
 }
 
 func buildToolExecutionLedger(cfg *models.Config, task *models.AutomationTask, runID, status string, reported []callbackToolExecution, artifacts []callbackArtifact, completedAt time.Time) ([]models.AutomationToolExecution, error) {

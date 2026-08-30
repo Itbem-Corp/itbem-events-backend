@@ -18,6 +18,7 @@ func TestAssignmentForOperationIsExhaustiveAndRoleIsolated(t *testing.T) {
 		{OperationCodeReview, RoleReviewer, LaneReview},
 		{OperationDeliveryQA, RoleQA, LaneQA},
 		{OperationDeliveryPublish, RoleReleaseManager, LaneRelease},
+		{OperationDeliveryReleaseGate, RoleReleaseManager, LaneRelease},
 	}
 
 	seen := make(map[string]struct{}, len(tests))

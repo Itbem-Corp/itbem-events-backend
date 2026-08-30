@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"events-stocks/internal/releasegate"
 	"events-stocks/models"
 	"events-stocks/services/deliveryworkflow"
 	"github.com/gofrs/uuid"
@@ -20,6 +21,7 @@ func TestAgentRunSpecsAreBoundToDeliveryStates(t *testing.T) {
 		{"plan", "delivery.plan", deliveryworkflow.StatePlanning},
 		{"implementation", "delivery.implementation", deliveryworkflow.StateImplementation},
 		{"publish", "delivery.publish", deliveryworkflow.StatePreviewPending},
+		{"release_gate", "delivery.release_gate", deliveryworkflow.StateReleaseReview},
 		{"qa", "delivery.qa", deliveryworkflow.StateQARunning},
 		{"summary", "delivery.summary", deliveryworkflow.StateReleaseReview},
 	}
@@ -37,6 +39,50 @@ func TestAgentRunSpecsAreBoundToDeliveryStates(t *testing.T) {
 	}
 	if _, allowed := agentRunSpecs["summary"].states[deliveryworkflow.StateReleased]; allowed {
 		t.Fatal("a completed delivery must not enqueue another summary run")
+	}
+}
+
+func TestStoredReleaseGateCandidateUsesEveryExactPublishedRepositoryHead(t *testing.T) {
+	workItemID := uuid.Must(uuid.NewV4())
+	item := models.DeliveryWorkItem{
+		ID:       workItemID,
+		PlanJSON: `{"repository_impact":[{"reference":"workspace://api","impact":"changes"},{"reference":"workspace://web","impact":"changes"}]}`,
+	}
+	change := func(reference, repository, branch, sha, pr string) models.DeliveryChangeSet {
+		return models.DeliveryChangeSet{
+			RepositoryRef: reference, Branch: branch, CommitSHA: sha, ReviewType: "pull_request", PullRequestURL: pr,
+			MetadataJSON: `{"branch_published":true,"verification_source":"itbem-github-app","remote_repository":"` + repository + `"}`,
+		}
+	}
+	changes := []models.DeliveryChangeSet{
+		change("workspace://web", "Example/Web", "itbem-agent/22222222-2222-4222-8222-222222222222", strings.Repeat("b", 40), "https://github.com/Example/Web/pull/8"),
+		change("workspace://api", "Example/API", "itbem-agent/11111111-1111-4111-8111-111111111111", strings.Repeat("a", 40), "https://github.com/Example/API/pull/7"),
+	}
+	candidate, err := storedReleaseGateCandidate(item, changes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if candidate.ChangeSetID != workItemID.String() || candidate.Action != "release" || candidate.Policy.Resolved || len(candidate.Revisions) != 2 {
+		t.Fatalf("unexpected release candidate: %#v", candidate)
+	}
+	if candidate.Revisions[0].Repository != "example/api" || candidate.Revisions[1].Repository != "example/web" {
+		t.Fatalf("revision matrix must be canonical and sorted: %#v", candidate.Revisions)
+	}
+	if decision := releasegate.Evaluate(candidate); decision.State != "blocked" {
+		t.Fatalf("stored evidence alone must never authorize release: %#v", decision)
+	}
+}
+
+func TestStoredReleaseGateCandidateFailsClosedForMissingOrUntrustedPublishedHead(t *testing.T) {
+	item := models.DeliveryWorkItem{ID: uuid.Must(uuid.NewV4()), PlanJSON: `{"repository_impact":[{"reference":"workspace://api","impact":"changes"}]}`}
+	for _, changes := range [][]models.DeliveryChangeSet{
+		nil,
+		{{RepositoryRef: "workspace://api", Branch: "itbem-agent/11111111-1111-4111-8111-111111111111", CommitSHA: strings.Repeat("a", 40), ReviewType: "pull_request", PullRequestURL: "https://github.com/Example/API/pull/7", MetadataJSON: `{"branch_published":true,"verification_source":"manual","remote_repository":"example/api"}`}},
+		{{RepositoryRef: "workspace://api", Branch: "itbem-agent/11111111-1111-4111-8111-111111111111", CommitSHA: strings.Repeat("a", 39), ReviewType: "pull_request", PullRequestURL: "https://github.com/Example/API/pull/7", MetadataJSON: `{"branch_published":true,"verification_source":"itbem-github-app","remote_repository":"example/api"}`}},
+	} {
+		if _, err := storedReleaseGateCandidate(item, changes); err == nil {
+			t.Fatal("missing or untrusted exact PR head must fail closed")
+		}
 	}
 }
 

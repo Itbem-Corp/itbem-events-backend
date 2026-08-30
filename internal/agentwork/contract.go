@@ -35,6 +35,7 @@ const (
 	OperationDeliveryPlan           = "delivery.plan"
 	OperationDeliveryImplementation = "delivery.implementation"
 	OperationDeliveryPublish        = "delivery.publish"
+	OperationDeliveryReleaseGate    = "delivery.release_gate"
 	OperationDeliveryQA             = "delivery.qa"
 	OperationDeliverySummary        = "delivery.summary"
 )
@@ -56,7 +57,7 @@ func AssignmentForOperation(operation string) (Assignment, bool) {
 		return Assignment{Role: RoleReviewer, Lane: LaneReview}, true
 	case OperationDeliveryQA:
 		return Assignment{Role: RoleQA, Lane: LaneQA}, true
-	case OperationDeliveryPublish:
+	case OperationDeliveryPublish, OperationDeliveryReleaseGate:
 		return Assignment{Role: RoleReleaseManager, Lane: LaneRelease}, true
 	default:
 		return Assignment{}, false

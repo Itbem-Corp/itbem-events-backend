@@ -261,6 +261,28 @@ func (w *Worker) Process(ctx context.Context, message TaskMessage) error {
 		_, err = w.callback.Update(ctx, message.Payload.TaskID, TaskUpdate{Status: "completed", RunID: runID, OutputRef: outputRef, Execution: publicationHandoff(publication), Deterministic: true})
 		return err
 	}
+	if message.Payload.Operation == "delivery.release_gate" {
+		gateInput, runErr := RunReleaseGate(input.Delivery)
+		if runErr != nil {
+			return w.fail(ctx, message.Payload.TaskID, runID, runErr)
+		}
+		handoff := releaseGateHandoff(gateInput)
+		output := map[string]any{
+			"schema_version": 1, "task_id": message.Payload.TaskID, "operation": message.Payload.Operation,
+			"deterministic": true, "structured_result": map[string]any{"state": "evaluated"}, "execution": handoff,
+			"created_at": w.now().UTC().Format(time.RFC3339Nano),
+		}
+		encoded, err := json.Marshal(output)
+		if err != nil {
+			return w.fail(ctx, message.Payload.TaskID, runID, fmt.Errorf("automation result could not be encoded"))
+		}
+		outputRef, err := w.storeExecutionResult(ctx, message.Payload.TaskID, runID, encoded)
+		if err != nil {
+			return err
+		}
+		_, err = w.callback.Update(ctx, message.Payload.TaskID, TaskUpdate{Status: "completed", RunID: runID, OutputRef: outputRef, Execution: handoff, Deterministic: true})
+		return err
+	}
 	if message.Payload.Operation == "delivery.qa" {
 		qaResult, qaArtifacts, err = RunQA(ctx, message.Payload.TaskID, input.Delivery, os.Getenv)
 		if err != nil {
@@ -682,7 +704,7 @@ func CompletionTokensForOperation(operation string) int {
 		return DefaultCompletionTokens
 	case "delivery.implementation":
 		return miniMaxM3CompletionLimit
-	case "delivery.publish":
+	case "delivery.publish", "delivery.release_gate":
 		return 0
 	}
 	return DefaultCompletionTokens

@@ -83,6 +83,13 @@ These private ITBEM routes require a platform administrator. Human gate decision
 are append-only, and a code approval only authorizes controlled preview deployment;
 QA and production release remain independent gates.
 
+The `release_gate` agent-run phase is available only during `release_review` to
+a release-authorized human. It is routed to the providerless `release_manager`
+worker on the `release` lane. The initial candidate is derived exclusively from
+GitHub-App-published change sets covering every repository marked `changes` in
+the approved plan; stored records alone remain blocked until the worker supplies
+fresh policy, GitHub, Vault, QA, security, environment and recovery evidence.
+
 ### Events
 - `GET /api/events/all` → `events.ListEvents` — compatibility path for dashboard list; requires auth and returns root/all or user-scoped events
 - `GET /api/events` → `events.ListEvents` — Protected. Query params: `?client_id=UUID` (optional). Root users see all events; regular users see events for their accessible clients; with `?client_id` returns events for that client (access-checked).

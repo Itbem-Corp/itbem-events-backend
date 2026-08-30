@@ -11,6 +11,12 @@ commit, publish one reviewed branch and create its pull request only when a
 GitHub App identity and a matching short-lived human publication grant are both
 present.
 
+The release lane also accepts `delivery.release_gate`, a providerless operation
+that evaluates a control-plane-built exact revision candidate and returns a
+bounded structured handoff. It cannot invent a human approval: the signed API
+callback binds the authenticated task requester and appends the immutable
+Gatekeeper event after re-evaluating the same subject.
+
 ## Continuous role-lane operation
 
 Each long-lived worker declares one exact identity with `ITBEM_AI_ROLE` and

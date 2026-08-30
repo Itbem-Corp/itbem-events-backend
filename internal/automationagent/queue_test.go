@@ -51,6 +51,9 @@ func TestCompletionTokensForOperationKeepsPlansBoundedAndExpandsImplementation(t
 	if got := CompletionTokensForOperation("delivery.publish"); got != 0 {
 		t.Fatalf("deterministic publication should have no model budget, got %d", got)
 	}
+	if got := CompletionTokensForOperation("delivery.release_gate"); got != 0 {
+		t.Fatalf("release Gatekeeper completion tokens = %d, want 0", got)
+	}
 }
 
 func TestBoundedCompletionTokensNeverLetsQueuePayloadRaiseOperationLimit(t *testing.T) {
