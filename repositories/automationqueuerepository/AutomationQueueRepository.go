@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"events-stocks/configuration"
+	"events-stocks/internal/agentwork"
 	"fmt"
 	"strings"
 	"sync"
@@ -149,23 +150,10 @@ func Validate(message Message) error {
 	if message.SchemaVersion != 1 || message.TenantCode != "itbem" || message.Type != "ai.local.process" || strings.TrimSpace(message.JobID) == "" || strings.TrimSpace(message.Payload.TaskID) == "" || message.Payload.Attempt < 1 {
 		return fmt.Errorf("invalid ITBEM automation message")
 	}
-	if !allowedOperation(message.Payload.Operation) {
+	if !agentwork.IsSupportedOperation(message.Payload.Operation) {
 		return fmt.Errorf("automation operation is not allowlisted")
 	}
 	return nil
-}
-
-// Keep the transport admission contract aligned with the isolated worker.
-// The worker revalidates its decoded body as defense in depth; rejecting an
-// invalid operation here prevents a malformed durable outbox payload from
-// wasting receives and eventually occupying the shared automation DLQ.
-func allowedOperation(operation string) bool {
-	switch operation {
-	case "ai.chat", "document.analyze", "code.review", "product.ideate", "delivery.plan", "delivery.implementation", "delivery.publish", "delivery.qa", "delivery.summary":
-		return true
-	default:
-		return false
-	}
 }
 
 func publishBody(body string) error {

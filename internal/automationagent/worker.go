@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"events-stocks/internal/agentwork"
 	"fmt"
 	"io"
 	"os"
@@ -171,19 +172,10 @@ func validateTaskMessageEnvelope(message TaskMessage) error {
 	if message.SchemaVersion != 1 || message.TenantCode != "itbem" || message.Type != "ai.local.process" || strings.TrimSpace(message.JobID) == "" || strings.TrimSpace(message.Payload.TaskID) == "" || message.Payload.Attempt < 1 {
 		return fmt.Errorf("invalid ITBEM automation message")
 	}
-	if !allowedOperation(message.Payload.Operation) {
+	if !agentwork.IsSupportedOperation(message.Payload.Operation) {
 		return fmt.Errorf("automation operation is not allowlisted")
 	}
 	return nil
-}
-
-func allowedOperation(operation string) bool {
-	switch operation {
-	case "ai.chat", "document.analyze", "code.review", "product.ideate", "delivery.plan", "delivery.implementation", "delivery.publish", "delivery.qa", "delivery.summary":
-		return true
-	default:
-		return false
-	}
 }
 
 func ParsePrivateReference(reference string) (bucket, key string, err error) {
