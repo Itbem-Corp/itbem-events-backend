@@ -15,6 +15,15 @@ permisos de organización salvo que un flujo distinto los requiera y se diseñe
 con otro grant. La evidencia de seguridad del Gatekeeper proviene de scanners
 locales configurados y no necesita GitHub Advanced Security.
 
+El worker determinista de release usa un grant de sólo lectura separado para
+comprobar el contrato de entorno aprobado: **Contents: read** para confirmar el
+workflow en el SHA exacto, **Actions: read** para confirmar el environment y
+**Environments: read** sólo cuando la política declara nombres de secrets o
+variables requeridos. Las APIs devuelven metadatos/nombres, nunca valores. El
+worker conserva únicamente los nombres requeridos que faltan; no persiste el
+inventario completo de la organización. Este grant no permite ejecutar el
+workflow, modificar secrets, administrar environments, mergear ni desplegar.
+
 ## Instalación inicial (una sola vez)
 
 1. En la organización de GitHub, crear una **GitHub App** privada para Delivery.
