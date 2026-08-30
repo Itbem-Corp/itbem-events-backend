@@ -36,13 +36,20 @@ type WorkspaceConfig struct {
 	// checkout synchronizer. They let one worker host maintain dedicated,
 	// reproducible base checkouts for many projects without letting a task pick
 	// a path, remote, or branch.
-	RepositoryURL       string     `json:"repository_url"`
-	BaseBranch          string     `json:"base_branch"`
-	Capabilities        []string   `json:"capabilities"`
-	ValidationCommands  [][]string `json:"validation_commands"`
-	QACommands          [][]string `json:"qa_commands"`
-	QAArtifactPatterns  []string   `json:"qa_artifact_patterns"`
-	QAScreenshotCommand []string   `json:"qa_screenshot_command"`
+	RepositoryURL      string     `json:"repository_url"`
+	BaseBranch         string     `json:"base_branch"`
+	Capabilities       []string   `json:"capabilities"`
+	ValidationCommands [][]string `json:"validation_commands"`
+	// ValidationCommandKinds and QACommandKinds are operator-owned identities
+	// for the commands at the matching index. Agent input may choose whether an
+	// approved command runs, but it can never rename a command to satisfy a
+	// release policy. Empty lists retain legacy execution without gate-bearing
+	// named evidence.
+	ValidationCommandKinds []string   `json:"validation_command_kinds"`
+	QACommands             [][]string `json:"qa_commands"`
+	QACommandKinds         []string   `json:"qa_command_kinds"`
+	QAArtifactPatterns     []string   `json:"qa_artifact_patterns"`
+	QAScreenshotCommand    []string   `json:"qa_screenshot_command"`
 	// QASemanticCommand is an operator-owned, opt-in browser QA layer (for
 	// example the pinned Stagehand runner). It receives only the reviewed
 	// preview URL and a private evidence output path; a task or model response
@@ -162,6 +169,9 @@ func loadWorkspaces(raw string, requireDirectory bool) (map[string]Workspace, er
 		if err := validateCommandList("qa_commands", config.QACommands); err != nil {
 			return nil, fmt.Errorf("workspace %s: %w", id, err)
 		}
+		if err := validateCommandKinds(config.ValidationCommands, config.ValidationCommandKinds, config.QACommands, config.QACommandKinds); err != nil {
+			return nil, fmt.Errorf("workspace %s: %w", id, err)
+		}
 		if err := validateArtifactPatterns(config.QAArtifactPatterns); err != nil {
 			return nil, fmt.Errorf("workspace %s: %w", id, err)
 		}
@@ -261,6 +271,42 @@ func validateCommandList(name string, commands [][]string) error {
 		}
 	}
 	return nil
+}
+
+var workspaceTestKind = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:/+-]{0,127}$`)
+
+// validateCommandKinds keeps test identity next to operator-owned executable
+// configuration. A partial positional map is ambiguous and duplicate names
+// could let one command masquerade as multiple policy requirements.
+func validateCommandKinds(validationCommands [][]string, validationKinds []string, qaCommands [][]string, qaKinds []string) error {
+	for _, pair := range []struct {
+		name     string
+		commands [][]string
+		kinds    []string
+	}{{"validation_command_kinds", validationCommands, validationKinds}, {"qa_command_kinds", qaCommands, qaKinds}} {
+		if len(pair.kinds) != 0 && len(pair.kinds) != len(pair.commands) {
+			return fmt.Errorf("%s must be empty or contain one identity per command", pair.name)
+		}
+	}
+	seen := make(map[string]struct{}, len(validationKinds)+len(qaKinds))
+	for _, kind := range append(append([]string(nil), validationKinds...), qaKinds...) {
+		if kind != strings.TrimSpace(kind) || !workspaceTestKind.MatchString(kind) {
+			return fmt.Errorf("test command identity %q is invalid", kind)
+		}
+		key := strings.ToLower(kind)
+		if _, duplicate := seen[key]; duplicate {
+			return fmt.Errorf("test command identity %q is duplicated", kind)
+		}
+		seen[key] = struct{}{}
+	}
+	return nil
+}
+
+func configuredCommandKind(kinds []string, index int) string {
+	if len(kinds) == 0 || index < 0 || index >= len(kinds) {
+		return ""
+	}
+	return kinds[index]
 }
 
 func validateArtifactPatterns(patterns []string) error {
@@ -380,11 +426,13 @@ type WorkspaceArchitecture struct {
 // configuration can contain internal paths or credentials and is executed by
 // the deterministic QA/validation runner rather than the model.
 type WorkspaceHarness struct {
-	ValidationCommandCount int    `json:"validation_command_count"`
-	QACommandCount         int    `json:"qa_command_count"`
-	ArtifactCollection     bool   `json:"artifact_collection"`
-	ScreenshotMode         string `json:"screenshot_mode"`
-	SemanticQAMode         string `json:"semantic_qa_mode"`
+	ValidationCommandCount      int    `json:"validation_command_count"`
+	NamedValidationCommandCount int    `json:"named_validation_command_count"`
+	QACommandCount              int    `json:"qa_command_count"`
+	NamedQACommandCount         int    `json:"named_qa_command_count"`
+	ArtifactCollection          bool   `json:"artifact_collection"`
+	ScreenshotMode              string `json:"screenshot_mode"`
+	SemanticQAMode              string `json:"semantic_qa_mode"`
 }
 
 // RemoteRepositoryContext distinguishes a frozen GitHub checkpoint from a
@@ -627,11 +675,13 @@ func workspaceHarness(config WorkspaceConfig) WorkspaceHarness {
 		semanticQAMode = "configured_command"
 	}
 	return WorkspaceHarness{
-		ValidationCommandCount: len(config.ValidationCommands),
-		QACommandCount:         len(config.QACommands),
-		ArtifactCollection:     len(config.QAArtifactPatterns) > 0,
-		ScreenshotMode:         screenshotMode,
-		SemanticQAMode:         semanticQAMode,
+		ValidationCommandCount:      len(config.ValidationCommands),
+		NamedValidationCommandCount: len(config.ValidationCommandKinds),
+		QACommandCount:              len(config.QACommands),
+		NamedQACommandCount:         len(config.QACommandKinds),
+		ArtifactCollection:          len(config.QAArtifactPatterns) > 0,
+		ScreenshotMode:              screenshotMode,
+		SemanticQAMode:              semanticQAMode,
 	}
 }
 
@@ -829,15 +879,17 @@ func sameManagedRemote(actual, registered string) bool {
 // operator verify that a local runner can safely serve a project without
 // emitting paths, remotes, source excerpts, credentials, or command output.
 type WorkspaceDiagnostic struct {
-	ID                     string            `json:"id"`
-	Ready                  bool              `json:"ready"`
-	Issue                  string            `json:"issue,omitempty"`
-	Capabilities           []string          `json:"capabilities"`
-	ValidationCommandCount int               `json:"validation_command_count"`
-	QACommandCount         int               `json:"qa_command_count"`
-	ScreenshotMode         string            `json:"screenshot_mode"`
-	SemanticQAMode         string            `json:"semantic_qa_mode"`
-	Git                    WorkspaceGitState `json:"git"`
+	ID                          string            `json:"id"`
+	Ready                       bool              `json:"ready"`
+	Issue                       string            `json:"issue,omitempty"`
+	Capabilities                []string          `json:"capabilities"`
+	ValidationCommandCount      int               `json:"validation_command_count"`
+	NamedValidationCommandCount int               `json:"named_validation_command_count"`
+	QACommandCount              int               `json:"qa_command_count"`
+	NamedQACommandCount         int               `json:"named_qa_command_count"`
+	ScreenshotMode              string            `json:"screenshot_mode"`
+	SemanticQAMode              string            `json:"semantic_qa_mode"`
+	Git                         WorkspaceGitState `json:"git"`
 }
 
 // WorkspaceReadiness is the small, continuously reportable projection of a
@@ -847,13 +899,15 @@ type WorkspaceDiagnostic struct {
 // a live worker with a worker that is actually ready to execute a given kind
 // of Delivery work.
 type WorkspaceReadiness struct {
-	ID                     string `json:"id"`
-	Ready                  bool   `json:"ready"`
-	QAReady                bool   `json:"qa_ready"`
-	VisualQAReady          bool   `json:"visual_qa_ready"`
-	PublicationReady       bool   `json:"publication_ready"`
-	ValidationCommandCount int    `json:"validation_command_count"`
-	QACommandCount         int    `json:"qa_command_count"`
+	ID                          string `json:"id"`
+	Ready                       bool   `json:"ready"`
+	QAReady                     bool   `json:"qa_ready"`
+	VisualQAReady               bool   `json:"visual_qa_ready"`
+	PublicationReady            bool   `json:"publication_ready"`
+	ValidationCommandCount      int    `json:"validation_command_count"`
+	NamedValidationCommandCount int    `json:"named_validation_command_count"`
+	QACommandCount              int    `json:"qa_command_count"`
+	NamedQACommandCount         int    `json:"named_qa_command_count"`
 }
 
 // WorkspaceReadinessSnapshot validates only local registry state and returns
@@ -870,13 +924,10 @@ func WorkspaceReadinessSnapshot(lookup func(string) string) ([]WorkspaceReadines
 			capabilityPresent(diagnostic.Capabilities, WorkspaceCapabilityPublishBranch) &&
 			capabilityPresent(diagnostic.Capabilities, WorkspaceCapabilityCreatePullReq)
 		result = append(result, WorkspaceReadiness{
-			ID:                     diagnostic.ID,
-			Ready:                  diagnostic.Ready,
-			QAReady:                diagnostic.Ready && diagnostic.QACommandCount > 0,
-			VisualQAReady:          diagnostic.Ready && diagnostic.SemanticQAMode == "configured_command",
-			PublicationReady:       diagnostic.Ready && canPublish,
-			ValidationCommandCount: diagnostic.ValidationCommandCount,
-			QACommandCount:         diagnostic.QACommandCount,
+			ID: diagnostic.ID, Ready: diagnostic.Ready,
+			QAReady: diagnostic.Ready && diagnostic.QACommandCount > 0, VisualQAReady: diagnostic.Ready && diagnostic.SemanticQAMode == "configured_command",
+			PublicationReady: diagnostic.Ready && canPublish, ValidationCommandCount: diagnostic.ValidationCommandCount,
+			NamedValidationCommandCount: diagnostic.NamedValidationCommandCount, QACommandCount: diagnostic.QACommandCount, NamedQACommandCount: diagnostic.NamedQACommandCount,
 		})
 	}
 	return result, nil
@@ -915,7 +966,8 @@ func DiagnoseWorkspaces(lookup func(string) string) ([]WorkspaceDiagnostic, erro
 		}
 		diagnostic := WorkspaceDiagnostic{
 			ID: id, Ready: state.Available, Capabilities: append([]string(nil), workspace.Config.Capabilities...),
-			ValidationCommandCount: len(workspace.Config.ValidationCommands), QACommandCount: len(workspace.Config.QACommands),
+			ValidationCommandCount: len(workspace.Config.ValidationCommands), NamedValidationCommandCount: len(workspace.Config.ValidationCommandKinds),
+			QACommandCount: len(workspace.Config.QACommands), NamedQACommandCount: len(workspace.Config.QACommandKinds),
 			ScreenshotMode: screenshotMode, SemanticQAMode: harness.SemanticQAMode, Git: state,
 		}
 		if !state.Available {

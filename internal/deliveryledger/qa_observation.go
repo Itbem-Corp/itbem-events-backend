@@ -19,7 +19,10 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-const EventTypeQAObserved = "delivery.qa.observed.v1"
+// Version two adds operator-owned named command identities. Version-one
+// observations remain immutable history but are intentionally ineligible for
+// named release gates.
+const EventTypeQAObserved = "delivery.qa.observed.v2"
 
 type qaObservationPayload struct {
 	SchemaVersion int                    `json:"schema_version"`
@@ -94,9 +97,9 @@ func newQAObservationEvent(workItemID uuid.UUID, observation qaevidence.Observat
 	payloadDigest := hex.EncodeToString(digest[:])
 	return models.DeliveryEvent{
 		WorkItemID: workItemID, EventType: EventTypeQAObserved,
-		DedupeKey:     workItemID.String() + ":qa-observation-v1:" + canonical.TaskID,
+		DedupeKey:     workItemID.String() + ":qa-observation-v2:" + canonical.TaskID,
 		SubjectDigest: canonical.MatrixDigest, PayloadJSON: string(payload), PayloadDigest: payloadDigest,
-		ActorType: "system", ActorID: "qa-runner/v1", OccurredAt: occurredAt.UTC(), CreatedAt: occurredAt.UTC(),
+		ActorType: "system", ActorID: "qa-runner/v2", OccurredAt: occurredAt.UTC(), CreatedAt: occurredAt.UTC(),
 	}, nil
 }
 

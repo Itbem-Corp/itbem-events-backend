@@ -92,21 +92,21 @@ func RunQA(ctx context.Context, taskID string, delivery json.RawMessage, lookup 
 		result["repository_execution_order"] = append(result["repository_execution_order"].([]string), target.reference)
 		commands := make([]any, 0, len(target.workspace.Config.ValidationCommands)+len(target.workspace.Config.QACommands))
 		if target.execution.RunValidation {
-			for _, command := range target.workspace.Config.ValidationCommands {
+			for index, command := range target.workspace.Config.ValidationCommands {
 				completed, runErr := runLocal(ctx, target.root, commandTimeout, "", command[0], command[1:]...)
 				if runErr != nil {
 					return nil, nil, runErr
 				}
-				commands = append(commands, map[string]any{"phase": "validation", "command": command, "passed": completed.ExitCode == 0, "output": completed.Output})
+				commands = append(commands, map[string]any{"kind": configuredCommandKind(target.workspace.Config.ValidationCommandKinds, index), "phase": "validation", "command": command, "passed": completed.ExitCode == 0, "output": completed.Output})
 			}
 		}
 		if target.execution.RunQA {
-			for _, command := range target.workspace.Config.QACommands {
+			for index, command := range target.workspace.Config.QACommands {
 				completed, runErr := runLocal(ctx, target.root, commandTimeout, "", command[0], command[1:]...)
 				if runErr != nil {
 					return nil, nil, runErr
 				}
-				commands = append(commands, map[string]any{"phase": "qa", "command": command, "passed": completed.ExitCode == 0, "output": completed.Output})
+				commands = append(commands, map[string]any{"kind": configuredCommandKind(target.workspace.Config.QACommandKinds, index), "phase": "qa", "command": command, "passed": completed.ExitCode == 0, "output": completed.Output})
 			}
 		}
 		if target.execution.CollectEvidence {

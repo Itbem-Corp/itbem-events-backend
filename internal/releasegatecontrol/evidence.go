@@ -11,9 +11,11 @@ import (
 	"strings"
 	"time"
 
+	"events-stocks/internal/deliveryledger"
 	"events-stocks/internal/deliverypolicy"
 	"events-stocks/internal/deliverypolicystore"
 	"events-stocks/internal/projectvault"
+	"events-stocks/internal/qaevidence"
 	"events-stocks/internal/releasegate"
 	"events-stocks/models"
 
@@ -24,6 +26,7 @@ import (
 const (
 	maxPolicyRevisions  = 500
 	maxPublishedChanges = 128
+	maxQAObservations   = 128
 )
 
 // Resolve replaces all candidate policy and Vault claims with current rows from
@@ -48,14 +51,14 @@ func Resolve(db *gorm.DB, workItemID uuid.UUID, input releasegate.Input, evaluat
 		return releasegate.Input{}, fmt.Errorf("release Gatekeeper project identity is invalid")
 	}
 
-	authoritativeRevisions, err := loadPublishedRevisionMatrix(db, item)
+	subject, err := loadPublishedReleaseSubject(db, item)
 	if err != nil {
 		return releasegate.Input{}, err
 	}
-	if !sameRevisionMatrix(input.Revisions, authoritativeRevisions) {
+	if !sameRevisionMatrix(input.Revisions, subject.Revisions) {
 		return releasegate.Input{}, fmt.Errorf("release Gatekeeper GitHub evidence does not match the current control-plane publication matrix")
 	}
-	input.Revisions = authoritativeRevisions
+	input.Revisions = subject.Revisions
 	discardUntrustedAssurance(&input)
 	repositories, references, err := repositoryReferences(input.Revisions)
 	if err != nil {
@@ -72,7 +75,11 @@ func Resolve(db *gorm.DB, workItemID uuid.UUID, input releasegate.Input, evaluat
 	if err != nil {
 		return releasegate.Input{}, err
 	}
-	return resolveStoredEvidence(input, project, repositories, vaults, revisions, decisions, evaluatedAt.UTC())
+	resolved, requiredByRepository, err := resolveStoredPolicyAndVault(input, project, repositories, vaults, revisions, decisions, evaluatedAt.UTC())
+	if err != nil {
+		return releasegate.Input{}, err
+	}
+	return resolveStoredQAEvidence(db, item.ID, resolved, subject, requiredByRepository)
 }
 
 type publishedChangeMetadata struct {
@@ -90,21 +97,27 @@ type selectedPublishedChange struct {
 	grantID  uuid.UUID
 }
 
-// loadPublishedRevisionMatrix rebuilds the exact release subject from the
+type publishedReleaseSubject struct {
+	Revisions                 []releasegate.Revision
+	RepositoryByReference     map[string]string
+	WorktreeBranchByReference map[string]string
+}
+
+// loadPublishedReleaseSubject rebuilds the exact release subject from the
 // approved plan, GitHub App publication records, and their consumed grants.
 // The callback's candidate matrix is deliberately ignored.
-func loadPublishedRevisionMatrix(db *gorm.DB, item models.DeliveryWorkItem) ([]releasegate.Revision, error) {
+func loadPublishedReleaseSubject(db *gorm.DB, item models.DeliveryWorkItem) (publishedReleaseSubject, error) {
 	required, err := requiredChangedRepositories(item.PlanJSON)
 	if err != nil {
-		return nil, err
+		return publishedReleaseSubject{}, err
 	}
 	var changes []models.DeliveryChangeSet
 	if err := db.Where("work_item_id = ? AND review_type = ?", item.ID, "pull_request").
 		Order("created_at DESC, id DESC").Limit(maxPublishedChanges + 1).Find(&changes).Error; err != nil {
-		return nil, fmt.Errorf("load release Gatekeeper published changes: %w", err)
+		return publishedReleaseSubject{}, fmt.Errorf("load release Gatekeeper published changes: %w", err)
 	}
 	if len(changes) > maxPublishedChanges {
-		return nil, fmt.Errorf("release Gatekeeper published change history exceeds the bounded limit")
+		return publishedReleaseSubject{}, fmt.Errorf("release Gatekeeper published change history exceeds the bounded limit")
 	}
 	selected := make(map[string]selectedPublishedChange, len(required))
 	for _, change := range changes {
@@ -117,12 +130,12 @@ func loadPublishedRevisionMatrix(db *gorm.DB, item models.DeliveryWorkItem) ([]r
 		}
 		metadata, grantID, parseErr := parsePublishedChange(change)
 		if parseErr != nil {
-			return nil, fmt.Errorf("release Gatekeeper latest publication for %s is invalid: %w", reference, parseErr)
+			return publishedReleaseSubject{}, fmt.Errorf("release Gatekeeper latest publication for %s is invalid: %w", reference, parseErr)
 		}
 		selected[reference] = selectedPublishedChange{change: change, metadata: metadata, grantID: grantID}
 	}
 	if len(selected) != len(required) {
-		return nil, fmt.Errorf("release Gatekeeper requires one current GitHub App publication for every changed repository")
+		return publishedReleaseSubject{}, fmt.Errorf("release Gatekeeper requires one current GitHub App publication for every changed repository")
 	}
 
 	grantIDs := make([]uuid.UUID, 0, len(selected))
@@ -131,30 +144,32 @@ func loadPublishedRevisionMatrix(db *gorm.DB, item models.DeliveryWorkItem) ([]r
 	}
 	var grants []models.DeliveryPublicationGrant
 	if err := db.Where("id IN ?", grantIDs).Find(&grants).Error; err != nil {
-		return nil, fmt.Errorf("load release Gatekeeper publication grants: %w", err)
+		return publishedReleaseSubject{}, fmt.Errorf("load release Gatekeeper publication grants: %w", err)
 	}
 	if len(grants) != len(grantIDs) {
-		return nil, fmt.Errorf("release Gatekeeper publication grant evidence is missing or ambiguous")
+		return publishedReleaseSubject{}, fmt.Errorf("release Gatekeeper publication grant evidence is missing or ambiguous")
 	}
 	grantByID := make(map[uuid.UUID]models.DeliveryPublicationGrant, len(grants))
 	for _, grant := range grants {
 		if grant.ID == uuid.Nil {
-			return nil, fmt.Errorf("release Gatekeeper publication grant identity is invalid")
+			return publishedReleaseSubject{}, fmt.Errorf("release Gatekeeper publication grant identity is invalid")
 		}
 		if _, duplicate := grantByID[grant.ID]; duplicate {
-			return nil, fmt.Errorf("release Gatekeeper publication grant evidence is duplicated")
+			return publishedReleaseSubject{}, fmt.Errorf("release Gatekeeper publication grant evidence is duplicated")
 		}
 		grantByID[grant.ID] = grant
 	}
 
 	revisions := make([]releasegate.Revision, 0, len(selected))
+	repositoryByReference := make(map[string]string, len(selected))
+	worktreeBranchByReference := make(map[string]string, len(selected))
 	for reference, value := range selected {
 		grant, ok := grantByID[value.grantID]
 		if !ok {
-			return nil, fmt.Errorf("release Gatekeeper publication grant is missing")
+			return publishedReleaseSubject{}, fmt.Errorf("release Gatekeeper publication grant is missing")
 		}
 		if err := validatePublicationGrant(item.ID, reference, value, grant); err != nil {
-			return nil, err
+			return publishedReleaseSubject{}, err
 		}
 		revision := releasegate.Revision{
 			Repository: strings.ToLower(strings.TrimSpace(value.metadata.RemoteRepository)),
@@ -162,17 +177,27 @@ func loadPublishedRevisionMatrix(db *gorm.DB, item models.DeliveryWorkItem) ([]r
 			SHA:        strings.ToLower(strings.TrimSpace(value.change.CommitSHA)),
 		}
 		if _, err := releasegate.RevisionMatrixDigest([]releasegate.Revision{revision}); err != nil {
-			return nil, fmt.Errorf("release Gatekeeper stored publication revision is invalid")
+			return publishedReleaseSubject{}, fmt.Errorf("release Gatekeeper stored publication revision is invalid")
 		}
 		revisions = append(revisions, revision)
+		repositoryByReference[reference] = revision.Repository
+		worktreeBranchByReference[reference] = value.change.Branch
 	}
 	sort.Slice(revisions, func(left, right int) bool {
 		return strings.ToLower(revisions[left].Repository) < strings.ToLower(revisions[right].Repository)
 	})
 	if _, err := releasegate.RevisionMatrixDigest(revisions); err != nil {
-		return nil, fmt.Errorf("release Gatekeeper stored publication matrix is invalid")
+		return publishedReleaseSubject{}, fmt.Errorf("release Gatekeeper stored publication matrix is invalid")
 	}
-	return revisions, nil
+	return publishedReleaseSubject{Revisions: revisions, RepositoryByReference: repositoryByReference, WorktreeBranchByReference: worktreeBranchByReference}, nil
+}
+
+// loadPublishedRevisionMatrix remains the narrow helper used by existing
+// callers and tests; release resolution uses the richer subject so local
+// workspace evidence can be bound to its exact published GitHub repository.
+func loadPublishedRevisionMatrix(db *gorm.DB, item models.DeliveryWorkItem) ([]releasegate.Revision, error) {
+	subject, err := loadPublishedReleaseSubject(db, item)
+	return subject.Revisions, err
 }
 
 func requiredChangedRepositories(planJSON string) (map[string]struct{}, error) {
@@ -395,21 +420,30 @@ func loadPolicyLedger(db *gorm.DB, project models.DeliveryProject, changeSetID s
 }
 
 func resolveStoredEvidence(input releasegate.Input, project models.DeliveryProject, repositories map[string]string, vaults []models.DeliveryProjectVaultRevision, revisions []models.DeliveryPolicyRevision, decisions []models.DeliveryPolicyDecision, evaluatedAt time.Time) (releasegate.Input, error) {
+	resolved, _, err := resolveStoredPolicyAndVault(input, project, repositories, vaults, revisions, decisions, evaluatedAt)
+	return resolved, err
+}
+
+// resolveStoredPolicyAndVault also retains the per-repository test contract.
+// Collapsing it to the policy-wide union before QA resolution would let a test
+// observed in one repository incorrectly satisfy another repository's gate.
+func resolveStoredPolicyAndVault(input releasegate.Input, project models.DeliveryProject, repositories map[string]string, vaults []models.DeliveryProjectVaultRevision, revisions []models.DeliveryPolicyRevision, decisions []models.DeliveryPolicyDecision, evaluatedAt time.Time) (releasegate.Input, map[string][]string, error) {
 	input.Policy = releasegate.Policy{Resolved: true, RequiredTestKinds: []string{}, Repositories: []releasegate.RepositoryPolicyEvidence{}}
 	input.Vault = []releasegate.VaultEvidence{}
 	vaultByReference := make(map[string]models.DeliveryProjectVaultRevision, len(vaults))
 	for _, vault := range vaults {
 		if err := validateVaultRevision(project.ID, vault); err != nil {
-			return releasegate.Input{}, err
+			return releasegate.Input{}, nil, err
 		}
 		key := strings.ToLower(strings.TrimSpace(vault.RepositoryReference))
 		if _, duplicate := vaultByReference[key]; duplicate {
-			return releasegate.Input{}, fmt.Errorf("release Gatekeeper Vault repository is duplicated")
+			return releasegate.Input{}, nil, fmt.Errorf("release Gatekeeper Vault repository is duplicated")
 		}
 		vaultByReference[key] = vault
 	}
 
 	requiredTests := map[string]string{}
+	requiredByRepository := make(map[string][]string, len(input.Revisions))
 	for _, matrixRevision := range input.Revisions {
 		repository := strings.ToLower(strings.TrimSpace(matrixRevision.Repository))
 		reference := repositories[repository]
@@ -418,7 +452,7 @@ func resolveStoredEvidence(input releasegate.Input, project models.DeliveryProje
 		}
 		policy, err := deliverypolicystore.ResolveEffective(context, revisions, decisions, evaluatedAt)
 		if err != nil {
-			return releasegate.Input{}, fmt.Errorf("resolve release Gatekeeper policy for %s: %w", repository, err)
+			return releasegate.Input{}, nil, fmt.Errorf("resolve release Gatekeeper policy for %s: %w", repository, err)
 		}
 		gatePolicy := policy.GatePolicyFor(input.Action)
 		actionAllowed := gatePolicy.Resolved
@@ -435,8 +469,12 @@ func resolveStoredEvidence(input releasegate.Input, project models.DeliveryProje
 			key := strings.ToLower(strings.TrimSpace(kind))
 			if key != "" {
 				requiredTests[key] = strings.TrimSpace(kind)
+				requiredByRepository[repository] = append(requiredByRepository[repository], strings.TrimSpace(kind))
 			}
 		}
+		sort.Slice(requiredByRepository[repository], func(left, right int) bool {
+			return strings.ToLower(requiredByRepository[repository][left]) < strings.ToLower(requiredByRepository[repository][right])
+		})
 
 		if vault, ok := vaultByReference[strings.ToLower(reference)]; ok {
 			revisionID := fmt.Sprintf("%s:%d:%s", vault.ID.String(), vault.Version, vault.ContentSHA256)
@@ -455,10 +493,165 @@ func resolveStoredEvidence(input releasegate.Input, project models.DeliveryProje
 	})
 	digest, err := releasegate.CompositePolicyDigest(input.Policy.Repositories)
 	if err != nil {
-		return releasegate.Input{}, fmt.Errorf("release Gatekeeper composite policy is invalid: %w", err)
+		return releasegate.Input{}, nil, fmt.Errorf("release Gatekeeper composite policy is invalid: %w", err)
 	}
 	input.Policy.Digest = digest
+	return input, requiredByRepository, nil
+}
+
+// resolveStoredQAEvidence accepts only the newest completed QA task for the
+// exact publication matrix. Old matrix observations are ignored by the query;
+// malformed current-matrix ledger rows fail closed instead of being skipped.
+func resolveStoredQAEvidence(db *gorm.DB, workItemID uuid.UUID, input releasegate.Input, subject publishedReleaseSubject, requiredByRepository map[string][]string) (releasegate.Input, error) {
+	if db == nil || workItemID == uuid.Nil {
+		return releasegate.Input{}, fmt.Errorf("release Gatekeeper QA context is invalid")
+	}
+	matrixDigest, err := releasegate.RevisionMatrixDigest(input.Revisions)
+	if err != nil || !sameRevisionMatrix(input.Revisions, subject.Revisions) {
+		return releasegate.Input{}, fmt.Errorf("release Gatekeeper QA matrix is invalid")
+	}
+	var events []models.DeliveryEvent
+	if err := db.Where("work_item_id = ? AND event_type = ? AND subject_digest = ?", workItemID, deliveryledger.EventTypeQAObserved, matrixDigest).
+		Order("sequence DESC, occurred_at DESC, id DESC").Limit(maxQAObservations + 1).Find(&events).Error; err != nil {
+		return releasegate.Input{}, fmt.Errorf("load release Gatekeeper QA evidence: %w", err)
+	}
+	if len(events) > maxQAObservations {
+		return releasegate.Input{}, fmt.Errorf("release Gatekeeper QA evidence history exceeds the bounded limit")
+	}
+	if len(events) == 0 {
+		return input, nil
+	}
+	projected := make([]deliveryledger.QAObservation, 0, len(events))
+	for _, event := range events {
+		observation, projectionErr := deliveryledger.ProjectQAObservation(event)
+		if projectionErr != nil {
+			return releasegate.Input{}, fmt.Errorf("release Gatekeeper QA evidence integrity failed: %w", projectionErr)
+		}
+		if !strings.EqualFold(observation.Observation.MatrixDigest, matrixDigest) {
+			return releasegate.Input{}, fmt.Errorf("release Gatekeeper QA evidence subject does not match")
+		}
+		projected = append(projected, observation)
+	}
+	latest := projected[0]
+	taskID, err := uuid.FromString(latest.Observation.TaskID)
+	if err != nil || taskID == uuid.Nil {
+		return releasegate.Input{}, fmt.Errorf("release Gatekeeper QA task identity is invalid")
+	}
+	var task models.AutomationTask
+	if err := db.Select("id", "delivery_work_item_id", "operation", "evidence_subject_digest", "status", "completed_at").First(&task, taskID).Error; err != nil {
+		return releasegate.Input{}, fmt.Errorf("load release Gatekeeper QA task: %w", err)
+	}
+	if err := validateQATaskProvenance(task, workItemID, taskID, matrixDigest, latest.OccurredAt); err != nil {
+		return releasegate.Input{}, err
+	}
+	tests, err := testsFromQAObservation(input.Policy.RequiredTestKinds, requiredByRepository, subject, latest.Observation)
+	if err != nil {
+		return releasegate.Input{}, err
+	}
+	input.Tests = tests
 	return input, nil
+}
+
+func validateQATaskProvenance(task models.AutomationTask, workItemID, taskID uuid.UUID, matrixDigest string, occurredAt time.Time) error {
+	if task.ID != taskID || task.DeliveryWorkItemID == nil || *task.DeliveryWorkItemID != workItemID || task.Operation != "delivery.qa" || task.Status != "completed" ||
+		task.CompletedAt == nil || !task.CompletedAt.UTC().Equal(occurredAt.UTC()) || !strings.EqualFold(strings.TrimSpace(task.EvidenceSubjectDigest), matrixDigest) || !validHex(matrixDigest, 64) {
+		return fmt.Errorf("release Gatekeeper QA task provenance does not match")
+	}
+	return nil
+}
+
+type testAggregate struct {
+	name     string
+	expected int
+	missing  bool
+	failed   bool
+}
+
+// testsFromQAObservation resolves named commands per repository before it
+// creates the policy-wide evidence expected by releasegate.Evaluate. A command
+// from another repository can therefore never satisfy the same named gate.
+func testsFromQAObservation(requiredKinds []string, requiredByRepository map[string][]string, subject publishedReleaseSubject, observation qaevidence.Observation) ([]releasegate.TestEvidence, error) {
+	if err := qaevidence.Validate(observation); err != nil {
+		return nil, fmt.Errorf("release Gatekeeper QA observation is invalid: %w", err)
+	}
+	if len(subject.RepositoryByReference) == 0 || len(subject.RepositoryByReference) != len(subject.WorktreeBranchByReference) || len(observation.Repositories) != len(subject.RepositoryByReference) {
+		return nil, fmt.Errorf("release Gatekeeper QA repository set does not match the publication subject")
+	}
+	runsByReference := make(map[string]qaevidence.Repository, len(observation.Repositories))
+	for _, repository := range observation.Repositories {
+		expectedRepository, exists := subject.RepositoryByReference[repository.Reference]
+		expectedBranch, branchExists := subject.WorktreeBranchByReference[repository.Reference]
+		if !exists || !branchExists || expectedRepository == "" || repository.Branch != expectedBranch {
+			return nil, fmt.Errorf("release Gatekeeper QA repository provenance does not match")
+		}
+		runsByReference[repository.Reference] = repository
+	}
+	referenceByRepository := make(map[string]string, len(subject.RepositoryByReference))
+	for reference, repository := range subject.RepositoryByReference {
+		key := strings.ToLower(strings.TrimSpace(repository))
+		if key == "" || strings.TrimSpace(reference) == "" {
+			return nil, fmt.Errorf("release Gatekeeper QA publication mapping is invalid")
+		}
+		if _, duplicate := referenceByRepository[key]; duplicate {
+			return nil, fmt.Errorf("release Gatekeeper QA publication mapping is ambiguous")
+		}
+		if _, observed := runsByReference[reference]; !observed {
+			return nil, fmt.Errorf("release Gatekeeper QA repository set does not match the publication subject")
+		}
+		referenceByRepository[key] = reference
+	}
+
+	aggregates := make(map[string]*testAggregate, len(requiredKinds))
+	for _, kind := range requiredKinds {
+		key := strings.ToLower(strings.TrimSpace(kind))
+		if key == "" {
+			return nil, fmt.Errorf("release Gatekeeper QA policy test identity is invalid")
+		}
+		aggregates[key] = &testAggregate{name: strings.TrimSpace(kind)}
+	}
+	for repository, kinds := range requiredByRepository {
+		reference, exists := referenceByRepository[strings.ToLower(strings.TrimSpace(repository))]
+		if !exists {
+			return nil, fmt.Errorf("release Gatekeeper QA policy repository is outside the publication subject")
+		}
+		commands := make(map[string]bool, len(runsByReference[reference].Commands))
+		for _, command := range runsByReference[reference].Commands {
+			if command.Kind != "" {
+				commands[strings.ToLower(command.Kind)] = command.Passed
+			}
+		}
+		for _, kind := range kinds {
+			key := strings.ToLower(strings.TrimSpace(kind))
+			aggregate, exists := aggregates[key]
+			if !exists {
+				return nil, fmt.Errorf("release Gatekeeper QA repository policy does not match its composite policy")
+			}
+			aggregate.expected++
+			passed, observed := commands[key]
+			if !observed {
+				aggregate.missing = true
+			} else if !passed {
+				aggregate.failed = true
+			}
+		}
+	}
+
+	tests := make([]releasegate.TestEvidence, 0, len(requiredKinds))
+	for _, kind := range requiredKinds {
+		aggregate := aggregates[strings.ToLower(strings.TrimSpace(kind))]
+		if aggregate == nil || aggregate.expected == 0 {
+			return nil, fmt.Errorf("release Gatekeeper QA composite policy has no repository requirement")
+		}
+		if aggregate.missing {
+			continue
+		}
+		status := releasegate.StatusPassed
+		if aggregate.failed {
+			status = releasegate.StatusFailed
+		}
+		tests = append(tests, releasegate.TestEvidence{Kind: aggregate.name, MatrixDigest: observation.MatrixDigest, Status: status})
+	}
+	return tests, nil
 }
 
 func policyRepositoryReference(fallback string, revisions []models.DeliveryPolicyRevision) string {

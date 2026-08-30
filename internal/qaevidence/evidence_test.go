@@ -11,7 +11,7 @@ func validObservation() Observation {
 		SchemaVersion: SchemaVersion, TaskID: "11111111-1111-4111-8111-111111111111", MatrixDigest: strings.Repeat("a", 64), PreviewPassed: true,
 		RepositoryExecutionOrder: []string{"workspace://api", "workspace://web"},
 		Repositories: []Repository{
-			{Reference: "workspace://web", Branch: "itbem-agent/22222222-2222-4222-8222-222222222222", Commands: []Command{{Index: 1, Phase: "qa", Passed: true}, {Index: 0, Phase: "validation", Passed: true}}},
+			{Reference: "workspace://web", Branch: "itbem-agent/22222222-2222-4222-8222-222222222222", Commands: []Command{{Index: 1, Phase: "qa", Kind: "e2e", Passed: true}, {Index: 0, Phase: "validation", Kind: "unit", Passed: true}}},
 			{Reference: "workspace://api", Branch: "itbem-agent/11111111-1111-4111-8111-111111111111", Commands: []Command{}},
 		},
 	}
@@ -45,5 +45,10 @@ func TestDecodeQAObservationFailsClosed(t *testing.T) {
 	invalid.Repositories[0].Commands = append(invalid.Repositories[0].Commands, Command{Index: 1, Phase: "qa", Passed: true})
 	if err := Validate(invalid); err == nil {
 		t.Fatal("duplicate QA command evidence was accepted")
+	}
+	duplicateKind := validObservation()
+	duplicateKind.Repositories[0].Commands[1].Kind = "E2E"
+	if err := Validate(duplicateKind); err == nil {
+		t.Fatal("duplicate QA test identity was accepted for one repository")
 	}
 }

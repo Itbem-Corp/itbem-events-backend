@@ -17,7 +17,7 @@ func ledgerQAObservation() qaevidence.Observation {
 		SchemaVersion: qaevidence.SchemaVersion, TaskID: "11111111-1111-4111-8111-111111111111", MatrixDigest: strings.Repeat("a", 64), PreviewPassed: true,
 		RepositoryExecutionOrder: []string{"workspace://api", "workspace://web"},
 		Repositories: []qaevidence.Repository{
-			{Reference: "workspace://web", Branch: "itbem-agent/22222222-2222-4222-8222-222222222222", Commands: []qaevidence.Command{{Index: 1, Phase: "qa", Passed: true}, {Index: 0, Phase: "validation", Passed: true}}},
+			{Reference: "workspace://web", Branch: "itbem-agent/22222222-2222-4222-8222-222222222222", Commands: []qaevidence.Command{{Index: 1, Phase: "qa", Kind: "e2e", Passed: true}, {Index: 0, Phase: "validation", Kind: "unit", Passed: true}}},
 			{Reference: "workspace://api", Branch: "itbem-agent/11111111-1111-4111-8111-111111111111", Commands: []qaevidence.Command{}},
 		},
 	}

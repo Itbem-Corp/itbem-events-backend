@@ -51,11 +51,14 @@ until separate immutable evidence resolvers attach them.
 For `delivery.qa`, the control plane fixes the current multi-repository matrix
 digest on the task before enqueue. The runner's callback handoff contains only
 that task/matrix identity, preview status, repository execution order, reviewed
-worktree references, and validation/QA pass/fail flags. It excludes commands,
-output, URLs, screenshots and the model-authored QA narrative. The backend
-strictly validates the handoff and appends `delivery.qa.observed.v1`; changing
-any release SHA leaves the historical QA event intact but makes it ineligible
-for the new matrix.
+worktree references, operator-owned test identities, and validation/QA
+pass/fail flags. It excludes commands, output, URLs, screenshots and the
+model-authored QA narrative. A task or model cannot label its own result. The
+backend strictly validates the handoff and appends `delivery.qa.observed.v2`;
+changing any release SHA leaves the historical QA event intact but makes it
+ineligible for the new matrix. The release resolver also binds every workspace
+and reviewed worktree branch to its exact GitHub App publication before a
+named test can satisfy that repository's policy.
 
 ## Continuous role-lane operation
 
@@ -214,8 +217,10 @@ available behind their normal human gates.
 	"repository_url": "https://github.com/example/dashboard.git",
 	"base_branch": "main",
 	"capabilities": ["repository:read", "repository:fetch", "worktree:create", "patch:apply"],
-    "validation_commands": [["npm", "run", "lint"], ["npm", "run", "typecheck"]],
+    "validation_commands": [["npm", "run", "test:unit"], ["npm", "run", "test:contract"]],
+    "validation_command_kinds": ["unit", "contract"],
     "qa_commands": [["npm", "run", "test:e2e"]],
+    "qa_command_kinds": ["e2e"],
     "qa_artifact_patterns": ["test-results/*.png"],
     "qa_semantic_command": ["node", "tools/stagehand-qa/run.mjs", "--url", "{preview_url}", "--output", "{artifact_path}"]
   }
@@ -225,7 +230,10 @@ available behind their normal human gates.
 The registry is operator-owned. `repository_url` is only used by the explicit
 managed-sync command; runtime task inputs can never choose it. Commands are arrays with allow-listed
 executables; no shell, arbitrary path, task prompt, or model response can add
-one. Implementation uses `git worktree` under the registered repository and
+one. Each `*_command_kinds` list must be empty or have exactly one unique,
+policy-compatible identity for every matching command. Empty lists preserve
+legacy execution but cannot satisfy named release gates. Implementation uses
+`git worktree` under the registered repository and
 leaves a reviewable branch for the human code-review gate.
 
 `qa_semantic_command` is optional. It runs the pinned, read-only Stagehand

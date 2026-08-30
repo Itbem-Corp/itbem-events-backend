@@ -147,10 +147,13 @@ Event     Event          `gorm:"foreignKey:EventID" json:"event,omitempty"`
   carry an optional `EvidenceSubjectDigest` fixed at enqueue time; QA uses it
   to bind observations to the exact multi-repository release matrix without
   granting the task merge or release authority.
-- **DeliveryEvent** QA observation (`delivery.qa.observed.v1`): Append-only,
+- **DeliveryEvent** QA observation (`delivery.qa.observed.v2`): Append-only,
   sequence-bearing result for one exact QA task and matrix digest. It stores
-  only repository execution order and bounded validation/QA pass/fail facts;
-  commands, output, URLs, screenshots and model prose remain private objects.
+  only repository execution order plus operator-owned test identities and
+  bounded validation/QA pass/fail facts; commands, output, URLs, screenshots
+  and model prose remain private objects. The release resolver accepts only a
+  completed matching task, exact workspace-to-publication/worktree mapping,
+  and each repository's effective required-test policy.
 - **AutomationAgentHeartbeat** (`models/AutomationAgentHeartbeat.go`): Short-
   lived, anonymized execution-plane presence. It records the declared worker
   role/lane, provider/model, concurrency and bounded workspace readiness, but

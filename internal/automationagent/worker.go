@@ -614,11 +614,12 @@ func qaExecutionHandoff(taskID string, delivery json.RawMessage, result map[stri
 		for index, rawCommand := range commands {
 			command, ok := rawCommand.(map[string]any)
 			phase, phaseOK := command["phase"].(string)
+			kind, kindOK := command["kind"].(string)
 			passed, passedOK := command["passed"].(bool)
-			if !ok || !phaseOK || !passedOK {
+			if !ok || !phaseOK || !kindOK || !passedOK {
 				return nil, fmt.Errorf("QA command observation is invalid")
 			}
-			repository.Commands = append(repository.Commands, qaevidence.Command{Index: index, Phase: strings.TrimSpace(phase), Passed: passed})
+			repository.Commands = append(repository.Commands, qaevidence.Command{Index: index, Phase: strings.TrimSpace(phase), Kind: strings.TrimSpace(kind), Passed: passed})
 		}
 		observation.Repositories = append(observation.Repositories, repository)
 	}

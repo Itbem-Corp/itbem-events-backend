@@ -37,6 +37,28 @@ func TestLoadWorkspacesProvidesBoundedSecretFreeContext(t *testing.T) {
 	}
 }
 
+func TestLoadWorkspacesBindsUniqueOperatorOwnedTestKindsByPosition(t *testing.T) {
+	root := filepath.ToSlash(t.TempDir())
+	valid := `{"demo":{"path":"` + root + `","validation_commands":[["go","test","./..."]],"validation_command_kinds":["unit"],"qa_commands":[["npm","run","test:e2e"]],"qa_command_kinds":["e2e"]}}`
+	workspaces, err := LoadWorkspaces(valid)
+	if err != nil || workspaces["demo"].Config.ValidationCommandKinds[0] != "unit" || workspaces["demo"].Config.QACommandKinds[0] != "e2e" {
+		t.Fatalf("valid named command registry was rejected: %#v / %v", workspaces, err)
+	}
+	for _, raw := range []string{
+		`{"demo":{"path":"` + root + `","validation_commands":[["go","test","./..."]],"validation_command_kinds":["unit","contract"]}}`,
+		`{"demo":{"path":"` + root + `","validation_commands":[["go","test","./..."]],"validation_command_kinds":["unit"],"qa_commands":[["npm","test"]],"qa_command_kinds":["UNIT"]}}`,
+		`{"demo":{"path":"` + root + `","qa_commands":[["npm","test"]],"qa_command_kinds":[" unsafe"]}}`,
+	} {
+		if _, err := LoadWorkspaces(raw); err == nil {
+			t.Fatalf("unsafe named command registry was accepted: %s", raw)
+		}
+	}
+	legacy := `{"demo":{"path":"` + root + `","validation_commands":[["go","test","./..."]]}}`
+	if _, err := LoadWorkspaces(legacy); err != nil {
+		t.Fatalf("legacy unlabeled commands should remain executable but non-gating: %v", err)
+	}
+}
+
 func TestDescribeWorkspaceExcludesCredentialLikeFilesAndDirectories(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Mkdir(filepath.Join(root, "secrets"), 0700); err != nil {
@@ -504,7 +526,7 @@ func TestWorkspaceReadinessSnapshotIsSafeAndRepresentsQAAndPublicationCapabiliti
 	}
 	readiness, err := WorkspaceReadinessSnapshot(func(key string) string {
 		if key == "ITBEM_AI_WORKSPACES_JSON" {
-			return `{"dashboard":{"path":"` + filepath.ToSlash(root) + `","capabilities":["repository:read","worktree:create","patch:apply","commit:stage","branch:publish","pull_request:create"],"validation_commands":[["go","test","./..."]],"qa_commands":[["go","test","./..."]],"qa_semantic_command":["node","runner.mjs","--url","{preview_url}","--output","{artifact_path}","--plan","{qa_plan_path}"]}}`
+			return `{"dashboard":{"path":"` + filepath.ToSlash(root) + `","capabilities":["repository:read","worktree:create","patch:apply","commit:stage","branch:publish","pull_request:create"],"validation_commands":[["go","test","./..."]],"validation_command_kinds":["unit"],"qa_commands":[["go","test","./..."]],"qa_command_kinds":["integration"],"qa_semantic_command":["node","runner.mjs","--url","{preview_url}","--output","{artifact_path}","--plan","{qa_plan_path}"]}}`
 		}
 		return ""
 	})
@@ -512,7 +534,7 @@ func TestWorkspaceReadinessSnapshotIsSafeAndRepresentsQAAndPublicationCapabiliti
 		t.Fatalf("workspace readiness: %#v / %v", readiness, err)
 	}
 	entry := readiness[0]
-	if entry.ID != "dashboard" || !entry.Ready || !entry.QAReady || !entry.VisualQAReady || !entry.PublicationReady || entry.ValidationCommandCount != 1 || entry.QACommandCount != 1 {
+	if entry.ID != "dashboard" || !entry.Ready || !entry.QAReady || !entry.VisualQAReady || !entry.PublicationReady || entry.ValidationCommandCount != 1 || entry.NamedValidationCommandCount != 1 || entry.QACommandCount != 1 || entry.NamedQACommandCount != 1 {
 		t.Fatalf("unexpected readiness projection: %#v", entry)
 	}
 	encoded, err := json.Marshal(entry)
@@ -594,7 +616,7 @@ func TestWorkspaceContextExposesOnlySafeHarnessCapabilities(t *testing.T) {
 	root := t.TempDir()
 	workspace, err := RegisteredWorkspace("workspace://demo", func(key string) string {
 		if key == "ITBEM_AI_WORKSPACES_JSON" {
-			return `{"demo":{"path":"` + filepath.ToSlash(root) + `","validation_commands":[["go","test","./..."]],"qa_commands":[["npm","run","test:e2e"]],"qa_artifact_patterns":["test-results/*.xml"],"qa_screenshot_command":["npx","capture","{preview_url}","{artifact_path}"],"qa_semantic_command":["node","tools/stagehand-qa/run.mjs","--url","{preview_url}","--output","{artifact_path}"]}}`
+			return `{"demo":{"path":"` + filepath.ToSlash(root) + `","validation_commands":[["go","test","./..."]],"validation_command_kinds":["unit"],"qa_commands":[["npm","run","test:e2e"]],"qa_command_kinds":["e2e"],"qa_artifact_patterns":["test-results/*.xml"],"qa_screenshot_command":["npx","capture","{preview_url}","{artifact_path}"],"qa_semantic_command":["node","tools/stagehand-qa/run.mjs","--url","{preview_url}","--output","{artifact_path}"]}}`
 		}
 		return ""
 	})
@@ -605,7 +627,7 @@ func TestWorkspaceContextExposesOnlySafeHarnessCapabilities(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if context.Harness.ValidationCommandCount != 1 || context.Harness.QACommandCount != 1 || !context.Harness.ArtifactCollection || context.Harness.ScreenshotMode != "configured_command" || context.Harness.SemanticQAMode != "configured_command" {
+	if context.Harness.ValidationCommandCount != 1 || context.Harness.NamedValidationCommandCount != 1 || context.Harness.QACommandCount != 1 || context.Harness.NamedQACommandCount != 1 || !context.Harness.ArtifactCollection || context.Harness.ScreenshotMode != "configured_command" || context.Harness.SemanticQAMode != "configured_command" {
 		t.Fatalf("safe harness profile is incomplete: %#v", context.Harness)
 	}
 	encoded, err := json.Marshal(context)

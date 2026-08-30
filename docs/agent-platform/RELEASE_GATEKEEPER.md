@@ -84,16 +84,25 @@ same control-plane candidate. The isolated QA runner projects only task ID,
 matrix digest, preview result, repository execution order, reviewed worktree
 identity, and bounded validation/QA pass/fail observations. Raw commands,
 output, URLs, screenshots and model prose remain encrypted private artifacts.
+Each command also carries a test identity such as `unit`, `contract`, or `e2e`
+from the operator-owned workspace registry; a task or model cannot rename it.
 The callback accepts the projection only for that task and digest, then appends
-`delivery.qa.observed.v1` idempotently. This records evidence but does not yet
-convert it into a passing release gate; policy mapping and the remaining
-security/environment ledgers must resolve it first.
+`delivery.qa.observed.v2` idempotently. Immediately before evaluation, the
+control plane selects the newest exact-matrix event, verifies the completed
+task and event timestamp, requires the complete approved workspace set and
+reviewed worktree branches, and maps each workspace through its consumed
+publication grant to the published GitHub repository. A required test passes
+only if it was observed passing in every repository whose effective policy
+requires it. Missing labels, stale matrices, another repository's result, or
+failed commands remain normal `required_test_*` blockers. The remaining
+security/environment ledgers are still unresolved and blocking.
 
 Policy is evaluated independently for every repository using the
 platform → organization → project → repository → bounded change-set override
 hierarchy. The composite digest binds the repository, effective policy digest,
 resolved state, action authorization, and exact target-branch authorization.
-Required test kinds are the canonical union across the matrix. Missing policy,
+Required test kinds are the canonical union across the matrix, while their
+repository-specific requirements are retained for QA resolution. Missing policy,
 an unauthorized action, or a target branch outside policy remains a structured
 blocked decision; malformed, tampered, ambiguous, or over-limit persisted
 evidence aborts the callback without appending authority.

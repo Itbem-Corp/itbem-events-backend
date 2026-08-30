@@ -356,7 +356,7 @@ func TestQAExecutionHandoffBindsMatrixAndExcludesPrivateOutput(t *testing.T) {
 		"repository_execution_order": []string{"workspace://api"},
 		"repository_runs": []any{map[string]any{
 			"workspace": "workspace://api", "branch": "itbem-agent/11111111-1111-4111-8111-111111111111",
-			"commands": []any{map[string]any{"phase": "validation", "command": []string{"go", "test", "./..."}, "passed": true, "output": "must-not-leak"}},
+			"commands": []any{map[string]any{"kind": "unit", "phase": "validation", "command": []string{"go", "test", "./..."}, "passed": true, "output": "must-not-leak"}},
 		}},
 	}
 	handoff, err := qaExecutionHandoff(taskID, delivery, result)
@@ -371,7 +371,7 @@ func TestQAExecutionHandoffBindsMatrixAndExcludesPrivateOutput(t *testing.T) {
 	}
 	observation, err := qaevidence.Decode(encoded)
 	wantDigest, _ := releasegate.RevisionMatrixDigest(revisions)
-	if err != nil || observation.MatrixDigest != wantDigest || len(observation.Repositories) != 1 || !observation.Repositories[0].Commands[0].Passed {
+	if err != nil || observation.MatrixDigest != wantDigest || len(observation.Repositories) != 1 || observation.Repositories[0].Commands[0].Kind != "unit" || !observation.Repositories[0].Commands[0].Passed {
 		t.Fatalf("QA handoff lost exact observed evidence: %#v / %v", observation, err)
 	}
 	if _, err := qaExecutionHandoff(taskID, []byte(`{}`), result); err == nil {

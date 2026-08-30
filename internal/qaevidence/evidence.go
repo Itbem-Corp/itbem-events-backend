@@ -1,6 +1,6 @@
 // Package qaevidence defines the bounded, provider-independent observation
-// emitted by the isolated QA runner. It records what ran; it never decides a
-// merge or release gate.
+// emitted by the isolated QA runner. It records what ran under an
+// operator-owned test identity; it never decides a merge or release gate.
 package qaevidence
 
 import (
@@ -14,13 +14,17 @@ import (
 )
 
 const (
-	SchemaVersion = 1
+	SchemaVersion = 2
 	maxInputBytes = 64 << 10
 )
 
 type Command struct {
-	Index  int    `json:"index"`
-	Phase  string `json:"phase"`
+	Index int    `json:"index"`
+	Phase string `json:"phase"`
+	// Kind is copied from the local operator registry, never from a model or
+	// task. Empty is retained for legacy commands but cannot satisfy a named
+	// release policy.
+	Kind   string `json:"kind"`
 	Passed bool   `json:"passed"`
 }
 
@@ -44,6 +48,7 @@ var (
 	digestPattern    = regexp.MustCompile(`^[a-f0-9]{64}$`)
 	workspacePattern = regexp.MustCompile(`^workspace://[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 	branchPattern    = regexp.MustCompile(`^itbem-agent/[a-f0-9-]{36}$`)
+	testKindPattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:/+-]{0,127}$`)
 )
 
 func Decode(payload []byte) (Observation, error) {
@@ -82,14 +87,23 @@ func Validate(observation Observation) error {
 		}
 		seenRepositories[reference] = struct{}{}
 		seenCommands := make(map[int]struct{}, len(repository.Commands))
+		seenKinds := make(map[string]struct{}, len(repository.Commands))
 		for _, command := range repository.Commands {
-			if command.Index < 0 || command.Index >= 12 || (command.Phase != "validation" && command.Phase != "qa") {
+			if command.Index < 0 || command.Index >= 12 || (command.Phase != "validation" && command.Phase != "qa") ||
+				command.Kind != strings.TrimSpace(command.Kind) || (command.Kind != "" && !testKindPattern.MatchString(command.Kind)) {
 				return fmt.Errorf("QA command observation is invalid")
 			}
 			if _, duplicate := seenCommands[command.Index]; duplicate {
 				return fmt.Errorf("QA command observation is duplicated")
 			}
 			seenCommands[command.Index] = struct{}{}
+			if command.Kind != "" {
+				key := strings.ToLower(command.Kind)
+				if _, duplicate := seenKinds[key]; duplicate {
+					return fmt.Errorf("QA test identity is duplicated for one repository")
+				}
+				seenKinds[key] = struct{}{}
+			}
 		}
 	}
 	seenOrder := make(map[string]struct{}, len(observation.RepositoryExecutionOrder))

@@ -1,13 +1,17 @@
 package releasegatecontrol
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
+	"events-stocks/internal/deliveryledger"
 	"events-stocks/internal/deliverypolicy"
 	"events-stocks/internal/projectvault"
+	"events-stocks/internal/qaevidence"
 	"events-stocks/internal/releasegate"
 	"events-stocks/models"
 
@@ -19,6 +23,146 @@ import (
 )
 
 var controlNow = time.Date(2026, time.August, 30, 18, 0, 0, 0, time.UTC)
+
+func TestResolveStoredQAEvidenceLoadsOnlyExactMatrixAndCompletedTask(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqlDB.Close()
+	db, err := gorm.Open(postgres.New(postgres.Config{Conn: sqlDB}), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workItemID, taskID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
+	revisions := []releasegate.Revision{{Repository: "example/api", Branch: "main", SHA: strings.Repeat("a", 40)}}
+	matrixDigest, _ := releasegate.RevisionMatrixDigest(revisions)
+	branch := "itbem-agent/11111111-1111-4111-8111-111111111111"
+	observation := qaevidence.Observation{
+		SchemaVersion: qaevidence.SchemaVersion, TaskID: taskID.String(), MatrixDigest: matrixDigest, PreviewPassed: true,
+		RepositoryExecutionOrder: []string{"workspace://api"},
+		Repositories:             []qaevidence.Repository{{Reference: "workspace://api", Branch: branch, Commands: []qaevidence.Command{{Index: 0, Phase: "validation", Kind: "unit", Passed: true}}}},
+	}
+	event := controlQAEvent(t, workItemID, 7, observation, controlNow)
+	mock.ExpectQuery(`SELECT \* FROM "delivery_events" WHERE work_item_id = \$1 AND event_type = \$2 AND subject_digest = \$3.*LIMIT \$4`).
+		WithArgs(workItemID, deliveryledger.EventTypeQAObserved, matrixDigest, maxQAObservations+1).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "work_item_id", "sequence", "event_type", "dedupe_key", "subject_digest", "payload_json", "payload_digest", "actor_type", "actor_id", "occurred_at", "created_at"}).
+			AddRow(event.ID, event.WorkItemID, event.Sequence, event.EventType, event.DedupeKey, event.SubjectDigest, event.PayloadJSON, event.PayloadDigest, event.ActorType, event.ActorID, event.OccurredAt, event.CreatedAt))
+	mock.ExpectQuery(`SELECT .* FROM "automation_tasks" WHERE "automation_tasks"\."id" = \$1.*LIMIT \$2`).
+		WithArgs(taskID, 1).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "delivery_work_item_id", "operation", "evidence_subject_digest", "status", "completed_at"}).
+			AddRow(taskID, workItemID, "delivery.qa", matrixDigest, "completed", controlNow))
+	input := releasegate.Input{Revisions: revisions, Policy: releasegate.Policy{RequiredTestKinds: []string{"unit"}}, Tests: []releasegate.TestEvidence{}}
+	subject := publishedReleaseSubject{Revisions: revisions, RepositoryByReference: map[string]string{"workspace://api": "example/api"}, WorktreeBranchByReference: map[string]string{"workspace://api": branch}}
+	resolved, err := resolveStoredQAEvidence(db, workItemID, input, subject, map[string][]string{"example/api": {"unit"}})
+	if err != nil || len(resolved.Tests) != 1 || resolved.Tests[0].Kind != "unit" || resolved.Tests[0].Status != releasegate.StatusPassed || resolved.Tests[0].MatrixDigest != matrixDigest {
+		t.Fatalf("exact persisted QA evidence was not resolved: %#v / %v", resolved.Tests, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func controlQAEvent(t *testing.T, workItemID uuid.UUID, sequence int64, observation qaevidence.Observation, occurredAt time.Time) models.DeliveryEvent {
+	t.Helper()
+	canonical, err := qaevidence.Canonical(observation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(map[string]any{"schema_version": qaevidence.SchemaVersion, "observation": canonical})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(payload)
+	return models.DeliveryEvent{
+		ID: uuid.Must(uuid.NewV4()), WorkItemID: workItemID, Sequence: sequence, EventType: deliveryledger.EventTypeQAObserved,
+		DedupeKey: workItemID.String() + ":qa-observation-v2:" + canonical.TaskID, SubjectDigest: canonical.MatrixDigest,
+		PayloadJSON: string(payload), PayloadDigest: hex.EncodeToString(digest[:]), ActorType: "system", ActorID: "qa-runner/v2", OccurredAt: occurredAt, CreatedAt: occurredAt,
+	}
+}
+
+func TestQAObservationSatisfiesOnlyTheRepositoryPolicyThatRanIt(t *testing.T) {
+	matrixDigest := strings.Repeat("d", 64)
+	subject := publishedReleaseSubject{
+		Revisions:                 []releasegate.Revision{{Repository: "example/api", Branch: "main", SHA: strings.Repeat("a", 40)}, {Repository: "example/web", Branch: "trunk", SHA: strings.Repeat("b", 40)}},
+		RepositoryByReference:     map[string]string{"workspace://api": "example/api", "workspace://web": "example/web"},
+		WorktreeBranchByReference: map[string]string{"workspace://api": "itbem-agent/11111111-1111-4111-8111-111111111111", "workspace://web": "itbem-agent/22222222-2222-4222-8222-222222222222"},
+	}
+	observation := qaevidence.Observation{
+		SchemaVersion: qaevidence.SchemaVersion, TaskID: "33333333-3333-4333-8333-333333333333", MatrixDigest: matrixDigest, PreviewPassed: true,
+		RepositoryExecutionOrder: []string{"workspace://api", "workspace://web"},
+		Repositories: []qaevidence.Repository{
+			{Reference: "workspace://api", Branch: subject.WorktreeBranchByReference["workspace://api"], Commands: []qaevidence.Command{{Index: 0, Phase: "validation", Kind: "unit", Passed: true}, {Index: 1, Phase: "qa", Kind: "contract", Passed: true}}},
+			{Reference: "workspace://web", Branch: subject.WorktreeBranchByReference["workspace://web"], Commands: []qaevidence.Command{{Index: 0, Phase: "validation", Kind: "unit", Passed: true}}},
+		},
+	}
+	required := map[string][]string{"example/api": {"contract", "unit"}, "example/web": {"unit"}}
+	tests, err := testsFromQAObservation([]string{"contract", "unit"}, required, subject, observation)
+	if err != nil || len(tests) != 2 || tests[0].Kind != "contract" || tests[0].Status != releasegate.StatusPassed || tests[1].Status != releasegate.StatusPassed {
+		t.Fatalf("exact per-repository evidence was not resolved: %#v / %v", tests, err)
+	}
+
+	// Running contract on web cannot replace the API contract requirement.
+	wrongRepository := observation
+	wrongRepository.Repositories = append([]qaevidence.Repository(nil), observation.Repositories...)
+	wrongRepository.Repositories[0].Commands = []qaevidence.Command{{Index: 0, Phase: "validation", Kind: "unit", Passed: true}}
+	wrongRepository.Repositories[1].Commands = append(wrongRepository.Repositories[1].Commands, qaevidence.Command{Index: 1, Phase: "qa", Kind: "contract", Passed: true})
+	tests, err = testsFromQAObservation([]string{"contract", "unit"}, required, subject, wrongRepository)
+	if err != nil || len(tests) != 1 || tests[0].Kind != "unit" {
+		t.Fatalf("a test from the wrong repository satisfied policy: %#v / %v", tests, err)
+	}
+
+	failed := observation
+	failed.Repositories = append([]qaevidence.Repository(nil), observation.Repositories...)
+	failed.Repositories[0].Commands = append([]qaevidence.Command(nil), observation.Repositories[0].Commands...)
+	failed.Repositories[0].Commands[1].Passed = false
+	tests, err = testsFromQAObservation([]string{"contract", "unit"}, required, subject, failed)
+	if err != nil || tests[0].Status != releasegate.StatusFailed || tests[1].Status != releasegate.StatusPassed {
+		t.Fatalf("failed repository command did not fail its named gate: %#v / %v", tests, err)
+	}
+}
+
+func TestQAObservationRejectsIncompleteOrAmbiguousPublicationEvidence(t *testing.T) {
+	subject := publishedReleaseSubject{
+		RepositoryByReference:     map[string]string{"workspace://api": "example/api"},
+		WorktreeBranchByReference: map[string]string{"workspace://api": "itbem-agent/11111111-1111-4111-8111-111111111111"},
+	}
+	observation := qaevidence.Observation{
+		SchemaVersion: qaevidence.SchemaVersion, TaskID: "33333333-3333-4333-8333-333333333333", MatrixDigest: strings.Repeat("d", 64),
+		RepositoryExecutionOrder: []string{"workspace://other"},
+		Repositories:             []qaevidence.Repository{{Reference: "workspace://other", Branch: "itbem-agent/11111111-1111-4111-8111-111111111111", Commands: []qaevidence.Command{{Index: 0, Phase: "qa", Kind: "unit", Passed: true}}}},
+	}
+	if _, err := testsFromQAObservation([]string{"unit"}, map[string][]string{"example/api": {"unit"}}, subject, observation); err == nil {
+		t.Fatal("QA evidence for a different workspace repository was accepted")
+	}
+	observation.RepositoryExecutionOrder[0], observation.Repositories[0].Reference = "workspace://api", "workspace://api"
+	observation.Repositories[0].Branch = "itbem-agent/99999999-9999-4999-8999-999999999999"
+	if _, err := testsFromQAObservation([]string{"unit"}, map[string][]string{"example/api": {"unit"}}, subject, observation); err == nil {
+		t.Fatal("QA evidence for a different reviewed worktree branch was accepted")
+	}
+}
+
+func TestQATaskProvenanceRequiresCompletedExactTaskAndMatrix(t *testing.T) {
+	workItemID, taskID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
+	completedAt := controlNow
+	task := models.AutomationTask{ID: taskID, DeliveryWorkItemID: &workItemID, Operation: "delivery.qa", Status: "completed", EvidenceSubjectDigest: strings.Repeat("a", 64), CompletedAt: &completedAt}
+	if err := validateQATaskProvenance(task, workItemID, taskID, strings.Repeat("a", 64), completedAt); err != nil {
+		t.Fatalf("matching QA task provenance was rejected: %v", err)
+	}
+	mutations := []func(*models.AutomationTask){
+		func(value *models.AutomationTask) { value.ID = uuid.Must(uuid.NewV4()) },
+		func(value *models.AutomationTask) { value.Status = "running" },
+		func(value *models.AutomationTask) { value.EvidenceSubjectDigest = strings.Repeat("b", 64) },
+		func(value *models.AutomationTask) { later := completedAt.Add(time.Second); value.CompletedAt = &later },
+	}
+	for _, mutate := range mutations {
+		forged := task
+		mutate(&forged)
+		if err := validateQATaskProvenance(forged, workItemID, taskID, strings.Repeat("a", 64), completedAt); err == nil {
+			t.Fatalf("forged QA task provenance was accepted: %#v", forged)
+		}
+	}
+}
 
 func TestControlPlaneQueriesUseBoundedCaseInsensitiveRepositoryScopes(t *testing.T) {
 	sqlDB, mock, err := sqlmock.New()

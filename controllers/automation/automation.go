@@ -714,13 +714,15 @@ type automationWorkerHealth struct {
 // path, repository name, Git SHA, branch, command line, error output and any
 // source material.
 type automationWorkspaceHealth struct {
-	ID                     string `json:"id"`
-	Ready                  bool   `json:"ready"`
-	QAReady                bool   `json:"qa_ready"`
-	VisualQAReady          bool   `json:"visual_qa_ready"`
-	PublicationReady       bool   `json:"publication_ready"`
-	ValidationCommandCount int    `json:"validation_command_count"`
-	QACommandCount         int    `json:"qa_command_count"`
+	ID                          string `json:"id"`
+	Ready                       bool   `json:"ready"`
+	QAReady                     bool   `json:"qa_ready"`
+	VisualQAReady               bool   `json:"visual_qa_ready"`
+	PublicationReady            bool   `json:"publication_ready"`
+	ValidationCommandCount      int    `json:"validation_command_count"`
+	NamedValidationCommandCount int    `json:"named_validation_command_count"`
+	QACommandCount              int    `json:"qa_command_count"`
+	NamedQACommandCount         int    `json:"named_qa_command_count"`
 }
 
 // automationHealth gives operators a continuous safety signal without
@@ -1782,6 +1784,9 @@ func validateWorkerWorkspaceReadiness(readiness []automationWorkspaceHealth) err
 		seen[workspace.ID] = struct{}{}
 		if workspace.ValidationCommandCount < 0 || workspace.ValidationCommandCount > 64 || workspace.QACommandCount < 0 || workspace.QACommandCount > 64 {
 			return fmt.Errorf("invalid workspace command count")
+		}
+		if workspace.NamedValidationCommandCount < 0 || workspace.NamedValidationCommandCount > workspace.ValidationCommandCount || workspace.NamedQACommandCount < 0 || workspace.NamedQACommandCount > workspace.QACommandCount {
+			return fmt.Errorf("invalid named workspace command count")
 		}
 		if workspace.QAReady && !workspace.Ready {
 			return fmt.Errorf("qa readiness requires workspace readiness")

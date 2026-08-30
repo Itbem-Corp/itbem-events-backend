@@ -12,14 +12,20 @@ Each frozen `workspace://` source carries a harness projection:
 | Field | Meaning |
 | --- | --- |
 | `validation_command_count` | Deterministic validations available during isolated implementation. |
+| `named_validation_command_count` | Validation commands with an operator-owned policy identity. |
 | `qa_command_count` | Deterministic QA commands available after reviewed code. |
+| `named_qa_command_count` | QA commands with an operator-owned policy identity. |
 | `artifact_collection` | Whether configured test artefacts may be retained privately. |
 | `screenshot_mode` | Responsive screenshot evidence capability. |
 | `semantic_qa_mode` | Whether the pinned Stagehand browser harness is available. |
 
 Command bodies remain local configuration. The model receives counts and
 capabilities, never shell arguments or credentials. This makes the plan
-auditable without letting it execute arbitrary commands.
+auditable without letting it execute arbitrary commands. A named count never
+exposes the identity or command itself. At release time, the control plane
+matches the private identity to each repository's effective required-test
+policy and the exact published matrix; an unlabeled legacy command still runs
+but cannot satisfy a named gate.
 
 ## Browser contract
 

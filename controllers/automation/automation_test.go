@@ -252,7 +252,7 @@ func TestValidReleaseTargetBranchAcceptsGenericSafeBranches(t *testing.T) {
 func TestWorkerWorkspaceReadinessRejectsImpossibleOrUnboundedStates(t *testing.T) {
 	valid := []automationWorkspaceHealth{{
 		ID: "eventiapp-dashboard", Ready: true, QAReady: true, VisualQAReady: true,
-		PublicationReady: true, ValidationCommandCount: 2, QACommandCount: 1,
+		PublicationReady: true, ValidationCommandCount: 2, NamedValidationCommandCount: 2, QACommandCount: 1, NamedQACommandCount: 1,
 	}}
 	if err := validateWorkerWorkspaceReadiness(valid); err != nil {
 		t.Fatalf("expected safe readiness accepted: %v", err)
@@ -266,6 +266,7 @@ func TestWorkerWorkspaceReadinessRejectsImpossibleOrUnboundedStates(t *testing.T
 		{{ID: "qa-without-workspace", QAReady: true}},
 		{{ID: "visual-without-workspace", VisualQAReady: true}},
 		{{ID: "too-many-commands", Ready: true, ValidationCommandCount: 65}},
+		{{ID: "impossible-named-commands", Ready: true, ValidationCommandCount: 1, NamedValidationCommandCount: 2}},
 	} {
 		if err := validateWorkerWorkspaceReadiness(invalid); err == nil {
 			t.Fatalf("expected invalid readiness rejected: %#v", invalid)
