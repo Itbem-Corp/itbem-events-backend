@@ -9,6 +9,8 @@ import (
 	"events-stocks/configuration"
 	"events-stocks/internal/authz"
 	"events-stocks/internal/automationagent"
+	"events-stocks/internal/deliveryledger"
+	"events-stocks/internal/releasegate"
 	"events-stocks/models"
 	awsrepository "events-stocks/repositories/awsrepository"
 	"events-stocks/services/deliveryworkflow"
@@ -34,6 +36,8 @@ var evidenceKinds = map[string]struct{}{"screenshot": {}, "video": {}, "test_res
 var deliveryArtifactNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,180}$`)
 var deliveryArtifactDigestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 var deliveryGitHubRepositoryReference = regexp.MustCompile(`^github://[A-Za-z0-9][A-Za-z0-9_.-]{0,38}/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$`)
+
+const releaseGateAuthorizationMaxAge = 10 * time.Minute
 
 type projectRequest struct {
 	ClientID string `json:"client_id"`
@@ -128,11 +132,12 @@ type deliveryWorkItemResponse struct {
 	CostSummary deliveryCostSummary `json:"cost_summary"`
 }
 type transitionRequest struct {
-	Action            string   `json:"action"`
-	Comment           string   `json:"comment"`
-	PullRequestURL    string   `json:"pull_request_url"`
-	PreviewURL        string   `json:"preview_url"`
-	EvidenceChecklist []string `json:"evidence_checklist"`
+	Action             string   `json:"action"`
+	Comment            string   `json:"comment"`
+	PullRequestURL     string   `json:"pull_request_url"`
+	PreviewURL         string   `json:"preview_url"`
+	EvidenceChecklist  []string `json:"evidence_checklist"`
+	ReleaseGateEventID string   `json:"release_gate_event_id,omitempty"`
 }
 type evidenceRequest struct {
 	Kind      string         `json:"kind"`
@@ -812,11 +817,20 @@ func TransitionWorkItem(c echo.Context) error {
 	if marshalErr != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid delivery gate", "evidence checklist is invalid")
 	}
+	var requestedReleaseGateEventID uuid.UUID
+	if action == deliveryworkflow.ActionApproveRelease {
+		parsed, parseErr := uuid.FromString(strings.TrimSpace(request.ReleaseGateEventID))
+		if parseErr != nil || parsed == uuid.Nil {
+			return utils.Error(c, http.StatusBadRequest, "Invalid delivery gate", "release_gate_event_id is required for release approval")
+		}
+		requestedReleaseGateEventID = parsed
+	}
 	actor, _, err := workItemActor(c, workItemID, transitionPermission(action))
 	if err != nil {
 		return err
 	}
 	var item models.DeliveryWorkItem
+	transitionedAt := time.Now().UTC()
 	if err := configuration.DB.Transaction(func(tx *gorm.DB) error {
 		// Serialise state changes. A gate is a human decision with operational
 		// consequences, so two reviewers must never be able to advance the same
@@ -835,6 +849,34 @@ func TransitionWorkItem(c echo.Context) error {
 			}
 		}
 		if action == deliveryworkflow.ActionApproveRelease {
+			var gateEvent models.DeliveryEvent
+			if err := tx.Where("id = ? AND work_item_id = ? AND event_type = ?", requestedReleaseGateEventID, item.ID, deliveryledger.EventTypeReleaseGateEvaluated).First(&gateEvent).Error; err != nil {
+				if err == gorm.ErrRecordNotFound {
+					return fmt.Errorf("the selected release Gatekeeper evaluation does not exist for this work item")
+				}
+				return err
+			}
+			var latestSequence int64
+			if err := tx.Model(&models.DeliveryEvent{}).
+				Where("work_item_id = ? AND event_type = ?", item.ID, deliveryledger.EventTypeReleaseGateEvaluated).
+				Select("COALESCE(MAX(sequence), 0)").Scan(&latestSequence).Error; err != nil {
+				return err
+			}
+			if gateEvent.Sequence != latestSequence {
+				return fmt.Errorf("release approval requires the newest Gatekeeper evaluation")
+			}
+			projection, err := deliveryledger.AuthorizeGateEvaluation(gateEvent, item.ID, releasegate.ActionRelease, actor.CognitoSub, transitionedAt, releaseGateAuthorizationMaxAge)
+			if err != nil {
+				return fmt.Errorf("release Gatekeeper authorization rejected: %w", err)
+			}
+			checklistItems = append(checklistItems,
+				"release_gate_event:"+gateEvent.ID.String(),
+				"release_gate_subject:"+projection.SubjectDigest,
+			)
+			checklist, marshalErr = json.Marshal(checklistItems)
+			if marshalErr != nil {
+				return fmt.Errorf("release Gatekeeper evidence could not be attached")
+			}
 			var release models.DeliveryRelease
 			if err := tx.Where("work_item_id = ? AND status = ?", item.ID, "ready").First(&release).Error; err != nil {
 				if err == gorm.ErrRecordNotFound {
@@ -930,7 +972,7 @@ func TransitionWorkItem(c echo.Context) error {
 			}
 		}
 		gate := gate(action, item.ID, actor.CognitoSub, comment, string(checklist))
-		if err := deliveryworkflow.Advance(&item, action, gate, time.Now().UTC()); err != nil {
+		if err := deliveryworkflow.Advance(&item, action, gate, transitionedAt); err != nil {
 			return err
 		}
 		if gate != nil {
@@ -951,12 +993,11 @@ func TransitionWorkItem(c echo.Context) error {
 		if err := tx.Save(&item).Error; err != nil {
 			return err
 		}
-		if err := invalidatePublicationGrantsForTransition(tx, item.ID, actor.CognitoSub, action, time.Now().UTC()); err != nil {
+		if err := invalidatePublicationGrantsForTransition(tx, item.ID, actor.CognitoSub, action, transitionedAt); err != nil {
 			return err
 		}
 		if action == deliveryworkflow.ActionApproveRelease {
-			now := time.Now().UTC()
-			return tx.Model(&models.DeliveryRelease{}).Where("work_item_id = ?", item.ID).Updates(map[string]any{"status": "released", "released_by": actor.CognitoSub, "released_at": &now}).Error
+			return tx.Model(&models.DeliveryRelease{}).Where("work_item_id = ?", item.ID).Updates(map[string]any{"status": "released", "released_by": actor.CognitoSub, "released_at": &transitionedAt}).Error
 		}
 		return nil
 	}); err != nil {

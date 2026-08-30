@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -128,6 +129,52 @@ func ProjectGateEvaluation(event models.DeliveryEvent) (GateEvaluation, error) {
 		SubjectDigest: decoded.Decision.SubjectDigest, State: decoded.Decision.State,
 		Reasons: append([]releasegate.Reason(nil), decoded.Decision.Reasons...), OccurredAt: event.OccurredAt.UTC(),
 	}, nil
+}
+
+// AuthorizeGateEvaluation verifies that an immutable Gatekeeper event is safe
+// to consume for one immediate human-authorized action. Reading a historical
+// "allowed" projection is not sufficient: the event must belong to this work
+// item, target the expected action and change-set identity, contain the exact
+// current human actor, still reproduce the stored deterministic decision, and
+// be recent enough that the action adapter can revalidate its exact SHA matrix.
+//
+// This function performs no merge, release, or deployment side effect.
+func AuthorizeGateEvaluation(event models.DeliveryEvent, workItemID uuid.UUID, action releasegate.Action, humanActor string, now time.Time, maxAge time.Duration) (GateEvaluation, error) {
+	actor := strings.TrimSpace(humanActor)
+	if workItemID == uuid.Nil || (action != releasegate.ActionMerge && action != releasegate.ActionRelease) || actor == "" || now.IsZero() || maxAge <= 0 {
+		return GateEvaluation{}, fmt.Errorf("release gate authorization context is invalid")
+	}
+	if event.WorkItemID != workItemID {
+		return GateEvaluation{}, fmt.Errorf("release gate event belongs to another work item")
+	}
+	projection, err := ProjectGateEvaluation(event)
+	if err != nil {
+		return GateEvaluation{}, err
+	}
+	var decoded gateEvaluationPayload
+	if err := json.Unmarshal([]byte(event.PayloadJSON), &decoded); err != nil || decoded.SchemaVersion != 1 {
+		return GateEvaluation{}, fmt.Errorf("release gate event payload is invalid")
+	}
+	recomputed := releasegate.Evaluate(decoded.Input)
+	if !reflect.DeepEqual(recomputed, decoded.Decision) {
+		return GateEvaluation{}, fmt.Errorf("release gate decision cannot be reproduced")
+	}
+	if projection.Action != action || projection.State != "allowed" || len(projection.Reasons) != 0 {
+		return GateEvaluation{}, fmt.Errorf("release gate did not allow the requested action")
+	}
+	if decoded.Input.ChangeSetID != workItemID.String() || projection.ChangeSetID != workItemID.String() {
+		return GateEvaluation{}, fmt.Errorf("release gate change-set does not match the work item")
+	}
+	approval := decoded.Input.HumanApproval
+	if approval == nil || !approval.Approved || approval.ActorType != "human" || approval.Actor != actor || !strings.EqualFold(approval.SubjectDigest, projection.SubjectDigest) {
+		return GateEvaluation{}, fmt.Errorf("release gate human approval does not match the current actor")
+	}
+	occurredAt := event.OccurredAt.UTC()
+	now = now.UTC()
+	if occurredAt.After(now.Add(time.Minute)) || now.Sub(occurredAt) > maxAge {
+		return GateEvaluation{}, fmt.Errorf("release gate evaluation is stale")
+	}
+	return projection, nil
 }
 
 func canonicalGateInput(input releasegate.Input) releasegate.Input {

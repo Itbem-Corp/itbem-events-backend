@@ -60,7 +60,8 @@
 - `POST /api/automation/projects/:id/work-items` → `delivery.CreateWorkItem`
 - `GET /api/automation/work-items/:id` → `delivery.GetWorkItem`
 - `GET /api/automation/work-items/:id/stream` → `delivery.StreamWorkItem` — authenticated SSE invalidation feed for live execution maps. It emits a `snapshot` on connect, then `update` only when the database-backed work-item revision changes. Its bounded payload is `{ work_item_id, revision, state, active_tasks, last_activity_at, generated_at }`; it never includes prompts, private object references, provider payloads, or task output. Connections refresh authorization after 55 seconds and clients reconnect using the SSE retry directive.
-- `POST /api/automation/work-items/:id/transitions` → `delivery.TransitionWorkItem`
+- `POST /api/automation/work-items/:id/transitions` → `delivery.TransitionWorkItem` — `approve_release` additionally requires `release_gate_event_id` for the newest, recent, deterministic `allowed` evaluation bound to this work item and the current human actor.
+- `GET /api/automation/work-items/:id/release-gate/evaluations` → `delivery.ListReleaseGateEvaluations` — integrity-checked, presentation-safe Gatekeeper history; private evidence and actor identities remain in the ledger.
 - `POST /api/automation/work-items/:id/agent-runs` → `delivery.StartAgentRun`
 - `POST /api/automation/work-items/:id/evidence` → `delivery.CreateEvidence`
 - `POST /api/automation/work-items/:id/messages` → `delivery.CreateMessage`
@@ -70,7 +71,10 @@ presigned download for private QA screenshots and other agent artifacts.
 
 Delivery submissions are deliberately gated: `submit_plan`, `submit_code_review`,
 `submit_qa` and the final `approve_release` decision require their completed
-matching agent result. Code-review submission
+matching agent result. Release approval also fails closed unless the selected
+Gatekeeper event is the newest evaluation, is no more than ten minutes old,
+reproduces an `allowed` decision for this exact work-item change-set, and carries
+the same authenticated human actor. Code-review submission
 also requires `pull_request_url` to be a valid HTTP(S) URL; `preview_ready`
 requires a valid HTTP(S) `preview_url`. These inputs are recorded with the
 append-only human decision and never authorize production release on their own.

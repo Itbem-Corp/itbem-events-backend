@@ -1,12 +1,15 @@
 package deliveryledger
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
 	"events-stocks/internal/releasegate"
+	"events-stocks/models"
 
 	"github.com/gofrs/uuid"
 )
@@ -164,5 +167,106 @@ func TestNewGateEvaluationEventPersistsBlockedDecisionsWithoutExecutingThem(t *t
 	}
 	if _, _, err := RecordGateEvaluation(nil, event.WorkItemID, input, time.Now().UTC()); err == nil {
 		t.Fatal("persistence without a database must fail closed")
+	}
+}
+
+func TestAuthorizeGateEvaluationBindsCurrentHumanWorkItemActionAndTime(t *testing.T) {
+	workItemID := uuid.Must(uuid.NewV4())
+	now := time.Date(2026, time.August, 30, 15, 0, 0, 0, time.UTC)
+	input := validGateInput(t)
+	input.ChangeSetID = workItemID.String()
+	input.Action = releasegate.ActionRelease
+	decision := releasegate.Evaluate(input)
+	input.HumanApproval = &releasegate.HumanApproval{
+		Actor: "release-owner", ActorType: "human", SubjectDigest: decision.SubjectDigest, Approved: true,
+	}
+	event, err := newGateEvaluationEvent(workItemID, input, now.Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	event.ID = uuid.Must(uuid.NewV4())
+	event.Sequence = 12
+
+	projection, err := AuthorizeGateEvaluation(event, workItemID, releasegate.ActionRelease, "release-owner", now, 10*time.Minute)
+	if err != nil || projection.State != "allowed" || projection.ChangeSetID != workItemID.String() {
+		t.Fatalf("exact authorization was rejected: %#v / %v", projection, err)
+	}
+
+	tests := []struct {
+		name     string
+		event    models.DeliveryEvent
+		workItem uuid.UUID
+		action   releasegate.Action
+		actor    string
+		now      time.Time
+	}{
+		{name: "different work item", event: event, workItem: uuid.Must(uuid.NewV4()), action: releasegate.ActionRelease, actor: "release-owner", now: now},
+		{name: "different action", event: event, workItem: workItemID, action: releasegate.ActionMerge, actor: "release-owner", now: now},
+		{name: "different human", event: event, workItem: workItemID, action: releasegate.ActionRelease, actor: "another-human", now: now},
+		{name: "stale", event: event, workItem: workItemID, action: releasegate.ActionRelease, actor: "release-owner", now: now.Add(11 * time.Minute)},
+		{name: "far future", event: event, workItem: workItemID, action: releasegate.ActionRelease, actor: "release-owner", now: now.Add(-3 * time.Minute)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := AuthorizeGateEvaluation(test.event, test.workItem, test.action, test.actor, test.now, 10*time.Minute); err == nil {
+				t.Fatal("mismatched or stale authorization must fail closed")
+			}
+		})
+	}
+}
+
+func TestAuthorizeGateEvaluationRejectsBlockedAndUnboundChangeSets(t *testing.T) {
+	workItemID := uuid.Must(uuid.NewV4())
+	now := time.Now().UTC()
+	for _, mutate := range []func(*releasegate.Input){
+		func(input *releasegate.Input) { input.ChangeSetID = "another-change-set" },
+		func(input *releasegate.Input) { input.Security[0].HighFindings = 1 },
+	} {
+		input := validGateInput(t)
+		input.ChangeSetID = workItemID.String()
+		mutate(&input)
+		decision := releasegate.Evaluate(input)
+		input.HumanApproval = &releasegate.HumanApproval{Actor: "release-owner", ActorType: "human", SubjectDigest: decision.SubjectDigest, Approved: true}
+		event, err := newGateEvaluationEvent(workItemID, input, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		event.ID, event.Sequence = uuid.Must(uuid.NewV4()), 1
+		if _, err := AuthorizeGateEvaluation(event, workItemID, releasegate.ActionRelease, "release-owner", now, 10*time.Minute); err == nil {
+			t.Fatal("blocked or unbound release Gatekeeper event must fail closed")
+		}
+	}
+}
+
+func TestAuthorizeGateEvaluationRecomputesStoredDecision(t *testing.T) {
+	workItemID := uuid.Must(uuid.NewV4())
+	now := time.Now().UTC()
+	input := validGateInput(t)
+	input.ChangeSetID = workItemID.String()
+	input.Security[0].HighFindings = 1
+	decision := releasegate.Evaluate(input)
+	input.HumanApproval = &releasegate.HumanApproval{Actor: "release-owner", ActorType: "human", SubjectDigest: decision.SubjectDigest, Approved: true}
+	event, err := newGateEvaluationEvent(workItemID, input, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event.ID, event.Sequence = uuid.Must(uuid.NewV4()), 1
+
+	var payload gateEvaluationPayload
+	if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
+		t.Fatal(err)
+	}
+	payload.Decision.State = "allowed"
+	payload.Decision.Reasons = []releasegate.Reason{}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(encoded)
+	event.PayloadJSON = string(encoded)
+	event.PayloadDigest = hex.EncodeToString(digest[:])
+
+	if _, err := AuthorizeGateEvaluation(event, workItemID, releasegate.ActionRelease, "release-owner", now, 10*time.Minute); err == nil {
+		t.Fatal("a forged allowed decision must fail deterministic recomputation")
 	}
 }
