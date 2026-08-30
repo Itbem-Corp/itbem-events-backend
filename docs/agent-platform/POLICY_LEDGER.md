@@ -95,10 +95,12 @@ to 24 hours.
 An approver must be a different authenticated human from the proposer. The
 revision row is locked while its latest decision is checked, so retries of an
 already-recorded state are idempotent and do not append duplicate authority.
-Revocation requires a reason. Before any decision is inserted, the stored
-patch and scope are decoded again, its immutable digest is recomputed, and the
-pure resolver revalidates it. Responses never expose proposer or decision
-authentication subjects.
+The state machine is monotonic (`pending → approved → revoked`): pending rows
+cannot be revoked and revoked content cannot be reactivated; correction needs
+a new revision and digest. Revocation requires a reason. Before any decision
+is inserted, the stored patch and scope are decoded again, its immutable
+digest is recomputed, and the pure resolver revalidates it. Responses never
+expose proposer or decision authentication subjects.
 
 These endpoints only configure and decide policy evidence. They cannot enqueue
 work, create GitHub reviews, merge, release, deploy, or bypass the exact-SHA

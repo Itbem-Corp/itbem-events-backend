@@ -214,17 +214,24 @@ func DecideProjectPolicyRevision(c echo.Context) error {
 
 		var latest models.DeliveryPolicyDecision
 		latestErr := tx.Where("policy_revision_id = ?", revision.ID).Order("occurred_at DESC, id DESC").First(&latest).Error
+		var latestDecision *models.DeliveryPolicyDecision
 		if latestErr == nil {
 			if err := deliverypolicystore.ValidateDecision(revision, latest, now); err != nil {
 				return errPolicyDecisionRejected("the latest policy decision failed integrity checks")
 			}
+			latestDecision = &latest
+		}
+		if latestErr != nil && latestErr != gorm.ErrRecordNotFound {
+			return latestErr
+		}
+		if err := deliverypolicystore.ValidateDecisionTransition(latestDecision, action); err != nil {
+			return errPolicyDecisionRejected(err.Error())
+		}
+		if latestDecision != nil {
 			if latest.PolicyDigest == expectedDigest && latest.Action == action {
 				decision = latest
 				return nil
 			}
-		}
-		if latestErr != nil && latestErr != gorm.ErrRecordNotFound {
-			return latestErr
 		}
 		decisionID, err := uuid.NewV4()
 		if err != nil {

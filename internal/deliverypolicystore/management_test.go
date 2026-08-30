@@ -102,4 +102,33 @@ func TestValidateDecisionRequiresIndependentApprovalAndRevocationReason(t *testi
 	}
 }
 
+func TestValidateDecisionTransitionIsMonotonicAndIdempotent(t *testing.T) {
+	approved := &models.DeliveryPolicyDecision{Action: "approved"}
+	revoked := &models.DeliveryPolicyDecision{Action: "revoked"}
+	tests := []struct {
+		name   string
+		latest *models.DeliveryPolicyDecision
+		action string
+		ok     bool
+	}{
+		{name: "approve pending", action: "approved", ok: true},
+		{name: "repeat approval", latest: approved, action: "approved", ok: true},
+		{name: "revoke approval", latest: approved, action: "revoked", ok: true},
+		{name: "repeat revocation", latest: revoked, action: "revoked", ok: true},
+		{name: "revoke pending", action: "revoked"},
+		{name: "reactivate revoked", latest: revoked, action: "approved"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := ValidateDecisionTransition(test.latest, test.action)
+			if test.ok && err != nil {
+				t.Fatalf("valid transition rejected: %v", err)
+			}
+			if !test.ok && err == nil {
+				t.Fatal("unsafe transition unexpectedly accepted")
+			}
+		})
+	}
+}
+
 func timePointer(value time.Time) *time.Time { return &value }

@@ -124,6 +124,25 @@ func ValidateDecision(revision models.DeliveryPolicyRevision, decision models.De
 	return validateDecision(revision, decision, now)
 }
 
+// ValidateDecisionTransition keeps one revision monotonic. Revoked content can
+// never be reactivated; a corrected policy must receive a new revision/digest.
+// Repeating the current state is allowed so the HTTP boundary can be idempotent.
+func ValidateDecisionTransition(latest *models.DeliveryPolicyDecision, action string) error {
+	switch action {
+	case "approved":
+		if latest != nil && latest.Action == "revoked" {
+			return fmt.Errorf("a revoked policy revision cannot be reactivated")
+		}
+	case "revoked":
+		if latest == nil {
+			return fmt.Errorf("a pending policy revision has no authority to revoke")
+		}
+	default:
+		return fmt.Errorf("policy decision action is invalid")
+	}
+	return nil
+}
+
 func decodePolicyPatch(raw json.RawMessage) (deliverypolicy.Patch, error) {
 	if len(raw) == 0 || len(raw) > maximumStoredPolicyPatchBytes {
 		return deliverypolicy.Patch{}, fmt.Errorf("policy patch is missing or too large")
