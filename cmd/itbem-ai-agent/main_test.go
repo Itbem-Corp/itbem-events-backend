@@ -69,3 +69,17 @@ func TestDoctorReviewIngressNeverLeaksConfigurationAndReportsIncompleteSetup(t *
 		t.Fatalf("doctor review ingress leaked secret or repository identity: %s", raw)
 	}
 }
+
+func TestDoctorReleaseReadinessRequiresGitHubAppConfiguration(t *testing.T) {
+	release := automationagent.RuntimeConfig{WorkerConfig: automationagent.WorkerConfig{Role: agentwork.RoleReleaseManager, Lane: agentwork.LaneRelease}}
+	reviewer := automationagent.RuntimeConfig{WorkerConfig: automationagent.WorkerConfig{Role: agentwork.RoleReviewer, Lane: agentwork.LaneReview}}
+	if doctorExecutionReady(true, true, true, false, release) {
+		t.Fatal("release doctor passed without publication identity")
+	}
+	if !doctorExecutionReady(true, true, true, true, release) {
+		t.Fatal("release doctor rejected a complete deterministic runtime")
+	}
+	if !doctorExecutionReady(true, true, true, false, reviewer) {
+		t.Fatal("non-release doctor made optional publication identity mandatory")
+	}
+}

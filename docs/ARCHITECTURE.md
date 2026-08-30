@@ -449,8 +449,13 @@ if !ok || cfg == nil {
   per-lane projection plus the role DLQ. Queue membership never grants source,
   merge, release, deployment, secret, or production authority.
   The Linux execution plane uses one hardened systemd template instance and
-  unprivileged Unix account per lane. Global/per-lane filesystem kill switches
-  prevent restart, and installation never implies activation.
+  unprivileged Unix account plus a private `0700` workspace root per lane.
+  Cross-lane checkout reuse is prohibited. A separate read-only oneshot doctor
+  validates configuration without polling SQS; the Release doctor also requires
+  its GitHub App identity. On-premises lanes obtain scoped temporary AWS
+  sessions through separate IAM Roles Anywhere credential-process profiles;
+  static IAM access keys and metadata fallback are disabled. Global/per-lane filesystem kill switches prevent
+  restart, and installation never implies activation.
 
 - Merge and release policy is evaluated by `internal/releasegate` as a pure,
   deterministic, fail-closed decision over structured exact-SHA evidence. The

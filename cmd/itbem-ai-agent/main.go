@@ -139,18 +139,26 @@ func doctorReport(lookup func(string) string) (map[string]any, bool, error) {
 		}
 	}
 	reviewIngress := doctorReviewIngress(lookup, githubAppReady, runtimeReady)
+	publicationRequired := runtimeReady && providerNotRequired(runtimeConfig)
+	ready := doctorExecutionReady(workspacesReady, providerReady, runtimeReady, githubAppReady, runtimeConfig)
 	report := map[string]any{
-		"ready":               workspacesReady && providerReady && runtimeReady,
-		"workspaces_ready":    workspacesReady,
-		"provider":            provider,
-		"runtime":             runtime,
-		"publication":         publication,
-		"review_ingress":      reviewIngress,
-		"workspaces":          diagnostics,
-		"provider_billable":   false,
-		"network_checks_made": false,
+		"ready":                ready,
+		"workspaces_ready":     workspacesReady,
+		"publication_required": publicationRequired,
+		"provider":             provider,
+		"runtime":              runtime,
+		"publication":          publication,
+		"review_ingress":       reviewIngress,
+		"workspaces":           diagnostics,
+		"provider_billable":    false,
+		"network_checks_made":  false,
 	}
-	return report, workspacesReady && providerReady && runtimeReady, nil
+	return report, ready, nil
+}
+
+func doctorExecutionReady(workspacesReady, providerReady, runtimeReady, githubAppReady bool, runtimeConfig automationagent.RuntimeConfig) bool {
+	publicationRequired := runtimeReady && providerNotRequired(runtimeConfig)
+	return workspacesReady && providerReady && runtimeReady && (!publicationRequired || githubAppReady)
 }
 
 // doctorReviewIngress is deliberately configuration-only. It never receives

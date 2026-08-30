@@ -209,6 +209,15 @@ without silently re-running a stale review.
 For the dedicated Linux host, use the reviewed unit, installer and activation
 runbook in `deploy/systemd/`. The installer stages a SHA-addressed binary and
 root-only configuration but intentionally never starts or enables a service.
+Every lane has a private `0700` workspace root and its own registry; sharing a
+checkout across Engineer, Reviewer, QA or Release is unsupported. Preflight
+uses the separate oneshot `itbem-ai-agent-doctor@.service`, which cannot poll
+SQS or mutate the checkout. The Release doctor fails closed when its GitHub App
+identity is absent even though that lane intentionally has no model key.
+On an on-premises host, each lane uses an independent IAM Roles Anywhere
+`credential_process` profile, with EC2 metadata and long-lived shared access
+keys disabled. The AWS SDK therefore receives only renewable temporary
+sessions scoped to that lane.
 
 The only billable connectivity command is explicit and guarded:
 
