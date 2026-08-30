@@ -24,7 +24,7 @@ func validInput(t *testing.T, action Action, revisions []Revision) Input {
 		Action:        action,
 		ChangeSetID:   "change-set:42",
 		Revisions:     revisions,
-		Policy:        Policy{Resolved: true, Digest: policyDigest, RequiredTestKinds: []string{"unit", "contract"}},
+		Policy:        Policy{Resolved: true, RequiredTestKinds: []string{"unit", "contract"}},
 		Compatibility: MatrixEvidence{MatrixDigest: digest, Status: StatusPassed},
 		Migrations:    MatrixEvidence{MatrixDigest: digest, Status: StatusPassed},
 		Dependencies:  MatrixEvidence{MatrixDigest: digest, Status: StatusPassed},
@@ -42,9 +42,51 @@ func validInput(t *testing.T, action Action, revisions []Revision) Input {
 		input.Reviews = append(input.Reviews, ReviewEvidence{Repository: revision.Repository, HeadSHA: revision.SHA, AuthorActor: "engineer-" + revision.Repository, ReviewerActor: "reviewer-" + revision.Repository, Approved: true})
 		input.Vault = append(input.Vault, VaultEvidence{Repository: revision.Repository, HeadSHA: revision.SHA, RevisionID: "vault-" + revision.Repository, Reconciled: true})
 		input.Security = append(input.Security, SecurityEvidence{Repository: revision.Repository, HeadSHA: revision.SHA, SecretScanPassed: true})
+		input.Policy.Repositories = append(input.Policy.Repositories, RepositoryPolicyEvidence{
+			Repository: revision.Repository, Digest: policyDigest, Resolved: true, ActionAllowed: true, BranchAllowed: true,
+		})
+	}
+	input.Policy.Digest, err = CompositePolicyDigest(input.Policy.Repositories)
+	if err != nil {
+		t.Fatal(err)
 	}
 	input.HumanApproval = &HumanApproval{Actor: "delivery-owner", ActorType: "human", SubjectDigest: expectedSubjectDigest(t, input), Approved: true}
 	return input
+}
+
+func TestCompositePolicyDigestIsCanonicalAndRepositorySensitive(t *testing.T) {
+	forward := []RepositoryPolicyEvidence{
+		{Repository: repositoryA, Digest: policyDigest, Resolved: true, ActionAllowed: true, BranchAllowed: true},
+		{Repository: repositoryB, Digest: strings.Repeat("d", 64), Resolved: true, ActionAllowed: true, BranchAllowed: true},
+	}
+	reverse := []RepositoryPolicyEvidence{forward[1], forward[0]}
+	first, err := CompositePolicyDigest(forward)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := CompositePolicyDigest(reverse)
+	if err != nil || first != second {
+		t.Fatalf("equivalent policy evidence changed digest: %s / %s / %v", first, second, err)
+	}
+	changed := append([]RepositoryPolicyEvidence(nil), forward...)
+	changed[0].BranchAllowed = false
+	third, err := CompositePolicyDigest(changed)
+	if err != nil || third == first {
+		t.Fatalf("repository authorization state did not change policy digest: %s / %s / %v", first, third, err)
+	}
+}
+
+func TestEvaluateExplainsRepositoryPolicyBlocks(t *testing.T) {
+	input := validInput(t, ActionRelease, []Revision{{Repository: repositoryA, Branch: "production", SHA: shaA}})
+	input.Policy.Repositories[0].BranchAllowed = false
+	input.Policy.Repositories[0].ActionAllowed = false
+	input.Policy.Digest, _ = CompositePolicyDigest(input.Policy.Repositories)
+	decision := Evaluate(input)
+	for _, code := range []string{"target_branch_not_allowed", "policy_action_not_allowed", "policy_unresolved", "human_approval_stale"} {
+		if !hasReason(decision, code) {
+			t.Fatalf("missing repository policy reason %s: %#v", code, decision)
+		}
+	}
 }
 
 func TestEvaluateBindsRequiredCheckToIntegrationIdentity(t *testing.T) {

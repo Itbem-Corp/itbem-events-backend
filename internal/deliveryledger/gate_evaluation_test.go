@@ -32,11 +32,7 @@ func validGateInput(t *testing.T) releasegate.Input {
 		Action:        releasegate.ActionRelease,
 		ChangeSetID:   "change-set:ledger-test",
 		Revisions:     revisions,
-		Policy: releasegate.Policy{
-			Resolved:          true,
-			Digest:            strings.Repeat("c", 64),
-			RequiredTestKinds: []string{"unit", "contract"},
-		},
+		Policy:        releasegate.Policy{Resolved: true, RequiredTestKinds: []string{"unit", "contract"}},
 		Branches: []releasegate.BranchEvidence{
 			{Repository: testRepositoryA, HeadSHA: revisions[0].SHA, Mergeable: true, ConflictFree: true, ProtectionEvaluated: true, Protected: true, RequiredChecks: []releasegate.RequiredCheck{{Name: "security", IntegrationID: 42}, {Name: "ci"}}},
 			{Repository: testRepositoryB, HeadSHA: revisions[1].SHA, Mergeable: true, ConflictFree: true, ProtectionEvaluated: true, Protected: true, RequiredChecks: []releasegate.RequiredCheck{{Name: "build"}}},
@@ -68,6 +64,14 @@ func validGateInput(t *testing.T) releasegate.Input {
 		Environment:   releasegate.MatrixEvidence{MatrixDigest: matrixDigest, Status: releasegate.StatusPassed},
 		Recovery:      releasegate.RecoveryEvidence{MatrixDigest: matrixDigest, Classification: releasegate.RecoveryRollback, Evaluated: true},
 	}
+	input.Policy.Repositories = []releasegate.RepositoryPolicyEvidence{
+		{Repository: testRepositoryA, Digest: strings.Repeat("c", 64), Resolved: true, ActionAllowed: true, BranchAllowed: true},
+		{Repository: testRepositoryB, Digest: strings.Repeat("d", 64), Resolved: true, ActionAllowed: true, BranchAllowed: true},
+	}
+	input.Policy.Digest, err = releasegate.CompositePolicyDigest(input.Policy.Repositories)
+	if err != nil {
+		t.Fatal(err)
+	}
 	decision := releasegate.Evaluate(input)
 	input.HumanApproval = &releasegate.HumanApproval{
 		Actor: "release-owner", ActorType: "human", SubjectDigest: decision.SubjectDigest, Approved: true,
@@ -95,6 +99,7 @@ func TestNewGateEvaluationEventCanonicalizesEquivalentEvidence(t *testing.T) {
 	reordered := input
 	reordered.Revisions = reverse(input.Revisions)
 	reordered.Policy.RequiredTestKinds = reverse(input.Policy.RequiredTestKinds)
+	reordered.Policy.Repositories = reverse(input.Policy.Repositories)
 	reordered.Branches = reverse(input.Branches)
 	for index := range reordered.Branches {
 		reordered.Branches[index].RequiredChecks = reverse(reordered.Branches[index].RequiredChecks)

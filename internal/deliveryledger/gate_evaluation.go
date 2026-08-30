@@ -185,6 +185,7 @@ func canonicalGateInput(input releasegate.Input) releasegate.Input {
 	clone := input
 	clone.Revisions = append([]releasegate.Revision(nil), input.Revisions...)
 	clone.Policy.RequiredTestKinds = append([]string(nil), input.Policy.RequiredTestKinds...)
+	clone.Policy.Repositories = append([]releasegate.RepositoryPolicyEvidence(nil), input.Policy.Repositories...)
 	clone.Branches = append([]releasegate.BranchEvidence(nil), input.Branches...)
 	clone.Checks = append([]releasegate.CheckEvidence(nil), input.Checks...)
 	clone.Reviews = append([]releasegate.ReviewEvidence(nil), input.Reviews...)
@@ -203,6 +204,9 @@ func canonicalGateInput(input releasegate.Input) releasegate.Input {
 	}
 	sort.Slice(clone.Policy.RequiredTestKinds, func(left, right int) bool {
 		return strings.ToLower(clone.Policy.RequiredTestKinds[left]) < strings.ToLower(clone.Policy.RequiredTestKinds[right])
+	})
+	sort.Slice(clone.Policy.Repositories, func(left, right int) bool {
+		return strings.ToLower(clone.Policy.Repositories[left].Repository) < strings.ToLower(clone.Policy.Repositories[right].Repository)
 	})
 	sort.Slice(clone.Revisions, func(left, right int) bool {
 		return strings.ToLower(clone.Revisions[left].Repository) < strings.ToLower(clone.Revisions[right].Repository)

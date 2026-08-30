@@ -48,9 +48,18 @@ type Revision struct {
 }
 
 type Policy struct {
-	Resolved          bool     `json:"resolved"`
-	Digest            string   `json:"digest"`
-	RequiredTestKinds []string `json:"required_test_kinds"`
+	Resolved          bool                       `json:"resolved"`
+	Digest            string                     `json:"digest"`
+	RequiredTestKinds []string                   `json:"required_test_kinds"`
+	Repositories      []RepositoryPolicyEvidence `json:"repositories"`
+}
+
+type RepositoryPolicyEvidence struct {
+	Repository    string `json:"repository"`
+	Digest        string `json:"digest"`
+	Resolved      bool   `json:"resolved"`
+	ActionAllowed bool   `json:"action_allowed"`
+	BranchAllowed bool   `json:"branch_allowed"`
 }
 
 // RequiredCheck binds a protected-branch context to its configured GitHub App
@@ -204,6 +213,39 @@ func RevisionMatrixDigest(revisions []Revision) (string, error) {
 	return hex.EncodeToString(digest[:]), nil
 }
 
+// CompositePolicyDigest binds a coordinated release to the exact effective
+// policy revision and authorization result for every repository. Repository
+// order never changes the digest.
+func CompositePolicyDigest(values []RepositoryPolicyEvidence) (string, error) {
+	if len(values) == 0 || len(values) > 64 {
+		return "", fmt.Errorf("repository policy evidence size is invalid")
+	}
+	normalized := make([]RepositoryPolicyEvidence, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		repository := strings.ToLower(strings.TrimSpace(value.Repository))
+		digest := strings.ToLower(strings.TrimSpace(value.Digest))
+		if !validRepository(repository) || !validDigest(digest) {
+			return "", fmt.Errorf("repository policy evidence is invalid")
+		}
+		if _, duplicate := seen[repository]; duplicate {
+			return "", fmt.Errorf("repository policy evidence is duplicated")
+		}
+		seen[repository] = struct{}{}
+		normalized = append(normalized, RepositoryPolicyEvidence{
+			Repository: repository, Digest: digest, Resolved: value.Resolved,
+			ActionAllowed: value.ActionAllowed, BranchAllowed: value.BranchAllowed,
+		})
+	}
+	sort.Slice(normalized, func(left, right int) bool { return normalized[left].Repository < normalized[right].Repository })
+	encoded, err := json.Marshal(normalized)
+	if err != nil {
+		return "", fmt.Errorf("encode repository policy evidence: %w", err)
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
+}
+
 // VaultEvidenceDigest returns the stable identity of the exact curated Vault
 // revisions reconciled against the release matrix. Repository order never
 // changes the digest; revision IDs and reconciliation state always do.
@@ -302,10 +344,37 @@ func Evaluate(input Input) Decision {
 	}
 	decision.MatrixDigest, _ = RevisionMatrixDigest(normalized)
 
-	if !input.Policy.Resolved || !validDigest(input.Policy.Digest) || !validUniqueNames(input.Policy.RequiredTestKinds) {
+	policyDigest, policyDigestErr := CompositePolicyDigest(input.Policy.Repositories)
+	policyEvidence := uniqueRepositoryPolicies(input.Policy.Repositories, add)
+	policyReady := policyDigestErr == nil && equalDigest(input.Policy.Digest, policyDigest) && validUniqueNames(input.Policy.RequiredTestKinds)
+	if !policyReady {
+		add("policy_evidence_invalid", "", "policy")
+	}
+	for _, revision := range normalized {
+		repository := strings.ToLower(revision.Repository)
+		evidence, ok := policyEvidence[repository]
+		if !ok {
+			add("repository_policy_missing", revision.Repository, "policy")
+			policyReady = false
+			continue
+		}
+		if !evidence.Resolved {
+			add("repository_policy_unresolved", revision.Repository, "policy")
+			policyReady = false
+		}
+		if !evidence.ActionAllowed {
+			add("policy_action_not_allowed", revision.Repository, string(input.Action))
+			policyReady = false
+		}
+		if !evidence.BranchAllowed {
+			add("target_branch_not_allowed", revision.Repository, revision.Branch)
+			policyReady = false
+		}
+	}
+	if !input.Policy.Resolved || !policyReady || len(policyEvidence) != len(normalized) {
 		add("policy_unresolved", "", "required test policy")
 	} else {
-		decision.PolicyDigest = strings.ToLower(strings.TrimSpace(input.Policy.Digest))
+		decision.PolicyDigest = policyDigest
 	}
 	vaultDigest, vaultDigestErr := VaultEvidenceDigest(input.Vault)
 	if vaultDigestErr != nil {
@@ -570,6 +639,23 @@ func uniqueBranches(values []BranchEvidence, add func(string, string, string)) m
 		}
 		if _, duplicate := result[key]; duplicate {
 			add("branch_evidence_duplicate", value.Repository, "branch")
+			continue
+		}
+		result[key] = value
+	}
+	return result
+}
+
+func uniqueRepositoryPolicies(values []RepositoryPolicyEvidence, add func(string, string, string)) map[string]RepositoryPolicyEvidence {
+	result := map[string]RepositoryPolicyEvidence{}
+	for _, value := range values {
+		key := strings.ToLower(strings.TrimSpace(value.Repository))
+		if !validRepository(value.Repository) || !validDigest(strings.ToLower(strings.TrimSpace(value.Digest))) {
+			add("repository_policy_evidence_invalid", "", "policy")
+			continue
+		}
+		if _, duplicate := result[key]; duplicate {
+			add("repository_policy_evidence_duplicate", value.Repository, "policy")
 			continue
 		}
 		result[key] = value

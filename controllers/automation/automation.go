@@ -13,6 +13,7 @@ import (
 	"events-stocks/internal/automationagent"
 	"events-stocks/internal/deliveryledger"
 	"events-stocks/internal/releasegate"
+	"events-stocks/internal/releasegatecontrol"
 	"events-stocks/models"
 	automationqueue "events-stocks/repositories/automationqueuerepository"
 	awsrepository "events-stocks/repositories/awsrepository"
@@ -2156,42 +2157,46 @@ func persistReleaseGateEvaluation(tx *gorm.DB, task *models.AutomationTask, raw 
 	if tx == nil || completedAt.IsZero() {
 		return fmt.Errorf("only a bounded release Gatekeeper task may append an evaluation")
 	}
-	workItemID, input, err := releaseGateEvaluationForTask(task, raw)
+	workItemID, actor, input, err := releaseGateCandidateForTask(task, raw)
 	if err != nil {
 		return err
 	}
+	input, err = releasegatecontrol.Resolve(tx, workItemID, input, completedAt.UTC())
+	if err != nil {
+		return err
+	}
+	preApproval := releasegate.Evaluate(input)
+	if preApproval.SubjectDigest == "" {
+		return fmt.Errorf("release Gatekeeper execution has no exact subject")
+	}
+	input.HumanApproval = &releasegate.HumanApproval{Actor: actor, ActorType: "human", SubjectDigest: preApproval.SubjectDigest, Approved: true}
 	if _, _, err := deliveryledger.RecordGateEvaluation(tx, workItemID, input, completedAt.UTC()); err != nil {
 		return err
 	}
 	return nil
 }
 
-func releaseGateEvaluationForTask(task *models.AutomationTask, raw json.RawMessage) (uuid.UUID, releasegate.Input, error) {
+func releaseGateCandidateForTask(task *models.AutomationTask, raw json.RawMessage) (uuid.UUID, string, releasegate.Input, error) {
 	if task == nil || task.Operation != "delivery.release_gate" || task.DeliveryWorkItemID == nil || *task.DeliveryWorkItemID == uuid.Nil {
-		return uuid.Nil, releasegate.Input{}, fmt.Errorf("only a bounded release Gatekeeper task may append an evaluation")
+		return uuid.Nil, "", releasegate.Input{}, fmt.Errorf("only a bounded release Gatekeeper task may append an evaluation")
 	}
 	actor := strings.TrimSpace(task.RequestedBy)
 	if actor == "" || actor == "github-app-review" || actor == "itbem-local-agent" || actor == "itbem-github-app" {
-		return uuid.Nil, releasegate.Input{}, fmt.Errorf("release Gatekeeper task does not have an authenticated human requester")
+		return uuid.Nil, "", releasegate.Input{}, fmt.Errorf("release Gatekeeper task does not have an authenticated human requester")
 	}
 	var handoff map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &handoff); err != nil || len(handoff) != 2 {
-		return uuid.Nil, releasegate.Input{}, fmt.Errorf("release Gatekeeper execution metadata is invalid")
+		return uuid.Nil, "", releasegate.Input{}, fmt.Errorf("release Gatekeeper execution metadata is invalid")
 	}
 	var schemaVersion int
 	if err := json.Unmarshal(handoff["schema_version"], &schemaVersion); err != nil || schemaVersion != 1 {
-		return uuid.Nil, releasegate.Input{}, fmt.Errorf("release Gatekeeper execution schema is invalid")
+		return uuid.Nil, "", releasegate.Input{}, fmt.Errorf("release Gatekeeper execution schema is invalid")
 	}
 	input, err := releasegate.DecodeInput(handoff["gatekeeper_input"])
 	if err != nil || input.SchemaVersion != releasegate.SchemaVersion || input.Action != releasegate.ActionRelease || input.ChangeSetID != task.DeliveryWorkItemID.String() || input.HumanApproval != nil {
-		return uuid.Nil, releasegate.Input{}, fmt.Errorf("release Gatekeeper execution candidate is invalid")
+		return uuid.Nil, "", releasegate.Input{}, fmt.Errorf("release Gatekeeper execution candidate is invalid")
 	}
-	preApproval := releasegate.Evaluate(input)
-	if preApproval.SubjectDigest == "" {
-		return uuid.Nil, releasegate.Input{}, fmt.Errorf("release Gatekeeper execution has no exact subject")
-	}
-	input.HumanApproval = &releasegate.HumanApproval{Actor: actor, ActorType: "human", SubjectDigest: preApproval.SubjectDigest, Approved: true}
-	return *task.DeliveryWorkItemID, input, nil
+	return *task.DeliveryWorkItemID, actor, input, nil
 }
 
 func buildToolExecutionLedger(cfg *models.Config, task *models.AutomationTask, runID, status string, reported []callbackToolExecution, artifacts []callbackArtifact, completedAt time.Time) ([]models.AutomationToolExecution, error) {

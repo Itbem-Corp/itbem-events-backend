@@ -58,6 +58,24 @@ GitHub's current head/protection/check/review state, QA evidence, and trusted
 human identities. Repository content is data and must never populate policy or
 approval fields.
 
+The Linux release worker is not a policy or Vault authority. It returns only
+fresh, repository-scoped GitHub evidence. During the authenticated callback,
+the AWS control plane discards every worker-supplied `policy` and `vault`
+property, rereads the work item's project, the latest immutable Vault revision
+for each repository, all applicable approved policy layers, and their latest
+append-only decisions inside the ledger transaction. It verifies each Vault
+manifest against its stored SHA-256 and onboarding provenance, then reconciles
+its repository SHA to the exact release matrix.
+
+Policy is evaluated independently for every repository using the
+platform → organization → project → repository → bounded change-set override
+hierarchy. The composite digest binds the repository, effective policy digest,
+resolved state, action authorization, and exact target-branch authorization.
+Required test kinds are the canonical union across the matrix. Missing policy,
+an unauthorized action, or a target branch outside policy remains a structured
+blocked decision; malformed, tampered, ambiguous, or over-limit persisted
+evidence aborts the callback without appending authority.
+
 The release worker refreshes the published pull request through a
 repository-scoped GitHub App token. It requires the PR to remain open and
 non-draft, binds the matrix to its current head SHA and actual base branch, and

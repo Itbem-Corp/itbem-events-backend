@@ -33,6 +33,13 @@ An unprotected branch, missing permission, truncated response, wrong SHA, or
 malformed integration identity fails closed instead of being treated as an
 empty requirement set.
 
+The worker deliberately does not read PostgreSQL and cannot assert project
+policy or Vault state. On callback, the control plane replaces those candidate
+fields from its append-only policy/Vault stores, computes one canonical
+multi-repository policy digest, validates every Vault manifest and reconciles
+each one to the exact GitHub head before it binds the authenticated human
+requester to the Gatekeeper subject.
+
 ## Continuous role-lane operation
 
 Each long-lived worker declares one exact identity with `ITBEM_AI_ROLE` and

@@ -26,7 +26,7 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-func TestReleaseGateEvaluationForTaskBindsAuthenticatedRequester(t *testing.T) {
+func TestReleaseGateCandidateForTaskRequiresAuthenticatedRequester(t *testing.T) {
 	workItemID := uuid.Must(uuid.NewV4())
 	input := releasegate.Input{
 		SchemaVersion: releasegate.SchemaVersion, Action: releasegate.ActionRelease, ChangeSetID: workItemID.String(),
@@ -35,18 +35,15 @@ func TestReleaseGateEvaluationForTaskBindsAuthenticatedRequester(t *testing.T) {
 	}
 	raw, _ := json.Marshal(map[string]any{"schema_version": 1, "gatekeeper_input": input})
 	task := &models.AutomationTask{Operation: "delivery.release_gate", DeliveryWorkItemID: &workItemID, RequestedBy: "cognito-human-42"}
-	actualWorkItemID, actual, err := releaseGateEvaluationForTask(task, raw)
-	if err != nil || actualWorkItemID != workItemID || actual.HumanApproval == nil || actual.HumanApproval.Actor != task.RequestedBy || actual.HumanApproval.ActorType != "human" {
-		t.Fatalf("release Gatekeeper callback did not bind its human requester: %s / %#v / %v", actualWorkItemID, actual, err)
-	}
-	if releasegate.Evaluate(actual).SubjectDigest != actual.HumanApproval.SubjectDigest {
-		t.Fatal("human approval was not bound to the deterministic subject")
+	actualWorkItemID, actor, actual, err := releaseGateCandidateForTask(task, raw)
+	if err != nil || actualWorkItemID != workItemID || actor != task.RequestedBy || actual.HumanApproval != nil {
+		t.Fatalf("release Gatekeeper callback did not preserve its human requester boundary: %s / %s / %#v / %v", actualWorkItemID, actor, actual, err)
 	}
 
 	for _, invalidActor := range []string{"", "github-app-review", "itbem-local-agent", "itbem-github-app"} {
 		copy := *task
 		copy.RequestedBy = invalidActor
-		if _, _, err := releaseGateEvaluationForTask(&copy, raw); err == nil {
+		if _, _, _, err := releaseGateCandidateForTask(&copy, raw); err == nil {
 			t.Fatalf("technical requester %q was accepted as a human", invalidActor)
 		}
 	}
