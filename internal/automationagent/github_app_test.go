@@ -160,6 +160,36 @@ func TestMintGitHubInstallationTokenUsesSignedAppJWT(t *testing.T) {
 	}
 }
 
+func TestMintGitHubInstallationTokenCorrectsClockSkewOnce(t *testing.T) {
+	key := testGitHubAppKey(t)
+	serverNow := time.Date(2026, time.August, 9, 12, 0, 0, 0, time.UTC)
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requests++
+		if requests == 1 {
+			response.Header().Set("Date", serverNow.Format(http.TimeFormat))
+			response.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		authorization := strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer ")
+		token, err := jwt.Parse(authorization, func(token *jwt.Token) (any, error) {
+			return &key.PublicKey, nil
+		}, jwt.WithTimeFunc(func() time.Time { return serverNow }))
+		if err != nil || !token.Valid {
+			t.Fatalf("clock-corrected GitHub App assertion is invalid: %v", err)
+		}
+		response.Header().Set("Content-Type", "application/json")
+		response.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(response).Encode(map[string]string{"token": "clock-corrected-token", "expires_at": serverNow.Add(45 * time.Minute).Format(time.RFC3339)})
+	}))
+	defer server.Close()
+
+	installation, err := MintGitHubInstallationToken(context.Background(), GitHubAppConfig{AppID: "12345", InstallationID: "67890", PrivateKey: key, APIBaseURL: server.URL}, server.Client(), serverNow.Add(6*time.Hour))
+	if err != nil || installation.Token != "clock-corrected-token" || requests != 2 {
+		t.Fatalf("expected one clock-corrected retry, got %#v / %v / requests=%d", installation, err, requests)
+	}
+}
+
 func TestVerifyGitHubAppInstallationUsesEphemeralTokenAndDoesNotExposeRepositories(t *testing.T) {
 	key := testGitHubAppKey(t)
 	now := time.Date(2026, time.August, 9, 12, 0, 0, 0, time.UTC)

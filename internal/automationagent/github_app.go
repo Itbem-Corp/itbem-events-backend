@@ -721,6 +721,10 @@ func isGitHubAPILoopbackHost(host string) bool {
 // The returned token is intentionally ephemeral and callers must keep it out
 // of result payloads, logs, evidence and storage.
 func MintGitHubInstallationToken(ctx context.Context, config GitHubAppConfig, client *http.Client, now time.Time) (GitHubInstallationToken, error) {
+	return mintGitHubInstallationToken(ctx, config, client, now, true)
+}
+
+func mintGitHubInstallationToken(ctx context.Context, config GitHubAppConfig, client *http.Client, now time.Time, allowClockCorrection bool) (GitHubInstallationToken, error) {
 	if config.PrivateKey == nil || strings.TrimSpace(config.AppID) == "" || strings.TrimSpace(config.InstallationID) == "" || strings.TrimSpace(config.APIBaseURL) == "" {
 		return GitHubInstallationToken{}, ErrGitHubAppNotConfigured
 	}
@@ -748,6 +752,14 @@ func MintGitHubInstallationToken(ctx context.Context, config GitHubAppConfig, cl
 	response, err := client.Do(req)
 	if err != nil {
 		return GitHubInstallationToken{}, fmt.Errorf("request GitHub App installation token: %w", err)
+	}
+	if response.StatusCode == http.StatusUnauthorized && allowClockCorrection {
+		serverTime, parseErr := http.ParseTime(response.Header.Get("Date"))
+		response.Body.Close()
+		if parseErr == nil && serverTime.Sub(now.UTC()).Abs() > 2*time.Minute {
+			return mintGitHubInstallationToken(ctx, config, client, serverTime, false)
+		}
+		return GitHubInstallationToken{}, fmt.Errorf("GitHub App installation token request was rejected (%d)", response.StatusCode)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusCreated {
