@@ -214,6 +214,7 @@ func TestApplyCapabilityProbesRequiresExactSHAAndSealedSandboxEvidence(t *testin
 		{Name: "source", State: "ready", Reason: "invented", Revision: testSHA, EvidenceSHA256: digest, SubjectSHA256: probe.SubjectSHA256, ExecutorRole: "qa"},
 		{Name: "release", State: "ready", Reason: "agent says so", Revision: testSHA, EvidenceSHA256: "not-a-digest", SubjectSHA256: probe.SubjectSHA256, ExecutorRole: "engineer"},
 		{Name: "unit", State: "ready", Reason: "replayed", Revision: testSHA, EvidenceSHA256: digest, SubjectSHA256: strings.Repeat("b", 64), ExecutorRole: "qa"},
+		{Name: "unit", State: "blocked", Reason: "verdict flipped", Revision: testSHA, EvidenceSHA256: digest, SubjectSHA256: probe.SubjectSHA256, ExecutorRole: "qa"},
 	}
 	for _, probe := range invalid {
 		if _, err := ApplyCapabilityProbes(proposal, []CapabilityProbe{probe}); err == nil {

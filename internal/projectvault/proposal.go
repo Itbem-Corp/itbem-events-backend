@@ -279,7 +279,8 @@ func ApplyCapabilityProbes(proposal Proposal, probes []CapabilityProbe) (Proposa
 // CapabilityProbeSubjectSHA256 prevents an evidence digest from being replayed
 // across repositories, commits, capabilities or execution roles.
 func CapabilityProbeSubjectSHA256(repository Repository, probe CapabilityProbe) (string, error) {
-	if repository.Reference == "" || !validSHA(strings.ToLower(strings.TrimSpace(repository.Revision))) || probe.Name == "" || !validDigest(probe.EvidenceSHA256) || probe.ExecutorRole == "" {
+	state := strings.ToLower(strings.TrimSpace(probe.State))
+	if repository.Reference == "" || !validSHA(strings.ToLower(strings.TrimSpace(repository.Revision))) || probe.Name == "" || (state != "ready" && state != "blocked") || !validDigest(probe.EvidenceSHA256) || probe.ExecutorRole == "" {
 		return "", fmt.Errorf("capability probe subject is invalid")
 	}
 	encoded, err := json.Marshal(struct {
@@ -287,9 +288,10 @@ func CapabilityProbeSubjectSHA256(repository Repository, probe CapabilityProbe) 
 		Repository     string `json:"repository"`
 		Revision       string `json:"revision"`
 		Capability     string `json:"capability"`
+		State          string `json:"state"`
 		ExecutorRole   string `json:"executor_role"`
 		EvidenceSHA256 string `json:"evidence_sha256"`
-	}{SchemaVersion, repository.Reference, strings.ToLower(strings.TrimSpace(repository.Revision)), strings.TrimSpace(probe.Name), strings.ToLower(strings.TrimSpace(probe.ExecutorRole)), strings.ToLower(strings.TrimSpace(probe.EvidenceSHA256))})
+	}{SchemaVersion, repository.Reference, strings.ToLower(strings.TrimSpace(repository.Revision)), strings.TrimSpace(probe.Name), strings.ToLower(strings.TrimSpace(probe.State)), strings.ToLower(strings.TrimSpace(probe.ExecutorRole)), strings.ToLower(strings.TrimSpace(probe.EvidenceSHA256))})
 	if err != nil {
 		return "", err
 	}
