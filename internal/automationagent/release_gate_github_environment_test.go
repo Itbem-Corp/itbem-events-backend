@@ -8,6 +8,9 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
+
+	"events-stocks/internal/releasegate"
 )
 
 func TestReadGitHubReleaseEnvironmentEvidencePinsWorkflowAndChecksOnlyRequiredNames(t *testing.T) {
@@ -48,6 +51,38 @@ func TestReadGitHubReleaseEnvironmentEvidencePinsWorkflowAndChecksOnlyRequiredNa
 	}
 	if len(requests) != 4 {
 		t.Fatalf("unexpected GitHub API request count: %d", len(requests))
+	}
+}
+
+func TestRunReleaseEnvironmentWithGitHubBindsTaskAndExactMatrix(t *testing.T) {
+	head := strings.Repeat("a", 40)
+	key := testGitHubAppKey(t)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/repos/example/service/installation":
+			_ = json.NewEncoder(response).Encode(map[string]int64{"id": 22})
+		case "/app/installations/22/access_tokens":
+			response.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(response).Encode(map[string]string{"token": "repository-token", "expires_at": time.Now().UTC().Add(45 * time.Minute).Format(time.RFC3339)})
+		case "/repos/example/service/contents/.github/workflows/deploy.yml":
+			if request.URL.Query().Get("ref") != head {
+				t.Fatal("release workflow read was not exact-SHA")
+			}
+			_ = json.NewEncoder(response).Encode(map[string]any{"type": "file", "path": ".github/workflows/deploy.yml", "sha": strings.Repeat("b", 40)})
+		case "/repos/example/service/environments/production":
+			_ = json.NewEncoder(response).Encode(map[string]any{"name": "production"})
+		default:
+			t.Fatalf("unexpected environment request: %s %s", request.Method, request.URL.String())
+		}
+	}))
+	defer server.Close()
+	input := releasegate.Input{SchemaVersion: releasegate.SchemaVersion, Action: releasegate.ActionRelease, ChangeSetID: "change-set:42", Revisions: []releasegate.Revision{{Repository: "example/service", Branch: "production", SHA: head}}}
+	delivery, _ := json.Marshal(map[string]any{"release_environment": []GitHubEnvironmentRequirement{{Repository: "example/service", HeadSHA: head, Workflow: ".github/workflows/deploy.yml", Environment: "production", RequiredSecretReferences: []string{}, RequiredVariableReferences: []string{}}}})
+	values := map[string]string{"ITBEM_GITHUB_APP_ID": "12345", "ITBEM_GITHUB_INSTALLATION_IDS": "22", "ITBEM_GITHUB_APP_PRIVATE_KEY": testGitHubAppPEM(t, key), "ITBEM_GITHUB_API_BASE_URL": server.URL}
+	taskID := "11111111-1111-4111-8111-111111111111"
+	observation, err := RunReleaseEnvironmentWithGitHub(context.Background(), delivery, input, taskID, func(name string) string { return values[name] })
+	if err != nil || observation.TaskID != taskID || len(observation.Repositories) != 1 || !observation.Repositories[0].Ready() {
+		t.Fatalf("exact environment observation failed: %#v / %v", observation, err)
 	}
 }
 

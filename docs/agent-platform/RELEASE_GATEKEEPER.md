@@ -108,6 +108,19 @@ grant, and supplies each exact remote repository/SHA to the Gatekeeper. Raw
 commands, output, finding details, and model prose are excluded. This path uses
 neither GitHub Actions nor GitHub Advanced Security.
 
+Environment readiness is a separate providerless release observation. Before
+enqueue, the control plane resolves the approved workflow, environment and
+explicit secret/variable reference names for every exact repository/SHA. The
+worker confirms the workflow through the Contents API pinned with `ref=<SHA>`,
+confirms the environment, and compares only required names. The callback is
+bound to the release task and matrix and appends
+`delivery.environment.observed.v1`. Immediately before Gatekeeper evaluation,
+the control plane verifies the completed task/timestamp and requires every
+observed workflow, environment, SHA and reference list to equal freshly
+resolved policy. Missing names become `environment_not_ready`; changed policy
+or SHA is stale evidence. Secret values and the complete GitHub inventory are
+never persisted.
+
 Compatibility and migration safety use the same exact-matrix QA ledger without
 trusting model prose. Operator configuration reserves
 `assurance:compatibility` and `assurance:migrations`; each identity must run in

@@ -48,6 +48,16 @@ also removes worker-supplied QA, security, compatibility, migration,
 dependency, environment, and recovery claims; those fields remain blocking
 until separate immutable evidence resolvers attach them.
 
+For `delivery.release_gate`, the backend also resolves each repository's
+approved workflow, GitHub environment, and explicit secret/variable reference
+names before enqueue. The providerless release worker verifies the workflow at
+the exact head SHA and checks environment metadata/names with a repository-
+scoped installation token. Its schema-v2 callback appends
+`delivery.environment.observed.v1`; the backend then re-resolves current policy,
+task provenance and matrix before setting environment evidence. A changed
+policy/SHA is stale, a missing required name is failed, and no secret value or
+complete GitHub inventory crosses the boundary.
+
 For `delivery.qa`, the control plane fixes the current multi-repository matrix
 digest on the task before enqueue. The runner's callback handoff contains only
 that task/matrix identity, preview status, repository execution order, reviewed

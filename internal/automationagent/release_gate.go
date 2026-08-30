@@ -24,7 +24,7 @@ func RunReleaseGate(delivery json.RawMessage) (releasegate.Input, error) {
 	allowed := map[string]struct{}{
 		"project": {}, "work_item": {}, "approved_plan": {}, "autonomy_policy": {}, "context_sources": {},
 		"repository_topology": {}, "client_context": {}, "conversation": {}, "change_sets": {}, "evidence": {},
-		"gates": {}, "human_request": {}, "publication": {}, "gatekeeper": {},
+		"gates": {}, "human_request": {}, "publication": {}, "gatekeeper": {}, "release_environment": {},
 	}
 	for key := range envelope {
 		if _, ok := allowed[key]; !ok {
@@ -49,6 +49,6 @@ func RunReleaseGate(delivery json.RawMessage) (releasegate.Input, error) {
 	return input, nil
 }
 
-func releaseGateHandoff(input releasegate.Input) map[string]any {
-	return map[string]any{"schema_version": 1, "gatekeeper_input": input}
+func releaseGateHandoff(input releasegate.Input, environment any) map[string]any {
+	return map[string]any{"schema_version": 2, "gatekeeper_input": input, "environment_observation": environment}
 }

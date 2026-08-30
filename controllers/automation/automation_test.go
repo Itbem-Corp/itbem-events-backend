@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"events-stocks/internal/environmentevidence"
 	"events-stocks/internal/qaevidence"
 	"events-stocks/internal/releasegate"
 	"events-stocks/models"
@@ -34,17 +35,25 @@ func TestReleaseGateCandidateForTaskRequiresAuthenticatedRequester(t *testing.T)
 		Revisions: []releasegate.Revision{{Repository: "example/service", Branch: "feature/release", SHA: strings.Repeat("a", 40)}},
 		Policy:    releasegate.Policy{Resolved: false, RequiredTestKinds: []string{}},
 	}
-	raw, _ := json.Marshal(map[string]any{"schema_version": 1, "gatekeeper_input": input})
-	task := &models.AutomationTask{Operation: "delivery.release_gate", DeliveryWorkItemID: &workItemID, RequestedBy: "cognito-human-42"}
-	actualWorkItemID, actor, actual, err := releaseGateCandidateForTask(task, raw)
+	digest, _ := releasegate.RevisionMatrixDigest(input.Revisions)
+	taskID := uuid.Must(uuid.NewV4())
+	environment := environmentevidence.Observation{SchemaVersion: environmentevidence.SchemaVersion, TaskID: taskID.String(), MatrixDigest: digest, Repositories: []environmentevidence.Repository{{Repository: "example/service", HeadSHA: strings.Repeat("a", 40), Workflow: ".github/workflows/deploy.yml", Environment: "production", RequiredSecretReferences: []string{}, RequiredVariableReferences: []string{}, WorkflowExists: true, EnvironmentExists: true, MissingSecretReferences: []string{}, MissingVariableReferences: []string{}}}}
+	raw, _ := json.Marshal(map[string]any{"schema_version": 2, "gatekeeper_input": input, "environment_observation": environment})
+	task := &models.AutomationTask{ID: taskID, Operation: "delivery.release_gate", DeliveryWorkItemID: &workItemID, RequestedBy: "cognito-human-42", EvidenceSubjectDigest: digest}
+	actualWorkItemID, actor, actual, actualEnvironment, err := releaseGateCandidateForTask(task, raw)
 	if err != nil || actualWorkItemID != workItemID || actor != task.RequestedBy || actual.HumanApproval != nil {
-		t.Fatalf("release Gatekeeper callback did not preserve its human requester boundary: %s / %s / %#v / %v", actualWorkItemID, actor, actual, err)
+		t.Fatalf("release Gatekeeper callback did not preserve its human requester boundary: %s / %s / %#v / %#v / %v", actualWorkItemID, actor, actual, actualEnvironment, err)
+	}
+	legacyRaw, _ := json.Marshal(map[string]any{"schema_version": 1, "gatekeeper_input": input})
+	_, _, _, legacyEnvironment, err := releaseGateCandidateForTask(task, legacyRaw)
+	if err != nil || legacyEnvironment != nil {
+		t.Fatalf("legacy rolling-upgrade callback should stay environment-blocked: %#v / %v", legacyEnvironment, err)
 	}
 
 	for _, invalidActor := range []string{"", "github-app-review", "itbem-local-agent", "itbem-github-app"} {
 		copy := *task
 		copy.RequestedBy = invalidActor
-		if _, _, _, err := releaseGateCandidateForTask(&copy, raw); err == nil {
+		if _, _, _, _, err := releaseGateCandidateForTask(&copy, raw); err == nil {
 			t.Fatalf("technical requester %q was accepted as a human", invalidActor)
 		}
 	}

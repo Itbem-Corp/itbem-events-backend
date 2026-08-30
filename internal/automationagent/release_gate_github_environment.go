@@ -11,6 +11,9 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"events-stocks/internal/environmentevidence"
+	"events-stocks/internal/releasegate"
 )
 
 const maxGitHubEnvironmentReferences = 64
@@ -42,6 +45,61 @@ type GitHubEnvironmentEvidence struct {
 	EnvironmentExists         bool     `json:"environment_exists"`
 	MissingSecretReferences   []string `json:"missing_secret_references"`
 	MissingVariableReferences []string `json:"missing_variable_references"`
+}
+
+// RunReleaseEnvironmentWithGitHub observes every repository in the exact gate
+// matrix using the queued value-free policy snapshot. The backend later
+// re-resolves policy and rejects any stale or altered requirement.
+func RunReleaseEnvironmentWithGitHub(ctx context.Context, delivery json.RawMessage, input releasegate.Input, taskID string, lookup func(string) string) (environmentevidence.Observation, error) {
+	var envelope struct {
+		ReleaseEnvironment []GitHubEnvironmentRequirement `json:"release_environment"`
+	}
+	if err := json.Unmarshal(delivery, &envelope); err != nil || len(envelope.ReleaseEnvironment) != len(input.Revisions) {
+		return environmentevidence.Observation{}, fmt.Errorf("release environment matrix is missing or incomplete")
+	}
+	matrixDigest, err := releasegate.RevisionMatrixDigest(input.Revisions)
+	if err != nil {
+		return environmentevidence.Observation{}, fmt.Errorf("release environment matrix is invalid")
+	}
+	revisions := make(map[string]releasegate.Revision, len(input.Revisions))
+	for _, revision := range input.Revisions {
+		revisions[strings.ToLower(strings.TrimSpace(revision.Repository))] = revision
+	}
+	config, err := LoadGitHubAppConfig(lookup)
+	if err != nil {
+		return environmentevidence.Observation{}, err
+	}
+	observation := environmentevidence.Observation{SchemaVersion: environmentevidence.SchemaVersion, TaskID: strings.ToLower(strings.TrimSpace(taskID)), MatrixDigest: matrixDigest, Repositories: []environmentevidence.Repository{}}
+	seen := map[string]struct{}{}
+	for _, requirement := range envelope.ReleaseEnvironment {
+		canonical, canonicalErr := canonicalGitHubEnvironmentRequirement(requirement)
+		revision, ok := revisions[canonical.Repository]
+		if canonicalErr != nil || !ok || !strings.EqualFold(revision.SHA, canonical.HeadSHA) {
+			return environmentevidence.Observation{}, fmt.Errorf("release environment requirement does not match the exact revision matrix")
+		}
+		if _, duplicate := seen[canonical.Repository]; duplicate {
+			return environmentevidence.Observation{}, fmt.Errorf("release environment requirement is duplicated")
+		}
+		seen[canonical.Repository] = struct{}{}
+		token, tokenErr := MintGitHubRepositoryToken(ctx, config, nil, time.Now().UTC(), canonical.Repository)
+		if tokenErr != nil {
+			return environmentevidence.Observation{}, fmt.Errorf("release environment could not authenticate the repository: %w", tokenErr)
+		}
+		evidence, readErr := ReadGitHubReleaseEnvironmentEvidence(ctx, config, token.Token, canonical)
+		if readErr != nil {
+			return environmentevidence.Observation{}, readErr
+		}
+		observation.Repositories = append(observation.Repositories, environmentevidence.Repository{
+			Repository: evidence.Repository, HeadSHA: evidence.HeadSHA, Workflow: evidence.Workflow, Environment: evidence.Environment,
+			RequiredSecretReferences: append([]string{}, evidence.RequiredSecretReferences...), RequiredVariableReferences: append([]string{}, evidence.RequiredVariableReferences...),
+			WorkflowExists: evidence.WorkflowExists, EnvironmentExists: evidence.EnvironmentExists,
+			MissingSecretReferences: append([]string{}, evidence.MissingSecretReferences...), MissingVariableReferences: append([]string{}, evidence.MissingVariableReferences...),
+		})
+	}
+	if len(seen) != len(revisions) {
+		return environmentevidence.Observation{}, fmt.Errorf("release environment requirement matrix is incomplete")
+	}
+	return environmentevidence.Canonical(observation)
 }
 
 func (evidence GitHubEnvironmentEvidence) Ready() bool {

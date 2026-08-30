@@ -12,6 +12,7 @@ import (
 	"events-stocks/internal/authz"
 	"events-stocks/internal/automationagent"
 	"events-stocks/internal/deliveryledger"
+	"events-stocks/internal/environmentevidence"
 	"events-stocks/internal/qaevidence"
 	"events-stocks/internal/releasegate"
 	"events-stocks/internal/releasegatecontrol"
@@ -2169,9 +2170,14 @@ func persistReleaseGateEvaluation(tx *gorm.DB, task *models.AutomationTask, raw 
 	if tx == nil || completedAt.IsZero() {
 		return fmt.Errorf("only a bounded release Gatekeeper task may append an evaluation")
 	}
-	workItemID, actor, input, err := releaseGateCandidateForTask(task, raw)
+	workItemID, actor, input, environment, err := releaseGateCandidateForTask(task, raw)
 	if err != nil {
 		return err
+	}
+	if environment != nil {
+		if _, _, err := deliveryledger.RecordEnvironmentObservation(tx, workItemID, *environment, completedAt.UTC()); err != nil {
+			return err
+		}
 	}
 	input, err = releasegatecontrol.Resolve(tx, workItemID, input, completedAt.UTC())
 	if err != nil {
@@ -2269,27 +2275,38 @@ func qaObservationForTask(task *models.AutomationTask, raw json.RawMessage) (uui
 	return *task.DeliveryWorkItemID, observation, nil
 }
 
-func releaseGateCandidateForTask(task *models.AutomationTask, raw json.RawMessage) (uuid.UUID, string, releasegate.Input, error) {
+func releaseGateCandidateForTask(task *models.AutomationTask, raw json.RawMessage) (uuid.UUID, string, releasegate.Input, *environmentevidence.Observation, error) {
 	if task == nil || task.Operation != "delivery.release_gate" || task.DeliveryWorkItemID == nil || *task.DeliveryWorkItemID == uuid.Nil {
-		return uuid.Nil, "", releasegate.Input{}, fmt.Errorf("only a bounded release Gatekeeper task may append an evaluation")
+		return uuid.Nil, "", releasegate.Input{}, nil, fmt.Errorf("only a bounded release Gatekeeper task may append an evaluation")
 	}
 	actor := strings.TrimSpace(task.RequestedBy)
 	if actor == "" || actor == "github-app-review" || actor == "itbem-local-agent" || actor == "itbem-github-app" {
-		return uuid.Nil, "", releasegate.Input{}, fmt.Errorf("release Gatekeeper task does not have an authenticated human requester")
+		return uuid.Nil, "", releasegate.Input{}, nil, fmt.Errorf("release Gatekeeper task does not have an authenticated human requester")
 	}
 	var handoff map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &handoff); err != nil || len(handoff) != 2 {
-		return uuid.Nil, "", releasegate.Input{}, fmt.Errorf("release Gatekeeper execution metadata is invalid")
+	if err := json.Unmarshal(raw, &handoff); err != nil || (len(handoff) != 2 && len(handoff) != 3) {
+		return uuid.Nil, "", releasegate.Input{}, nil, fmt.Errorf("release Gatekeeper execution metadata is invalid")
 	}
 	var schemaVersion int
-	if err := json.Unmarshal(handoff["schema_version"], &schemaVersion); err != nil || schemaVersion != 1 {
-		return uuid.Nil, "", releasegate.Input{}, fmt.Errorf("release Gatekeeper execution schema is invalid")
+	if err := json.Unmarshal(handoff["schema_version"], &schemaVersion); err != nil || (schemaVersion != 1 && schemaVersion != 2) || (schemaVersion == 1 && len(handoff) != 2) || (schemaVersion == 2 && len(handoff) != 3) {
+		return uuid.Nil, "", releasegate.Input{}, nil, fmt.Errorf("release Gatekeeper execution schema is invalid")
 	}
 	input, err := releasegate.DecodeInput(handoff["gatekeeper_input"])
 	if err != nil || input.SchemaVersion != releasegate.SchemaVersion || input.Action != releasegate.ActionRelease || input.ChangeSetID != task.DeliveryWorkItemID.String() || input.HumanApproval != nil {
-		return uuid.Nil, "", releasegate.Input{}, fmt.Errorf("release Gatekeeper execution candidate is invalid")
+		return uuid.Nil, "", releasegate.Input{}, nil, fmt.Errorf("release Gatekeeper execution candidate is invalid")
 	}
-	return *task.DeliveryWorkItemID, actor, input, nil
+	if schemaVersion == 1 {
+		// Rolling upgrades may finish a task on an old release worker. Accept its
+		// exact GitHub PR/check candidate but attach no environment event, so the
+		// deterministic Gatekeeper remains blocked until a schema-v2 rerun.
+		return *task.DeliveryWorkItemID, actor, input, nil, nil
+	}
+	environment, err := environmentevidence.Decode(handoff["environment_observation"])
+	subject := strings.ToLower(strings.TrimSpace(task.EvidenceSubjectDigest))
+	if err != nil || environment.TaskID != task.ID.String() || !strings.EqualFold(environment.MatrixDigest, subject) || !artifactDigestPattern.MatchString(subject) {
+		return uuid.Nil, "", releasegate.Input{}, nil, fmt.Errorf("release environment observation does not match its exact queued subject")
+	}
+	return *task.DeliveryWorkItemID, actor, input, &environment, nil
 }
 
 func buildToolExecutionLedger(cfg *models.Config, task *models.AutomationTask, runID, status string, reported []callbackToolExecution, artifacts []callbackArtifact, completedAt time.Time) ([]models.AutomationToolExecution, error) {

@@ -174,6 +174,12 @@ Event     Event          `gorm:"foreignKey:EventID" json:"event,omitempty"`
   environment secrets and variables. Empty lists are meaningful and must be
   approved explicitly; secret values are never stored in policy, Postgres,
   Vault manifests, event payloads, or API responses.
+- **DeliveryEvent** environment observation (`delivery.environment.observed.v1`):
+  Append-only, task- and matrix-bound readiness from the deterministic release
+  worker. It records the exact repository SHA, approved workflow/environment,
+  required names and only required names that are missing. It never stores
+  secret/variable values or GitHub's complete environment inventory. Replayed
+  callbacks are idempotent only when the canonical payload is identical.
 - **AutomationAgentHeartbeat** (`models/AutomationAgentHeartbeat.go`): Short-
   lived, anonymized execution-plane presence. It records the declared worker
   role/lane, provider/model, concurrency and bounded workspace readiness, but

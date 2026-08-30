@@ -71,6 +71,7 @@ itbem-events-backend/
 | Effective-policy composite recovery resolver | `internal/deliverypolicy/`, `internal/deliverypolicystore/`, `internal/releasegatecontrol/evidence.go` |
 | Explicit release environment secret/variable reference policy and safe projection | `internal/deliverypolicy/policy.go`, `controllers/delivery/effective_policy.go` |
 | Exact-SHA GitHub release workflow/environment readiness adapter | `internal/automationagent/release_gate_github_environment.go` |
+| Immutable exact-matrix release environment evidence | `internal/environmentevidence/`, `internal/deliveryledger/environment_observation.go` |
 | Linux multiagent systemd distribution | `deploy/systemd/` |
 | Moment | `models/Moment.go` |
 | MomentType | `models/MomentType.go` |

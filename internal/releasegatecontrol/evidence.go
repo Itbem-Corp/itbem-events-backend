@@ -15,6 +15,7 @@ import (
 	"events-stocks/internal/deliveryledger"
 	"events-stocks/internal/deliverypolicy"
 	"events-stocks/internal/deliverypolicystore"
+	"events-stocks/internal/environmentevidence"
 	"events-stocks/internal/projectvault"
 	"events-stocks/internal/qaevidence"
 	"events-stocks/internal/releasegate"
@@ -34,6 +35,62 @@ const (
 	compatibilityTestKind    = "assurance:compatibility"
 	migrationsTestKind       = "assurance:migrations"
 )
+
+// EnvironmentRequirement is the value-free effective release contract sent
+// to the deterministic worker. The callback observation is reconciled against
+// a freshly resolved copy, so this queued snapshot grants no authority.
+type EnvironmentRequirement struct {
+	Repository                 string   `json:"repository"`
+	HeadSHA                    string   `json:"head_sha"`
+	Workflow                   string   `json:"workflow"`
+	Environment                string   `json:"environment"`
+	RequiredSecretReferences   []string `json:"required_secret_references"`
+	RequiredVariableReferences []string `json:"required_variable_references"`
+}
+
+// ResolveEnvironmentRequirements derives release requirements exclusively
+// from the approved policy ledger and current publication matrix.
+func ResolveEnvironmentRequirements(db *gorm.DB, workItemID uuid.UUID, input releasegate.Input, evaluatedAt time.Time) ([]EnvironmentRequirement, error) {
+	if db == nil || workItemID == uuid.Nil || evaluatedAt.IsZero() || input.ChangeSetID != workItemID.String() || input.Action != releasegate.ActionRelease {
+		return nil, fmt.Errorf("release environment requirement context is invalid")
+	}
+	var item models.DeliveryWorkItem
+	if err := db.Select("id", "project_id", "plan_json").First(&item, workItemID).Error; err != nil {
+		return nil, fmt.Errorf("load release environment work item: %w", err)
+	}
+	var project models.DeliveryProject
+	if err := db.Select("id", "client_id").First(&project, item.ProjectID).Error; err != nil {
+		return nil, fmt.Errorf("load release environment project: %w", err)
+	}
+	subject, err := loadPublishedReleaseSubject(db, item)
+	if err != nil || !sameRevisionMatrix(input.Revisions, subject.Revisions) {
+		return nil, fmt.Errorf("release environment publication matrix is stale")
+	}
+	repositories, references, err := repositoryReferences(subject.Revisions)
+	if err != nil {
+		return nil, err
+	}
+	revisions, decisions, err := loadPolicyLedger(db, project, input.ChangeSetID, references)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]EnvironmentRequirement, 0, len(subject.Revisions))
+	for _, matrixRevision := range subject.Revisions {
+		repository := strings.ToLower(strings.TrimSpace(matrixRevision.Repository))
+		reference := repositories[repository]
+		context := deliverypolicy.Context{OrganizationID: project.ClientID.String(), ProjectID: project.ID.String(), Repository: policyRepositoryReference(reference, revisions), ChangeSetID: input.ChangeSetID}
+		policy, resolveErr := deliverypolicystore.ResolveEffective(context, revisions, decisions, evaluatedAt.UTC())
+		if resolveErr != nil || !policy.GatePolicyFor(releasegate.ActionRelease).Resolved || !policy.AllowsTargetBranch(matrixRevision.Branch) {
+			return nil, fmt.Errorf("release environment policy for %s is unresolved", repository)
+		}
+		result = append(result, EnvironmentRequirement{
+			Repository: repository, HeadSHA: strings.ToLower(matrixRevision.SHA), Workflow: policy.DeploymentWorkflow, Environment: policy.DeploymentEnvironment,
+			RequiredSecretReferences: append([]string{}, policy.RequiredSecretReferences...), RequiredVariableReferences: append([]string{}, policy.RequiredVariableReferences...),
+		})
+	}
+	sort.Slice(result, func(left, right int) bool { return result[left].Repository < result[right].Repository })
+	return result, nil
+}
 
 // Resolve replaces all candidate policy and Vault claims with current rows from
 // the control-plane database. Missing policy or Vault data remains structured
@@ -89,7 +146,95 @@ func Resolve(db *gorm.DB, workItemID uuid.UUID, input releasegate.Input, evaluat
 	if err != nil {
 		return releasegate.Input{}, err
 	}
-	return resolveStoredSecurityEvidence(db, item.ID, resolved, subject)
+	resolved, err = resolveStoredSecurityEvidence(db, item.ID, resolved, subject)
+	if err != nil {
+		return releasegate.Input{}, err
+	}
+	return resolveStoredEnvironmentEvidence(db, item.ID, resolved, subject, evaluatedAt.UTC())
+}
+
+func resolveStoredEnvironmentEvidence(db *gorm.DB, workItemID uuid.UUID, input releasegate.Input, subject publishedReleaseSubject, evaluatedAt time.Time) (releasegate.Input, error) {
+	if db == nil || workItemID == uuid.Nil || evaluatedAt.IsZero() || !sameRevisionMatrix(input.Revisions, subject.Revisions) {
+		return releasegate.Input{}, fmt.Errorf("release Gatekeeper environment context is invalid")
+	}
+	matrixDigest, err := releasegate.RevisionMatrixDigest(input.Revisions)
+	if err != nil {
+		return releasegate.Input{}, fmt.Errorf("release Gatekeeper environment matrix is invalid")
+	}
+	var events []models.DeliveryEvent
+	if err := db.Where("work_item_id = ? AND event_type = ? AND subject_digest = ?", workItemID, deliveryledger.EventTypeEnvironmentObserved, matrixDigest).
+		Order("sequence DESC, occurred_at DESC, id DESC").Limit(maxAssuranceObservations + 1).Find(&events).Error; err != nil {
+		return releasegate.Input{}, fmt.Errorf("load release Gatekeeper environment evidence: %w", err)
+	}
+	if len(events) > maxAssuranceObservations {
+		return releasegate.Input{}, fmt.Errorf("release Gatekeeper environment evidence history exceeds the bounded limit")
+	}
+	if len(events) == 0 {
+		return input, nil
+	}
+	latest, err := deliveryledger.ProjectEnvironmentObservation(events[0])
+	if err != nil || !strings.EqualFold(latest.Observation.MatrixDigest, matrixDigest) {
+		return releasegate.Input{}, fmt.Errorf("release Gatekeeper environment evidence integrity failed")
+	}
+	// GitHub environments and reference-name inventories are mutable. Unlike
+	// QA over immutable SHAs, an older observation for the same matrix is not
+	// reusable: only this callback's deterministic read may satisfy the gate.
+	if !latest.OccurredAt.UTC().Equal(evaluatedAt.UTC()) {
+		return input, nil
+	}
+	taskID, err := uuid.FromString(latest.Observation.TaskID)
+	if err != nil || taskID == uuid.Nil {
+		return releasegate.Input{}, fmt.Errorf("release Gatekeeper environment task identity is invalid")
+	}
+	var task models.AutomationTask
+	if err := db.Select("id", "delivery_work_item_id", "operation", "evidence_subject_digest", "status", "completed_at").First(&task, taskID).Error; err != nil {
+		return releasegate.Input{}, fmt.Errorf("load release Gatekeeper environment task: %w", err)
+	}
+	if task.ID != taskID || task.DeliveryWorkItemID == nil || *task.DeliveryWorkItemID != workItemID || task.Operation != "delivery.release_gate" || task.Status != "completed" || task.CompletedAt == nil || !task.CompletedAt.UTC().Equal(latest.OccurredAt.UTC()) || !strings.EqualFold(strings.TrimSpace(task.EvidenceSubjectDigest), matrixDigest) {
+		return releasegate.Input{}, fmt.Errorf("release Gatekeeper environment task provenance does not match")
+	}
+	requirements, err := ResolveEnvironmentRequirements(db, workItemID, input, evaluatedAt)
+	if err != nil || len(requirements) != len(latest.Observation.Repositories) {
+		return releasegate.Input{}, fmt.Errorf("release Gatekeeper current environment policy does not match the observation")
+	}
+	input.Environment, err = environmentMatrixEvidence(matrixDigest, requirements, latest.Observation)
+	if err != nil {
+		return releasegate.Input{}, err
+	}
+	return input, nil
+}
+
+func environmentMatrixEvidence(matrixDigest string, requirements []EnvironmentRequirement, observation environmentevidence.Observation) (releasegate.MatrixEvidence, error) {
+	if !strings.EqualFold(strings.TrimSpace(observation.MatrixDigest), matrixDigest) || len(requirements) == 0 || len(requirements) != len(observation.Repositories) {
+		return releasegate.MatrixEvidence{}, fmt.Errorf("release Gatekeeper environment matrix does not match")
+	}
+	observed := make(map[string]struct {
+		workflow, environment, sha, secrets, variables string
+		ready                                          bool
+	}, len(observation.Repositories))
+	for _, repository := range observation.Repositories {
+		key := strings.ToLower(repository.Repository)
+		if _, duplicate := observed[key]; duplicate {
+			return releasegate.MatrixEvidence{}, fmt.Errorf("release Gatekeeper environment observation is duplicated")
+		}
+		observed[key] = struct {
+			workflow, environment, sha, secrets, variables string
+			ready                                          bool
+		}{repository.Workflow, repository.Environment, strings.ToLower(repository.HeadSHA), strings.Join(repository.RequiredSecretReferences, "\x00"), strings.Join(repository.RequiredVariableReferences, "\x00"), repository.Ready()}
+	}
+	ready := true
+	for _, requirement := range requirements {
+		value, ok := observed[strings.ToLower(requirement.Repository)]
+		if !ok || value.workflow != requirement.Workflow || value.environment != requirement.Environment || value.sha != strings.ToLower(requirement.HeadSHA) || value.secrets != strings.Join(requirement.RequiredSecretReferences, "\x00") || value.variables != strings.Join(requirement.RequiredVariableReferences, "\x00") {
+			return releasegate.MatrixEvidence{}, fmt.Errorf("release Gatekeeper environment observation is stale")
+		}
+		ready = ready && value.ready
+	}
+	status := releasegate.StatusFailed
+	if ready {
+		status = releasegate.StatusPassed
+	}
+	return releasegate.MatrixEvidence{MatrixDigest: matrixDigest, Status: status}, nil
 }
 
 type publishedChangeMetadata struct {

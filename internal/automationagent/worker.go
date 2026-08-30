@@ -269,7 +269,11 @@ func (w *Worker) Process(ctx context.Context, message TaskMessage) error {
 		if runErr != nil {
 			return w.fail(ctx, message.Payload.TaskID, runID, runErr)
 		}
-		handoff := releaseGateHandoff(gateInput)
+		environment, runErr := RunReleaseEnvironmentWithGitHub(ctx, input.Delivery, gateInput, message.Payload.TaskID, os.Getenv)
+		if runErr != nil {
+			return w.fail(ctx, message.Payload.TaskID, runID, runErr)
+		}
+		handoff := releaseGateHandoff(gateInput, environment)
 		output := map[string]any{
 			"schema_version": 1, "task_id": message.Payload.TaskID, "operation": message.Payload.Operation,
 			"deterministic": true, "structured_result": map[string]any{"state": "evaluated"}, "execution": handoff,

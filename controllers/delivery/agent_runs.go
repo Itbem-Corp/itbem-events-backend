@@ -5,6 +5,7 @@ import (
 	"events-stocks/configuration"
 	"events-stocks/internal/automationagent"
 	"events-stocks/internal/releasegate"
+	"events-stocks/internal/releasegatecontrol"
 	"events-stocks/models"
 	automationqueue "events-stocks/repositories/automationqueuerepository"
 	awsrepository "events-stocks/repositories/awsrepository"
@@ -90,11 +91,12 @@ type deliveryAgentInput struct {
 		// Evidence and Gates let QA and the final delivery report cite the
 		// actual human decisions and captured artifacts. They deliberately omit
 		// object-store locations and reviewer identities.
-		Evidence     []deliveryAgentEvidence   `json:"evidence,omitempty"`
-		Gates        []deliveryAgentGate       `json:"gates,omitempty"`
-		HumanRequest string                    `json:"human_request,omitempty"`
-		Publication  *deliveryAgentPublication `json:"publication,omitempty"`
-		Gatekeeper   *releasegate.Input        `json:"gatekeeper,omitempty"`
+		Evidence           []deliveryAgentEvidence                     `json:"evidence,omitempty"`
+		Gates              []deliveryAgentGate                         `json:"gates,omitempty"`
+		HumanRequest       string                                      `json:"human_request,omitempty"`
+		Publication        *deliveryAgentPublication                   `json:"publication,omitempty"`
+		Gatekeeper         *releasegate.Input                          `json:"gatekeeper,omitempty"`
+		ReleaseEnvironment []releasegatecontrol.EnvironmentRequirement `json:"release_environment,omitempty"`
 	} `json:"delivery"`
 }
 
@@ -344,6 +346,11 @@ func StartAgentRun(c echo.Context) error {
 			return utils.Error(c, http.StatusConflict, "Exact delivery matrix rejected", candidateErr.Error())
 		}
 		input.Delivery.Gatekeeper = &candidate
+		requirements, requirementErr := releasegatecontrol.ResolveEnvironmentRequirements(configuration.DB, item.ID, candidate, time.Now().UTC())
+		if requirementErr != nil {
+			return utils.Error(c, http.StatusConflict, "Release environment rejected", requirementErr.Error())
+		}
+		input.Delivery.ReleaseEnvironment = requirements
 		evidenceSubjectDigest, candidateErr = releasegate.RevisionMatrixDigest(candidate.Revisions)
 		if candidateErr != nil {
 			return utils.Error(c, http.StatusConflict, "Exact delivery matrix rejected", candidateErr.Error())

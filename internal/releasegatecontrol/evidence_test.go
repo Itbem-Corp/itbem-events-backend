@@ -10,6 +10,7 @@ import (
 
 	"events-stocks/internal/deliveryledger"
 	"events-stocks/internal/deliverypolicy"
+	"events-stocks/internal/environmentevidence"
 	"events-stocks/internal/projectvault"
 	"events-stocks/internal/qaevidence"
 	"events-stocks/internal/releasegate"
@@ -24,6 +25,28 @@ import (
 )
 
 var controlNow = time.Date(2026, time.August, 30, 18, 0, 0, 0, time.UTC)
+
+func TestEnvironmentMatrixEvidenceRequiresCurrentExactPolicy(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	requirements := []EnvironmentRequirement{{Repository: "example/service", HeadSHA: strings.Repeat("b", 40), Workflow: ".github/workflows/deploy.yml", Environment: "production", RequiredSecretReferences: []string{"DATABASE_URL"}, RequiredVariableReferences: []string{}}}
+	observation := environmentevidence.Observation{SchemaVersion: environmentevidence.SchemaVersion, TaskID: "11111111-1111-4111-8111-111111111111", MatrixDigest: digest, Repositories: []environmentevidence.Repository{{Repository: "example/service", HeadSHA: strings.Repeat("b", 40), Workflow: ".github/workflows/deploy.yml", Environment: "production", RequiredSecretReferences: []string{"DATABASE_URL"}, RequiredVariableReferences: []string{}, WorkflowExists: true, EnvironmentExists: true, MissingSecretReferences: []string{}, MissingVariableReferences: []string{}}}}
+	evidence, err := environmentMatrixEvidence(digest, requirements, observation)
+	if err != nil || evidence.Status != releasegate.StatusPassed || evidence.MatrixDigest != digest {
+		t.Fatalf("ready exact environment was rejected: %#v / %v", evidence, err)
+	}
+	missing := observation
+	missing.Repositories = append([]environmentevidence.Repository(nil), observation.Repositories...)
+	missing.Repositories[0].MissingSecretReferences = []string{"DATABASE_URL"}
+	evidence, err = environmentMatrixEvidence(digest, requirements, missing)
+	if err != nil || evidence.Status != releasegate.StatusFailed {
+		t.Fatalf("missing required secret did not block: %#v / %v", evidence, err)
+	}
+	stale := requirements
+	stale[0].Environment = "staging"
+	if _, err := environmentMatrixEvidence(digest, stale, observation); err == nil {
+		t.Fatal("observation for a stale environment policy was accepted")
+	}
+}
 
 func TestResolveStoredQAEvidenceLoadsOnlyExactMatrixAndCompletedTask(t *testing.T) {
 	sqlDB, mock, err := sqlmock.New()
