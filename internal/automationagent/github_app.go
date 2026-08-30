@@ -67,6 +67,7 @@ const (
 )
 
 const maxGitHubPullRequestPatchBytes = 512 << 10
+const maxGitHubInstallationIDs = 16
 
 // GitHubPullRequestState is the small mutable PR checkpoint used solely to
 // reject obsolete webhook deliveries. It carries no source or account data.
@@ -637,10 +638,15 @@ func parseGitHubInstallationIDs(value string) ([]string, error) {
 		if item == "" {
 			continue
 		}
-		if _, err := strconv.ParseInt(item, 10, 64); err != nil {
+		parsed, err := strconv.ParseInt(item, 10, 64)
+		if err != nil || parsed < 1 {
 			return nil, fmt.Errorf("ITBEM_GITHUB_INSTALLATION_ID is invalid")
 		}
+		item = strconv.FormatInt(parsed, 10)
 		if _, exists := seen[item]; !exists {
+			if len(result) >= maxGitHubInstallationIDs {
+				return nil, fmt.Errorf("too many GitHub App installation IDs are configured")
+			}
 			seen[item] = struct{}{}
 			result = append(result, item)
 		}
@@ -721,15 +727,75 @@ func isGitHubAPILoopbackHost(host string) bool {
 // The returned token is intentionally ephemeral and callers must keep it out
 // of result payloads, logs, evidence and storage.
 func MintGitHubInstallationToken(ctx context.Context, config GitHubAppConfig, client *http.Client, now time.Time) (GitHubInstallationToken, error) {
-	return mintGitHubInstallationToken(ctx, config, client, now, true)
+	return mintGitHubInstallationToken(ctx, config, client, now, true, "")
 }
 
-func mintGitHubInstallationToken(ctx context.Context, config GitHubAppConfig, client *http.Client, now time.Time, allowClockCorrection bool) (GitHubInstallationToken, error) {
-	if config.PrivateKey == nil || strings.TrimSpace(config.AppID) == "" || strings.TrimSpace(config.InstallationID) == "" || strings.TrimSpace(config.APIBaseURL) == "" {
+// MintGitHubRepositoryToken selects the configured App installation that can
+// access one explicitly authorized repository. It never falls back to a user
+// token, SSH credential, or an installation outside the configured allow-list.
+// The selected installation identity remains private to the release process.
+func MintGitHubRepositoryToken(ctx context.Context, config GitHubAppConfig, client *http.Client, now time.Time, repository string) (GitHubInstallationToken, error) {
+	repository = strings.ToLower(strings.TrimSpace(repository))
+	if !githubRepositoryNamePattern.MatchString(repository) {
+		return GitHubInstallationToken{}, fmt.Errorf("GitHub repository token scope is invalid")
+	}
+	if len(config.InstallationIDs) == 0 && strings.TrimSpace(config.InstallationID) == "" {
 		return GitHubInstallationToken{}, ErrGitHubAppNotConfigured
 	}
 	if client == nil {
 		client = &http.Client{Timeout: 15 * time.Second}
+	}
+	installationID, err := readGitHubRepositoryInstallationID(ctx, config, client, now, repository, true)
+	if err != nil {
+		return GitHubInstallationToken{}, err
+	}
+	selected, err := config.WithInstallationID(installationID)
+	if err != nil {
+		return GitHubInstallationToken{}, fmt.Errorf("repository GitHub App installation is not authorized")
+	}
+	parts := strings.Split(repository, "/")
+	return mintGitHubInstallationToken(ctx, selected, client, now, true, parts[1])
+}
+
+func readGitHubRepositoryInstallationID(ctx context.Context, config GitHubAppConfig, client *http.Client, now time.Time, repository string, allowClockCorrection bool) (int64, error) {
+	assertion, err := signGitHubAppAssertion(config, now)
+	if err != nil {
+		return 0, err
+	}
+	parts := strings.Split(repository, "/")
+	endpoint := strings.TrimRight(config.APIBaseURL, "/") + "/repos/" + url.PathEscape(parts[0]) + "/" + url.PathEscape(parts[1]) + "/installation"
+	request, err := githubAppRequest(ctx, http.MethodGet, endpoint, assertion, nil)
+	if err != nil {
+		return 0, err
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return 0, fmt.Errorf("resolve GitHub App repository installation")
+	}
+	if response.StatusCode == http.StatusUnauthorized && allowClockCorrection {
+		serverTime, parseErr := http.ParseTime(response.Header.Get("Date"))
+		response.Body.Close()
+		if parseErr == nil && serverTime.Sub(now.UTC()).Abs() > 2*time.Minute {
+			return readGitHubRepositoryInstallationID(ctx, config, client, serverTime, repository, false)
+		}
+		return 0, fmt.Errorf("GitHub App repository installation lookup was rejected (%d)", response.StatusCode)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("GitHub App repository installation lookup was rejected (%d)", response.StatusCode)
+	}
+	var payload struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 16<<10)).Decode(&payload); err != nil || payload.ID < 1 {
+		return 0, fmt.Errorf("GitHub App repository installation response is invalid")
+	}
+	return payload.ID, nil
+}
+
+func signGitHubAppAssertion(config GitHubAppConfig, now time.Time) (string, error) {
+	if config.PrivateKey == nil || strings.TrimSpace(config.AppID) == "" || strings.TrimSpace(config.APIBaseURL) == "" {
+		return "", ErrGitHubAppNotConfigured
 	}
 	issuedAt := now.UTC().Add(-60 * time.Second)
 	claims := jwt.RegisteredClaims{
@@ -739,16 +805,44 @@ func mintGitHubInstallationToken(ctx context.Context, config GitHubAppConfig, cl
 	}
 	assertion, err := jwt.NewWithClaims(jwt.SigningMethodRS256, claims).SignedString(config.PrivateKey)
 	if err != nil {
-		return GitHubInstallationToken{}, fmt.Errorf("sign GitHub App assertion: %w", err)
+		return "", fmt.Errorf("sign GitHub App assertion: %w", err)
+	}
+	return assertion, nil
+}
+
+func mintGitHubInstallationToken(ctx context.Context, config GitHubAppConfig, client *http.Client, now time.Time, allowClockCorrection bool, repositoryName string) (GitHubInstallationToken, error) {
+	if config.PrivateKey == nil || strings.TrimSpace(config.AppID) == "" || strings.TrimSpace(config.InstallationID) == "" || strings.TrimSpace(config.APIBaseURL) == "" {
+		return GitHubInstallationToken{}, ErrGitHubAppNotConfigured
+	}
+	if client == nil {
+		client = &http.Client{Timeout: 15 * time.Second}
+	}
+	assertion, err := signGitHubAppAssertion(config, now)
+	if err != nil {
+		return GitHubInstallationToken{}, err
 	}
 	endpoint := strings.TrimRight(config.APIBaseURL, "/") + "/app/installations/" + url.PathEscape(config.InstallationID) + "/access_tokens"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
+	var body io.Reader
+	if repositoryName != "" {
+		if !githubRepositoryNamePattern.MatchString("x/" + repositoryName) {
+			return GitHubInstallationToken{}, fmt.Errorf("GitHub repository token scope is invalid")
+		}
+		encoded, encodeErr := json.Marshal(map[string][]string{"repositories": {repositoryName}})
+		if encodeErr != nil {
+			return GitHubInstallationToken{}, fmt.Errorf("encode GitHub repository token scope: %w", encodeErr)
+		}
+		body = strings.NewReader(string(encoded))
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, body)
 	if err != nil {
 		return GitHubInstallationToken{}, fmt.Errorf("create GitHub App token request: %w", err)
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("Authorization", "Bearer "+assertion)
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if repositoryName != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	response, err := client.Do(req)
 	if err != nil {
 		return GitHubInstallationToken{}, fmt.Errorf("request GitHub App installation token: %w", err)
@@ -757,7 +851,7 @@ func mintGitHubInstallationToken(ctx context.Context, config GitHubAppConfig, cl
 		serverTime, parseErr := http.ParseTime(response.Header.Get("Date"))
 		response.Body.Close()
 		if parseErr == nil && serverTime.Sub(now.UTC()).Abs() > 2*time.Minute {
-			return mintGitHubInstallationToken(ctx, config, client, serverTime, false)
+			return mintGitHubInstallationToken(ctx, config, client, serverTime, false, repositoryName)
 		}
 		return GitHubInstallationToken{}, fmt.Errorf("GitHub App installation token request was rejected (%d)", response.StatusCode)
 	}

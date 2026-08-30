@@ -11,6 +11,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -61,6 +63,80 @@ func TestGitHubAppConfigAllowsOnlyExplicitInstallationIDs(t *testing.T) {
 	}
 	if _, err := config.WithInstallationID(1); err == nil {
 		t.Fatal("unconfigured GitHub App installation must be rejected")
+	}
+}
+
+func TestLoadGitHubAppConfigRejectsInvalidOrUnboundedInstallationLists(t *testing.T) {
+	key := testGitHubAppKey(t)
+	values := map[string]string{
+		"ITBEM_GITHUB_APP_ID":           "12345",
+		"ITBEM_GITHUB_INSTALLATION_IDS": "0",
+		"ITBEM_GITHUB_APP_PRIVATE_KEY":  testGitHubAppPEM(t, key),
+	}
+	if _, err := LoadGitHubAppConfig(func(name string) string { return values[name] }); err == nil {
+		t.Fatal("a non-positive installation ID must be rejected")
+	}
+	ids := make([]string, 0, maxGitHubInstallationIDs+1)
+	for index := 1; index <= maxGitHubInstallationIDs+1; index++ {
+		ids = append(ids, strconv.Itoa(index))
+	}
+	values["ITBEM_GITHUB_INSTALLATION_IDS"] = strings.Join(ids, ",")
+	if _, err := LoadGitHubAppConfig(func(name string) string { return values[name] }); err == nil {
+		t.Fatal("an unbounded installation allow-list must be rejected")
+	}
+}
+
+func TestMintGitHubRepositoryTokenSelectsOnlyTheInstallationWithAccess(t *testing.T) {
+	key := testGitHubAppKey(t)
+	now := time.Date(2026, time.August, 30, 12, 0, 0, 0, time.UTC)
+	requests := make([]string, 0, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requests = append(requests, request.Method+" "+request.URL.Path)
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == "/repos/other/repository/installation":
+			if !strings.HasPrefix(request.Header.Get("Authorization"), "Bearer ") || request.Header.Get("X-GitHub-Api-Version") != "2022-11-28" {
+				t.Fatal("repository installation lookup must use an App assertion")
+			}
+			_ = json.NewEncoder(response).Encode(map[string]int64{"id": 22})
+		case request.Method == http.MethodPost && request.URL.Path == "/app/installations/22/access_tokens":
+			var scope map[string][]string
+			if request.Header.Get("Content-Type") != "application/json" || json.NewDecoder(request.Body).Decode(&scope) != nil || !reflect.DeepEqual(scope["repositories"], []string{"repository"}) {
+				t.Fatalf("installation token must be restricted to the exact repository: %#v", scope)
+			}
+			response.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(response).Encode(map[string]string{"token": "token-twenty-two", "expires_at": now.Add(45 * time.Minute).Format(time.RFC3339)})
+		default:
+			t.Fatalf("unexpected repository token request: %s %s", request.Method, request.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	config := GitHubAppConfig{AppID: "12345", InstallationID: "11", InstallationIDs: []string{"11", "22"}, PrivateKey: key, APIBaseURL: server.URL}
+	token, err := MintGitHubRepositoryToken(context.Background(), config, server.Client(), now, "other/repository")
+	if err != nil || token.Token != "token-twenty-two" {
+		t.Fatalf("expected the repository-scoped installation token, got %#v / %v", token, err)
+	}
+	want := []string{
+		"GET /repos/other/repository/installation", "POST /app/installations/22/access_tokens",
+	}
+	if !reflect.DeepEqual(requests, want) {
+		t.Fatalf("unexpected installation selection sequence: %#v", requests)
+	}
+}
+
+func TestMintGitHubRepositoryTokenRejectsAnUnconfiguredInstallationBeforeMint(t *testing.T) {
+	key := testGitHubAppKey(t)
+	now := time.Date(2026, time.August, 30, 12, 0, 0, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet || request.URL.Path != "/repos/other/repository/installation" {
+			t.Fatalf("an unauthorized installation must never reach token minting: %s %s", request.Method, request.URL.Path)
+		}
+		_ = json.NewEncoder(response).Encode(map[string]int64{"id": 33})
+	}))
+	defer server.Close()
+	config := GitHubAppConfig{AppID: "12345", InstallationID: "11", InstallationIDs: []string{"11", "22"}, PrivateKey: key, APIBaseURL: server.URL}
+	if _, err := MintGitHubRepositoryToken(context.Background(), config, server.Client(), now, "other/repository"); err == nil {
+		t.Fatal("a repository installation outside the explicit allow-list must be rejected")
 	}
 }
 

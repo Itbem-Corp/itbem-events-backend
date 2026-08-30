@@ -100,7 +100,7 @@ func RunPublication(ctx context.Context, delivery json.RawMessage, lookup func(s
 	}
 	// Authentication is checked before the local worktree is mutated. A missing
 	// or invalid app therefore fails closed without producing a stray commit.
-	token, err := MintGitHubInstallationToken(ctx, config, nil, time.Now())
+	token, err := MintGitHubRepositoryToken(ctx, config, nil, time.Now(), auth.GitHubRepository)
 	if err != nil {
 		return nil, err
 	}

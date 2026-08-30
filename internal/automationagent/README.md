@@ -17,6 +17,12 @@ bounded structured handoff. It cannot invent a human approval: the signed API
 callback binds the authenticated task requester and appends the immutable
 Gatekeeper event after re-evaluating the same subject.
 
+Remote publication resolves the repository's GitHub App installation with an
+App assertion, verifies that installation is in the configured allow-list, and
+mints a short-lived token restricted to that one repository. This supports
+authorized repositories across organizations without accidentally selecting
+the first configured installation or falling back to a user PAT/SSH key.
+
 ## Continuous role-lane operation
 
 Each long-lived worker declares one exact identity with `ITBEM_AI_ROLE` and

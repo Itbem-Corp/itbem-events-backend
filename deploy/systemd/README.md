@@ -14,8 +14,9 @@ systemd services. The installer never enables or starts a service.
 - Provide AWS credentials through a root-managed credential source. Each lane
   should receive only its queue, task-input read and task-output write actions.
   Do not reuse the broad credentials of a developer workstation.
-- Keep the GitHub App PEM only in the release secret file. Model keys belong
-  only to inference roles; Release must not contain one.
+- Keep the GitHub App PEM and explicit comma-separated installation allow-list
+  only in the release secret file. Model keys belong only to inference roles;
+  Release must not contain one.
 
 ## Install without activation
 
@@ -33,9 +34,11 @@ sudo install -m 0640 -o root -g itbem-agent-release /secure/source/bema-review-b
 Install one AWS shared-credentials file per lane under
 `/etc/itbem-ai-agent/secrets/<lane>/aws-credentials`, mode `0640`, owned by
 `root:itbem-agent-<lane>`. Each IAM principal must be limited to that lane's
-queue plus task-input read and task-output write. Release may additionally use
-the exact GitHub App installation configured for approved publication; no
-other lane receives its PEM.
+queue plus task-input read and task-output write. Release may additionally
+resolve the exact configured GitHub App installation for the approved
+repository and mint a short-lived token restricted to that repository.
+Installations outside the allow-list, PATs and SSH credentials are never
+fallback paths; no other lane receives the PEM.
 
 Environment files are root-only. systemd reads them before switching to the
 unprivileged per-lane Unix account. Never place their values in a repository,
