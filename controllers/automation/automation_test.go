@@ -221,6 +221,27 @@ func TestCodeReviewPublicationForTaskRequiresExactIndependentGitHubEvidence(t *t
 	}
 }
 
+func TestAutomationTaskListViewNeverSerializesPrivateTaskFields(t *testing.T) {
+	view := automationTaskListView{
+		ID: uuid.Must(uuid.NewV4()), Operation: "code.review", Status: "completed", Provider: "minimax", Model: "MiniMax-M3",
+		AttemptCount: 1, ResultAvailable: true, HasError: false, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	raw, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"input_ref", "output_ref", "error_message", "requested_by", "correlation_id", "provider_response_id", "evidence_subject_digest", "budget_reservation"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("broad task list leaked %q: %s", forbidden, raw)
+		}
+	}
+	for _, required := range []string{`"result_available":true`, `"attempt_count":1`} {
+		if !strings.Contains(string(raw), required) {
+			t.Fatalf("safe task state lost %q: %s", required, raw)
+		}
+	}
+}
+
 func TestSupersedeQueuedGitHubReviewsTargetsOnlyOlderQueuedHeadsForTheSamePR(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {

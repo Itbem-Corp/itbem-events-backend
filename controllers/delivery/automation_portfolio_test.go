@@ -18,6 +18,7 @@ func TestBuildAutomationPortfolioIsCompactAndRevisionStable(t *testing.T) {
 	taskID := uuid.Must(uuid.NewV4())
 	now := time.Date(2026, time.August, 12, 15, 4, 5, 0, time.UTC)
 	completedAt := now.Add(-time.Minute)
+	publishedAt := now.Add(-30 * time.Second)
 
 	input := automationPortfolioBuildInput{
 		GeneratedAt: now,
@@ -41,6 +42,12 @@ func TestBuildAutomationPortfolioIsCompactAndRevisionStable(t *testing.T) {
 		WorkItemTaskTotals: []automationPortfolioWorkItemTaskTotals{{WorkItemID: workItemID, AutomationTasks: 13}},
 		GateTotals:         []automationPortfolioGateTotals{{WorkItemID: workItemID, Total: 2, Approved: 1, ChangesRequested: 1}},
 		EvidenceTotals:     []automationPortfolioEvidenceTotals{{WorkItemID: workItemID, EvidenceCount: 4}},
+		ReviewQueue: []automationPortfolioReview{{
+			TaskID: uuid.Must(uuid.NewV4()), Repository: "itbem/example", PullRequest: 42, HeadSHA: strings.Repeat("a", 40),
+			Status: "completed", AttemptCount: 1, Verdict: "approve", Event: "APPROVE",
+			ReviewURL: "https://github.com/itbem/example/pull/42#pullrequestreview-77", ReviewerActor: "reviewer-bot[bot]",
+			CreatedAt: now.Add(-2 * time.Minute), UpdatedAt: now, CompletedAt: &completedAt, PublishedAt: &publishedAt,
+		}},
 	}
 
 	snapshot := buildAutomationPortfolio(input)
@@ -49,6 +56,9 @@ func TestBuildAutomationPortfolioIsCompactAndRevisionStable(t *testing.T) {
 	}
 	if len(snapshot.Projects) != 1 || len(snapshot.Projects[0].WorkItems) != 1 {
 		t.Fatalf("unexpected portfolio shape: %#v", snapshot.Projects)
+	}
+	if len(snapshot.ReviewQueue) != 1 || snapshot.Totals.ReviewTasks != 1 || snapshot.Totals.PublishedReviews != 1 {
+		t.Fatalf("safe review queue was lost: %#v / %#v", snapshot.ReviewQueue, snapshot.Totals)
 	}
 	project := snapshot.Projects[0]
 	item := project.WorkItems[0]
@@ -79,6 +89,46 @@ func TestBuildAutomationPortfolioIsCompactAndRevisionStable(t *testing.T) {
 	changed.Tasks[0].Status = "failed"
 	if next := buildAutomationPortfolio(changed); next.Revision == snapshot.Revision {
 		t.Fatal("revision did not change after a visible task status changed")
+	}
+	changedReview := input
+	changedReview.ReviewQueue = append([]automationPortfolioReview(nil), input.ReviewQueue...)
+	changedReview.ReviewQueue[0].Status = "failed"
+	if next := buildAutomationPortfolio(changedReview); next.Revision == snapshot.Revision {
+		t.Fatal("revision did not change after a visible review status changed")
+	}
+}
+
+func TestAutomationPortfolioReviewProjectionRejectsForgedOrMismatchedIdentity(t *testing.T) {
+	now := time.Now().UTC()
+	publishedAt := now.Add(-time.Minute)
+	row := automationPortfolioReviewRow{
+		TaskID: uuid.Must(uuid.NewV4()), CorrelationID: "github-pr:itbem/example:42:" + strings.Repeat("b", 40),
+		Status: "completed", AttemptCount: 1, CreatedAt: now.Add(-time.Hour), UpdatedAt: now, CompletedAt: &now,
+		PublicationRepository: "itbem/example", PublicationPullRequest: 42, PublicationHeadSHA: strings.Repeat("b", 40),
+		Verdict: "approve", Event: "APPROVE", ReviewID: 77, ReviewURL: "https://github.com/itbem/example/pull/42#pullrequestreview-77",
+		ReviewerActor: "reviewer-bot[bot]", PublishedAt: &publishedAt,
+	}
+	review, ok := automationPortfolioReviewFromRow(row)
+	if !ok || review.Repository != "itbem/example" || review.ReviewURL == "" {
+		t.Fatalf("valid public review projection rejected: %#v / %v", review, ok)
+	}
+	for name, mutate := range map[string]func(*automationPortfolioReviewRow){
+		"unsafe correlation": func(value *automationPortfolioReviewRow) {
+			value.CorrelationID = "github-pr:../secret:42:" + strings.Repeat("b", 40)
+		},
+		"wrong head":  func(value *automationPortfolioReviewRow) { value.PublicationHeadSHA = strings.Repeat("c", 40) },
+		"wrong event": func(value *automationPortfolioReviewRow) { value.Event = "REQUEST_CHANGES" },
+		"forged URL": func(value *automationPortfolioReviewRow) {
+			value.ReviewURL = "https://example.com/itbem/example/pull/42#pullrequestreview-77"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := row
+			mutate(&candidate)
+			if _, ok := automationPortfolioReviewFromRow(candidate); ok {
+				t.Fatal("invalid review queue identity was projected")
+			}
+		})
 	}
 }
 

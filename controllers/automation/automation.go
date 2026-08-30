@@ -95,6 +95,24 @@ type githubReviewTaskView struct {
 	CreatedAt    time.Time  `json:"created_at"`
 }
 
+// automationTaskListView is the only task shape exposed by the broad polling
+// endpoint. Object keys, prompts, outputs, errors, requesters, leases,
+// provider response IDs and evidence digests remain behind task-scoped reads.
+type automationTaskListView struct {
+	ID                 uuid.UUID  `json:"id"`
+	DeliveryWorkItemID *uuid.UUID `json:"delivery_work_item_id,omitempty"`
+	Operation          string     `json:"operation"`
+	Status             string     `json:"status"`
+	Provider           string     `json:"provider,omitempty"`
+	Model              string     `json:"model,omitempty"`
+	AttemptCount       int        `json:"attempt_count"`
+	ResultAvailable    bool       `json:"result_available"`
+	HasError           bool       `json:"has_error"`
+	CompletedAt        *time.Time `json:"completed_at,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+}
+
 // GitHubPullRequestReviewWebhook converts an explicitly permitted, signed PR
 // event into the same durable private code.review task used everywhere else.
 // It cannot comment, approve, merge, publish or run code. The App API is used
@@ -892,7 +910,7 @@ func List(c echo.Context) error {
 	if configuration.DB == nil {
 		return utils.Error(c, http.StatusServiceUnavailable, "Automation unavailable", "Database is unavailable")
 	}
-	var tasks []models.AutomationTask
+	var tasks []automationTaskListView
 	requestedBy, _ := c.Get("cognito_sub").(string)
 	if strings.TrimSpace(requestedBy) == "" {
 		return utils.Error(c, http.StatusUnauthorized, "Unauthorized", "")
@@ -902,15 +920,20 @@ func List(c echo.Context) error {
 	// manually submitted automation. Non-administrators remain strictly scoped
 	// to their own generic tasks; Delivery task reads continue through project
 	// membership checks in their dedicated surfaces.
-	query := configuration.DB
+	query := configuration.DB.Table("automation_tasks AS task").Select(`
+		task.id, task.delivery_work_item_id, task.operation, task.status, task.provider, task.model,
+		task.attempt_count, task.completed_at, task.created_at, task.updated_at,
+		CASE WHEN task.output_ref <> '' THEN TRUE ELSE FALSE END AS result_available,
+		CASE WHEN task.error_message <> '' THEN TRUE ELSE FALSE END AS has_error
+	`)
 	user, err := authz.CurrentUser(c)
 	if err != nil {
 		return authz.Respond(c, err)
 	}
 	if !user.IsPlatformAdmin() {
-		query = query.Where("requested_by = ?", requestedBy)
+		query = query.Where("task.requested_by = ?", requestedBy)
 	}
-	if err := query.Order("created_at DESC").Limit(100).Find(&tasks).Error; err != nil {
+	if err := query.Order("task.created_at DESC").Limit(100).Scan(&tasks).Error; err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Automation tasks unavailable", "")
 	}
 	return utils.Success(c, http.StatusOK, "Automation tasks", tasks)

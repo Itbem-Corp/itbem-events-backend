@@ -8,7 +8,11 @@ import (
 	"events-stocks/internal/authz"
 	"events-stocks/models"
 	"events-stocks/utils"
+	"fmt"
 	"net/http"
+	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,10 +26,13 @@ import (
 // a living portfolio in one request, while every detailed resource keeps its
 // existing, separately-authorized endpoint.
 const (
-	automationPortfolioSchemaVersion          = 2
+	automationPortfolioSchemaVersion          = 3
 	automationPortfolioMaxWorkItemsPerProject = 24
 	automationPortfolioMaxTasksPerWorkItem    = 12
+	automationPortfolioMaxReviewTasks         = 50
 )
+
+var automationPortfolioReviewCorrelation = regexp.MustCompile(`^github-pr:([a-z0-9][a-z0-9_.-]*/[a-z0-9][a-z0-9_.-]*):([1-9][0-9]*):([a-f0-9]{40})$`)
 
 // automationPortfolioSnapshot is safe to poll. It deliberately omits prompts,
 // object-storage references, agent output, error messages, human identities,
@@ -36,6 +43,7 @@ type automationPortfolioSnapshot struct {
 	Revision                  string                       `json:"revision"`
 	Totals                    automationPortfolioTotals    `json:"totals"`
 	Projects                  []automationPortfolioProject `json:"projects"`
+	ReviewQueue               []automationPortfolioReview  `json:"review_queue"`
 	SummarySourcesUnavailable []string                     `json:"summary_sources_unavailable,omitempty"`
 }
 
@@ -49,6 +57,31 @@ type automationPortfolioTotals struct {
 	QueuedTasks       int64 `json:"queued_tasks"`
 	RunningTasks      int64 `json:"running_tasks"`
 	AttentionTasks    int64 `json:"attention_tasks"`
+	ReviewTasks       int64 `json:"review_tasks"`
+	QueuedReviews     int64 `json:"queued_reviews"`
+	RunningReviews    int64 `json:"running_reviews"`
+	AttentionReviews  int64 `json:"attention_reviews"`
+	PublishedReviews  int64 `json:"published_reviews"`
+}
+
+// automationPortfolioReview is the public, platform-admin-only lifecycle of
+// one webhook review. It contains no prompt, patch, finding, object reference,
+// error prose, installation ID or credential material.
+type automationPortfolioReview struct {
+	TaskID        uuid.UUID  `json:"task_id"`
+	Repository    string     `json:"repository"`
+	PullRequest   int        `json:"pull_request"`
+	HeadSHA       string     `json:"head_sha"`
+	Status        string     `json:"status"`
+	AttemptCount  int        `json:"attempt_count"`
+	Verdict       string     `json:"verdict,omitempty"`
+	Event         string     `json:"event,omitempty"`
+	ReviewURL     string     `json:"review_url,omitempty"`
+	ReviewerActor string     `json:"reviewer_actor,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+	CompletedAt   *time.Time `json:"completed_at,omitempty"`
+	PublishedAt   *time.Time `json:"published_at,omitempty"`
 }
 
 type automationPortfolioProject struct {
@@ -161,6 +194,25 @@ type automationPortfolioEvidenceTotals struct {
 	EvidenceCount int64
 }
 
+type automationPortfolioReviewRow struct {
+	TaskID                 uuid.UUID
+	CorrelationID          string
+	Status                 string
+	AttemptCount           int
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
+	CompletedAt            *time.Time
+	PublicationRepository  string
+	PublicationPullRequest int
+	PublicationHeadSHA     string
+	Verdict                string
+	Event                  string
+	ReviewID               int64
+	ReviewURL              string
+	ReviewerActor          string
+	PublishedAt            *time.Time
+}
+
 type automationPortfolioBuildInput struct {
 	GeneratedAt               time.Time
 	Projects                  []models.DeliveryProject
@@ -171,6 +223,7 @@ type automationPortfolioBuildInput struct {
 	WorkItemTaskTotals        []automationPortfolioWorkItemTaskTotals
 	GateTotals                []automationPortfolioGateTotals
 	EvidenceTotals            []automationPortfolioEvidenceTotals
+	ReviewQueue               []automationPortfolioReview
 	SummarySourcesUnavailable []string
 }
 
@@ -205,6 +258,12 @@ func loadAutomationPortfolio(viewer *models.User) (automationPortfolioBuildInput
 	input := automationPortfolioBuildInput{GeneratedAt: time.Now().UTC()}
 	if viewer == nil {
 		return input, gorm.ErrRecordNotFound
+	}
+	input.ReviewQueue = []automationPortfolioReview{}
+	if viewer.IsPlatformAdmin() {
+		if err := loadAutomationPortfolioReviewQueue(&input); err != nil {
+			return input, err
+		}
 	}
 
 	projectQuery := configuration.DB.Model(&models.DeliveryProject{}).
@@ -270,6 +329,97 @@ func loadAutomationPortfolio(viewer *models.User) (automationPortfolioBuildInput
 		input.SummarySourcesUnavailable = append(input.SummarySourcesUnavailable, "evidence")
 	}
 	return input, nil
+}
+
+func loadAutomationPortfolioReviewQueue(input *automationPortfolioBuildInput) error {
+	var rows []automationPortfolioReviewRow
+	if err := configuration.DB.Raw(`
+		SELECT task.id AS task_id, task.correlation_id, task.status, task.attempt_count,
+			task.created_at, task.updated_at, task.completed_at,
+			COALESCE(publication.repository, '') AS publication_repository,
+			COALESCE(publication.pull_request, 0) AS publication_pull_request,
+			COALESCE(publication.head_sha, '') AS publication_head_sha,
+			COALESCE(publication.verdict, '') AS verdict,
+			COALESCE(publication.event, '') AS event,
+			COALESCE(publication.review_id, 0) AS review_id,
+			COALESCE(publication.review_url, '') AS review_url,
+			COALESCE(publication.reviewer_actor, '') AS reviewer_actor,
+			publication.published_at
+		FROM automation_tasks AS task
+		LEFT JOIN automation_code_review_publications AS publication ON publication.automation_task_id = task.id
+		WHERE task.operation = 'code.review' AND task.requested_by = 'github-app-review'
+		ORDER BY task.created_at DESC, task.id DESC
+		LIMIT ?
+	`, automationPortfolioMaxReviewTasks).Scan(&rows).Error; err != nil {
+		return err
+	}
+	for _, row := range rows {
+		review, ok := automationPortfolioReviewFromRow(row)
+		if !ok {
+			return fmt.Errorf("automation review queue contains invalid public identity")
+		}
+		input.ReviewQueue = append(input.ReviewQueue, review)
+	}
+	return nil
+}
+
+func automationPortfolioReviewFromRow(row automationPortfolioReviewRow) (automationPortfolioReview, bool) {
+	matches := automationPortfolioReviewCorrelation.FindStringSubmatch(strings.ToLower(strings.TrimSpace(row.CorrelationID)))
+	if row.TaskID == uuid.Nil || len(matches) != 4 || !automationPortfolioTaskStatus(strings.TrimSpace(row.Status)) || row.CreatedAt.IsZero() || row.UpdatedAt.IsZero() {
+		return automationPortfolioReview{}, false
+	}
+	pullRequest, err := strconv.Atoi(matches[2])
+	if err != nil || pullRequest < 1 || !githubRepositoryPattern.MatchString(matches[1]) {
+		return automationPortfolioReview{}, false
+	}
+	review := automationPortfolioReview{
+		TaskID: row.TaskID, Repository: matches[1], PullRequest: pullRequest, HeadSHA: matches[3],
+		Status: strings.TrimSpace(row.Status), AttemptCount: row.AttemptCount, CreatedAt: row.CreatedAt.UTC(), UpdatedAt: row.UpdatedAt.UTC(), CompletedAt: utcTimePointer(row.CompletedAt),
+	}
+	if row.ReviewID == 0 {
+		return review, true
+	}
+	verdict := strings.ToLower(strings.TrimSpace(row.Verdict))
+	event := strings.ToUpper(strings.TrimSpace(row.Event))
+	actor := strings.ToLower(strings.TrimSpace(row.ReviewerActor))
+	if !strings.EqualFold(row.PublicationRepository, review.Repository) || row.PublicationPullRequest != review.PullRequest || !strings.EqualFold(row.PublicationHeadSHA, review.HeadSHA) || !automationPortfolioReviewVerdictEvent(verdict, event) || actor == "" || row.PublishedAt == nil || !automationPortfolioReviewURL(row.ReviewURL, review.Repository, review.PullRequest, row.ReviewID) {
+		return automationPortfolioReview{}, false
+	}
+	review.Verdict, review.Event, review.ReviewURL, review.ReviewerActor = verdict, event, strings.TrimSpace(row.ReviewURL), actor
+	review.PublishedAt = utcTimePointer(row.PublishedAt)
+	return review, true
+}
+
+func automationPortfolioTaskStatus(value string) bool {
+	switch value {
+	case "queued", "running", "cancel_requested", "cancelled", "completed", "failed", "dispatch_failed":
+		return true
+	default:
+		return false
+	}
+}
+
+func automationPortfolioReviewVerdictEvent(verdict, event string) bool {
+	return (verdict == "approve" && (event == "APPROVE" || event == "COMMENT")) ||
+		(verdict == "request_changes" && event == "REQUEST_CHANGES") ||
+		((verdict == "comment" || verdict == "blocked") && event == "COMMENT")
+}
+
+func automationPortfolioReviewURL(value, repository string, pullRequest int, reviewID int64) bool {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || parsed.Scheme != "https" || !strings.EqualFold(parsed.Hostname(), "github.com") || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "pullrequestreview-"+strconv.FormatInt(reviewID, 10) {
+		return false
+	}
+	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	return len(parts) == 4 && strings.EqualFold(parts[0]+"/"+parts[1], repository) && parts[2] == "pull" && parts[3] == strconv.Itoa(pullRequest)
+}
+
+func utcTimePointer(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	utc := value.UTC()
+	return &utc
 }
 
 func automationPortfolioViewableProjectIDs(cognitoSub string) ([]uuid.UUID, error) {
@@ -484,6 +634,24 @@ func buildAutomationPortfolio(input automationPortfolioBuildInput) automationPor
 
 	projects := make([]automationPortfolioProject, 0, len(input.Projects))
 	totals := automationPortfolioTotals{Projects: int64(len(input.Projects))}
+	reviewQueue := input.ReviewQueue
+	if reviewQueue == nil {
+		reviewQueue = []automationPortfolioReview{}
+	}
+	for _, review := range reviewQueue {
+		totals.ReviewTasks++
+		switch review.Status {
+		case "queued":
+			totals.QueuedReviews++
+		case "running":
+			totals.RunningReviews++
+		case "failed", "dispatch_failed":
+			totals.AttentionReviews++
+		}
+		if review.ReviewURL != "" {
+			totals.PublishedReviews++
+		}
+	}
 	for _, project := range input.Projects {
 		workItemTotal := workItemTotals[project.ID]
 		taskTotal := projectTaskTotals[project.ID]
@@ -514,6 +682,7 @@ func buildAutomationPortfolio(input automationPortfolioBuildInput) automationPor
 		GeneratedAt:               generatedAt,
 		Totals:                    totals,
 		Projects:                  projects,
+		ReviewQueue:               reviewQueue,
 		SummarySourcesUnavailable: input.SummarySourcesUnavailable,
 	}
 	snapshot.Revision = automationPortfolioRevision(snapshot)
@@ -527,8 +696,9 @@ func automationPortfolioRevision(snapshot automationPortfolioSnapshot) string {
 		SchemaVersion             int                          `json:"schema_version"`
 		Totals                    automationPortfolioTotals    `json:"totals"`
 		Projects                  []automationPortfolioProject `json:"projects"`
+		ReviewQueue               []automationPortfolioReview  `json:"review_queue"`
 		SummarySourcesUnavailable []string                     `json:"summary_sources_unavailable,omitempty"`
-	}{SchemaVersion: snapshot.SchemaVersion, Totals: snapshot.Totals, Projects: snapshot.Projects, SummarySourcesUnavailable: snapshot.SummarySourcesUnavailable}
+	}{SchemaVersion: snapshot.SchemaVersion, Totals: snapshot.Totals, Projects: snapshot.Projects, ReviewQueue: snapshot.ReviewQueue, SummarySourcesUnavailable: snapshot.SummarySourcesUnavailable}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return ""

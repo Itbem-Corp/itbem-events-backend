@@ -125,6 +125,21 @@ una revisión automática nueva.
 
 ## Operación y trazabilidad
 
+El portafolio de Automation expone a administradores una cola compacta de
+revisiones webhook: task, repositorio, PR, head SHA, estado y, cuando existe,
+la identidad y URL pública de la revisión. La proyección cruza el correlation
+ID del task con la publicación persistida y rechaza cualquier repo, PR, SHA,
+evento o URL que no coincida. Nunca incluye prompts, diff, findings, errores,
+installation IDs, referencias de objetos ni credenciales. El dashboard usa
+esta cola como fuente del estado en tiempo real y enlaza la evidencia pública
+exacta de GitHub.
+
+El listado general `GET /api/automation/tasks` también es deliberadamente
+estrecho: sólo devuelve estado operativo, proveedor/modelo, intentos,
+timestamps y booleanos de resultado/error. La evidencia completa continúa
+detrás de lecturas autorizadas por task; no debe reconstruirse en una ruta de
+polling amplia.
+
 En el dashboard, tras el gate de código, la tarea entra a `preview_pending`.
 Con un grant vigente aparece **Publicar rama y crear PR**. No consume tokens ni
 coste de IA: es una operación determinista. Su resultado privado y el cambio
