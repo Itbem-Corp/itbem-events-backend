@@ -159,7 +159,7 @@ func inspectGitHubRepositoryForOnboarding(ctx context.Context, config automation
 
 func reconcileOnboardingProposal(db *gorm.DB, projectID uuid.UUID, proposal projectvault.Proposal) (projectvault.Proposal, error) {
 	if db == nil || projectID == uuid.Nil {
-		return projectvault.Proposal{}, fmt.Errorf("Vault reconciliation context is invalid")
+		return projectvault.Proposal{}, fmt.Errorf("vault reconciliation context is invalid")
 	}
 	var previous models.DeliveryProjectVaultRevision
 	err := db.Where("project_id = ? AND repository_reference = ?", projectID, proposal.Repository.Reference).
