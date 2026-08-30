@@ -78,6 +78,17 @@ Forged or stale test, security, compatibility, migration, dependency,
 environment, or recovery claims are cleared at this boundary until their
 dedicated control-plane evidence ledgers resolve them.
 
+QA is the first of those dedicated ledgers. When QA is enqueued, its
+`AutomationTask` stores the canonical revision-matrix digest and receives the
+same control-plane candidate. The isolated QA runner projects only task ID,
+matrix digest, preview result, repository execution order, reviewed worktree
+identity, and bounded validation/QA pass/fail observations. Raw commands,
+output, URLs, screenshots and model prose remain encrypted private artifacts.
+The callback accepts the projection only for that task and digest, then appends
+`delivery.qa.observed.v1` idempotently. This records evidence but does not yet
+convert it into a passing release gate; policy mapping and the remaining
+security/environment ledgers must resolve it first.
+
 Policy is evaluated independently for every repository using the
 platform → organization → project → repository → bounded change-set override
 hierarchy. The composite digest binds the repository, effective policy digest,

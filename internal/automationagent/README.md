@@ -48,6 +48,15 @@ also removes worker-supplied QA, security, compatibility, migration,
 dependency, environment, and recovery claims; those fields remain blocking
 until separate immutable evidence resolvers attach them.
 
+For `delivery.qa`, the control plane fixes the current multi-repository matrix
+digest on the task before enqueue. The runner's callback handoff contains only
+that task/matrix identity, preview status, repository execution order, reviewed
+worktree references, and validation/QA pass/fail flags. It excludes commands,
+output, URLs, screenshots and the model-authored QA narrative. The backend
+strictly validates the handoff and appends `delivery.qa.observed.v1`; changing
+any release SHA leaves the historical QA event intact but makes it ineligible
+for the new matrix.
+
 ## Continuous role-lane operation
 
 Each long-lived worker declares one exact identity with `ITBEM_AI_ROLE` and

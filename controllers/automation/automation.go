@@ -12,6 +12,7 @@ import (
 	"events-stocks/internal/authz"
 	"events-stocks/internal/automationagent"
 	"events-stocks/internal/deliveryledger"
+	"events-stocks/internal/qaevidence"
 	"events-stocks/internal/releasegate"
 	"events-stocks/internal/releasegatecontrol"
 	"events-stocks/models"
@@ -2018,8 +2019,8 @@ func Complete(c echo.Context) error {
 		if task.Operation == "delivery.release_gate" {
 			limit = 256 * 1024
 		}
-		if request.Status != "completed" || (task.Operation != "delivery.implementation" && task.Operation != "delivery.publish" && task.Operation != "delivery.release_gate") || len(request.Execution) > limit || !json.Valid(request.Execution) {
-			return utils.Error(c, http.StatusBadRequest, "Invalid automation execution", "only a bounded completed delivery implementation, publication, or release Gatekeeper run may register execution metadata")
+		if request.Status != "completed" || (task.Operation != "delivery.implementation" && task.Operation != "delivery.publish" && task.Operation != "delivery.release_gate" && task.Operation != "delivery.qa") || len(request.Execution) > limit || !json.Valid(request.Execution) {
+			return utils.Error(c, http.StatusBadRequest, "Invalid automation execution", "only a bounded completed delivery implementation, publication, QA, or release Gatekeeper run may register execution metadata")
 		}
 	}
 	if request.Deterministic && (request.Status != "completed" || (task.Operation != "delivery.publish" && task.Operation != "delivery.release_gate")) {
@@ -2136,6 +2137,11 @@ func Complete(c echo.Context) error {
 					return err
 				}
 			}
+			if task.Operation == "delivery.qa" {
+				if err := persistQAObservation(tx, &task, request.Execution, completedAt); err != nil {
+					return err
+				}
+			}
 			if task.Operation == "delivery.release_gate" {
 				if err := persistReleaseGateEvaluation(tx, &task, request.Execution, completedAt); err != nil {
 					return err
@@ -2174,6 +2180,35 @@ func persistReleaseGateEvaluation(tx *gorm.DB, task *models.AutomationTask, raw 
 		return err
 	}
 	return nil
+}
+
+func persistQAObservation(tx *gorm.DB, task *models.AutomationTask, raw json.RawMessage, completedAt time.Time) error {
+	if tx == nil || completedAt.IsZero() {
+		return fmt.Errorf("only a bounded QA task may append an observation")
+	}
+	workItemID, observation, err := qaObservationForTask(task, raw)
+	if err != nil {
+		return err
+	}
+	if _, _, err := deliveryledger.RecordQAObservation(tx, workItemID, observation, completedAt.UTC()); err != nil {
+		return err
+	}
+	return nil
+}
+
+func qaObservationForTask(task *models.AutomationTask, raw json.RawMessage) (uuid.UUID, qaevidence.Observation, error) {
+	if task == nil || task.ID == uuid.Nil || task.Operation != "delivery.qa" || task.DeliveryWorkItemID == nil || *task.DeliveryWorkItemID == uuid.Nil {
+		return uuid.Nil, qaevidence.Observation{}, fmt.Errorf("only a bounded QA task may append an observation")
+	}
+	observation, err := qaevidence.Decode(raw)
+	if err != nil {
+		return uuid.Nil, qaevidence.Observation{}, err
+	}
+	subject := strings.ToLower(strings.TrimSpace(task.EvidenceSubjectDigest))
+	if observation.TaskID != task.ID.String() || !strings.EqualFold(observation.MatrixDigest, subject) || !artifactDigestPattern.MatchString(subject) {
+		return uuid.Nil, qaevidence.Observation{}, fmt.Errorf("QA observation does not match its exact queued subject")
+	}
+	return *task.DeliveryWorkItemID, observation, nil
 }
 
 func releaseGateCandidateForTask(task *models.AutomationTask, raw json.RawMessage) (uuid.UUID, string, releasegate.Input, error) {

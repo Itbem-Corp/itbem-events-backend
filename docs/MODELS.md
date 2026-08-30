@@ -143,7 +143,14 @@ Event     Event          `gorm:"foreignKey:EventID" json:"event,omitempty"`
 - **AutomationTask**: Existing local-agent queue record. It may link to a
   `DeliveryWorkItem`; standalone legacy automation tasks remain valid. A
   completed delivery task is recorded as immutable private report evidence
-  before its plan, code, or QA review can be opened.
+  before its plan, code, or QA review can be opened. Evidence-producing tasks
+  carry an optional `EvidenceSubjectDigest` fixed at enqueue time; QA uses it
+  to bind observations to the exact multi-repository release matrix without
+  granting the task merge or release authority.
+- **DeliveryEvent** QA observation (`delivery.qa.observed.v1`): Append-only,
+  sequence-bearing result for one exact QA task and matrix digest. It stores
+  only repository execution order and bounded validation/QA pass/fail facts;
+  commands, output, URLs, screenshots and model prose remain private objects.
 - **AutomationAgentHeartbeat** (`models/AutomationAgentHeartbeat.go`): Short-
   lived, anonymized execution-plane presence. It records the declared worker
   role/lane, provider/model, concurrency and bounded workspace readiness, but

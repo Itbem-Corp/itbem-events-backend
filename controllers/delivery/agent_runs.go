@@ -337,12 +337,17 @@ func StartAgentRun(c echo.Context) error {
 	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Agent run rejected", err.Error())
 	}
-	if phase == "release_gate" {
+	evidenceSubjectDigest := ""
+	if phase == "qa" || phase == "release_gate" {
 		candidate, candidateErr := storedReleaseGateCandidate(item, changeSets)
 		if candidateErr != nil {
-			return utils.Error(c, http.StatusConflict, "Release Gatekeeper rejected", candidateErr.Error())
+			return utils.Error(c, http.StatusConflict, "Exact delivery matrix rejected", candidateErr.Error())
 		}
 		input.Delivery.Gatekeeper = &candidate
+		evidenceSubjectDigest, candidateErr = releasegate.RevisionMatrixDigest(candidate.Revisions)
+		if candidateErr != nil {
+			return utils.Error(c, http.StatusConflict, "Exact delivery matrix rejected", candidateErr.Error())
+		}
 	}
 	taskID, jobID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
 	inputJSON, err := json.Marshal(input)
@@ -354,7 +359,7 @@ func StartAgentRun(c echo.Context) error {
 		return utils.Error(c, http.StatusServiceUnavailable, "Agent run failed", "Could not write private agent input")
 	}
 	inputRef := "s3://" + cfg.AutomationInputBucket + "/" + inputKey
-	task := &models.AutomationTask{ID: taskID, JobID: jobID, RequestedBy: actor.CognitoSub, DeliveryWorkItemID: &item.ID, CorrelationID: item.ID.String(), Operation: spec.operation, MaxCompletionTokens: maxCompletionTokens, InputRef: inputRef, Status: "queued"}
+	task := &models.AutomationTask{ID: taskID, JobID: jobID, RequestedBy: actor.CognitoSub, DeliveryWorkItemID: &item.ID, CorrelationID: item.ID.String(), Operation: spec.operation, EvidenceSubjectDigest: evidenceSubjectDigest, MaxCompletionTokens: maxCompletionTokens, InputRef: inputRef, Status: "queued"}
 	message := automationqueue.Message{SchemaVersion: 1, JobID: jobID.String(), TenantCode: "itbem", CorrelationID: task.CorrelationID, Type: "ai.local.process"}
 	message.Payload.TaskID, message.Payload.Operation, message.Payload.MaxCompletionTokens, message.Payload.InputRef, message.Payload.Attempt = task.ID.String(), task.Operation, task.MaxCompletionTokens, task.InputRef, 1
 	if err := configuration.DB.Transaction(func(tx *gorm.DB) error {

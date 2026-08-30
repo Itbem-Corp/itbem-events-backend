@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"events-stocks/internal/qaevidence"
 	"events-stocks/internal/releasegate"
 	"events-stocks/models"
 	"events-stocks/repositories/automationqueuerepository"
@@ -45,6 +46,38 @@ func TestReleaseGateCandidateForTaskRequiresAuthenticatedRequester(t *testing.T)
 		copy.RequestedBy = invalidActor
 		if _, _, _, err := releaseGateCandidateForTask(&copy, raw); err == nil {
 			t.Fatalf("technical requester %q was accepted as a human", invalidActor)
+		}
+	}
+}
+
+func TestQAObservationForTaskRequiresExactQueuedMatrix(t *testing.T) {
+	workItemID, taskID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
+	digest := strings.Repeat("a", 64)
+	task := &models.AutomationTask{ID: taskID, Operation: "delivery.qa", DeliveryWorkItemID: &workItemID, EvidenceSubjectDigest: digest}
+	observation := qaevidence.Observation{
+		SchemaVersion: qaevidence.SchemaVersion, TaskID: taskID.String(), MatrixDigest: digest, PreviewPassed: true,
+		RepositoryExecutionOrder: []string{"workspace://api"},
+		Repositories:             []qaevidence.Repository{{Reference: "workspace://api", Branch: "itbem-agent/11111111-1111-4111-8111-111111111111", Commands: []qaevidence.Command{}}},
+	}
+	raw, _ := json.Marshal(observation)
+	actualWorkItemID, actual, err := qaObservationForTask(task, raw)
+	if err != nil || actualWorkItemID != workItemID || actual.MatrixDigest != digest {
+		t.Fatalf("exact QA observation was rejected: %#v / %v", actual, err)
+	}
+	for _, mutate := range []func(*models.AutomationTask, *qaevidence.Observation){
+		func(task *models.AutomationTask, _ *qaevidence.Observation) {
+			task.EvidenceSubjectDigest = strings.Repeat("b", 64)
+		},
+		func(_ *models.AutomationTask, observation *qaevidence.Observation) {
+			observation.TaskID = uuid.Must(uuid.NewV4()).String()
+		},
+		func(task *models.AutomationTask, _ *qaevidence.Observation) { task.Operation = "delivery.release_gate" },
+	} {
+		candidateTask, candidateObservation := *task, observation
+		mutate(&candidateTask, &candidateObservation)
+		candidateRaw, _ := json.Marshal(candidateObservation)
+		if _, _, err := qaObservationForTask(&candidateTask, candidateRaw); err == nil {
+			t.Fatal("QA observation outside its task subject was accepted")
 		}
 	}
 }

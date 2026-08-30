@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"events-stocks/internal/agentwork"
+	"events-stocks/internal/qaevidence"
+	"events-stocks/internal/releasegate"
 	"reflect"
 	"strings"
 	"sync"
@@ -342,6 +344,38 @@ func TestPublicationHandoffExcludesSensitiveExecutionOutput(t *testing.T) {
 	handoff, err := json.Marshal(publicationHandoff(result))
 	if err != nil || !strings.Contains(string(handoff), `"target_branch":"trunk"`) || strings.Contains(string(handoff), "must-never-escape") || strings.Contains(string(handoff), "command_output") {
 		t.Fatalf("publication handoff leaked sensitive execution data: %s / %v", handoff, err)
+	}
+}
+
+func TestQAExecutionHandoffBindsMatrixAndExcludesPrivateOutput(t *testing.T) {
+	taskID := "11111111-1111-4111-8111-111111111111"
+	revisions := []releasegate.Revision{{Repository: "example/api", Branch: "main", SHA: strings.Repeat("a", 40)}}
+	delivery, _ := json.Marshal(map[string]any{"gatekeeper": releasegate.Input{Revisions: revisions}})
+	result := map[string]any{
+		"preview":                    map[string]any{"passed": true, "url": "https://private.invalid"},
+		"repository_execution_order": []string{"workspace://api"},
+		"repository_runs": []any{map[string]any{
+			"workspace": "workspace://api", "branch": "itbem-agent/11111111-1111-4111-8111-111111111111",
+			"commands": []any{map[string]any{"phase": "validation", "command": []string{"go", "test", "./..."}, "passed": true, "output": "must-not-leak"}},
+		}},
+	}
+	handoff, err := qaExecutionHandoff(taskID, delivery, result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal(handoff)
+	for _, private := range []string{"must-not-leak", "private.invalid", "go test", `"command"`} {
+		if strings.Contains(string(encoded), private) {
+			t.Fatalf("QA handoff leaked private execution data %q: %s", private, encoded)
+		}
+	}
+	observation, err := qaevidence.Decode(encoded)
+	wantDigest, _ := releasegate.RevisionMatrixDigest(revisions)
+	if err != nil || observation.MatrixDigest != wantDigest || len(observation.Repositories) != 1 || !observation.Repositories[0].Commands[0].Passed {
+		t.Fatalf("QA handoff lost exact observed evidence: %#v / %v", observation, err)
+	}
+	if _, err := qaExecutionHandoff(taskID, []byte(`{}`), result); err == nil {
+		t.Fatal("QA handoff without a control-plane matrix was accepted")
 	}
 }
 

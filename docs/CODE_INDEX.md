@@ -64,6 +64,7 @@ itbem-events-backend/
 | DeliveryRepositoryOnboarding / DeliveryProjectVaultRevision | `models/DeliveryProjectVault.go` |
 | AutomationTask | `models/AutomationTask.go` |
 | AutomationAgentHeartbeat | `models/AutomationAgentHeartbeat.go` |
+| Exact-matrix QA evidence contract / ledger | `internal/qaevidence/`, `internal/deliveryledger/qa_observation.go` |
 | Linux multiagent systemd distribution | `deploy/systemd/` |
 | Moment | `models/Moment.go` |
 | MomentType | `models/MomentType.go` |

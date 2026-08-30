@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"events-stocks/internal/agentwork"
+	"events-stocks/internal/qaevidence"
+	"events-stocks/internal/releasegate"
 	"fmt"
 	"io"
 	"os"
@@ -240,6 +242,7 @@ func (w *Worker) Process(ctx context.Context, message TaskMessage) error {
 	}
 	var qaResult map[string]any
 	var qaArtifacts []LocalArtifact
+	var qaExecution map[string]any
 	if message.Payload.Operation == "delivery.publish" {
 		publication, runErr := RunPublication(ctx, input.Delivery, os.Getenv)
 		if runErr != nil {
@@ -288,6 +291,10 @@ func (w *Worker) Process(ctx context.Context, message TaskMessage) error {
 		if err != nil {
 			return w.fail(ctx, message.Payload.TaskID, runID, err)
 		}
+		qaExecution, err = qaExecutionHandoff(message.Payload.TaskID, input.Delivery, qaResult)
+		if err != nil {
+			return w.fail(ctx, message.Payload.TaskID, runID, err)
+		}
 		input.Delivery, err = appendQAExecution(input.Delivery, qaResult)
 		if err != nil {
 			return w.fail(ctx, message.Payload.TaskID, runID, err)
@@ -326,6 +333,9 @@ func (w *Worker) Process(ctx context.Context, message TaskMessage) error {
 	artifactReferences := []ArtifactReference(nil)
 	toolExecutions := []ToolExecution(nil)
 	execution := map[string]any(nil)
+	if message.Payload.Operation == "delivery.qa" {
+		execution = qaExecution
+	}
 	if message.Payload.Operation == "delivery.plan" {
 		structuredResult, err = ParseDeliveryPlan(completion.Content)
 		if err != nil {
@@ -555,6 +565,81 @@ func publicationHandoff(result map[string]any) map[string]any {
 		}
 	}
 	return handoff
+}
+
+// qaExecutionHandoff projects only deterministic command outcomes and their
+// pre-bound matrix identity. Raw commands, output, URLs, screenshots and model
+// prose stay in encrypted object storage.
+func qaExecutionHandoff(taskID string, delivery json.RawMessage, result map[string]any) (map[string]any, error) {
+	var envelope struct {
+		Gatekeeper *releasegate.Input `json:"gatekeeper"`
+	}
+	if err := json.Unmarshal(delivery, &envelope); err != nil || envelope.Gatekeeper == nil {
+		return nil, fmt.Errorf("QA execution requires an exact control-plane matrix")
+	}
+	matrixDigest, err := releasegate.RevisionMatrixDigest(envelope.Gatekeeper.Revisions)
+	if err != nil {
+		return nil, fmt.Errorf("QA execution matrix is invalid")
+	}
+	preview, ok := result["preview"].(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("QA preview observation is invalid")
+	}
+	previewPassed, ok := preview["passed"].(bool)
+	if !ok {
+		return nil, fmt.Errorf("QA preview observation is invalid")
+	}
+	order, ok := result["repository_execution_order"].([]string)
+	if !ok {
+		return nil, fmt.Errorf("QA repository execution order is invalid")
+	}
+	runs, ok := result["repository_runs"].([]any)
+	if !ok {
+		return nil, fmt.Errorf("QA repository observations are invalid")
+	}
+	observation := qaevidence.Observation{
+		SchemaVersion: qaevidence.SchemaVersion, TaskID: strings.ToLower(strings.TrimSpace(taskID)), MatrixDigest: matrixDigest,
+		PreviewPassed: previewPassed, RepositoryExecutionOrder: append([]string(nil), order...), Repositories: make([]qaevidence.Repository, 0, len(runs)),
+	}
+	for _, rawRun := range runs {
+		run, ok := rawRun.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("QA repository observation is invalid")
+		}
+		repository := qaevidence.Repository{Reference: strings.TrimSpace(qaStringValue(run["workspace"])), Branch: strings.TrimSpace(qaStringValue(run["branch"])), Commands: []qaevidence.Command{}}
+		commands, ok := run["commands"].([]any)
+		if !ok {
+			return nil, fmt.Errorf("QA command observations are invalid")
+		}
+		for index, rawCommand := range commands {
+			command, ok := rawCommand.(map[string]any)
+			phase, phaseOK := command["phase"].(string)
+			passed, passedOK := command["passed"].(bool)
+			if !ok || !phaseOK || !passedOK {
+				return nil, fmt.Errorf("QA command observation is invalid")
+			}
+			repository.Commands = append(repository.Commands, qaevidence.Command{Index: index, Phase: strings.TrimSpace(phase), Passed: passed})
+		}
+		observation.Repositories = append(observation.Repositories, repository)
+	}
+	canonical, err := qaevidence.Canonical(observation)
+	if err != nil {
+		return nil, err
+	}
+	encoded, err := json.Marshal(canonical)
+	if err != nil {
+		return nil, fmt.Errorf("QA observation could not be encoded")
+	}
+	var handoff map[string]any
+	if err := json.Unmarshal(encoded, &handoff); err != nil {
+		return nil, fmt.Errorf("QA observation could not be projected")
+	}
+	return handoff, nil
+}
+
+func qaStringValue(value any) string {
+	result, _ := value.(string)
+	return result
 }
 
 // storeExecutionResult gives every worker lease an immutable response object.
