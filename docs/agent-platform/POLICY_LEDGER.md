@@ -40,3 +40,19 @@ The subsequent selector/API increment must enforce these rules transactionally:
 
 The database schema intentionally precedes mutation endpoints so CI and an
 independent reviewer can inspect the immutable evidence boundary in isolation.
+
+## Deterministic row selection
+
+`internal/deliverypolicystore.ResolveEffective` implements the read-side rules
+without performing database I/O. Callers provide the authorized revision and
+decision rows; the selector verifies strict patch JSON (unknown fields are
+rejected), immutable content digests, decision-to-revision binding, decision
+timestamps and independent approval before invoking the pure hierarchy
+resolver.
+
+Input ordering cannot affect the result. Pending revisions are ignored. The
+latest decision at one exact scope wins, including a revocation. For an exact
+change set, a repository-specific override takes precedence over a project-wide
+override; revoking the repository-specific override blocks fallback to the
+broader exception. This prevents a revoke from accidentally restoring older or
+broader permissions.
