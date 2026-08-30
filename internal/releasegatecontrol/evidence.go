@@ -454,6 +454,7 @@ func resolveStoredPolicyAndVault(input releasegate.Input, project models.Deliver
 
 	requiredTests := map[string]string{}
 	requiredByRepository := make(map[string][]string, len(input.Revisions))
+	recoveryByRepository := make(map[string]releasegate.RecoveryClassification, len(input.Revisions))
 	for _, matrixRevision := range input.Revisions {
 		repository := strings.ToLower(strings.TrimSpace(matrixRevision.Repository))
 		reference := repositories[repository]
@@ -485,6 +486,9 @@ func resolveStoredPolicyAndVault(input releasegate.Input, project models.Deliver
 		sort.Slice(requiredByRepository[repository], func(left, right int) bool {
 			return strings.ToLower(requiredByRepository[repository][left]) < strings.ToLower(requiredByRepository[repository][right])
 		})
+		if policy.Resolved && gatePolicy.Resolved && strings.TrimSpace(policy.RecoveryDefault) != "" {
+			recoveryByRepository[repository] = releasegate.RecoveryClassification(strings.TrimSpace(policy.RecoveryDefault))
+		}
 
 		if vault, ok := vaultByReference[strings.ToLower(reference)]; ok {
 			revisionID := fmt.Sprintf("%s:%d:%s", vault.ID.String(), vault.Version, vault.ContentSHA256)
@@ -506,7 +510,51 @@ func resolveStoredPolicyAndVault(input releasegate.Input, project models.Deliver
 		return releasegate.Input{}, nil, fmt.Errorf("release Gatekeeper composite policy is invalid: %w", err)
 	}
 	input.Policy.Digest = digest
+	if len(recoveryByRepository) == len(input.Revisions) {
+		classification, err := compositeRecoveryClassification(recoveryByRepository)
+		if err != nil {
+			return releasegate.Input{}, nil, err
+		}
+		matrixDigest, err := releasegate.RevisionMatrixDigest(input.Revisions)
+		if err != nil {
+			return releasegate.Input{}, nil, fmt.Errorf("release Gatekeeper recovery matrix is invalid")
+		}
+		input.Recovery = releasegate.RecoveryEvidence{MatrixDigest: matrixDigest, Classification: classification, Evaluated: true}
+	}
 	return input, requiredByRepository, nil
+}
+
+// compositeRecoveryClassification represents the safest executable posture for
+// the coordinated release. A component that cannot use a lower-risk strategy
+// raises the classification for the entire matrix. Irreversible remains
+// separately blocked until an exact-subject human approval exists.
+func compositeRecoveryClassification(values map[string]releasegate.RecoveryClassification) (releasegate.RecoveryClassification, error) {
+	if len(values) == 0 || len(values) > 64 {
+		return "", fmt.Errorf("release Gatekeeper recovery policy is missing")
+	}
+	rank := map[releasegate.RecoveryClassification]int{
+		releasegate.RecoveryRollback: 1, releasegate.RecoveryRollForward: 2,
+		releasegate.RecoveryExpandContract: 3, releasegate.RecoveryIrreversible: 4,
+	}
+	classification := releasegate.RecoveryClassification("")
+	highest := 0
+	seen := make(map[string]struct{}, len(values))
+	for repository, candidate := range values {
+		key := strings.ToLower(strings.TrimSpace(repository))
+		value, valid := rank[candidate]
+		_, repositoryErr := projectvault.CanonicalGitHubReference("github://" + key)
+		if !valid || repositoryErr != nil {
+			return "", fmt.Errorf("release Gatekeeper repository recovery policy is invalid")
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return "", fmt.Errorf("release Gatekeeper repository recovery policy is duplicated")
+		}
+		seen[key] = struct{}{}
+		if value > highest {
+			highest, classification = value, candidate
+		}
+	}
+	return classification, nil
 }
 
 // resolveStoredQAEvidence accepts only the newest completed QA task for the

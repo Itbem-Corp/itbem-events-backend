@@ -167,6 +167,9 @@ Event     Event          `gorm:"foreignKey:EventID" json:"event,omitempty"`
   Dependency assurance combines its repository execution order with frozen
   `DeliveryContextSnapshot` dependency edges and current released states from
   `DeliveryWorkItemDependency`; no worker-provided dependency verdict is used.
+  Recovery evidence is reconstructed from every effective repository policy;
+  the most constrained classification becomes the exact-matrix composite and
+  irreversible recovery still requires a distinct exact-subject human grant.
 - **AutomationAgentHeartbeat** (`models/AutomationAgentHeartbeat.go`): Short-
   lived, anonymized execution-plane presence. It records the declared worker
   role/lane, provider/model, concurrency and bounded workspace readiness, but

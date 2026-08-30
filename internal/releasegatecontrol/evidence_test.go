@@ -528,7 +528,9 @@ func TestResolveStoredEvidenceReplacesCandidateClaimsForMultiRepoMatrix(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !resolved.Policy.Resolved || len(resolved.Policy.Repositories) != 2 || strings.Join(resolved.Policy.RequiredTestKinds, ",") != "contract,unit" || len(resolved.Vault) != 2 {
+	matrixDigest, _ := releasegate.RevisionMatrixDigest(revisions)
+	if !resolved.Policy.Resolved || len(resolved.Policy.Repositories) != 2 || strings.Join(resolved.Policy.RequiredTestKinds, ",") != "contract,unit" || len(resolved.Vault) != 2 ||
+		!resolved.Recovery.Evaluated || resolved.Recovery.Classification != releasegate.RecoveryRollback || resolved.Recovery.MatrixDigest != matrixDigest || resolved.Recovery.HumanApproved {
 		t.Fatalf("authoritative multi-repo evidence was not resolved: %#v", resolved)
 	}
 	if resolved.Policy.Digest == input.Policy.Digest || resolved.Policy.Repositories[0].Repository == "attacker/repo" || resolved.Vault[0].Repository == "attacker/repo" {
@@ -540,6 +542,31 @@ func TestResolveStoredEvidenceReplacesCandidateClaimsForMultiRepoMatrix(t *testi
 	decisionResult := releasegate.Evaluate(resolved)
 	if !hasControlReason(decisionResult, "vault_evidence_stale") {
 		t.Fatalf("stale repository Vault was not visible to Gatekeeper: %#v", decisionResult)
+	}
+}
+
+func TestCompositeRecoveryClassificationUsesMostConstrainedRepositoryPolicy(t *testing.T) {
+	values := map[string]releasegate.RecoveryClassification{
+		"example/api": releasegate.RecoveryRollback,
+		"example/web": releasegate.RecoveryRollForward,
+	}
+	classification, err := compositeRecoveryClassification(values)
+	if err != nil || classification != releasegate.RecoveryRollForward {
+		t.Fatalf("composite recovery did not retain the most constrained strategy: %s / %v", classification, err)
+	}
+	values["example/data"] = releasegate.RecoveryExpandContract
+	classification, err = compositeRecoveryClassification(values)
+	if err != nil || classification != releasegate.RecoveryExpandContract {
+		t.Fatalf("expand/contract did not dominate a simple recovery: %s / %v", classification, err)
+	}
+	values["example/ledger"] = releasegate.RecoveryIrreversible
+	classification, err = compositeRecoveryClassification(values)
+	if err != nil || classification != releasegate.RecoveryIrreversible {
+		t.Fatalf("irreversible component did not classify the composite as irreversible: %s / %v", classification, err)
+	}
+	values["example/broken"] = "pretend_rollback"
+	if _, err := compositeRecoveryClassification(values); err == nil {
+		t.Fatal("unknown recovery strategy was accepted")
 	}
 }
 

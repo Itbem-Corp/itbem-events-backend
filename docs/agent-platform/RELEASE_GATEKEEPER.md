@@ -121,8 +121,16 @@ duplicate, or cyclic edges, and verifies that the exact QA repository execution
 order places each changed dependency before its consumer. It also reloads every
 declared work-item prerequisite and requires it to be `released`. The resulting
 matrix is failed for a valid but unsatisfied order/prerequisite and invalid
-control-plane data aborts evaluation. Environment and recovery ledgers are still
-unresolved and blocking.
+control-plane data aborts evaluation.
+
+Recovery classification comes only from each repository's effective,
+independently approved policy. The control plane selects a conservative
+composite posture in this order: `rollback` → `roll_forward` →
+`expand_contract` → `irreversible`, binds it to the exact matrix, and never
+accepts the release worker's classification. Any irreversible component makes
+the composite irreversible; its separate exact-subject human approval remains
+mandatory and is not inferred from policy approval. Environment readiness is
+still unresolved and blocking.
 
 Policy is evaluated independently for every repository using the
 platform → organization → project → repository → bounded change-set override

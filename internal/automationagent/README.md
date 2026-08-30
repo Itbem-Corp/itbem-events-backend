@@ -81,6 +81,12 @@ declared prerequisite work items. Changed dependencies must run before their
 consumers and every prerequisite task must already be released; model prose or
 a worker-authored dependency verdict cannot satisfy this gate.
 
+Recovery is also control-plane-owned. Every repository's independently approved
+effective policy contributes its configured default; the resolver promotes the
+most constrained posture across the matrix. A worker cannot supply or downgrade
+it, and an irreversible composite remains blocked until a separate human grant
+is bound to that exact release subject.
+
 ## Continuous role-lane operation
 
 Each long-lived worker declares one exact identity with `ITBEM_AI_ROLE` and
