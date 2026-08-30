@@ -62,7 +62,7 @@ func ReadGitHubReleaseBranchEvidence(ctx context.Context, config GitHubAppConfig
 		return githubReleaseBranchEvidence{}, fmt.Errorf("release Gatekeeper combined checks exceed the bounded limit")
 	}
 	sort.Slice(checks, func(left, right int) bool {
-		if strings.ToLower(checks[left].Name) != strings.ToLower(checks[right].Name) {
+		if !strings.EqualFold(checks[left].Name, checks[right].Name) {
 			return strings.ToLower(checks[left].Name) < strings.ToLower(checks[right].Name)
 		}
 		return checks[left].IntegrationID < checks[right].IntegrationID
@@ -178,7 +178,7 @@ func mergeGitHubRequiredChecks(groups ...[]releasegate.RequiredCheck) ([]release
 		}
 	}
 	sort.Slice(result, func(left, right int) bool {
-		if strings.ToLower(result[left].Name) != strings.ToLower(result[right].Name) {
+		if !strings.EqualFold(result[left].Name, result[right].Name) {
 			return strings.ToLower(result[left].Name) < strings.ToLower(result[right].Name)
 		}
 		return result[left].IntegrationID < result[right].IntegrationID
