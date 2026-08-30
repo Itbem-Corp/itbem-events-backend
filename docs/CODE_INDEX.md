@@ -63,6 +63,7 @@ itbem-events-backend/
 | DeliveryProject / work-item workflow | `models/DeliveryWorkflow.go` |
 | DeliveryRepositoryOnboarding / DeliveryProjectVaultRevision | `models/DeliveryProjectVault.go` |
 | AutomationTask | `models/AutomationTask.go` |
+| AutomationAgentHeartbeat | `models/AutomationAgentHeartbeat.go` |
 | Moment | `models/Moment.go` |
 | MomentType | `models/MomentType.go` |
 | Color | `models/Color.go` |

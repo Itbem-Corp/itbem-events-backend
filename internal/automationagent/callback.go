@@ -26,6 +26,8 @@ type AgentHeartbeat struct {
 	WorkerID           string               `json:"worker_id"`
 	Provider           string               `json:"provider"`
 	Model              string               `json:"model"`
+	Role               string               `json:"role,omitempty"`
+	Lane               string               `json:"lane,omitempty"`
 	Concurrency        int                  `json:"concurrency"`
 	StartedAt          string               `json:"started_at"`
 	WorkspaceReadiness []WorkspaceReadiness `json:"workspace_readiness,omitempty"`

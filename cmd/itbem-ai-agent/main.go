@@ -116,7 +116,7 @@ func doctorReport(lookup func(string) string) (map[string]any, bool, error) {
 	runtimeReady := false
 	if config, runtimeErr := automationagent.LoadRuntimeConfig(lookup); runtimeErr == nil {
 		runtimeReady = true
-		runtime = map[string]any{"ready": true, "status": "configured", "concurrency": config.Concurrency}
+		runtime = map[string]any{"ready": true, "status": "configured", "concurrency": config.Concurrency, "role": config.Role, "lane": config.Lane}
 	}
 	publication := map[string]any{"ready": true, "status": "configured"}
 	githubAppReady := true
@@ -198,12 +198,14 @@ func run(providerConfig automationagent.ProviderConfig) {
 		"provider", providerConfig.Provider,
 		"model", providerConfig.Model,
 		"concurrency", runtimeConfig.Concurrency,
+		"role", runtimeConfig.Role,
+		"lane", runtimeConfig.Lane,
 		"queue_url", runtimeConfig.QueueURL,
 		"sqs_endpoint", runtimeConfig.SQSEndpoint,
 	)
 	workerID := uuid.Must(uuid.NewV4()).String()
 	startedAt := time.Now().UTC()
-	go reportHeartbeats(ctx, callback, automationagent.AgentHeartbeat{WorkerID: workerID, Provider: string(providerConfig.Provider), Model: providerConfig.Model, Concurrency: runtimeConfig.Concurrency, StartedAt: startedAt.Format(time.RFC3339)}, os.Getenv)
+	go reportHeartbeats(ctx, callback, automationagent.AgentHeartbeat{WorkerID: workerID, Provider: string(providerConfig.Provider), Model: providerConfig.Model, Role: string(runtimeConfig.Role), Lane: string(runtimeConfig.Lane), Concurrency: runtimeConfig.Concurrency, StartedAt: startedAt.Format(time.RFC3339)}, os.Getenv)
 	if err := automationagent.RunQueue(ctx, worker, queue, runtimeConfig.Concurrency, slog.Default()); err != nil {
 		fail(err)
 	}

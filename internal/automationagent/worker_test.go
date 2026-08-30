@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"events-stocks/internal/agentwork"
 	"reflect"
 	"strings"
 	"sync"
@@ -84,6 +85,36 @@ func validMessage() TaskMessage {
 	message.Payload.InputRef = "s3://itbem-ai-inputs-local/automation/inputs/task/input.json"
 	message.Payload.Attempt = 1
 	return message
+}
+
+func TestRoleWorkerRejectsForeignLaneBeforeCallbackOrProvider(t *testing.T) {
+	callback := &fakeCallback{}
+	worker, err := NewWorker(WorkerConfig{
+		InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local",
+		Role: agentwork.RoleReviewer, Lane: agentwork.LaneReview,
+	}, &fakeStore{}, callback, fakeProvider{err: errors.New("provider must not run")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := validMessage()
+	message.Payload.Operation = agentwork.OperationDeliveryPublish
+	if err := worker.Process(context.Background(), message); err == nil {
+		t.Fatal("review worker accepted release work")
+	}
+	if len(callback.updates) != 0 {
+		t.Fatalf("foreign work acquired a task lease: %#v", callback.updates)
+	}
+}
+
+func TestNewWorkerRejectsPartialOrCrossRoleIdentity(t *testing.T) {
+	for _, config := range []WorkerConfig{
+		{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local", Role: agentwork.RoleReviewer},
+		{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local", Role: agentwork.RoleReviewer, Lane: agentwork.LaneRelease},
+	} {
+		if _, err := NewWorker(config, &fakeStore{}, &fakeCallback{}, fakeProvider{}); err == nil {
+			t.Fatalf("invalid worker identity accepted: %#v", config)
+		}
+	}
 }
 
 func TestDeliveryGovernanceInstructionPreservesHumanAuthorityWithoutTrustingAgentMessages(t *testing.T) {

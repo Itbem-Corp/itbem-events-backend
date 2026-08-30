@@ -49,3 +49,28 @@ func TestAssignmentForOperationFailsClosed(t *testing.T) {
 		}
 	}
 }
+
+func TestIsKnownRoleLaneRejectsCrossRoleAndInventedIdentities(t *testing.T) {
+	t.Parallel()
+	for _, assignment := range []Assignment{
+		{Role: RoleOrchestrator, Lane: LaneOrchestration},
+		{Role: RolePrincipalEngineer, Lane: LaneEngineering},
+		{Role: RoleReviewer, Lane: LaneReview},
+		{Role: RoleQA, Lane: LaneQA},
+		{Role: RoleReleaseManager, Lane: LaneRelease},
+	} {
+		if !IsKnownRoleLane(assignment.Role, assignment.Lane) {
+			t.Fatalf("known assignment rejected: %#v", assignment)
+		}
+	}
+	for _, assignment := range []Assignment{
+		{},
+		{Role: RoleReviewer, Lane: LaneRelease},
+		{Role: Role("admin"), Lane: Lane("production")},
+		{Role: RolePrincipalEngineer, Lane: LaneReview},
+	} {
+		if IsKnownRoleLane(assignment.Role, assignment.Lane) {
+			t.Fatalf("invalid assignment accepted: %#v", assignment)
+		}
+	}
+}

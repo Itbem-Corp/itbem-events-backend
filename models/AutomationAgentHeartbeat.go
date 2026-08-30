@@ -16,6 +16,8 @@ type AutomationAgentHeartbeat struct {
 	WorkerID           string    `gorm:"type:varchar(64);not null;uniqueIndex" json:"worker_id"`
 	Provider           string    `gorm:"type:varchar(48);not null;default:''" json:"provider,omitempty"`
 	Model              string    `gorm:"type:varchar(128);not null;default:''" json:"model,omitempty"`
+	Role               string    `gorm:"type:varchar(32);not null;default:'';index" json:"role,omitempty"`
+	Lane               string    `gorm:"type:varchar(32);not null;default:'';index" json:"lane,omitempty"`
 	Concurrency        int       `gorm:"not null;default:1" json:"concurrency"`
 	WorkspaceReadiness string    `gorm:"type:jsonb;not null;default:'[]'" json:"-"`
 	StartedAt          time.Time `gorm:"not null" json:"started_at"`

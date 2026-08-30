@@ -11,14 +11,21 @@ commit, publish one reviewed branch and create its pull request only when a
 GitHub App identity and a matching short-lived human publication grant are both
 present.
 
-## Continuous single-queue operation
+## Continuous role-lane operation
 
-One local worker consumes the single private automation queue continuously.
-Every message is validated against an operation allow-list before it can reach
-the provider; SQS leases, idempotent callbacks, output reuse and visibility
-heartbeats make redelivery safe. Set `ITBEM_AI_CONCURRENCY=1` for a strictly
-serial local agent, or raise it only for independent workspaces with available
-provider capacity. The worker never shares a writable worktree between tasks.
+Each long-lived worker declares one exact identity with `ITBEM_AI_ROLE` and
+`ITBEM_AI_QUEUE_LANE`: `orchestrator/orchestration`,
+`principal_engineer/engineering`, `reviewer/review`, `qa/qa`, or
+`release_manager/release`. A cross-role or partial identity fails doctor and
+startup. A message whose allow-listed operation belongs to another identity is
+rejected before input retrieval, callback lease acquisition or provider use.
+The empty identity remains accepted only while draining the retained combined
+queue during migration.
+
+SQS leases, idempotent callbacks, output reuse and visibility heartbeats make
+redelivery safe. Set `ITBEM_AI_CONCURRENCY=1` for a strictly serial role, or
+raise it only for independent workspaces with available provider capacity. The
+worker never shares a writable worktree between tasks.
 The transport is strict: it accepts exactly one schema-versioned JSON message,
 with no unknown fields and a positive delivery attempt, before scheduling it.
 Malformed messages do not consume a model call or acquire review priority;
@@ -102,8 +109,9 @@ silently start another worker against the same local queue. `-Doctor` and
 `-SyncWorkspaces` remain concurrent, read-only/operator commands.
 
 The paired dead-letter queue is never auto-replayed. Platform health reports
-only its approximate depth, so an operator can inspect and explicitly decide
-how to recover poisoned messages without silently re-running a stale review.
+its approximate depth plus safe per-lane counters and role/lane heartbeats, so
+an operator can inspect and explicitly decide how to recover poisoned messages
+without silently re-running a stale review.
 
 The only billable connectivity command is explicit and guarded:
 

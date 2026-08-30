@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"events-stocks/configuration"
+	"events-stocks/internal/agentwork"
 	"events-stocks/internal/authz"
 	"events-stocks/internal/automationagent"
 	"events-stocks/models"
@@ -694,6 +695,8 @@ func automationCostLedgerSource(db *gorm.DB) (string, automationCostLedgerCovera
 type automationWorkerHealth struct {
 	Provider               string                      `json:"provider"`
 	Model                  string                      `json:"model"`
+	Role                   string                      `json:"role,omitempty"`
+	Lane                   string                      `json:"lane,omitempty"`
 	Concurrency            int                         `json:"concurrency"`
 	StartedAt              time.Time                   `json:"started_at"`
 	LastSeenAt             time.Time                   `json:"last_seen_at"`
@@ -756,6 +759,8 @@ type agentHeartbeatRequest struct {
 	WorkerID           string                      `json:"worker_id"`
 	Provider           string                      `json:"provider"`
 	Model              string                      `json:"model"`
+	Role               string                      `json:"role"`
+	Lane               string                      `json:"lane"`
 	Concurrency        int                         `json:"concurrency"`
 	StartedAt          string                      `json:"started_at"`
 	WorkspaceReadiness []automationWorkspaceHealth `json:"workspace_readiness"`
@@ -1697,7 +1702,7 @@ func Health(c echo.Context) error {
 			result.LastWorkerSeenAt = lastSeen
 		}
 		if err := workerQuery.Session(&gorm.Session{}).
-			Select("provider, model, concurrency, started_at, last_seen_at, workspace_readiness").
+			Select("provider, model, role, lane, concurrency, started_at, last_seen_at, workspace_readiness").
 			Order("last_seen_at DESC").
 			Limit(8).
 			Find(&result.Workers).Error; err != nil {
@@ -1714,8 +1719,14 @@ func Health(c echo.Context) error {
 				return utils.Error(c, http.StatusInternalServerError, "Automation health unavailable", "")
 			}
 		}
+		var reviewWorkers int64
+		if err := workerQuery.Session(&gorm.Session{}).
+			Where("(role = '' AND lane = '') OR (role = ? AND lane = ?)", agentwork.RoleReviewer, agentwork.LaneReview).
+			Count(&reviewWorkers).Error; err != nil {
+			return utils.Error(c, http.StatusInternalServerError, "Automation health unavailable", "")
+		}
 		cfg, _ := c.Get("config").(*models.Config)
-		result.ReviewIngress = automationReviewIngressStatus(cfg, result.ActiveWorkers)
+		result.ReviewIngress = automationReviewIngressStatus(cfg, reviewWorkers)
 	}
 	return utils.Success(c, http.StatusOK, "Automation health", result)
 }
@@ -1778,6 +1789,17 @@ func validateWorkerWorkspaceReadiness(readiness []automationWorkspaceHealth) err
 	return nil
 }
 
+func normalizeWorkerRoleLane(role, lane string) (string, string, error) {
+	role, lane = strings.TrimSpace(role), strings.TrimSpace(lane)
+	if role == "" && lane == "" {
+		return "", "", nil
+	}
+	if !agentwork.IsKnownRoleLane(agentwork.Role(role), agentwork.Lane(lane)) {
+		return "", "", fmt.Errorf("invalid worker role and queue lane")
+	}
+	return role, lane, nil
+}
+
 // AgentHeartbeat gives the dashboard a real liveness signal from the isolated
 // worker. It is callback-secret authenticated and stores no host, queue or
 // credential information.
@@ -1799,6 +1821,10 @@ func AgentHeartbeat(c echo.Context) error {
 	if !providerAllowed(request.Provider) || len(strings.TrimSpace(request.Model)) == 0 || len(strings.TrimSpace(request.Model)) > 128 || request.Concurrency < 1 || request.Concurrency > 8 {
 		return utils.Error(c, http.StatusBadRequest, "Invalid agent heartbeat", "")
 	}
+	role, lane, err := normalizeWorkerRoleLane(request.Role, request.Lane)
+	if err != nil {
+		return utils.Error(c, http.StatusBadRequest, "Invalid agent heartbeat", "")
+	}
 	startedAt, err := time.Parse(time.RFC3339, strings.TrimSpace(request.StartedAt))
 	if err != nil || startedAt.After(time.Now().UTC().Add(5*time.Minute)) {
 		return utils.Error(c, http.StatusBadRequest, "Invalid agent heartbeat", "")
@@ -1811,8 +1837,8 @@ func AgentHeartbeat(c echo.Context) error {
 		return utils.Error(c, http.StatusBadRequest, "Invalid agent heartbeat", "")
 	}
 	now := time.Now().UTC()
-	heartbeat := models.AutomationAgentHeartbeat{WorkerID: workerID, Provider: strings.ToLower(strings.TrimSpace(request.Provider)), Model: strings.TrimSpace(request.Model), Concurrency: request.Concurrency, WorkspaceReadiness: string(workspaceReadiness), StartedAt: startedAt.UTC(), LastSeenAt: now}
-	if err := configuration.DB.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "worker_id"}}, DoUpdates: clause.Assignments(map[string]any{"provider": heartbeat.Provider, "model": heartbeat.Model, "concurrency": heartbeat.Concurrency, "workspace_readiness": heartbeat.WorkspaceReadiness, "started_at": heartbeat.StartedAt, "last_seen_at": heartbeat.LastSeenAt, "updated_at": now})}).Create(&heartbeat).Error; err != nil {
+	heartbeat := models.AutomationAgentHeartbeat{WorkerID: workerID, Provider: strings.ToLower(strings.TrimSpace(request.Provider)), Model: strings.TrimSpace(request.Model), Role: role, Lane: lane, Concurrency: request.Concurrency, WorkspaceReadiness: string(workspaceReadiness), StartedAt: startedAt.UTC(), LastSeenAt: now}
+	if err := configuration.DB.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "worker_id"}}, DoUpdates: clause.Assignments(map[string]any{"provider": heartbeat.Provider, "model": heartbeat.Model, "role": heartbeat.Role, "lane": heartbeat.Lane, "concurrency": heartbeat.Concurrency, "workspace_readiness": heartbeat.WorkspaceReadiness, "started_at": heartbeat.StartedAt, "last_seen_at": heartbeat.LastSeenAt, "updated_at": now})}).Create(&heartbeat).Error; err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Automation heartbeat unavailable", "")
 	}
 	return utils.Success(c, http.StatusOK, "Automation agent heartbeat accepted", map[string]any{"accepted_at": now})

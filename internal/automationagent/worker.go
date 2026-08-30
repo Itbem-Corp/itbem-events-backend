@@ -115,6 +115,8 @@ type ArtifactReference struct {
 type WorkerConfig struct {
 	InputBucket  string
 	OutputBucket string
+	Role         agentwork.Role
+	Lane         agentwork.Lane
 }
 
 type Worker struct {
@@ -131,6 +133,9 @@ func NewWorker(config WorkerConfig, store ObjectStore, callback TaskCallback, pr
 	}
 	if store == nil || callback == nil || provider == nil {
 		return nil, fmt.Errorf("worker store, callback and provider are required")
+	}
+	if (config.Role == "") != (config.Lane == "") || (config.Role != "" && !agentwork.IsKnownRoleLane(config.Role, config.Lane)) {
+		return nil, fmt.Errorf("worker role and queue lane must form a known assignment")
 	}
 	return &Worker{config: config, store: store, callback: callback, provider: provider, now: time.Now}, nil
 }
@@ -195,6 +200,12 @@ func ParsePrivateReference(reference string) (bucket, key string, err error) {
 func (w *Worker) Process(ctx context.Context, message TaskMessage) error {
 	if err := ValidateMessage(message, w.config.InputBucket); err != nil {
 		return err
+	}
+	if w.config.Role != "" {
+		assignment, _ := agentwork.AssignmentForOperation(message.Payload.Operation)
+		if assignment.Role != w.config.Role || assignment.Lane != w.config.Lane {
+			return fmt.Errorf("automation operation is outside this worker role and queue lane")
+		}
 	}
 	runID := uuid.Must(uuid.NewV4()).String()
 	accepted, err := w.callback.Update(ctx, message.Payload.TaskID, TaskUpdate{Status: "running", RunID: runID})

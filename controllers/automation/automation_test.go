@@ -180,6 +180,20 @@ func TestWorkerWorkspaceReadinessRejectsImpossibleOrUnboundedStates(t *testing.T
 	}
 }
 
+func TestNormalizeWorkerRoleLaneKeepsLegacyVisibleAndRejectsCrossRoleIdentity(t *testing.T) {
+	if role, lane, err := normalizeWorkerRoleLane("", ""); err != nil || role != "" || lane != "" {
+		t.Fatalf("legacy combined worker rejected: %q %q %v", role, lane, err)
+	}
+	if role, lane, err := normalizeWorkerRoleLane(" reviewer ", " review "); err != nil || role != "reviewer" || lane != "review" {
+		t.Fatalf("review worker rejected: %q %q %v", role, lane, err)
+	}
+	for _, identity := range [][2]string{{"reviewer", "release"}, {"admin", "production"}, {"principal_engineer", ""}, {"", "qa"}} {
+		if _, _, err := normalizeWorkerRoleLane(identity[0], identity[1]); err == nil {
+			t.Fatalf("invalid worker identity accepted: %#v", identity)
+		}
+	}
+}
+
 func TestRecentCostLedgerSelectionIncludesEveryBillableComponentWithoutPrivateReferences(t *testing.T) {
 	for _, column := range []string{
 		"execution.input_cost_micros",

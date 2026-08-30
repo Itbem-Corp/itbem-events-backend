@@ -144,6 +144,12 @@ Event     Event          `gorm:"foreignKey:EventID" json:"event,omitempty"`
   `DeliveryWorkItem`; standalone legacy automation tasks remain valid. A
   completed delivery task is recorded as immutable private report evidence
   before its plan, code, or QA review can be opened.
+- **AutomationAgentHeartbeat** (`models/AutomationAgentHeartbeat.go`): Short-
+  lived, anonymized execution-plane presence. It records the declared worker
+  role/lane, provider/model, concurrency and bounded workspace readiness, but
+  never a hostname, queue URL, prompt, result, repository path or credential.
+  Empty role/lane identifies only the temporary combined worker during queue
+  migration.
 
 ---
 

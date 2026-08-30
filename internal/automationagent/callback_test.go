@@ -80,6 +80,8 @@ func TestHTTPCallbackHeartbeatSendsOnlyWorkerLivenessMetadata(t *testing.T) {
 		delete(body, "worker_id")
 		delete(body, "provider")
 		delete(body, "model")
+		delete(body, "role")
+		delete(body, "lane")
 		delete(body, "concurrency")
 		delete(body, "started_at")
 		delete(body, "workspace_readiness")
@@ -96,6 +98,8 @@ func TestHTTPCallbackHeartbeatSendsOnlyWorkerLivenessMetadata(t *testing.T) {
 		WorkerID:    "a69b7f51-58b9-4f0e-aef3-1fbc23f79826",
 		Provider:    "minimax",
 		Model:       "MiniMax-M3",
+		Role:        "reviewer",
+		Lane:        "review",
 		Concurrency: 2,
 		StartedAt:   "2026-08-09T12:00:00Z",
 		WorkspaceReadiness: []WorkspaceReadiness{{

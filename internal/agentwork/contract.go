@@ -67,3 +67,23 @@ func IsSupportedOperation(operation string) bool {
 	_, ok := AssignmentForOperation(operation)
 	return ok
 }
+
+// IsKnownRoleLane accepts only the five deployable worker identities. Empty
+// values are a migration concern handled by runtime configuration, not a sixth
+// privileged identity.
+func IsKnownRoleLane(role Role, lane Lane) bool {
+	switch {
+	case role == RoleOrchestrator && lane == LaneOrchestration:
+		return true
+	case role == RolePrincipalEngineer && lane == LaneEngineering:
+		return true
+	case role == RoleReviewer && lane == LaneReview:
+		return true
+	case role == RoleQA && lane == LaneQA:
+		return true
+	case role == RoleReleaseManager && lane == LaneRelease:
+		return true
+	default:
+		return false
+	}
+}
