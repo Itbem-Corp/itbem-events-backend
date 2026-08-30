@@ -338,9 +338,9 @@ func TestImplementationHandoffKeepsMultiRepositoryReviewMetadataSeparate(t *test
 }
 
 func TestPublicationHandoffExcludesSensitiveExecutionOutput(t *testing.T) {
-	result := map[string]any{"grant_id": "d4a4b837-2e18-43af-9f58-6d59629db2bb", "branch": "itbem-agent/d4a4b837-2e18-43af-9f58-6d59629db2bb", "commit_sha": strings.Repeat("a", 40), "pull_request_url": "https://github.com/itbem/repo/pull/1", "token": "must-never-escape", "command_output": "private"}
+	result := map[string]any{"grant_id": "d4a4b837-2e18-43af-9f58-6d59629db2bb", "branch": "itbem-agent/d4a4b837-2e18-43af-9f58-6d59629db2bb", "target_branch": "trunk", "commit_sha": strings.Repeat("a", 40), "pull_request_url": "https://github.com/itbem/repo/pull/1", "token": "must-never-escape", "command_output": "private"}
 	handoff, err := json.Marshal(publicationHandoff(result))
-	if err != nil || strings.Contains(string(handoff), "must-never-escape") || strings.Contains(string(handoff), "command_output") {
+	if err != nil || !strings.Contains(string(handoff), `"target_branch":"trunk"`) || strings.Contains(string(handoff), "must-never-escape") || strings.Contains(string(handoff), "command_output") {
 		t.Fatalf("publication handoff leaked sensitive execution data: %s / %v", handoff, err)
 	}
 }

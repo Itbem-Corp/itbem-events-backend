@@ -549,7 +549,7 @@ func implementationHandoffSingle(result map[string]any) map[string]any {
 // command text. The full private result remains encrypted in object storage.
 func publicationHandoff(result map[string]any) map[string]any {
 	handoff := map[string]any{}
-	for _, key := range []string{"grant_id", "workspace", "worktree", "repository_ref", "branch", "base_sha", "commit_sha", "remote_repository", "branch_published", "commit_created", "pull_request_url", "pull_request_created"} {
+	for _, key := range []string{"grant_id", "workspace", "worktree", "repository_ref", "branch", "target_branch", "base_sha", "commit_sha", "remote_repository", "branch_published", "commit_created", "pull_request_url", "pull_request_created"} {
 		if value, ok := result[key]; ok {
 			handoff[key] = value
 		}

@@ -51,7 +51,7 @@ func TestStoredReleaseGateCandidateUsesEveryExactPublishedRepositoryHead(t *test
 	change := func(reference, repository, branch, sha, pr string) models.DeliveryChangeSet {
 		return models.DeliveryChangeSet{
 			RepositoryRef: reference, Branch: branch, CommitSHA: sha, ReviewType: "pull_request", PullRequestURL: pr,
-			MetadataJSON: `{"branch_published":true,"verification_source":"itbem-github-app","remote_repository":"` + repository + `"}`,
+			MetadataJSON: `{"branch_published":true,"verification_source":"itbem-github-app","remote_repository":"` + repository + `","target_branch":"main"}`,
 		}
 	}
 	changes := []models.DeliveryChangeSet{
@@ -68,6 +68,9 @@ func TestStoredReleaseGateCandidateUsesEveryExactPublishedRepositoryHead(t *test
 	if candidate.Revisions[0].Repository != "example/api" || candidate.Revisions[1].Repository != "example/web" {
 		t.Fatalf("revision matrix must be canonical and sorted: %#v", candidate.Revisions)
 	}
+	if candidate.Revisions[0].Branch != "main" || candidate.Revisions[1].Branch != "main" {
+		t.Fatalf("revision matrix must use each persisted PR target branch: %#v", candidate.Revisions)
+	}
 	if decision := releasegate.Evaluate(candidate); decision.State != "blocked" {
 		t.Fatalf("stored evidence alone must never authorize release: %#v", decision)
 	}
@@ -77,8 +80,9 @@ func TestStoredReleaseGateCandidateFailsClosedForMissingOrUntrustedPublishedHead
 	item := models.DeliveryWorkItem{ID: uuid.Must(uuid.NewV4()), PlanJSON: `{"repository_impact":[{"reference":"workspace://api","impact":"changes"}]}`}
 	for _, changes := range [][]models.DeliveryChangeSet{
 		nil,
-		{{RepositoryRef: "workspace://api", Branch: "itbem-agent/11111111-1111-4111-8111-111111111111", CommitSHA: strings.Repeat("a", 40), ReviewType: "pull_request", PullRequestURL: "https://github.com/Example/API/pull/7", MetadataJSON: `{"branch_published":true,"verification_source":"manual","remote_repository":"example/api"}`}},
-		{{RepositoryRef: "workspace://api", Branch: "itbem-agent/11111111-1111-4111-8111-111111111111", CommitSHA: strings.Repeat("a", 39), ReviewType: "pull_request", PullRequestURL: "https://github.com/Example/API/pull/7", MetadataJSON: `{"branch_published":true,"verification_source":"itbem-github-app","remote_repository":"example/api"}`}},
+		{{RepositoryRef: "workspace://api", Branch: "itbem-agent/11111111-1111-4111-8111-111111111111", CommitSHA: strings.Repeat("a", 40), ReviewType: "pull_request", PullRequestURL: "https://github.com/Example/API/pull/7", MetadataJSON: `{"branch_published":true,"verification_source":"manual","remote_repository":"example/api","target_branch":"main"}`}},
+		{{RepositoryRef: "workspace://api", Branch: "itbem-agent/11111111-1111-4111-8111-111111111111", CommitSHA: strings.Repeat("a", 39), ReviewType: "pull_request", PullRequestURL: "https://github.com/Example/API/pull/7", MetadataJSON: `{"branch_published":true,"verification_source":"itbem-github-app","remote_repository":"example/api","target_branch":"main"}`}},
+		{{RepositoryRef: "workspace://api", Branch: "itbem-agent/11111111-1111-4111-8111-111111111111", CommitSHA: strings.Repeat("a", 40), ReviewType: "pull_request", PullRequestURL: "https://github.com/Example/API/pull/7", MetadataJSON: `{"branch_published":true,"verification_source":"itbem-github-app","remote_repository":"example/api"}`}},
 	} {
 		if _, err := storedReleaseGateCandidate(item, changes); err == nil {
 			t.Fatal("missing or untrusted exact PR head must fail closed")

@@ -2465,6 +2465,7 @@ type publicationExecutionHandoff struct {
 	Worktree           string `json:"worktree"`
 	RepositoryRef      string `json:"repository_ref"`
 	Branch             string `json:"branch"`
+	TargetBranch       string `json:"target_branch"`
 	BaseSHA            string `json:"base_sha"`
 	CommitSHA          string `json:"commit_sha"`
 	RemoteRepository   string `json:"remote_repository"`
@@ -2488,9 +2489,9 @@ func persistPublicationChangeSet(tx *gorm.DB, task *models.AutomationTask, raw j
 	if err != nil || grantID == uuid.Nil || !handoff.BranchPublished {
 		return fmt.Errorf("publication execution grant or branch evidence is invalid")
 	}
-	handoff.Workspace, handoff.Worktree, handoff.RepositoryRef, handoff.Branch = strings.TrimSpace(handoff.Workspace), strings.TrimSpace(handoff.Worktree), strings.TrimSpace(handoff.RepositoryRef), strings.TrimSpace(handoff.Branch)
+	handoff.Workspace, handoff.Worktree, handoff.RepositoryRef, handoff.Branch, handoff.TargetBranch = strings.TrimSpace(handoff.Workspace), strings.TrimSpace(handoff.Worktree), strings.TrimSpace(handoff.RepositoryRef), strings.TrimSpace(handoff.Branch), strings.TrimSpace(handoff.TargetBranch)
 	handoff.BaseSHA, handoff.CommitSHA, handoff.RemoteRepository = strings.ToLower(strings.TrimSpace(handoff.BaseSHA)), strings.ToLower(strings.TrimSpace(handoff.CommitSHA)), strings.ToLower(strings.TrimSpace(handoff.RemoteRepository))
-	if !strings.HasPrefix(handoff.Workspace, "workspace://") || handoff.RepositoryRef != handoff.Workspace || handoff.Worktree != handoff.Workspace+"#"+handoff.Branch || !agentBranchPattern.MatchString(handoff.Branch) || !gitCommitSHA.MatchString(handoff.BaseSHA) || !gitCommitSHA.MatchString(handoff.CommitSHA) || !githubRepositoryPattern.MatchString(handoff.RemoteRepository) {
+	if !strings.HasPrefix(handoff.Workspace, "workspace://") || handoff.RepositoryRef != handoff.Workspace || handoff.Worktree != handoff.Workspace+"#"+handoff.Branch || !agentBranchPattern.MatchString(handoff.Branch) || !validReleaseTargetBranch(handoff.TargetBranch) || !gitCommitSHA.MatchString(handoff.BaseSHA) || !gitCommitSHA.MatchString(handoff.CommitSHA) || !githubRepositoryPattern.MatchString(handoff.RemoteRepository) {
 		return fmt.Errorf("publication execution workspace or revision is invalid")
 	}
 	var workItem models.DeliveryWorkItem
@@ -2519,7 +2520,8 @@ func persistPublicationChangeSet(tx *gorm.DB, task *models.AutomationTask, raw j
 	}
 	metadata, err := json.Marshal(map[string]any{
 		"automation_task_id": task.ID.String(), "publication_grant_id": grant.ID.String(), "base_sha": handoff.BaseSHA,
-		"remote_repository": strings.TrimSpace(handoff.RemoteRepository), "branch_published": true, "pull_request_created": handoff.PullRequestCreated,
+		"remote_repository": strings.TrimSpace(handoff.RemoteRepository), "target_branch": handoff.TargetBranch,
+		"branch_published": true, "pull_request_created": handoff.PullRequestCreated,
 		"verification_source": "itbem-github-app",
 	})
 	if err != nil {
@@ -2576,6 +2578,15 @@ func validPublicationPRURL(value, repository string) bool {
 		}
 	}
 	return parts[3] != "" && parts[3] != "0" && strings.EqualFold(parts[0]+"/"+parts[1], strings.TrimSpace(repository))
+}
+
+func validReleaseTargetBranch(value string) bool {
+	_, err := releasegate.RevisionMatrixDigest([]releasegate.Revision{{
+		Repository: "validation/repository",
+		Branch:     strings.TrimSpace(value),
+		SHA:        strings.Repeat("0", 40),
+	}})
+	return err == nil && value == strings.TrimSpace(value)
 }
 
 func pricingCatalog(cfg *models.Config) string {

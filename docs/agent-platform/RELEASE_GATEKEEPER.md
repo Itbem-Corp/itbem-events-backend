@@ -67,6 +67,17 @@ append-only decisions inside the ledger transaction. It verifies each Vault
 manifest against its stored SHA-256 and onboarding provenance, then reconciles
 its repository SHA to the exact release matrix.
 
+The callback also does not trust the worker to choose that matrix. PostgreSQL
+rebuilds it from the approved repository-impact plan, the newest GitHub App
+publication for every repository marked `changes`, and the exact one-shot
+human publication grant consumed by each record. Publication persists the
+GitHub default branch read before the PR was created, not the temporary
+`itbem-agent/*` head branch. The fresh GitHub PR adapter must return that same
+repository, target branch, and head SHA; any difference aborts the callback.
+Forged or stale test, security, compatibility, migration, dependency,
+environment, or recovery claims are cleared at this boundary until their
+dedicated control-plane evidence ledgers resolve them.
+
 Policy is evaluated independently for every repository using the
 platform → organization → project → repository → bounded change-set override
 hierarchy. The composite digest binds the repository, effective policy digest,

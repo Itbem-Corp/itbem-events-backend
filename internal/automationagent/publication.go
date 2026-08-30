@@ -138,7 +138,8 @@ func RunPublication(ctx context.Context, delivery json.RawMessage, lookup func(s
 	}
 	result := map[string]any{
 		"grant_id": auth.GrantID, "workspace": "workspace://" + workspace.ID, "worktree": "workspace://" + workspace.ID + "#" + auth.Branch,
-		"repository_ref": auth.RepositoryRef, "branch": auth.Branch, "base_sha": strings.ToLower(auth.BaseSHA), "commit_sha": commitSHA,
+		"repository_ref": auth.RepositoryRef, "branch": auth.Branch, "target_branch": checkpoint.DefaultBranch,
+		"base_sha": strings.ToLower(auth.BaseSHA), "commit_sha": commitSHA,
 		"remote_repository": remote.Owner + "/" + remote.Name, "branch_published": true, "commit_created": committed,
 		"deployment": "not attempted; a human preview/release workflow remains required",
 	}

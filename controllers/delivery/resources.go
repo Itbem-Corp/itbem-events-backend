@@ -74,7 +74,7 @@ var requiredPlanLists = []string{"context_reviewed", "context_gaps", "assumption
 var repositoryImpactStates = map[string]struct{}{"changes": {}, "consulted": {}, "untouched": {}}
 var reservedChangeSetProvenanceKeys = map[string]struct{}{
 	"automation_task_id": {}, "publication_grant_id": {}, "verification_source": {}, "branch_published": {},
-	"review_diff_sha256": {}, "github_repository": {}, "base_sha": {}, "worktree": {}, "remote_repository": {},
+	"review_diff_sha256": {}, "github_repository": {}, "base_sha": {}, "worktree": {}, "remote_repository": {}, "target_branch": {},
 }
 
 func containsReservedChangeSetProvenance(metadata map[string]any) bool {

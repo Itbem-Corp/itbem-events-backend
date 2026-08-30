@@ -203,6 +203,19 @@ func TestValidPublicationPRURLBindsTheApprovedRepository(t *testing.T) {
 	}
 }
 
+func TestValidReleaseTargetBranchAcceptsGenericSafeBranches(t *testing.T) {
+	for _, branch := range []string{"main", "trunk", "release/v2"} {
+		if !validReleaseTargetBranch(branch) {
+			t.Fatalf("expected safe target branch accepted: %q", branch)
+		}
+	}
+	for _, branch := range []string{"", " main", "main\nother", "../main", strings.Repeat("a", 256)} {
+		if validReleaseTargetBranch(branch) {
+			t.Fatalf("expected unsafe target branch rejected: %q", branch)
+		}
+	}
+}
+
 func TestWorkerWorkspaceReadinessRejectsImpossibleOrUnboundedStates(t *testing.T) {
 	valid := []automationWorkspaceHealth{{
 		ID: "eventiapp-dashboard", Ready: true, QAReady: true, VisualQAReady: true,

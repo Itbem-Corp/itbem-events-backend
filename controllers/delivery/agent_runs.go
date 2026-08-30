@@ -467,11 +467,11 @@ func storedReleaseGateCandidate(item models.DeliveryWorkItem, changes []models.D
 		if !validPublishedChangeRecord(change) || change.ReviewType != "pull_request" || strings.TrimSpace(change.PullRequestURL) == "" {
 			continue
 		}
-		repository, parseErr := releaseGateChangeRepository(change)
+		repository, targetBranch, parseErr := releaseGateChangeRepository(change)
 		if parseErr != nil {
 			continue
 		}
-		revision := releasegate.Revision{Repository: repository, Branch: strings.TrimSpace(change.Branch), SHA: strings.ToLower(strings.TrimSpace(change.CommitSHA))}
+		revision := releasegate.Revision{Repository: repository, Branch: targetBranch, SHA: strings.ToLower(strings.TrimSpace(change.CommitSHA))}
 		if _, digestErr := releasegate.RevisionMatrixDigest([]releasegate.Revision{revision}); digestErr != nil {
 			continue
 		}
@@ -502,17 +502,22 @@ func storedReleaseGateCandidate(item models.DeliveryWorkItem, changes []models.D
 	}, nil
 }
 
-func releaseGateChangeRepository(change models.DeliveryChangeSet) (string, error) {
+func releaseGateChangeRepository(change models.DeliveryChangeSet) (string, string, error) {
 	metadata := map[string]any{}
 	if err := json.Unmarshal([]byte(change.MetadataJSON), &metadata); err != nil {
-		return "", fmt.Errorf("published change-set metadata is invalid")
+		return "", "", fmt.Errorf("published change-set metadata is invalid")
 	}
 	repository, _ := metadata["remote_repository"].(string)
 	repository = strings.ToLower(strings.TrimSpace(repository))
+	targetBranch, _ := metadata["target_branch"].(string)
+	targetBranch = strings.TrimSpace(targetBranch)
 	if !githubRepositoryPattern.MatchString(repository) || !releaseGatePullRequestURL(change.PullRequestURL, repository) {
-		return "", fmt.Errorf("published change-set repository identity is invalid")
+		return "", "", fmt.Errorf("published change-set repository identity is invalid")
 	}
-	return repository, nil
+	if _, err := releasegate.RevisionMatrixDigest([]releasegate.Revision{{Repository: repository, Branch: targetBranch, SHA: strings.ToLower(strings.TrimSpace(change.CommitSHA))}}); err != nil {
+		return "", "", fmt.Errorf("published change-set target branch is invalid")
+	}
+	return repository, targetBranch, nil
 }
 
 func releaseGatePullRequestURL(value, repository string) bool {

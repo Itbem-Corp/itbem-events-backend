@@ -40,6 +40,14 @@ multi-repository policy digest, validates every Vault manifest and reconciles
 each one to the exact GitHub head before it binds the authenticated human
 requester to the Gatekeeper subject.
 
+Publication records the GitHub default branch observed before creating the PR.
+At release time the control plane reconstructs every repository/target/SHA from
+the approved impact matrix, the GitHub App publication row, and its consumed
+human grant, then requires the fresh PR read to match it exactly. The callback
+also removes worker-supplied QA, security, compatibility, migration,
+dependency, environment, and recovery claims; those fields remain blocking
+until separate immutable evidence resolvers attach them.
+
 ## Continuous role-lane operation
 
 Each long-lived worker declares one exact identity with `ITBEM_AI_ROLE` and

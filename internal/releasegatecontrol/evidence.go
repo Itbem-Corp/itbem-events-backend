@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -20,7 +21,10 @@ import (
 	"gorm.io/gorm"
 )
 
-const maxPolicyRevisions = 500
+const (
+	maxPolicyRevisions  = 500
+	maxPublishedChanges = 128
+)
 
 // Resolve replaces all candidate policy and Vault claims with current rows from
 // the control-plane database. Missing policy or Vault data remains structured
@@ -33,7 +37,7 @@ func Resolve(db *gorm.DB, workItemID uuid.UUID, input releasegate.Input, evaluat
 		return releasegate.Input{}, fmt.Errorf("release Gatekeeper revision matrix is invalid")
 	}
 	var item models.DeliveryWorkItem
-	if err := db.Select("id", "project_id").First(&item, workItemID).Error; err != nil {
+	if err := db.Select("id", "project_id", "plan_json").First(&item, workItemID).Error; err != nil {
 		return releasegate.Input{}, fmt.Errorf("load release Gatekeeper work item: %w", err)
 	}
 	var project models.DeliveryProject
@@ -44,6 +48,15 @@ func Resolve(db *gorm.DB, workItemID uuid.UUID, input releasegate.Input, evaluat
 		return releasegate.Input{}, fmt.Errorf("release Gatekeeper project identity is invalid")
 	}
 
+	authoritativeRevisions, err := loadPublishedRevisionMatrix(db, item)
+	if err != nil {
+		return releasegate.Input{}, err
+	}
+	if !sameRevisionMatrix(input.Revisions, authoritativeRevisions) {
+		return releasegate.Input{}, fmt.Errorf("release Gatekeeper GitHub evidence does not match the current control-plane publication matrix")
+	}
+	input.Revisions = authoritativeRevisions
+	discardUntrustedAssurance(&input)
 	repositories, references, err := repositoryReferences(input.Revisions)
 	if err != nil {
 		return releasegate.Input{}, err
@@ -60,6 +73,220 @@ func Resolve(db *gorm.DB, workItemID uuid.UUID, input releasegate.Input, evaluat
 		return releasegate.Input{}, err
 	}
 	return resolveStoredEvidence(input, project, repositories, vaults, revisions, decisions, evaluatedAt.UTC())
+}
+
+type publishedChangeMetadata struct {
+	PublicationGrantID string `json:"publication_grant_id"`
+	BaseSHA            string `json:"base_sha"`
+	RemoteRepository   string `json:"remote_repository"`
+	TargetBranch       string `json:"target_branch"`
+	BranchPublished    bool   `json:"branch_published"`
+	VerificationSource string `json:"verification_source"`
+}
+
+type selectedPublishedChange struct {
+	change   models.DeliveryChangeSet
+	metadata publishedChangeMetadata
+	grantID  uuid.UUID
+}
+
+// loadPublishedRevisionMatrix rebuilds the exact release subject from the
+// approved plan, GitHub App publication records, and their consumed grants.
+// The callback's candidate matrix is deliberately ignored.
+func loadPublishedRevisionMatrix(db *gorm.DB, item models.DeliveryWorkItem) ([]releasegate.Revision, error) {
+	required, err := requiredChangedRepositories(item.PlanJSON)
+	if err != nil {
+		return nil, err
+	}
+	var changes []models.DeliveryChangeSet
+	if err := db.Where("work_item_id = ? AND review_type = ?", item.ID, "pull_request").
+		Order("created_at DESC, id DESC").Limit(maxPublishedChanges + 1).Find(&changes).Error; err != nil {
+		return nil, fmt.Errorf("load release Gatekeeper published changes: %w", err)
+	}
+	if len(changes) > maxPublishedChanges {
+		return nil, fmt.Errorf("release Gatekeeper published change history exceeds the bounded limit")
+	}
+	selected := make(map[string]selectedPublishedChange, len(required))
+	for _, change := range changes {
+		reference := strings.TrimSpace(change.RepositoryRef)
+		if _, needed := required[reference]; !needed {
+			continue
+		}
+		if _, alreadySelected := selected[reference]; alreadySelected {
+			continue
+		}
+		metadata, grantID, parseErr := parsePublishedChange(change)
+		if parseErr != nil {
+			return nil, fmt.Errorf("release Gatekeeper latest publication for %s is invalid: %w", reference, parseErr)
+		}
+		selected[reference] = selectedPublishedChange{change: change, metadata: metadata, grantID: grantID}
+	}
+	if len(selected) != len(required) {
+		return nil, fmt.Errorf("release Gatekeeper requires one current GitHub App publication for every changed repository")
+	}
+
+	grantIDs := make([]uuid.UUID, 0, len(selected))
+	for _, value := range selected {
+		grantIDs = append(grantIDs, value.grantID)
+	}
+	var grants []models.DeliveryPublicationGrant
+	if err := db.Where("id IN ?", grantIDs).Find(&grants).Error; err != nil {
+		return nil, fmt.Errorf("load release Gatekeeper publication grants: %w", err)
+	}
+	if len(grants) != len(grantIDs) {
+		return nil, fmt.Errorf("release Gatekeeper publication grant evidence is missing or ambiguous")
+	}
+	grantByID := make(map[uuid.UUID]models.DeliveryPublicationGrant, len(grants))
+	for _, grant := range grants {
+		if grant.ID == uuid.Nil {
+			return nil, fmt.Errorf("release Gatekeeper publication grant identity is invalid")
+		}
+		if _, duplicate := grantByID[grant.ID]; duplicate {
+			return nil, fmt.Errorf("release Gatekeeper publication grant evidence is duplicated")
+		}
+		grantByID[grant.ID] = grant
+	}
+
+	revisions := make([]releasegate.Revision, 0, len(selected))
+	for reference, value := range selected {
+		grant, ok := grantByID[value.grantID]
+		if !ok {
+			return nil, fmt.Errorf("release Gatekeeper publication grant is missing")
+		}
+		if err := validatePublicationGrant(item.ID, reference, value, grant); err != nil {
+			return nil, err
+		}
+		revision := releasegate.Revision{
+			Repository: strings.ToLower(strings.TrimSpace(value.metadata.RemoteRepository)),
+			Branch:     strings.TrimSpace(value.metadata.TargetBranch),
+			SHA:        strings.ToLower(strings.TrimSpace(value.change.CommitSHA)),
+		}
+		if _, err := releasegate.RevisionMatrixDigest([]releasegate.Revision{revision}); err != nil {
+			return nil, fmt.Errorf("release Gatekeeper stored publication revision is invalid")
+		}
+		revisions = append(revisions, revision)
+	}
+	sort.Slice(revisions, func(left, right int) bool {
+		return strings.ToLower(revisions[left].Repository) < strings.ToLower(revisions[right].Repository)
+	})
+	if _, err := releasegate.RevisionMatrixDigest(revisions); err != nil {
+		return nil, fmt.Errorf("release Gatekeeper stored publication matrix is invalid")
+	}
+	return revisions, nil
+}
+
+func requiredChangedRepositories(planJSON string) (map[string]struct{}, error) {
+	var plan struct {
+		RepositoryImpact json.RawMessage `json:"repository_impact"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(planJSON)), &plan); err != nil || len(plan.RepositoryImpact) == 0 {
+		return nil, fmt.Errorf("release Gatekeeper approved plan repository matrix is invalid")
+	}
+	var entries []struct {
+		Reference string `json:"reference"`
+		Impact    string `json:"impact"`
+	}
+	if err := json.Unmarshal(plan.RepositoryImpact, &entries); err != nil || len(entries) == 0 || len(entries) > 64 {
+		return nil, fmt.Errorf("release Gatekeeper approved plan repository matrix is invalid")
+	}
+	result := make(map[string]struct{}, len(entries))
+	seen := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		reference := strings.TrimSpace(entry.Reference)
+		impact := strings.ToLower(strings.TrimSpace(entry.Impact))
+		if !strings.HasPrefix(reference, "workspace://") || len(reference) > 500 || (impact != "changes" && impact != "consulted" && impact != "untouched") {
+			return nil, fmt.Errorf("release Gatekeeper approved plan repository matrix is invalid")
+		}
+		if _, duplicate := seen[reference]; duplicate {
+			return nil, fmt.Errorf("release Gatekeeper approved plan repository matrix is duplicated")
+		}
+		seen[reference] = struct{}{}
+		if impact == "changes" {
+			result[reference] = struct{}{}
+		}
+	}
+	if len(result) == 0 {
+		return nil, fmt.Errorf("release Gatekeeper approved plan has no changed repository")
+	}
+	return result, nil
+}
+
+func parsePublishedChange(change models.DeliveryChangeSet) (publishedChangeMetadata, uuid.UUID, error) {
+	var metadata publishedChangeMetadata
+	if change.ID == uuid.Nil || strings.TrimSpace(change.CreatedBy) != "itbem-github-app" ||
+		!strings.EqualFold(strings.TrimSpace(change.ReviewType), "pull_request") || !strings.HasPrefix(strings.TrimSpace(change.Branch), "itbem-agent/") ||
+		!validHex(change.CommitSHA, 40) || json.Unmarshal([]byte(change.MetadataJSON), &metadata) != nil {
+		return publishedChangeMetadata{}, uuid.Nil, fmt.Errorf("publication record is invalid")
+	}
+	metadata.PublicationGrantID = strings.TrimSpace(metadata.PublicationGrantID)
+	metadata.BaseSHA = strings.ToLower(strings.TrimSpace(metadata.BaseSHA))
+	metadata.RemoteRepository = strings.ToLower(strings.TrimSpace(metadata.RemoteRepository))
+	metadata.TargetBranch = strings.TrimSpace(metadata.TargetBranch)
+	metadata.VerificationSource = strings.TrimSpace(metadata.VerificationSource)
+	grantID, err := uuid.FromString(metadata.PublicationGrantID)
+	if err != nil || grantID == uuid.Nil || !validHex(metadata.BaseSHA, 40) || !metadata.BranchPublished || metadata.VerificationSource != "itbem-github-app" || !validGitHubPullRequest(change.PullRequestURL, metadata.RemoteRepository) {
+		return publishedChangeMetadata{}, uuid.Nil, fmt.Errorf("publication provenance is invalid")
+	}
+	return metadata, grantID, nil
+}
+
+func validatePublicationGrant(workItemID uuid.UUID, reference string, value selectedPublishedChange, grant models.DeliveryPublicationGrant) error {
+	if grant.ID != value.grantID || grant.WorkItemID != workItemID || grant.RepositoryRef != reference {
+		return fmt.Errorf("release Gatekeeper publication grant scope does not match")
+	}
+	if grant.Branch != value.change.Branch {
+		return fmt.Errorf("release Gatekeeper publication grant branch does not match")
+	}
+	if !strings.EqualFold(grant.GitHubRepository, value.metadata.RemoteRepository) {
+		return fmt.Errorf("release Gatekeeper publication grant repository does not match")
+	}
+	if !strings.EqualFold(grant.BaseSHA, value.metadata.BaseSHA) {
+		return fmt.Errorf("release Gatekeeper publication grant base does not match")
+	}
+	if !validHex(grant.ReviewDiffSHA256, 64) || grant.RevokedAt == nil || strings.TrimSpace(grant.RevokedBy) != "itbem-github-app" {
+		return fmt.Errorf("release Gatekeeper publication grant consumption is invalid")
+	}
+	if !grant.RevokedAt.UTC().Equal(value.change.CreatedAt.UTC()) {
+		return fmt.Errorf("release Gatekeeper publication grant consumption time does not match")
+	}
+	return nil
+}
+
+func validGitHubPullRequest(value, repository string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || parsed.Scheme != "https" || !strings.EqualFold(parsed.Hostname(), "github.com") || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return false
+	}
+	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	if len(parts) != 4 || parts[2] != "pull" || !strings.EqualFold(parts[0]+"/"+parts[1], repository) || parts[3] == "" || parts[3] == "0" {
+		return false
+	}
+	for _, character := range parts[3] {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	_, err = projectvault.CanonicalGitHubReference("github://" + repository)
+	return err == nil
+}
+
+// Assurance is accepted only from the dedicated immutable QA/security and
+// environment ledgers. Until those resolvers attach it, a release callback
+// cannot self-attest any of these safety floors.
+func discardUntrustedAssurance(input *releasegate.Input) {
+	input.Tests = []releasegate.TestEvidence{}
+	input.Security = []releasegate.SecurityEvidence{}
+	input.Compatibility = releasegate.MatrixEvidence{}
+	input.Migrations = releasegate.MatrixEvidence{}
+	input.Dependencies = releasegate.MatrixEvidence{}
+	input.Environment = releasegate.MatrixEvidence{}
+	input.Recovery = releasegate.RecoveryEvidence{}
+}
+
+func sameRevisionMatrix(left, right []releasegate.Revision) bool {
+	leftDigest, leftErr := releasegate.RevisionMatrixDigest(left)
+	rightDigest, rightErr := releasegate.RevisionMatrixDigest(right)
+	return leftErr == nil && rightErr == nil && strings.EqualFold(leftDigest, rightDigest)
 }
 
 func repositoryReferences(revisions []releasegate.Revision) (map[string]string, []string, error) {
