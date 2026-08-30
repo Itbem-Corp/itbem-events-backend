@@ -1,10 +1,84 @@
 package automationqueuerepository
 
 import (
+	"events-stocks/internal/agentwork"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 )
+
+const completeLaneQueues = `{
+	"orchestration":"https://sqs.example/queues/orchestration",
+	"engineering":"https://sqs.example/queues/engineering",
+	"review":"https://sqs.example/queues/review",
+	"qa":"https://sqs.example/queues/qa",
+	"release":"https://sqs.example/queues/release"
+}`
+
+func TestParseQueueTargetsKeepsLegacyModeBackwardCompatible(t *testing.T) {
+	t.Parallel()
+	targets, err := parseQueueTargets(" https://sqs.example/queues/legacy ", " https://sqs.example/queues/legacy-dlq ", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !targets.configured() || len(targets.laneURLs) != 0 {
+		t.Fatalf("legacy queue targets = %#v", targets)
+	}
+	queueURL, err := targets.queueURLForOperation(agentwork.OperationCodeReview)
+	if err != nil || queueURL != "https://sqs.example/queues/legacy" {
+		t.Fatalf("legacy review route = %q, %v", queueURL, err)
+	}
+}
+
+func TestParseQueueTargetsRoutesEveryOperationToItsRoleLane(t *testing.T) {
+	t.Parallel()
+	targets, err := parseQueueTargets("https://sqs.example/queues/legacy", "https://sqs.example/queues/legacy-dlq", completeLaneQueues, "https://sqs.example/queues/role-dlq")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := map[string]string{
+		agentwork.OperationAIChat:                 "orchestration",
+		agentwork.OperationDeliverySummary:        "orchestration",
+		agentwork.OperationDeliveryPlan:           "engineering",
+		agentwork.OperationDeliveryImplementation: "engineering",
+		agentwork.OperationCodeReview:             "review",
+		agentwork.OperationDeliveryQA:             "qa",
+		agentwork.OperationDeliveryPublish:        "release",
+	}
+	for operation, lane := range tests {
+		queueURL, routeErr := targets.queueURLForOperation(operation)
+		if routeErr != nil || queueURL != "https://sqs.example/queues/"+lane {
+			t.Fatalf("route %s = %q, %v", operation, queueURL, routeErr)
+		}
+	}
+}
+
+func TestParseQueueTargetsRejectsPartialAmbiguousOrUnknownRoleMaps(t *testing.T) {
+	t.Parallel()
+	for name, input := range map[string]struct {
+		lanes string
+		dlq   string
+	}{
+		"partial":        {`{"orchestration":"one"}`, "role-dlq"},
+		"missing dlq":    {completeLaneQueues, ""},
+		"unknown lane":   {`{"orchestration":"one","engineering":"two","review":"three","qa":"four","release":"five","admin":"six"}`, "role-dlq"},
+		"duplicate lane": {`{"orchestration":"same","engineering":"same","review":"three","qa":"four","release":"five"}`, "role-dlq"},
+		"multiple json":  {completeLaneQueues + `{}`, "role-dlq"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if targets, err := parseQueueTargets("legacy", "legacy-dlq", input.lanes, input.dlq); err == nil {
+				t.Fatalf("invalid queue map accepted: %#v", targets)
+			}
+		})
+	}
+	if _, err := parseQueueTargets("", "orphan-dlq", "", ""); err == nil {
+		t.Fatal("orphan legacy DLQ was accepted")
+	}
+	if _, err := parseQueueTargets("legacy", "legacy-dlq", "", "orphan-role-dlq"); err == nil {
+		t.Fatal("orphan role DLQ was accepted")
+	}
+}
 
 func TestQueueAttributeCountFailsClosedForMissingMalformedOrNegativeValues(t *testing.T) {
 	name := types.QueueAttributeNameApproximateNumberOfMessages

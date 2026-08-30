@@ -10,6 +10,7 @@ itbem-events-backend/
 ├── cmd/api/              # API entrypoint
 ├── internal/app/         # Composition root, server setup, dependency wiring
 ├── internal/authz/       # Shared authorization helpers for protected handlers
+├── internal/projectvault/# Generic static onboarding and curated Vault proposal domain
 ├── configuration/        # DB, Redis, CORS, env setup
 ├── controllers/          # HTTP handlers (one dir per domain)
 ├── middleware/           # Echo middleware (token, redis)
@@ -35,6 +36,8 @@ itbem-events-backend/
 | `configuration/environmentVariables.go` | Env var loading into Config |
 | `configuration/cors.go` | CORS settings |
 | `configuration/redis.go` | Redis connection |
+| `docs/agent-platform/DOMAIN_AND_THREAT_MODEL.md` | Multi-agent invariants, role separation, gates and threats |
+| `docs/agent-platform/QUALIFICATION.md` | Executable local, staging, production and recovery qualification gates |
 
 ## Models (`models/*.go`)
 
@@ -59,7 +62,18 @@ itbem-events-backend/
 | ResourceType | `models/ResourceType.go` |
 | DesignTemplate | `models/DesignTemplate.go` |
 | DeliveryProject / work-item workflow | `models/DeliveryWorkflow.go` |
+| DeliveryRepositoryOnboarding / DeliveryProjectVaultRevision | `models/DeliveryProjectVault.go` |
 | AutomationTask | `models/AutomationTask.go` |
+| AutomationAgentHeartbeat | `models/AutomationAgentHeartbeat.go` |
+| Named exact-matrix QA evidence / per-repository gate resolver | `internal/qaevidence/`, `internal/deliveryledger/qa_observation.go`, `internal/releasegatecontrol/evidence.go` |
+| Exact-matrix local security evidence / immutable resolver | `internal/securityevidence/`, `internal/qaevidence/`, `internal/deliveryledger/security_observation.go`, `controllers/automation/automation.go`, `internal/releasegatecontrol/evidence.go` |
+| Exact-matrix compatibility and migration assurance resolver | `internal/qaevidence/`, `internal/deliveryledger/qa_observation.go`, `internal/releasegatecontrol/evidence.go` |
+| Frozen repository/work-item dependency Gatekeeper resolver | `models/DeliveryWorkflow.go`, `internal/qaevidence/`, `internal/releasegatecontrol/evidence.go` |
+| Effective-policy composite recovery resolver | `internal/deliverypolicy/`, `internal/deliverypolicystore/`, `internal/releasegatecontrol/evidence.go` |
+| Explicit release environment secret/variable reference policy and safe projection | `internal/deliverypolicy/policy.go`, `controllers/delivery/effective_policy.go` |
+| Exact-SHA GitHub release workflow/environment readiness adapter | `internal/automationagent/release_gate_github_environment.go` |
+| Immutable exact-matrix release environment evidence | `internal/environmentevidence/`, `internal/deliveryledger/environment_observation.go` |
+| Linux multiagent systemd distribution, private lane workspaces and non-consuming doctor | `deploy/systemd/` |
 | Moment | `models/Moment.go` |
 | MomentType | `models/MomentType.go` |
 | Color | `models/Color.go` |
@@ -84,7 +98,7 @@ itbem-events-backend/
 | clienttypes | `controllers/clienttypes/clientTypes.go` | `/api/catalogs/client-types` |
 | clientroles | `controllers/clientroles/clientRoles.go` | `/api/catalogs/roles` |
 | cache | `controllers/cache/cache.go` | `/api/cache*` |
-| delivery | `controllers/delivery/delivery.go`, `controllers/delivery/agent_runs.go` | `/api/automation/projects*`, `/api/automation/work-items*` |
+| delivery | `controllers/delivery/delivery.go`, `controllers/delivery/agent_runs.go`, `controllers/delivery/onboarding.go` | `/api/automation/projects*`, `/api/automation/work-items*` |
 
 ## Services (`services/<domain>/`)
 
@@ -137,6 +151,7 @@ itbem-events-backend/
 | `repositories/awsrepository/CognitoRepository.go` | Cognito admin |
 | `repositories/bucketrepository/BucketRepository.go` | Bucket/URL helpers |
 | `repositories/sqsrepository/SQSRepository.go` | Async media job publisher |
+| `repositories/automationqueuerepository/AutomationQueueRepository.go` | Local-agent outbox publisher and role-lane queue router |
 | `repositories/authproviderrepository/AuthProviderRepository.go` | Token validation |
 | `repositories/eventsrepository/EventsRepository.go` | Events DB |
 | `repositories/eventconfigrepository/EventConfigRepository.go` | EventConfig DB |

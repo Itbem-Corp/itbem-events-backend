@@ -8,8 +8,15 @@ import (
 	"encoding/json"
 	"errors"
 	"events-stocks/configuration"
+	"events-stocks/internal/agentwork"
 	"events-stocks/internal/authz"
 	"events-stocks/internal/automationagent"
+	"events-stocks/internal/deliveryledger"
+	"events-stocks/internal/environmentevidence"
+	"events-stocks/internal/qaevidence"
+	"events-stocks/internal/releasegate"
+	"events-stocks/internal/releasegatecontrol"
+	"events-stocks/internal/securityevidence"
 	"events-stocks/models"
 	automationqueue "events-stocks/repositories/automationqueuerepository"
 	awsrepository "events-stocks/repositories/awsrepository"
@@ -53,6 +60,7 @@ var allowedOperations = map[string]struct{}{
 	"delivery.plan":           {},
 	"delivery.implementation": {},
 	"delivery.publish":        {},
+	"delivery.release_gate":   {},
 	"delivery.qa":             {},
 	"delivery.summary":        {},
 }
@@ -694,6 +702,8 @@ func automationCostLedgerSource(db *gorm.DB) (string, automationCostLedgerCovera
 type automationWorkerHealth struct {
 	Provider               string                      `json:"provider"`
 	Model                  string                      `json:"model"`
+	Role                   string                      `json:"role,omitempty"`
+	Lane                   string                      `json:"lane,omitempty"`
 	Concurrency            int                         `json:"concurrency"`
 	StartedAt              time.Time                   `json:"started_at"`
 	LastSeenAt             time.Time                   `json:"last_seen_at"`
@@ -706,13 +716,15 @@ type automationWorkerHealth struct {
 // path, repository name, Git SHA, branch, command line, error output and any
 // source material.
 type automationWorkspaceHealth struct {
-	ID                     string `json:"id"`
-	Ready                  bool   `json:"ready"`
-	QAReady                bool   `json:"qa_ready"`
-	VisualQAReady          bool   `json:"visual_qa_ready"`
-	PublicationReady       bool   `json:"publication_ready"`
-	ValidationCommandCount int    `json:"validation_command_count"`
-	QACommandCount         int    `json:"qa_command_count"`
+	ID                          string `json:"id"`
+	Ready                       bool   `json:"ready"`
+	QAReady                     bool   `json:"qa_ready"`
+	VisualQAReady               bool   `json:"visual_qa_ready"`
+	PublicationReady            bool   `json:"publication_ready"`
+	ValidationCommandCount      int    `json:"validation_command_count"`
+	NamedValidationCommandCount int    `json:"named_validation_command_count"`
+	QACommandCount              int    `json:"qa_command_count"`
+	NamedQACommandCount         int    `json:"named_qa_command_count"`
 }
 
 // automationHealth gives operators a continuous safety signal without
@@ -720,23 +732,24 @@ type automationWorkspaceHealth struct {
 // task-scoped inspector. Workers contains only current, anonymous runtime
 // metadata so that readiness claims remain auditable in the dashboard.
 type automationHealth struct {
-	Queued                        int64                         `json:"queued"`
-	Running                       int64                         `json:"running"`
-	FailedLastDay                 int64                         `json:"failed_last_day"`
-	ExpiredLeases                 int64                         `json:"expired_leases"`
-	SpendLastDay                  int64                         `json:"spend_last_day_microusd"`
-	ActiveWorkers                 int64                         `json:"active_workers"`
-	WorkerCapacity                int64                         `json:"worker_capacity"`
-	QueueTelemetry                bool                          `json:"queue_telemetry_available"`
-	QueueVisible                  int64                         `json:"queue_visible_approximate"`
-	QueueInFlight                 int64                         `json:"queue_in_flight_approximate"`
-	QueueDelayed                  int64                         `json:"queue_delayed_approximate"`
-	DeadLetterTelemetry           bool                          `json:"dead_letter_telemetry_available"`
-	DeadLetterVisible             int64                         `json:"dead_letter_visible_approximate"`
-	OperationalTelemetryAvailable bool                          `json:"operational_telemetry_available"`
-	LastWorkerSeenAt              *time.Time                    `json:"last_worker_seen_at,omitempty"`
-	Workers                       []automationWorkerHealth      `json:"workers"`
-	ReviewIngress                 automationReviewIngressHealth `json:"review_ingress"`
+	Queued                        int64                                 `json:"queued"`
+	Running                       int64                                 `json:"running"`
+	FailedLastDay                 int64                                 `json:"failed_last_day"`
+	ExpiredLeases                 int64                                 `json:"expired_leases"`
+	SpendLastDay                  int64                                 `json:"spend_last_day_microusd"`
+	ActiveWorkers                 int64                                 `json:"active_workers"`
+	WorkerCapacity                int64                                 `json:"worker_capacity"`
+	QueueTelemetry                bool                                  `json:"queue_telemetry_available"`
+	QueueLanes                    map[string]automationqueue.LaneHealth `json:"queue_lanes,omitempty"`
+	QueueVisible                  int64                                 `json:"queue_visible_approximate"`
+	QueueInFlight                 int64                                 `json:"queue_in_flight_approximate"`
+	QueueDelayed                  int64                                 `json:"queue_delayed_approximate"`
+	DeadLetterTelemetry           bool                                  `json:"dead_letter_telemetry_available"`
+	DeadLetterVisible             int64                                 `json:"dead_letter_visible_approximate"`
+	OperationalTelemetryAvailable bool                                  `json:"operational_telemetry_available"`
+	LastWorkerSeenAt              *time.Time                            `json:"last_worker_seen_at,omitempty"`
+	Workers                       []automationWorkerHealth              `json:"workers"`
+	ReviewIngress                 automationReviewIngressHealth         `json:"review_ingress"`
 }
 
 // automationReviewIngressHealth makes automatic PR review operationally
@@ -756,6 +769,8 @@ type agentHeartbeatRequest struct {
 	WorkerID           string                      `json:"worker_id"`
 	Provider           string                      `json:"provider"`
 	Model              string                      `json:"model"`
+	Role               string                      `json:"role"`
+	Lane               string                      `json:"lane"`
 	Concurrency        int                         `json:"concurrency"`
 	StartedAt          string                      `json:"started_at"`
 	WorkspaceReadiness []automationWorkspaceHealth `json:"workspace_readiness"`
@@ -1662,6 +1677,7 @@ func Health(c echo.Context) error {
 	if user.IsPlatformAdmin() {
 		queueHealth := automationqueue.QueueHealth(c.Request().Context())
 		result.QueueTelemetry = queueHealth.Available
+		result.QueueLanes = queueHealth.Lanes
 		result.QueueVisible, result.QueueInFlight, result.QueueDelayed = queueHealth.Visible, queueHealth.InFlight, queueHealth.Delayed
 		result.DeadLetterTelemetry, result.DeadLetterVisible = queueHealth.DeadLetterAvailable, queueHealth.DeadLetterVisible
 	}
@@ -1697,7 +1713,7 @@ func Health(c echo.Context) error {
 			result.LastWorkerSeenAt = lastSeen
 		}
 		if err := workerQuery.Session(&gorm.Session{}).
-			Select("provider, model, concurrency, started_at, last_seen_at, workspace_readiness").
+			Select("provider, model, role, lane, concurrency, started_at, last_seen_at, workspace_readiness").
 			Order("last_seen_at DESC").
 			Limit(8).
 			Find(&result.Workers).Error; err != nil {
@@ -1714,8 +1730,14 @@ func Health(c echo.Context) error {
 				return utils.Error(c, http.StatusInternalServerError, "Automation health unavailable", "")
 			}
 		}
+		var reviewWorkers int64
+		if err := workerQuery.Session(&gorm.Session{}).
+			Where("(role = '' AND lane = '') OR (role = ? AND lane = ?)", agentwork.RoleReviewer, agentwork.LaneReview).
+			Count(&reviewWorkers).Error; err != nil {
+			return utils.Error(c, http.StatusInternalServerError, "Automation health unavailable", "")
+		}
 		cfg, _ := c.Get("config").(*models.Config)
-		result.ReviewIngress = automationReviewIngressStatus(cfg, result.ActiveWorkers)
+		result.ReviewIngress = automationReviewIngressStatus(cfg, reviewWorkers)
 	}
 	return utils.Success(c, http.StatusOK, "Automation health", result)
 }
@@ -1765,6 +1787,9 @@ func validateWorkerWorkspaceReadiness(readiness []automationWorkspaceHealth) err
 		if workspace.ValidationCommandCount < 0 || workspace.ValidationCommandCount > 64 || workspace.QACommandCount < 0 || workspace.QACommandCount > 64 {
 			return fmt.Errorf("invalid workspace command count")
 		}
+		if workspace.NamedValidationCommandCount < 0 || workspace.NamedValidationCommandCount > workspace.ValidationCommandCount || workspace.NamedQACommandCount < 0 || workspace.NamedQACommandCount > workspace.QACommandCount {
+			return fmt.Errorf("invalid named workspace command count")
+		}
 		if workspace.QAReady && !workspace.Ready {
 			return fmt.Errorf("qa readiness requires workspace readiness")
 		}
@@ -1776,6 +1801,25 @@ func validateWorkerWorkspaceReadiness(readiness []automationWorkspaceHealth) err
 		}
 	}
 	return nil
+}
+
+func normalizeWorkerRoleLane(role, lane string) (string, string, error) {
+	role, lane = strings.TrimSpace(role), strings.TrimSpace(lane)
+	if role == "" && lane == "" {
+		return "", "", nil
+	}
+	if !agentwork.IsKnownRoleLane(agentwork.Role(role), agentwork.Lane(lane)) {
+		return "", "", fmt.Errorf("invalid worker role and queue lane")
+	}
+	return role, lane, nil
+}
+
+func validWorkerProvider(role, lane, provider, model string) bool {
+	provider, model = strings.TrimSpace(provider), strings.TrimSpace(model)
+	if role == string(agentwork.RoleReleaseManager) && lane == string(agentwork.LaneRelease) {
+		return provider == "" && model == ""
+	}
+	return providerAllowed(provider) && model != "" && len(model) <= 128
 }
 
 // AgentHeartbeat gives the dashboard a real liveness signal from the isolated
@@ -1796,7 +1840,14 @@ func AgentHeartbeat(c echo.Context) error {
 	if _, err := uuid.FromString(workerID); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid agent heartbeat", "")
 	}
-	if !providerAllowed(request.Provider) || len(strings.TrimSpace(request.Model)) == 0 || len(strings.TrimSpace(request.Model)) > 128 || request.Concurrency < 1 || request.Concurrency > 8 {
+	if request.Concurrency < 1 || request.Concurrency > 8 {
+		return utils.Error(c, http.StatusBadRequest, "Invalid agent heartbeat", "")
+	}
+	role, lane, err := normalizeWorkerRoleLane(request.Role, request.Lane)
+	if err != nil {
+		return utils.Error(c, http.StatusBadRequest, "Invalid agent heartbeat", "")
+	}
+	if !validWorkerProvider(role, lane, request.Provider, request.Model) {
 		return utils.Error(c, http.StatusBadRequest, "Invalid agent heartbeat", "")
 	}
 	startedAt, err := time.Parse(time.RFC3339, strings.TrimSpace(request.StartedAt))
@@ -1811,8 +1862,8 @@ func AgentHeartbeat(c echo.Context) error {
 		return utils.Error(c, http.StatusBadRequest, "Invalid agent heartbeat", "")
 	}
 	now := time.Now().UTC()
-	heartbeat := models.AutomationAgentHeartbeat{WorkerID: workerID, Provider: strings.ToLower(strings.TrimSpace(request.Provider)), Model: strings.TrimSpace(request.Model), Concurrency: request.Concurrency, WorkspaceReadiness: string(workspaceReadiness), StartedAt: startedAt.UTC(), LastSeenAt: now}
-	if err := configuration.DB.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "worker_id"}}, DoUpdates: clause.Assignments(map[string]any{"provider": heartbeat.Provider, "model": heartbeat.Model, "concurrency": heartbeat.Concurrency, "workspace_readiness": heartbeat.WorkspaceReadiness, "started_at": heartbeat.StartedAt, "last_seen_at": heartbeat.LastSeenAt, "updated_at": now})}).Create(&heartbeat).Error; err != nil {
+	heartbeat := models.AutomationAgentHeartbeat{WorkerID: workerID, Provider: strings.ToLower(strings.TrimSpace(request.Provider)), Model: strings.TrimSpace(request.Model), Role: role, Lane: lane, Concurrency: request.Concurrency, WorkspaceReadiness: string(workspaceReadiness), StartedAt: startedAt.UTC(), LastSeenAt: now}
+	if err := configuration.DB.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "worker_id"}}, DoUpdates: clause.Assignments(map[string]any{"provider": heartbeat.Provider, "model": heartbeat.Model, "role": heartbeat.Role, "lane": heartbeat.Lane, "concurrency": heartbeat.Concurrency, "workspace_readiness": heartbeat.WorkspaceReadiness, "started_at": heartbeat.StartedAt, "last_seen_at": heartbeat.LastSeenAt, "updated_at": now})}).Create(&heartbeat).Error; err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Automation heartbeat unavailable", "")
 	}
 	return utils.Success(c, http.StatusOK, "Automation agent heartbeat accepted", map[string]any{"accepted_at": now})
@@ -1971,12 +2022,19 @@ func Complete(c echo.Context) error {
 		return utils.Error(c, http.StatusBadRequest, "Invalid automation evidence", err.Error())
 	}
 	if len(request.Execution) > 0 {
-		if request.Status != "completed" || (task.Operation != "delivery.implementation" && task.Operation != "delivery.publish") || len(request.Execution) > 32*1024 || !json.Valid(request.Execution) {
-			return utils.Error(c, http.StatusBadRequest, "Invalid automation execution", "only a bounded completed delivery implementation or publication may register execution metadata")
+		limit := 32 * 1024
+		if task.Operation == "delivery.release_gate" {
+			limit = 256 * 1024
+		}
+		if request.Status != "completed" || (task.Operation != "delivery.implementation" && task.Operation != "delivery.publish" && task.Operation != "delivery.release_gate" && task.Operation != "delivery.qa") || len(request.Execution) > limit || !json.Valid(request.Execution) {
+			return utils.Error(c, http.StatusBadRequest, "Invalid automation execution", "only a bounded completed delivery implementation, publication, QA, or release Gatekeeper run may register execution metadata")
 		}
 	}
-	if request.Deterministic && (request.Status != "completed" || task.Operation != "delivery.publish") {
-		return utils.Error(c, http.StatusBadRequest, "Invalid automation result", "only delivery publication may be deterministic")
+	if request.Deterministic && (request.Status != "completed" || (task.Operation != "delivery.publish" && task.Operation != "delivery.release_gate")) {
+		return utils.Error(c, http.StatusBadRequest, "Invalid automation result", "only delivery publication or release Gatekeeper may be deterministic")
+	}
+	if task.Operation == "delivery.release_gate" && request.Status == "completed" && (!request.Deterministic || len(request.Execution) == 0) {
+		return utils.Error(c, http.StatusBadRequest, "Invalid automation result", "release Gatekeeper completion requires deterministic execution evidence")
 	}
 	toolExecutionRows, toolExecutionErr := buildToolExecutionLedger(cfg, &task, ledgerRunID, request.Status, request.ToolExecutions, request.Artifacts, time.Now().UTC())
 	if toolExecutionErr != nil {
@@ -2086,6 +2144,16 @@ func Complete(c echo.Context) error {
 					return err
 				}
 			}
+			if task.Operation == "delivery.qa" {
+				if err := persistQAObservation(tx, &task, request.Execution, completedAt); err != nil {
+					return err
+				}
+			}
+			if task.Operation == "delivery.release_gate" {
+				if err := persistReleaseGateEvaluation(tx, &task, request.Execution, completedAt); err != nil {
+					return err
+				}
+			}
 		}
 		return nil
 	})
@@ -2096,6 +2164,149 @@ func Complete(c echo.Context) error {
 		return utils.Error(c, http.StatusConflict, "Automation result ignored", "Task is not awaiting a result")
 	}
 	return c.NoContent(http.StatusNoContent)
+}
+
+func persistReleaseGateEvaluation(tx *gorm.DB, task *models.AutomationTask, raw json.RawMessage, completedAt time.Time) error {
+	if tx == nil || completedAt.IsZero() {
+		return fmt.Errorf("only a bounded release Gatekeeper task may append an evaluation")
+	}
+	workItemID, actor, input, environment, err := releaseGateCandidateForTask(task, raw)
+	if err != nil {
+		return err
+	}
+	if environment != nil {
+		if _, _, err := deliveryledger.RecordEnvironmentObservation(tx, workItemID, *environment, completedAt.UTC()); err != nil {
+			return err
+		}
+	}
+	input, err = releasegatecontrol.Resolve(tx, workItemID, input, completedAt.UTC())
+	if err != nil {
+		return err
+	}
+	preApproval := releasegate.Evaluate(input)
+	if preApproval.SubjectDigest == "" {
+		return fmt.Errorf("release Gatekeeper execution has no exact subject")
+	}
+	input.HumanApproval = &releasegate.HumanApproval{Actor: actor, ActorType: "human", SubjectDigest: preApproval.SubjectDigest, Approved: true}
+	if _, _, err := deliveryledger.RecordGateEvaluation(tx, workItemID, input, completedAt.UTC()); err != nil {
+		return err
+	}
+	return nil
+}
+
+func persistQAObservation(tx *gorm.DB, task *models.AutomationTask, raw json.RawMessage, completedAt time.Time) error {
+	if tx == nil || completedAt.IsZero() {
+		return fmt.Errorf("only a bounded QA task may append an observation")
+	}
+	workItemID, observation, err := qaObservationForTask(task, raw)
+	if err != nil {
+		return err
+	}
+	if _, _, err := deliveryledger.RecordQAObservation(tx, workItemID, observation, completedAt.UTC()); err != nil {
+		return err
+	}
+	security, complete, err := securityObservationFromQA(observation)
+	if err != nil {
+		return err
+	}
+	if complete {
+		if _, _, err := deliveryledger.RecordSecurityObservation(tx, workItemID, security, completedAt.UTC()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+const (
+	securitySecretsTestKind      = "security:secrets"
+	securityHighCriticalTestKind = "security:high-critical"
+)
+
+// securityObservationFromQA promotes only operator-owned reserved command
+// identities. Missing scanners do not become an event, so the release gate
+// remains explicitly missing instead of treating an unavailable tool as pass.
+func securityObservationFromQA(observation qaevidence.Observation) (securityevidence.Observation, bool, error) {
+	if err := qaevidence.Validate(observation); err != nil {
+		return securityevidence.Observation{}, false, err
+	}
+	repositories := make([]securityevidence.Repository, 0, len(observation.Repositories))
+	for _, repository := range observation.Repositories {
+		commands := make(map[string]qaevidence.Command, len(repository.Commands))
+		for _, command := range repository.Commands {
+			commands[strings.ToLower(command.Kind)] = command
+		}
+		secretScan, hasSecretScan := commands[securitySecretsTestKind]
+		highCritical, hasHighCritical := commands[securityHighCriticalTestKind]
+		if !hasSecretScan || !hasHighCritical {
+			return securityevidence.Observation{}, false, nil
+		}
+		highFindings := 0
+		if !highCritical.Passed {
+			// The bounded command contract exposes pass/fail, not scanner details.
+			// One means at least one high-or-critical finding was observed.
+			highFindings = 1
+		}
+		repositories = append(repositories, securityevidence.Repository{
+			Reference: repository.Reference, Branch: repository.Branch, SecretScanPassed: secretScan.Passed,
+			HighFindings: highFindings, CriticalFindings: 0,
+		})
+	}
+	security := securityevidence.Observation{
+		SchemaVersion: securityevidence.SchemaVersion, TaskID: observation.TaskID, MatrixDigest: observation.MatrixDigest, Repositories: repositories,
+	}
+	if err := securityevidence.Validate(security); err != nil {
+		return securityevidence.Observation{}, false, err
+	}
+	return security, true, nil
+}
+
+func qaObservationForTask(task *models.AutomationTask, raw json.RawMessage) (uuid.UUID, qaevidence.Observation, error) {
+	if task == nil || task.ID == uuid.Nil || task.Operation != "delivery.qa" || task.DeliveryWorkItemID == nil || *task.DeliveryWorkItemID == uuid.Nil {
+		return uuid.Nil, qaevidence.Observation{}, fmt.Errorf("only a bounded QA task may append an observation")
+	}
+	observation, err := qaevidence.Decode(raw)
+	if err != nil {
+		return uuid.Nil, qaevidence.Observation{}, err
+	}
+	subject := strings.ToLower(strings.TrimSpace(task.EvidenceSubjectDigest))
+	if observation.TaskID != task.ID.String() || !strings.EqualFold(observation.MatrixDigest, subject) || !artifactDigestPattern.MatchString(subject) {
+		return uuid.Nil, qaevidence.Observation{}, fmt.Errorf("QA observation does not match its exact queued subject")
+	}
+	return *task.DeliveryWorkItemID, observation, nil
+}
+
+func releaseGateCandidateForTask(task *models.AutomationTask, raw json.RawMessage) (uuid.UUID, string, releasegate.Input, *environmentevidence.Observation, error) {
+	if task == nil || task.Operation != "delivery.release_gate" || task.DeliveryWorkItemID == nil || *task.DeliveryWorkItemID == uuid.Nil {
+		return uuid.Nil, "", releasegate.Input{}, nil, fmt.Errorf("only a bounded release Gatekeeper task may append an evaluation")
+	}
+	actor := strings.TrimSpace(task.RequestedBy)
+	if actor == "" || actor == "github-app-review" || actor == "itbem-local-agent" || actor == "itbem-github-app" {
+		return uuid.Nil, "", releasegate.Input{}, nil, fmt.Errorf("release Gatekeeper task does not have an authenticated human requester")
+	}
+	var handoff map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &handoff); err != nil || (len(handoff) != 2 && len(handoff) != 3) {
+		return uuid.Nil, "", releasegate.Input{}, nil, fmt.Errorf("release Gatekeeper execution metadata is invalid")
+	}
+	var schemaVersion int
+	if err := json.Unmarshal(handoff["schema_version"], &schemaVersion); err != nil || (schemaVersion != 1 && schemaVersion != 2) || (schemaVersion == 1 && len(handoff) != 2) || (schemaVersion == 2 && len(handoff) != 3) {
+		return uuid.Nil, "", releasegate.Input{}, nil, fmt.Errorf("release Gatekeeper execution schema is invalid")
+	}
+	input, err := releasegate.DecodeInput(handoff["gatekeeper_input"])
+	if err != nil || input.SchemaVersion != releasegate.SchemaVersion || input.Action != releasegate.ActionRelease || input.ChangeSetID != task.DeliveryWorkItemID.String() || input.HumanApproval != nil {
+		return uuid.Nil, "", releasegate.Input{}, nil, fmt.Errorf("release Gatekeeper execution candidate is invalid")
+	}
+	if schemaVersion == 1 {
+		// Rolling upgrades may finish a task on an old release worker. Accept its
+		// exact GitHub PR/check candidate but attach no environment event, so the
+		// deterministic Gatekeeper remains blocked until a schema-v2 rerun.
+		return *task.DeliveryWorkItemID, actor, input, nil, nil
+	}
+	environment, err := environmentevidence.Decode(handoff["environment_observation"])
+	subject := strings.ToLower(strings.TrimSpace(task.EvidenceSubjectDigest))
+	if err != nil || environment.TaskID != task.ID.String() || !strings.EqualFold(environment.MatrixDigest, subject) || !artifactDigestPattern.MatchString(subject) {
+		return uuid.Nil, "", releasegate.Input{}, nil, fmt.Errorf("release environment observation does not match its exact queued subject")
+	}
+	return *task.DeliveryWorkItemID, actor, input, &environment, nil
 }
 
 func buildToolExecutionLedger(cfg *models.Config, task *models.AutomationTask, runID, status string, reported []callbackToolExecution, artifacts []callbackArtifact, completedAt time.Time) ([]models.AutomationToolExecution, error) {
@@ -2364,6 +2575,7 @@ type publicationExecutionHandoff struct {
 	Worktree           string `json:"worktree"`
 	RepositoryRef      string `json:"repository_ref"`
 	Branch             string `json:"branch"`
+	TargetBranch       string `json:"target_branch"`
 	BaseSHA            string `json:"base_sha"`
 	CommitSHA          string `json:"commit_sha"`
 	RemoteRepository   string `json:"remote_repository"`
@@ -2387,9 +2599,9 @@ func persistPublicationChangeSet(tx *gorm.DB, task *models.AutomationTask, raw j
 	if err != nil || grantID == uuid.Nil || !handoff.BranchPublished {
 		return fmt.Errorf("publication execution grant or branch evidence is invalid")
 	}
-	handoff.Workspace, handoff.Worktree, handoff.RepositoryRef, handoff.Branch = strings.TrimSpace(handoff.Workspace), strings.TrimSpace(handoff.Worktree), strings.TrimSpace(handoff.RepositoryRef), strings.TrimSpace(handoff.Branch)
+	handoff.Workspace, handoff.Worktree, handoff.RepositoryRef, handoff.Branch, handoff.TargetBranch = strings.TrimSpace(handoff.Workspace), strings.TrimSpace(handoff.Worktree), strings.TrimSpace(handoff.RepositoryRef), strings.TrimSpace(handoff.Branch), strings.TrimSpace(handoff.TargetBranch)
 	handoff.BaseSHA, handoff.CommitSHA, handoff.RemoteRepository = strings.ToLower(strings.TrimSpace(handoff.BaseSHA)), strings.ToLower(strings.TrimSpace(handoff.CommitSHA)), strings.ToLower(strings.TrimSpace(handoff.RemoteRepository))
-	if !strings.HasPrefix(handoff.Workspace, "workspace://") || handoff.RepositoryRef != handoff.Workspace || handoff.Worktree != handoff.Workspace+"#"+handoff.Branch || !agentBranchPattern.MatchString(handoff.Branch) || !gitCommitSHA.MatchString(handoff.BaseSHA) || !gitCommitSHA.MatchString(handoff.CommitSHA) || !githubRepositoryPattern.MatchString(handoff.RemoteRepository) {
+	if !strings.HasPrefix(handoff.Workspace, "workspace://") || handoff.RepositoryRef != handoff.Workspace || handoff.Worktree != handoff.Workspace+"#"+handoff.Branch || !agentBranchPattern.MatchString(handoff.Branch) || !validReleaseTargetBranch(handoff.TargetBranch) || !gitCommitSHA.MatchString(handoff.BaseSHA) || !gitCommitSHA.MatchString(handoff.CommitSHA) || !githubRepositoryPattern.MatchString(handoff.RemoteRepository) {
 		return fmt.Errorf("publication execution workspace or revision is invalid")
 	}
 	var workItem models.DeliveryWorkItem
@@ -2418,7 +2630,8 @@ func persistPublicationChangeSet(tx *gorm.DB, task *models.AutomationTask, raw j
 	}
 	metadata, err := json.Marshal(map[string]any{
 		"automation_task_id": task.ID.String(), "publication_grant_id": grant.ID.String(), "base_sha": handoff.BaseSHA,
-		"remote_repository": strings.TrimSpace(handoff.RemoteRepository), "branch_published": true, "pull_request_created": handoff.PullRequestCreated,
+		"remote_repository": strings.TrimSpace(handoff.RemoteRepository), "target_branch": handoff.TargetBranch,
+		"branch_published": true, "pull_request_created": handoff.PullRequestCreated,
 		"verification_source": "itbem-github-app",
 	})
 	if err != nil {
@@ -2475,6 +2688,15 @@ func validPublicationPRURL(value, repository string) bool {
 		}
 	}
 	return parts[3] != "" && parts[3] != "0" && strings.EqualFold(parts[0]+"/"+parts[1], strings.TrimSpace(repository))
+}
+
+func validReleaseTargetBranch(value string) bool {
+	_, err := releasegate.RevisionMatrixDigest([]releasegate.Revision{{
+		Repository: "validation/repository",
+		Branch:     strings.TrimSpace(value),
+		SHA:        strings.Repeat("0", 40),
+	}})
+	return err == nil && value == strings.TrimSpace(value)
 }
 
 func pricingCatalog(cfg *models.Config) string {

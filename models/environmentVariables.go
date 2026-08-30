@@ -91,11 +91,19 @@ type Config struct {
 	// SQSAutomationQueueURL is the ITBEM-only pull queue consumed by the local
 	// AI agent. It must never point to an EventiApp worker or media queue.
 	SQSAutomationQueueURL string `required:"false"`
+	// SQSAutomationQueueLanesJSON atomically switches publication from the
+	// retained combined queue to five role-isolated queues. It must contain the
+	// complete orchestration, engineering, review, qa and release map; a partial
+	// map is rejected at startup rather than falling back per message.
+	SQSAutomationQueueLanesJSON string `required:"false"`
 	// SQSAutomationDeadLetterQueueURL is the dedicated failure queue paired
 	// with SQSAutomationQueueURL. It is read for operator health only; the API
 	// never consumes or republishes its messages automatically.
 	SQSAutomationDeadLetterQueueURL string `required:"false"`
-	AutomationInputBucket           string `required:"false"`
+	// SQSAutomationRoleDeadLetterQueueURL is the shared failure queue for the
+	// five role lanes. The API reads its depth only and never replays it.
+	SQSAutomationRoleDeadLetterQueueURL string `required:"false"`
+	AutomationInputBucket               string `required:"false"`
 	// AutomationOutputBucket stores local-agent results independently from inputs.
 	AutomationOutputBucket string `required:"false"`
 	// AutomationPricingJSON is a server-owned, versioned price catalog. It may

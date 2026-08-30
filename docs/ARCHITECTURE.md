@@ -440,6 +440,29 @@ if !ok || cfg == nil {
 
 ## Monitoring & Health
 
+- Local engineering automation is handed off through a durable outbox. The
+  publisher supports a backward-compatible combined SQS queue or an atomic
+  five-lane map (`orchestration`, `engineering`, `review`, `qa`, `release`).
+  Routing is derived only from the fail-closed operation contract in
+  `internal/agentwork`; callers cannot select a lane. A configured lane map
+  must be complete and use distinct queues, and aggregate health includes a
+  per-lane projection plus the role DLQ. Queue membership never grants source,
+  merge, release, deployment, secret, or production authority.
+  The Linux execution plane uses one hardened systemd template instance and
+  unprivileged Unix account plus a private `0700` workspace root per lane.
+  Cross-lane checkout reuse is prohibited. A separate read-only oneshot doctor
+  validates configuration without polling SQS; the Release doctor also requires
+  its GitHub App identity. On-premises lanes obtain scoped temporary AWS
+  sessions through separate IAM Roles Anywhere credential-process profiles;
+  static IAM access keys and metadata fallback are disabled. Global/per-lane filesystem kill switches prevent
+  restart, and installation never implies activation.
+
+- Merge and release policy is evaluated by `internal/releasegate` as a pure,
+  deterministic, fail-closed decision over structured exact-SHA evidence. The
+  revision matrix and resolved policy are digest-bound; model output cannot
+  waive a reason code. An allowed decision grants no side effect by itself.
+  See `docs/agent-platform/RELEASE_GATEKEEPER.md`.
+
 - Application notifications use `services/notifications` with the durable
   outbox and worker queue. `itbem-events-workers` owns Block Kit,
   SSM webhook access, HTTP delivery, retry, and DLQ behavior. The worker is

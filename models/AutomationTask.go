@@ -10,13 +10,17 @@ import (
 // request. Inputs and outputs are object references, never the heavyweight or
 // sensitive payload itself.
 type AutomationTask struct {
-	ID                  uuid.UUID  `gorm:"type:uuid;default:uuid_generate_v4();primaryKey" json:"id"`
-	JobID               uuid.UUID  `gorm:"type:uuid;not null;uniqueIndex" json:"job_id"`
-	RequestedBy         string     `gorm:"type:varchar(128);not null;index" json:"requested_by"`
-	DeliveryWorkItemID  *uuid.UUID `gorm:"type:uuid;index" json:"delivery_work_item_id,omitempty"`
-	CorrelationID       string     `gorm:"type:varchar(64);not null;index" json:"correlation_id"`
-	Operation           string     `gorm:"type:varchar(96);not null;index" json:"operation"`
-	MaxCompletionTokens int        `gorm:"not null;default:0" json:"max_completion_tokens"`
+	ID                 uuid.UUID  `gorm:"type:uuid;default:uuid_generate_v4();primaryKey" json:"id"`
+	JobID              uuid.UUID  `gorm:"type:uuid;not null;uniqueIndex" json:"job_id"`
+	RequestedBy        string     `gorm:"type:varchar(128);not null;index" json:"requested_by"`
+	DeliveryWorkItemID *uuid.UUID `gorm:"type:uuid;index" json:"delivery_work_item_id,omitempty"`
+	CorrelationID      string     `gorm:"type:varchar(64);not null;index" json:"correlation_id"`
+	Operation          string     `gorm:"type:varchar(96);not null;index" json:"operation"`
+	// EvidenceSubjectDigest binds deterministic evidence-producing work to the
+	// exact control-plane subject selected when it was enqueued (for example a
+	// coordinated repository/target/SHA matrix). It grants no capability.
+	EvidenceSubjectDigest string `gorm:"type:varchar(64);not null;default:'';index" json:"evidence_subject_digest,omitempty"`
+	MaxCompletionTokens   int    `gorm:"not null;default:0" json:"max_completion_tokens"`
 	// BudgetReservationMicros is the conservative upper bound held while this
 	// non-deterministic run is queued or running. Once it completes, the
 	// immutable execution ledger replaces the reservation with actual cost.

@@ -21,6 +21,7 @@
 | `repositories/awsrepository/CognitoRepository.go` | Cognito user admin operations |
 | `repositories/bucketrepository/BucketRepository.go` | Bucket-level operations, URL helpers |
 | `repositories/authproviderrepository/AuthProviderRepository.go` | Auth provider token validation |
+| `repositories/automationqueuerepository/AutomationQueueRepository.go` | Fail-closed local-agent SQS publication, atomic role-lane routing, and bounded queue/DLQ health |
 
 ## Domain Repositories
 

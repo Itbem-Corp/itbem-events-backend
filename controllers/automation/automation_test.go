@@ -5,7 +5,11 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"events-stocks/internal/environmentevidence"
+	"events-stocks/internal/qaevidence"
+	"events-stocks/internal/releasegate"
 	"events-stocks/models"
+	"events-stocks/repositories/automationqueuerepository"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,6 +27,90 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
+
+func TestReleaseGateCandidateForTaskRequiresAuthenticatedRequester(t *testing.T) {
+	workItemID := uuid.Must(uuid.NewV4())
+	input := releasegate.Input{
+		SchemaVersion: releasegate.SchemaVersion, Action: releasegate.ActionRelease, ChangeSetID: workItemID.String(),
+		Revisions: []releasegate.Revision{{Repository: "example/service", Branch: "feature/release", SHA: strings.Repeat("a", 40)}},
+		Policy:    releasegate.Policy{Resolved: false, RequiredTestKinds: []string{}},
+	}
+	digest, _ := releasegate.RevisionMatrixDigest(input.Revisions)
+	taskID := uuid.Must(uuid.NewV4())
+	environment := environmentevidence.Observation{SchemaVersion: environmentevidence.SchemaVersion, TaskID: taskID.String(), MatrixDigest: digest, Repositories: []environmentevidence.Repository{{Repository: "example/service", HeadSHA: strings.Repeat("a", 40), Workflow: ".github/workflows/deploy.yml", Environment: "production", RequiredSecretReferences: []string{}, RequiredVariableReferences: []string{}, WorkflowExists: true, EnvironmentExists: true, MissingSecretReferences: []string{}, MissingVariableReferences: []string{}}}}
+	raw, _ := json.Marshal(map[string]any{"schema_version": 2, "gatekeeper_input": input, "environment_observation": environment})
+	task := &models.AutomationTask{ID: taskID, Operation: "delivery.release_gate", DeliveryWorkItemID: &workItemID, RequestedBy: "cognito-human-42", EvidenceSubjectDigest: digest}
+	actualWorkItemID, actor, actual, actualEnvironment, err := releaseGateCandidateForTask(task, raw)
+	if err != nil || actualWorkItemID != workItemID || actor != task.RequestedBy || actual.HumanApproval != nil {
+		t.Fatalf("release Gatekeeper callback did not preserve its human requester boundary: %s / %s / %#v / %#v / %v", actualWorkItemID, actor, actual, actualEnvironment, err)
+	}
+	legacyRaw, _ := json.Marshal(map[string]any{"schema_version": 1, "gatekeeper_input": input})
+	_, _, _, legacyEnvironment, err := releaseGateCandidateForTask(task, legacyRaw)
+	if err != nil || legacyEnvironment != nil {
+		t.Fatalf("legacy rolling-upgrade callback should stay environment-blocked: %#v / %v", legacyEnvironment, err)
+	}
+
+	for _, invalidActor := range []string{"", "github-app-review", "itbem-local-agent", "itbem-github-app"} {
+		copy := *task
+		copy.RequestedBy = invalidActor
+		if _, _, _, _, err := releaseGateCandidateForTask(&copy, raw); err == nil {
+			t.Fatalf("technical requester %q was accepted as a human", invalidActor)
+		}
+	}
+}
+
+func TestSecurityObservationPromotesOnlyCompleteOperatorNamedQACommands(t *testing.T) {
+	observation := qaevidence.Observation{
+		SchemaVersion: qaevidence.SchemaVersion, TaskID: "11111111-1111-4111-8111-111111111111", MatrixDigest: strings.Repeat("a", 64),
+		RepositoryExecutionOrder: []string{"workspace://api", "workspace://web"},
+		Repositories: []qaevidence.Repository{
+			{Reference: "workspace://api", Branch: "itbem-agent/11111111-1111-4111-8111-111111111111", Commands: []qaevidence.Command{{Index: 0, Phase: "qa", Kind: securitySecretsTestKind, Passed: true}, {Index: 1, Phase: "qa", Kind: securityHighCriticalTestKind, Passed: true}}},
+			{Reference: "workspace://web", Branch: "itbem-agent/22222222-2222-4222-8222-222222222222", Commands: []qaevidence.Command{{Index: 0, Phase: "qa", Kind: securitySecretsTestKind, Passed: false}, {Index: 1, Phase: "qa", Kind: securityHighCriticalTestKind, Passed: false}}},
+		},
+	}
+	security, complete, err := securityObservationFromQA(observation)
+	if err != nil || !complete || len(security.Repositories) != 2 || !security.Repositories[0].SecretScanPassed || security.Repositories[1].SecretScanPassed || security.Repositories[1].HighFindings != 1 {
+		t.Fatalf("complete local security scans were not promoted: %#v / %t / %v", security, complete, err)
+	}
+	missing := observation
+	missing.Repositories = append([]qaevidence.Repository(nil), observation.Repositories...)
+	missing.Repositories[0].Commands = missing.Repositories[0].Commands[:1]
+	if _, complete, err := securityObservationFromQA(missing); err != nil || complete {
+		t.Fatalf("missing local security scanner became gate evidence: %t / %v", complete, err)
+	}
+}
+
+func TestQAObservationForTaskRequiresExactQueuedMatrix(t *testing.T) {
+	workItemID, taskID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
+	digest := strings.Repeat("a", 64)
+	task := &models.AutomationTask{ID: taskID, Operation: "delivery.qa", DeliveryWorkItemID: &workItemID, EvidenceSubjectDigest: digest}
+	observation := qaevidence.Observation{
+		SchemaVersion: qaevidence.SchemaVersion, TaskID: taskID.String(), MatrixDigest: digest, PreviewPassed: true,
+		RepositoryExecutionOrder: []string{"workspace://api"},
+		Repositories:             []qaevidence.Repository{{Reference: "workspace://api", Branch: "itbem-agent/11111111-1111-4111-8111-111111111111", Commands: []qaevidence.Command{}}},
+	}
+	raw, _ := json.Marshal(observation)
+	actualWorkItemID, actual, err := qaObservationForTask(task, raw)
+	if err != nil || actualWorkItemID != workItemID || actual.MatrixDigest != digest {
+		t.Fatalf("exact QA observation was rejected: %#v / %v", actual, err)
+	}
+	for _, mutate := range []func(*models.AutomationTask, *qaevidence.Observation){
+		func(task *models.AutomationTask, _ *qaevidence.Observation) {
+			task.EvidenceSubjectDigest = strings.Repeat("b", 64)
+		},
+		func(_ *models.AutomationTask, observation *qaevidence.Observation) {
+			observation.TaskID = uuid.Must(uuid.NewV4()).String()
+		},
+		func(task *models.AutomationTask, _ *qaevidence.Observation) { task.Operation = "delivery.release_gate" },
+	} {
+		candidateTask, candidateObservation := *task, observation
+		mutate(&candidateTask, &candidateObservation)
+		candidateRaw, _ := json.Marshal(candidateObservation)
+		if _, _, err := qaObservationForTask(&candidateTask, candidateRaw); err == nil {
+			t.Fatal("QA observation outside its task subject was accepted")
+		}
+	}
+}
 
 func TestGitHubReviewWebhookAdmissionIsExplicitAndSignatureBound(t *testing.T) {
 	cfg := &models.Config{GitHubReviewWebhookSecret: "webhook-secret", GitHubReviewRepositories: "itbem/backend, ITBEM/dashboard"}
@@ -114,6 +202,28 @@ func TestAutomationReviewIngressStatusReportsOnlySafeReadiness(t *testing.T) {
 	}
 }
 
+func TestAutomationHealthExposesLaneTelemetryWithoutInventingIt(t *testing.T) {
+	withoutTelemetry, err := json.Marshal(automationHealth{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(withoutTelemetry), `"queue_lanes"`) {
+		t.Fatalf("absent lane telemetry must remain unknown, got %s", withoutTelemetry)
+	}
+
+	withTelemetry, err := json.Marshal(automationHealth{QueueLanes: map[string]automationqueuerepository.LaneHealth{
+		"review": {Available: true, Visible: 2, InFlight: 1, Delayed: 0},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{`"queue_lanes"`, `"review"`, `"available":true`, `"visible":2`, `"in_flight":1`} {
+		if !strings.Contains(string(withTelemetry), expected) {
+			t.Fatalf("lane telemetry is missing %s: %s", expected, withTelemetry)
+		}
+	}
+}
+
 func TestValidCallbackSecretSupportsRotation(t *testing.T) {
 	t.Setenv("AUTOMATION_CALLBACK_SECRET", "current")
 	t.Setenv("AUTOMATION_CALLBACK_SECRET_PREVIOUS", "previous")
@@ -156,10 +266,23 @@ func TestValidPublicationPRURLBindsTheApprovedRepository(t *testing.T) {
 	}
 }
 
+func TestValidReleaseTargetBranchAcceptsGenericSafeBranches(t *testing.T) {
+	for _, branch := range []string{"main", "trunk", "release/v2"} {
+		if !validReleaseTargetBranch(branch) {
+			t.Fatalf("expected safe target branch accepted: %q", branch)
+		}
+	}
+	for _, branch := range []string{"", " main", "main\nother", "../main", strings.Repeat("a", 256)} {
+		if validReleaseTargetBranch(branch) {
+			t.Fatalf("expected unsafe target branch rejected: %q", branch)
+		}
+	}
+}
+
 func TestWorkerWorkspaceReadinessRejectsImpossibleOrUnboundedStates(t *testing.T) {
 	valid := []automationWorkspaceHealth{{
 		ID: "eventiapp-dashboard", Ready: true, QAReady: true, VisualQAReady: true,
-		PublicationReady: true, ValidationCommandCount: 2, QACommandCount: 1,
+		PublicationReady: true, ValidationCommandCount: 2, NamedValidationCommandCount: 2, QACommandCount: 1, NamedQACommandCount: 1,
 	}}
 	if err := validateWorkerWorkspaceReadiness(valid); err != nil {
 		t.Fatalf("expected safe readiness accepted: %v", err)
@@ -173,10 +296,40 @@ func TestWorkerWorkspaceReadinessRejectsImpossibleOrUnboundedStates(t *testing.T
 		{{ID: "qa-without-workspace", QAReady: true}},
 		{{ID: "visual-without-workspace", VisualQAReady: true}},
 		{{ID: "too-many-commands", Ready: true, ValidationCommandCount: 65}},
+		{{ID: "impossible-named-commands", Ready: true, ValidationCommandCount: 1, NamedValidationCommandCount: 2}},
 	} {
 		if err := validateWorkerWorkspaceReadiness(invalid); err == nil {
 			t.Fatalf("expected invalid readiness rejected: %#v", invalid)
 		}
+	}
+}
+
+func TestNormalizeWorkerRoleLaneKeepsLegacyVisibleAndRejectsCrossRoleIdentity(t *testing.T) {
+	if role, lane, err := normalizeWorkerRoleLane("", ""); err != nil || role != "" || lane != "" {
+		t.Fatalf("legacy combined worker rejected: %q %q %v", role, lane, err)
+	}
+	if role, lane, err := normalizeWorkerRoleLane(" reviewer ", " review "); err != nil || role != "reviewer" || lane != "review" {
+		t.Fatalf("review worker rejected: %q %q %v", role, lane, err)
+	}
+	for _, identity := range [][2]string{{"reviewer", "release"}, {"admin", "production"}, {"principal_engineer", ""}, {"", "qa"}} {
+		if _, _, err := normalizeWorkerRoleLane(identity[0], identity[1]); err == nil {
+			t.Fatalf("invalid worker identity accepted: %#v", identity)
+		}
+	}
+}
+
+func TestValidWorkerProviderAllowsProviderlessReleaseOnly(t *testing.T) {
+	if !validWorkerProvider("release_manager", "release", "", "") {
+		t.Fatal("providerless deterministic release worker was rejected")
+	}
+	if validWorkerProvider("release_manager", "release", "minimax", "MiniMax-M3") {
+		t.Fatal("release worker retained an unnecessary model credential")
+	}
+	if validWorkerProvider("reviewer", "review", "", "") {
+		t.Fatal("review worker was allowed without a model provider")
+	}
+	if !validWorkerProvider("reviewer", "review", "minimax", "MiniMax-M3") {
+		t.Fatal("configured review provider was rejected")
 	}
 }
 

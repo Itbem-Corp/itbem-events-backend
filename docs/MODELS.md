@@ -121,6 +121,14 @@ Event     Event          `gorm:"foreignKey:EventID" json:"event,omitempty"`
   agent, along with bounded context metadata such as a client-conversation
   excerpt or decision. Later edits or removal cannot silently alter approved
   context.
+- **DeliveryRepositoryOnboarding** (`models/DeliveryProjectVault.go`): Mutable,
+  human-reviewed static onboarding proposal pinned to one GitHub default-branch
+  SHA. It stores structured proposal/capability JSON, never credentials or raw
+  repository prose, and is unique by project/repository/revision.
+- **DeliveryProjectVaultRevision** (`models/DeliveryProjectVault.go`): Immutable,
+  repository-scoped curated Vault manifest with monotonic version, source SHA,
+  content digest, provenance and onboarding identity. Application hooks and a
+  PostgreSQL trigger reject update/delete; reconciliation appends a revision.
 - **DeliveryWorkItem**: Bounded request with outcome, included/excluded scope,
   acceptance criteria, generated plan, pull request and preview references.
   Its lifecycle is enforced by `services/deliveryworkflow`; human gates are
@@ -135,7 +143,49 @@ Event     Event          `gorm:"foreignKey:EventID" json:"event,omitempty"`
 - **AutomationTask**: Existing local-agent queue record. It may link to a
   `DeliveryWorkItem`; standalone legacy automation tasks remain valid. A
   completed delivery task is recorded as immutable private report evidence
-  before its plan, code, or QA review can be opened.
+  before its plan, code, or QA review can be opened. Evidence-producing tasks
+  carry an optional `EvidenceSubjectDigest` fixed at enqueue time; QA uses it
+  to bind observations to the exact multi-repository release matrix without
+  granting the task merge or release authority.
+- **DeliveryEvent** QA observation (`delivery.qa.observed.v2`): Append-only,
+  sequence-bearing result for one exact QA task and matrix digest. It stores
+  only repository execution order plus operator-owned test identities and
+  bounded validation/QA pass/fail facts; commands, output, URLs, screenshots
+  and model prose remain private objects. The release resolver accepts only a
+  completed matching task, exact workspace-to-publication/worktree mapping,
+  and each repository's effective required-test policy.
+- **DeliveryEvent** security observation (`delivery.security.observed.v1`):
+  Append-only projection of operator-configured local scanner results from a
+  completed exact-matrix QA task. It stores reviewed workspace/branch identity,
+  bounded high/critical counts, and the secret-scan result; command text,
+  output, findings, tokens, and model prose never enter the public ledger.
+  Resolution maps that identity through the consumed publication grant to each
+  exact remote repository/SHA immediately before Gatekeeper evaluation.
+  Reserved `assurance:compatibility` and `assurance:migrations` QA identities
+  are resolved from the same event into separate exact-matrix Gatekeeper
+  fields; missing per-repository commands remain missing evidence.
+  Dependency assurance combines its repository execution order with frozen
+  `DeliveryContextSnapshot` dependency edges and current released states from
+  `DeliveryWorkItemDependency`; no worker-provided dependency verdict is used.
+  Recovery evidence is reconstructed from every effective repository policy;
+  the most constrained classification becomes the exact-matrix composite and
+  irreversible recovery still requires a distinct exact-subject human grant.
+  Release policy also carries explicit, canonical names for required GitHub
+  environment secrets and variables. Empty lists are meaningful and must be
+  approved explicitly; secret values are never stored in policy, Postgres,
+  Vault manifests, event payloads, or API responses.
+- **DeliveryEvent** environment observation (`delivery.environment.observed.v1`):
+  Append-only, task- and matrix-bound readiness from the deterministic release
+  worker. It records the exact repository SHA, approved workflow/environment,
+  required names and only required names that are missing. It never stores
+  secret/variable values or GitHub's complete environment inventory. Replayed
+  callbacks are idempotent only when the canonical payload is identical.
+- **AutomationAgentHeartbeat** (`models/AutomationAgentHeartbeat.go`): Short-
+  lived, anonymized execution-plane presence. It records the declared worker
+  role/lane, provider/model, concurrency and bounded workspace readiness, but
+  never a hostname, queue URL, prompt, result, repository path or credential.
+  Empty role/lane identifies only the temporary combined worker during queue
+  migration.
 
 ---
 

@@ -100,7 +100,7 @@ func RunPublication(ctx context.Context, delivery json.RawMessage, lookup func(s
 	}
 	// Authentication is checked before the local worktree is mutated. A missing
 	// or invalid app therefore fails closed without producing a stray commit.
-	token, err := MintGitHubInstallationToken(ctx, config, nil, time.Now())
+	token, err := MintGitHubRepositoryToken(ctx, config, nil, time.Now(), auth.GitHubRepository)
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +138,8 @@ func RunPublication(ctx context.Context, delivery json.RawMessage, lookup func(s
 	}
 	result := map[string]any{
 		"grant_id": auth.GrantID, "workspace": "workspace://" + workspace.ID, "worktree": "workspace://" + workspace.ID + "#" + auth.Branch,
-		"repository_ref": auth.RepositoryRef, "branch": auth.Branch, "base_sha": strings.ToLower(auth.BaseSHA), "commit_sha": commitSHA,
+		"repository_ref": auth.RepositoryRef, "branch": auth.Branch, "target_branch": checkpoint.DefaultBranch,
+		"base_sha": strings.ToLower(auth.BaseSHA), "commit_sha": commitSHA,
 		"remote_repository": remote.Owner + "/" + remote.Name, "branch_published": true, "commit_created": committed,
 		"deployment": "not attempted; a human preview/release workflow remains required",
 	}

@@ -2,6 +2,7 @@ package models
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -34,6 +35,20 @@ func TestDeliveryMetadataSerializesAsJSONObject(t *testing.T) {
 				t.Fatalf("metadata unexpectedly empty: %s", encoded)
 			}
 		})
+	}
+}
+
+func TestDeliveryEventDoesNotSerializePrivateLedgerFields(t *testing.T) {
+	encoded, err := json.Marshal(DeliveryEvent{
+		DedupeKey: "private-dedupe", PayloadJSON: `{"token":"private-payload"}`, ActorID: "private-actor",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, private := range []string{"private-dedupe", "private-payload", "private-actor", "payload_json", "actor_id", "dedupe_key"} {
+		if strings.Contains(string(encoded), private) {
+			t.Fatalf("delivery event serialized private field %q: %s", private, encoded)
+		}
 	}
 }
 

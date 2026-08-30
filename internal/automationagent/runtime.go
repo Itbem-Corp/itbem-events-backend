@@ -2,6 +2,7 @@ package automationagent
 
 import (
 	"context"
+	"events-stocks/internal/agentwork"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -35,7 +36,10 @@ func LoadRuntimeConfig(lookup func(string) string) (RuntimeConfig, error) {
 		concurrency = parsed
 	}
 	config := RuntimeConfig{
-		WorkerConfig:   WorkerConfig{InputBucket: value("ITBEM_AI_INPUT_BUCKET"), OutputBucket: value("ITBEM_AI_OUTPUT_BUCKET")},
+		WorkerConfig: WorkerConfig{
+			InputBucket: value("ITBEM_AI_INPUT_BUCKET"), OutputBucket: value("ITBEM_AI_OUTPUT_BUCKET"),
+			Role: agentwork.Role(value("ITBEM_AI_ROLE")), Lane: agentwork.Lane(value("ITBEM_AI_QUEUE_LANE")),
+		},
 		QueueURL:       value("ITBEM_AI_QUEUE_URL"),
 		AWSRegion:      value("AWS_REGION"),
 		APIBaseURL:     strings.TrimRight(value("ITBEM_API_BASE_URL"), "/"),

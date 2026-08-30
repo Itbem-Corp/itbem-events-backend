@@ -45,13 +45,13 @@ func main() {
 		}
 		return
 	}
+	if !*smoke {
+		run()
+		return
+	}
 	config, err := automationagent.LoadProviderConfig(os.Getenv)
 	if err != nil {
 		fail(err)
-	}
-	if !*smoke {
-		run(config)
-		return
 	}
 	if os.Getenv("ITBEM_AI_ALLOW_PROVIDER_SMOKE") != "1" {
 		fail(fmt.Errorf("set ITBEM_AI_ALLOW_PROVIDER_SMOKE=1 before a billable provider smoke request"))
@@ -104,19 +104,24 @@ func doctorReport(lookup func(string) string) (map[string]any, bool, error) {
 		"ready": false, "status": "not_configured",
 		"message": "Provider execution is disabled until a valid local provider configuration is present.",
 	}
-	providerReady := false
-	if config, providerErr := automationagent.LoadProviderConfig(lookup); providerErr == nil {
-		providerReady = true
-		provider = map[string]any{"ready": true, "status": "configured", "provider": config.Provider, "model": config.Model}
-	}
 	runtime := map[string]any{
 		"ready": false, "status": "not_configured",
 		"message": "Runtime execution is disabled until queue, storage and callback configuration is present.",
 	}
 	runtimeReady := false
+	var runtimeConfig automationagent.RuntimeConfig
 	if config, runtimeErr := automationagent.LoadRuntimeConfig(lookup); runtimeErr == nil {
 		runtimeReady = true
-		runtime = map[string]any{"ready": true, "status": "configured", "concurrency": config.Concurrency}
+		runtimeConfig = config
+		runtime = map[string]any{"ready": true, "status": "configured", "concurrency": config.Concurrency, "role": config.Role, "lane": config.Lane}
+	}
+	providerReady := false
+	if runtimeReady && providerNotRequired(runtimeConfig) {
+		providerReady = true
+		provider = map[string]any{"ready": true, "status": "not_required", "message": "This deterministic release worker has no model-provider credential."}
+	} else if config, providerErr := automationagent.LoadProviderConfig(lookup); providerErr == nil {
+		providerReady = true
+		provider = map[string]any{"ready": true, "status": "configured", "provider": config.Provider, "model": config.Model}
 	}
 	publication := map[string]any{"ready": true, "status": "configured"}
 	githubAppReady := true
@@ -134,18 +139,26 @@ func doctorReport(lookup func(string) string) (map[string]any, bool, error) {
 		}
 	}
 	reviewIngress := doctorReviewIngress(lookup, githubAppReady, runtimeReady)
+	publicationRequired := runtimeReady && providerNotRequired(runtimeConfig)
+	ready := doctorExecutionReady(workspacesReady, providerReady, runtimeReady, githubAppReady, runtimeConfig)
 	report := map[string]any{
-		"ready":               workspacesReady && providerReady && runtimeReady,
-		"workspaces_ready":    workspacesReady,
-		"provider":            provider,
-		"runtime":             runtime,
-		"publication":         publication,
-		"review_ingress":      reviewIngress,
-		"workspaces":          diagnostics,
-		"provider_billable":   false,
-		"network_checks_made": false,
+		"ready":                ready,
+		"workspaces_ready":     workspacesReady,
+		"publication_required": publicationRequired,
+		"provider":             provider,
+		"runtime":              runtime,
+		"publication":          publication,
+		"review_ingress":       reviewIngress,
+		"workspaces":           diagnostics,
+		"provider_billable":    false,
+		"network_checks_made":  false,
 	}
-	return report, workspacesReady && providerReady && runtimeReady, nil
+	return report, ready, nil
+}
+
+func doctorExecutionReady(workspacesReady, providerReady, runtimeReady, githubAppReady bool, runtimeConfig automationagent.RuntimeConfig) bool {
+	publicationRequired := runtimeReady && providerNotRequired(runtimeConfig)
+	return workspacesReady && providerReady && runtimeReady && (!publicationRequired || githubAppReady)
 }
 
 // doctorReviewIngress is deliberately configuration-only. It never receives
@@ -170,8 +183,33 @@ func doctorReviewIngress(lookup func(string) string, githubAppReady, runtimeRead
 	return map[string]any{"enabled": true, "ready": true, "status": "configured", "allowed_repository_count": repositories}
 }
 
-func run(providerConfig automationagent.ProviderConfig) {
+type deterministicOnlyProvider struct{}
+
+func (deterministicOnlyProvider) Complete(context.Context, []automationagent.Message, int) (automationagent.Completion, error) {
+	return automationagent.Completion{}, fmt.Errorf("model execution is disabled for the deterministic release worker")
+}
+
+func providerNotRequired(config automationagent.RuntimeConfig) bool {
+	return config.Role == "release_manager" && config.Lane == "release"
+}
+
+func providerForRuntime(config automationagent.RuntimeConfig, lookup func(string) string) (automationagent.ProviderClient, string, string, error) {
+	if providerNotRequired(config) {
+		return deterministicOnlyProvider{}, "", "", nil
+	}
+	providerConfig, err := automationagent.LoadProviderConfig(lookup)
+	if err != nil {
+		return nil, "", "", err
+	}
+	return automationagent.NewProviderClient(providerConfig, nil), string(providerConfig.Provider), providerConfig.Model, nil
+}
+
+func run() {
 	runtimeConfig, err := automationagent.LoadRuntimeConfig(os.Getenv)
+	if err != nil {
+		fail(err)
+	}
+	provider, providerName, modelName, err := providerForRuntime(runtimeConfig, os.Getenv)
 	if err != nil {
 		fail(err)
 	}
@@ -185,7 +223,7 @@ func run(providerConfig automationagent.ProviderConfig) {
 	if err != nil {
 		fail(err)
 	}
-	worker, err := automationagent.NewWorker(runtimeConfig.WorkerConfig, automationagent.NewAWSObjectStore(runtime.S3), callback, automationagent.NewProviderClient(providerConfig, nil))
+	worker, err := automationagent.NewWorker(runtimeConfig.WorkerConfig, automationagent.NewAWSObjectStore(runtime.S3), callback, provider)
 	if err != nil {
 		fail(err)
 	}
@@ -195,15 +233,17 @@ func run(providerConfig automationagent.ProviderConfig) {
 	}
 	slog.Info(
 		"ITBEM Go AI agent started",
-		"provider", providerConfig.Provider,
-		"model", providerConfig.Model,
+		"provider", providerName,
+		"model", modelName,
 		"concurrency", runtimeConfig.Concurrency,
+		"role", runtimeConfig.Role,
+		"lane", runtimeConfig.Lane,
 		"queue_url", runtimeConfig.QueueURL,
 		"sqs_endpoint", runtimeConfig.SQSEndpoint,
 	)
 	workerID := uuid.Must(uuid.NewV4()).String()
 	startedAt := time.Now().UTC()
-	go reportHeartbeats(ctx, callback, automationagent.AgentHeartbeat{WorkerID: workerID, Provider: string(providerConfig.Provider), Model: providerConfig.Model, Concurrency: runtimeConfig.Concurrency, StartedAt: startedAt.Format(time.RFC3339)}, os.Getenv)
+	go reportHeartbeats(ctx, callback, automationagent.AgentHeartbeat{WorkerID: workerID, Provider: providerName, Model: modelName, Role: string(runtimeConfig.Role), Lane: string(runtimeConfig.Lane), Concurrency: runtimeConfig.Concurrency, StartedAt: startedAt.Format(time.RFC3339)}, os.Getenv)
 	if err := automationagent.RunQueue(ctx, worker, queue, runtimeConfig.Concurrency, slog.Default()); err != nil {
 		fail(err)
 	}

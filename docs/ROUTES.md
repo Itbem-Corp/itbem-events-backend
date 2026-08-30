@@ -53,10 +53,15 @@
 - `GET|POST /api/automation/projects` → `delivery.ListProjects` / `delivery.CreateProject`
 - `GET /api/automation/projects/:id` → `delivery.GetProject`
 - `POST /api/automation/projects/:id/context` → `delivery.CreateContext`
+- `GET /api/automation/projects/:id/repository-onboardings` → `delivery.ListRepositoryOnboardings`
+- `POST /api/automation/projects/:id/repository-onboardings/inspect` → `delivery.InspectRepositoryOnboarding` — bounded static GitHub inspection pinned to the actual default-branch SHA; creates a reviewable proposal and executes no repository code.
+- `POST /api/automation/projects/:id/repository-onboardings/:onboardingID/approve` → `delivery.ApproveRepositoryOnboarding` — explicit human/SHA gate; atomically publishes repository context and an immutable Vault revision.
+- `GET /api/automation/projects/:id/vault/revisions` → `delivery.ListProjectVaultRevisions` — append-only curated Vault history.
 - `POST /api/automation/projects/:id/work-items` → `delivery.CreateWorkItem`
 - `GET /api/automation/work-items/:id` → `delivery.GetWorkItem`
 - `GET /api/automation/work-items/:id/stream` → `delivery.StreamWorkItem` — authenticated SSE invalidation feed for live execution maps. It emits a `snapshot` on connect, then `update` only when the database-backed work-item revision changes. Its bounded payload is `{ work_item_id, revision, state, active_tasks, last_activity_at, generated_at }`; it never includes prompts, private object references, provider payloads, or task output. Connections refresh authorization after 55 seconds and clients reconnect using the SSE retry directive.
-- `POST /api/automation/work-items/:id/transitions` → `delivery.TransitionWorkItem`
+- `POST /api/automation/work-items/:id/transitions` → `delivery.TransitionWorkItem` — `approve_release` additionally requires `release_gate_event_id` for the newest, recent, deterministic `allowed` evaluation bound to this work item and the current human actor.
+- `GET /api/automation/work-items/:id/release-gate/evaluations` → `delivery.ListReleaseGateEvaluations` — integrity-checked, presentation-safe Gatekeeper history; private evidence and actor identities remain in the ledger.
 - `POST /api/automation/work-items/:id/agent-runs` → `delivery.StartAgentRun`
 - `POST /api/automation/work-items/:id/evidence` → `delivery.CreateEvidence`
 - `POST /api/automation/work-items/:id/messages` → `delivery.CreateMessage`
@@ -66,7 +71,10 @@ presigned download for private QA screenshots and other agent artifacts.
 
 Delivery submissions are deliberately gated: `submit_plan`, `submit_code_review`,
 `submit_qa` and the final `approve_release` decision require their completed
-matching agent result. Code-review submission
+matching agent result. Release approval also fails closed unless the selected
+Gatekeeper event is the newest evaluation, is no more than ten minutes old,
+reproduces an `allowed` decision for this exact work-item change-set, and carries
+the same authenticated human actor. Code-review submission
 also requires `pull_request_url` to be a valid HTTP(S) URL; `preview_ready`
 requires a valid HTTP(S) `preview_url`. These inputs are recorded with the
 append-only human decision and never authorize production release on their own.
@@ -74,6 +82,23 @@ append-only human decision and never authorize production release on their own.
 These private ITBEM routes require a platform administrator. Human gate decisions
 are append-only, and a code approval only authorizes controlled preview deployment;
 QA and production release remain independent gates.
+
+The `release_gate` agent-run phase is available only during `release_review` to
+a release-authorized human. It is routed to the providerless `release_manager`
+worker on the `release` lane. The initial candidate is derived exclusively from
+GitHub-App-published change sets covering every repository marked `changes` in
+the approved plan. The worker refreshes GitHub PR/branch/check state; completed
+exact-matrix QA tasks promote only configured local `security:secrets` and
+`security:high-critical` results into an immutable security event. The control
+plane independently reloads policy, Vault, QA, and security ledgers. Missing
+compatibility, migration, dependency, environment, or recovery evidence remains
+blocking.
+Gatekeeper schema v3 binds the human approval subject to the exact revision
+matrix, resolved policy digest, canonical Vault evidence digest, required test
+kinds, protected-branch requirements (including GitHub integration identity)
+and recovery classification. Any policy, Vault revision/reconciliation or
+required-check identity change therefore makes the previous approval stale.
+Legacy v1/v2 events remain auditable but cannot authorize a v3 action.
 
 ### Events
 - `GET /api/events/all` → `events.ListEvents` — compatibility path for dashboard list; requires auth and returns root/all or user-scoped events

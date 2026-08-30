@@ -11,14 +11,114 @@ commit, publish one reviewed branch and create its pull request only when a
 GitHub App identity and a matching short-lived human publication grant are both
 present.
 
-## Continuous single-queue operation
+The release lane also accepts `delivery.release_gate`, a providerless operation
+that evaluates a control-plane-built exact revision candidate and returns a
+bounded structured handoff. It cannot invent a human approval: the signed API
+callback binds the authenticated task requester and appends the immutable
+Gatekeeper event after re-evaluating the same subject.
 
-One local worker consumes the single private automation queue continuously.
-Every message is validated against an operation allow-list before it can reach
-the provider; SQS leases, idempotent callbacks, output reuse and visibility
-heartbeats make redelivery safe. Set `ITBEM_AI_CONCURRENCY=1` for a strictly
-serial local agent, or raise it only for independent workspaces with available
-provider capacity. The worker never shares a writable worktree between tasks.
+Remote publication resolves the repository's GitHub App installation with an
+App assertion, verifies that installation is in the configured allow-list, and
+mints a short-lived token restricted to that one repository. This supports
+authorized repositories across organizations without accidentally selecting
+the first configured installation or falling back to a user PAT/SSH key.
+
+Before a release-gate callback, the release worker also rereads every published
+PR with that repository-scoped token. A changed head, closed/draft PR,
+ambiguous change set or unbounded review history fails the run. Current base
+branch and decisive reviews replace stored mutable claims. The worker then
+combines classic protection and all active rulesets for that base branch, and
+collects bounded App check runs plus legacy commit statuses for the exact head.
+An unprotected branch, missing permission, truncated response, wrong SHA, or
+malformed integration identity fails closed instead of being treated as an
+empty requirement set.
+
+The worker deliberately does not read PostgreSQL and cannot assert project
+policy or Vault state. On callback, the control plane replaces those candidate
+fields from its append-only policy/Vault stores, computes one canonical
+multi-repository policy digest, validates every Vault manifest and reconciles
+each one to the exact GitHub head before it binds the authenticated human
+requester to the Gatekeeper subject.
+
+Publication records the GitHub default branch observed before creating the PR.
+At release time the control plane reconstructs every repository/target/SHA from
+the approved impact matrix, the GitHub App publication row, and its consumed
+human grant, then requires the fresh PR read to match it exactly. The callback
+also removes worker-supplied QA, security, compatibility, migration,
+dependency, environment, and recovery claims; those fields remain blocking
+until separate immutable evidence resolvers attach them.
+
+For `delivery.release_gate`, the backend also resolves each repository's
+approved workflow, GitHub environment, and explicit secret/variable reference
+names before enqueue. The providerless release worker verifies the workflow at
+the exact head SHA and checks environment metadata/names with a repository-
+scoped installation token. Its schema-v2 callback appends
+`delivery.environment.observed.v1`; the backend then re-resolves current policy,
+task provenance and matrix before setting environment evidence. A changed
+policy/SHA is stale, a missing required name is failed, and no secret value or
+complete GitHub inventory crosses the boundary.
+
+For `delivery.qa`, the control plane fixes the current multi-repository matrix
+digest on the task before enqueue. The runner's callback handoff contains only
+that task/matrix identity, preview status, repository execution order, reviewed
+worktree references, operator-owned test identities, and validation/QA
+pass/fail flags. It excludes commands, output, URLs, screenshots and the
+model-authored QA narrative. A task or model cannot label its own result. The
+backend strictly validates the handoff and appends `delivery.qa.observed.v2`;
+changing any release SHA leaves the historical QA event intact but makes it
+ineligible for the new matrix. The release resolver also binds every workspace
+and reviewed worktree branch to its exact GitHub App publication before a
+named test can satisfy that repository's policy.
+
+The isolated QA lane also runs the operator-configured commands identified as
+`security:secrets` and `security:high-critical` in every exact reviewed
+worktree. These identities are fixed by workspace configuration; the model
+cannot create or rename them. The completed exact-matrix callback promotes only
+their bounded pass/fail state into `delivery.security.observed.v1`. Missing
+commands yield no event, and failed scans become Gatekeeper blockers. Commands,
+output and findings stay private. This uses neither GitHub Actions nor GitHub
+Advanced Security and requires no additional GitHub App permission.
+
+The same operator-owned registry may identify commands as
+`assurance:compatibility` and `assurance:migrations`. Both must execute in every
+reviewed worktree for their coordinated Gatekeeper matrix to exist. One failure
+fails the matrix; one missing identity keeps the evidence missing. The handoff
+still exposes only command identity and pass/fail, never command text or output.
+
+Dependency readiness is not a command identity. The control plane combines the
+frozen repository DAG with the exact QA execution order and current states of
+declared prerequisite work items. Changed dependencies must run before their
+consumers and every prerequisite task must already be released; model prose or
+a worker-authored dependency verdict cannot satisfy this gate.
+
+Recovery is also control-plane-owned. Every repository's independently approved
+effective policy contributes its configured default; the resolver promotes the
+most constrained posture across the matrix. A worker cannot supply or downgrade
+it, and an irreversible composite remains blocked until a separate human grant
+is bound to that exact release subject.
+
+## Continuous role-lane operation
+
+Each long-lived worker declares one exact identity with `ITBEM_AI_ROLE` and
+`ITBEM_AI_QUEUE_LANE`: `orchestrator/orchestration`,
+`principal_engineer/engineering`, `reviewer/review`, `qa/qa`, or
+`release_manager/release`. A cross-role or partial identity fails doctor and
+startup. A message whose allow-listed operation belongs to another identity is
+rejected before input retrieval, callback lease acquisition or provider use.
+The empty identity remains accepted only while draining the retained combined
+queue during migration.
+
+The `release_manager/release` worker is deterministic and starts without any
+model API key. Its provider/model heartbeat fields must remain empty. Every
+other role, including the temporary combined worker, still requires its scoped
+model provider because it can execute at least one inference operation. This
+keeps GitHub publication authority and model credentials out of the same
+release process unless a future reviewed operation explicitly needs both.
+
+SQS leases, idempotent callbacks, output reuse and visibility heartbeats make
+redelivery safe. Set `ITBEM_AI_CONCURRENCY=1` for a strictly serial role, or
+raise it only for independent workspaces with available provider capacity. The
+worker never shares a writable worktree between tasks.
 The transport is strict: it accepts exactly one schema-versioned JSON message,
 with no unknown fields and a positive delivery attempt, before scheduling it.
 Malformed messages do not consume a model call or acquire review priority;
@@ -102,8 +202,22 @@ silently start another worker against the same local queue. `-Doctor` and
 `-SyncWorkspaces` remain concurrent, read-only/operator commands.
 
 The paired dead-letter queue is never auto-replayed. Platform health reports
-only its approximate depth, so an operator can inspect and explicitly decide
-how to recover poisoned messages without silently re-running a stale review.
+its approximate depth plus safe per-lane counters and role/lane heartbeats, so
+an operator can inspect and explicitly decide how to recover poisoned messages
+without silently re-running a stale review.
+
+For the dedicated Linux host, use the reviewed unit, installer and activation
+runbook in `deploy/systemd/`. The installer stages a SHA-addressed binary and
+root-only configuration but intentionally never starts or enables a service.
+Every lane has a private `0700` workspace root and its own registry; sharing a
+checkout across Engineer, Reviewer, QA or Release is unsupported. Preflight
+uses the separate oneshot `itbem-ai-agent-doctor@.service`, which cannot poll
+SQS or mutate the checkout. The Release doctor fails closed when its GitHub App
+identity is absent even though that lane intentionally has no model key.
+On an on-premises host, each lane uses an independent IAM Roles Anywhere
+`credential_process` profile, with EC2 metadata and long-lived shared access
+keys disabled. The AWS SDK therefore receives only renewable temporary
+sessions scoped to that lane.
 
 The only billable connectivity command is explicit and guarded:
 
@@ -126,7 +240,9 @@ them before refreshing Delivery checkpoints:
 ```
 
 This command clones a missing configured checkout, or fetches `origin`, safely
-switches it to `base_branch` (default `main`) and fast-forwards it. It refuses
+switches it to the explicitly configured `base_branch` and fast-forwards it. A
+managed registry entry must copy the branch detected during onboarding (or an
+approved override); the agent never assumes `main`. It refuses
 local changes or divergent history and never uses reset, rebase, pull or a
 task-provided remote. Refresh the project's local context afterwards so a plan
 freezes the resulting SHA. Every approved implementation still gets a distinct
@@ -149,8 +265,10 @@ available behind their normal human gates.
 	"repository_url": "https://github.com/example/dashboard.git",
 	"base_branch": "main",
 	"capabilities": ["repository:read", "repository:fetch", "worktree:create", "patch:apply"],
-    "validation_commands": [["npm", "run", "lint"], ["npm", "run", "typecheck"]],
+    "validation_commands": [["npm", "run", "test:unit"], ["npm", "run", "test:contract"]],
+    "validation_command_kinds": ["unit", "contract"],
     "qa_commands": [["npm", "run", "test:e2e"]],
+    "qa_command_kinds": ["e2e"],
     "qa_artifact_patterns": ["test-results/*.png"],
     "qa_semantic_command": ["node", "tools/stagehand-qa/run.mjs", "--url", "{preview_url}", "--output", "{artifact_path}"]
   }
@@ -160,7 +278,10 @@ available behind their normal human gates.
 The registry is operator-owned. `repository_url` is only used by the explicit
 managed-sync command; runtime task inputs can never choose it. Commands are arrays with allow-listed
 executables; no shell, arbitrary path, task prompt, or model response can add
-one. Implementation uses `git worktree` under the registered repository and
+one. Each `*_command_kinds` list must be empty or have exactly one unique,
+policy-compatible identity for every matching command. Empty lists preserve
+legacy execution but cannot satisfy named release gates. Implementation uses
+`git worktree` under the registered repository and
 leaves a reviewable branch for the human code-review gate.
 
 `qa_semantic_command` is optional. It runs the pinned, read-only Stagehand

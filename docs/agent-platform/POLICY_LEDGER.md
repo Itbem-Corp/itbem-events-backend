@@ -1,0 +1,107 @@
+# Immutable policy ledger
+
+Delivery policy persistence uses two append-only PostgreSQL ledgers:
+
+- `delivery_policy_revisions` stores one exact, digest-sealed proposal.
+- `delivery_policy_decisions` records a later human `approved` or `revoked`
+  decision for that exact revision and digest.
+
+A revision is data, not authority. Creating it does not alter effective policy.
+The tables have application hooks and PostgreSQL triggers rejecting update or
+delete. Corrections append another revision or decision.
+
+## Database safety boundary
+
+The schema rejects unsupported hierarchy levels, malformed scopes, non-object
+patch JSON, empty actors, and malformed SHA-256 values. A composite foreign key
+binds every decision to both the immutable revision ID and its stored digest;
+an approval cannot point at the right row with different content.
+
+Raw proposer and decision actor identifiers are not part of the default JSON
+projection. The patch is projected as a JSON object and malformed legacy data
+fails closed to `{}`. Future API handlers must return a purpose-built safe
+approval projection rather than exposing authentication subjects.
+
+## Effective-selection contract
+
+The subsequent selector/API increment must enforce these rules transactionally:
+
+1. proposals without a decision have no effect;
+2. at each exact hierarchy scope, the most recent decided revision is the only
+   candidate—revoking it does not silently revive an older, more permissive
+   revision;
+3. the approver must be an authorized human distinct from the proposer;
+4. repository and override scopes must be reconciled against an approved Vault
+   repository, and overrides must match the exact change set and expiry;
+5. selected rows are reconstructed as `deliverypolicy.Layer` values and passed
+   through the deterministic resolver again before use;
+6. policy resolution still grants no GitHub, queue, merge, or deployment
+   capability. The exact-SHA action adapter remains a separate boundary.
+
+The database schema intentionally precedes mutation endpoints so CI and an
+independent reviewer can inspect the immutable evidence boundary in isolation.
+
+## Deterministic row selection
+
+`internal/deliverypolicystore.ResolveEffective` implements the read-side rules
+without performing database I/O. Callers provide the authorized revision and
+decision rows; the selector verifies strict patch JSON (unknown fields are
+rejected), immutable content digests, decision-to-revision binding, decision
+timestamps and independent approval before invoking the pure hierarchy
+resolver.
+
+Input ordering cannot affect the result. Pending revisions are ignored. The
+latest decision at one exact scope wins, including a revocation. For an exact
+change set, a repository-specific override takes precedence over a project-wide
+override; revoking the repository-specific override blocks fallback to the
+broader exception. This prevents a revoke from accidentally restoring older or
+broader permissions.
+
+## Read-only project API
+
+`GET /api/automation/projects/:id/delivery-policy/effective` accepts an
+approved Vault repository and an optional exact `change_set_id`. Project view
+authorization is required before any policy rows are read. Without a change
+set, the response is an explicit configuration preview and does not consider
+overrides.
+
+The query is bounded and fails closed instead of returning a partial policy.
+Only the latest decision for each revision is loaded, then the deterministic
+selector evaluates the hierarchy. The response contains Vault provenance,
+effective fields, fixed safety floors, safe source revision/digests and missing
+configuration. Raw proposer/approver authentication subjects and policy JSON
+storage fields are deliberately absent. This endpoint cannot create revisions,
+approve policy, enqueue work, merge, or deploy.
+
+## Project management API
+
+Project policy configuration is an explicit two-person ledger workflow:
+
+- `GET /api/automation/projects/:id/delivery-policy/revisions` returns at most
+  200 safe project/repository/override proposals and their latest decision.
+- `POST /api/automation/projects/:id/delivery-policy/revisions` requires
+  project management permission and appends a digest-sealed proposal.
+- `POST /api/automation/projects/:id/delivery-policy/revisions/:revisionID/decisions`
+  requires project review permission, the exact expected digest, and appends
+  `approved` or `revoked` evidence.
+
+The project endpoint cannot create platform or organization policy. Repository
+references must already exist in the approved immutable Vault. Request and
+patch JSON use strict schemas with size limits; unknown fields, trailing JSON,
+wildcard branches, arbitrary workflow paths, invalid scopes, and overrides
+without an exact change set/reason/expiry are rejected. Overrides are limited
+to 24 hours.
+
+An approver must be a different authenticated human from the proposer. The
+revision row is locked while its latest decision is checked, so retries of an
+already-recorded state are idempotent and do not append duplicate authority.
+The state machine is monotonic (`pending → approved → revoked`): pending rows
+cannot be revoked and revoked content cannot be reactivated; correction needs
+a new revision and digest. Revocation requires a reason. Before any decision
+is inserted, the stored patch and scope are decoded again, its immutable
+digest is recomputed, and the pure resolver revalidates it. Responses never
+expose proposer or decision authentication subjects.
+
+These endpoints only configure and decide policy evidence. They cannot enqueue
+work, create GitHub reviews, merge, release, deploy, or bypass the exact-SHA
+Gatekeeper and its non-negotiable safety floors.

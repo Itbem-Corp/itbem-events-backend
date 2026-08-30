@@ -6,6 +6,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"events-stocks/internal/agentwork"
+	"events-stocks/internal/qaevidence"
+	"events-stocks/internal/releasegate"
 	"fmt"
 	"io"
 	"os"
@@ -114,6 +117,8 @@ type ArtifactReference struct {
 type WorkerConfig struct {
 	InputBucket  string
 	OutputBucket string
+	Role         agentwork.Role
+	Lane         agentwork.Lane
 }
 
 type Worker struct {
@@ -130,6 +135,9 @@ func NewWorker(config WorkerConfig, store ObjectStore, callback TaskCallback, pr
 	}
 	if store == nil || callback == nil || provider == nil {
 		return nil, fmt.Errorf("worker store, callback and provider are required")
+	}
+	if (config.Role == "") != (config.Lane == "") || (config.Role != "" && !agentwork.IsKnownRoleLane(config.Role, config.Lane)) {
+		return nil, fmt.Errorf("worker role and queue lane must form a known assignment")
 	}
 	return &Worker{config: config, store: store, callback: callback, provider: provider, now: time.Now}, nil
 }
@@ -171,19 +179,10 @@ func validateTaskMessageEnvelope(message TaskMessage) error {
 	if message.SchemaVersion != 1 || message.TenantCode != "itbem" || message.Type != "ai.local.process" || strings.TrimSpace(message.JobID) == "" || strings.TrimSpace(message.Payload.TaskID) == "" || message.Payload.Attempt < 1 {
 		return fmt.Errorf("invalid ITBEM automation message")
 	}
-	if !allowedOperation(message.Payload.Operation) {
+	if !agentwork.IsSupportedOperation(message.Payload.Operation) {
 		return fmt.Errorf("automation operation is not allowlisted")
 	}
 	return nil
-}
-
-func allowedOperation(operation string) bool {
-	switch operation {
-	case "ai.chat", "document.analyze", "code.review", "product.ideate", "delivery.plan", "delivery.implementation", "delivery.publish", "delivery.qa", "delivery.summary":
-		return true
-	default:
-		return false
-	}
 }
 
 func ParsePrivateReference(reference string) (bucket, key string, err error) {
@@ -203,6 +202,12 @@ func ParsePrivateReference(reference string) (bucket, key string, err error) {
 func (w *Worker) Process(ctx context.Context, message TaskMessage) error {
 	if err := ValidateMessage(message, w.config.InputBucket); err != nil {
 		return err
+	}
+	if w.config.Role != "" {
+		assignment, _ := agentwork.AssignmentForOperation(message.Payload.Operation)
+		if assignment.Role != w.config.Role || assignment.Lane != w.config.Lane {
+			return fmt.Errorf("automation operation is outside this worker role and queue lane")
+		}
 	}
 	runID := uuid.Must(uuid.NewV4()).String()
 	accepted, err := w.callback.Update(ctx, message.Payload.TaskID, TaskUpdate{Status: "running", RunID: runID})
@@ -237,6 +242,7 @@ func (w *Worker) Process(ctx context.Context, message TaskMessage) error {
 	}
 	var qaResult map[string]any
 	var qaArtifacts []LocalArtifact
+	var qaExecution map[string]any
 	if message.Payload.Operation == "delivery.publish" {
 		publication, runErr := RunPublication(ctx, input.Delivery, os.Getenv)
 		if runErr != nil {
@@ -258,8 +264,38 @@ func (w *Worker) Process(ctx context.Context, message TaskMessage) error {
 		_, err = w.callback.Update(ctx, message.Payload.TaskID, TaskUpdate{Status: "completed", RunID: runID, OutputRef: outputRef, Execution: publicationHandoff(publication), Deterministic: true})
 		return err
 	}
+	if message.Payload.Operation == "delivery.release_gate" {
+		gateInput, runErr := RunReleaseGateWithGitHub(ctx, input.Delivery, os.Getenv)
+		if runErr != nil {
+			return w.fail(ctx, message.Payload.TaskID, runID, runErr)
+		}
+		environment, runErr := RunReleaseEnvironmentWithGitHub(ctx, input.Delivery, gateInput, message.Payload.TaskID, os.Getenv)
+		if runErr != nil {
+			return w.fail(ctx, message.Payload.TaskID, runID, runErr)
+		}
+		handoff := releaseGateHandoff(gateInput, environment)
+		output := map[string]any{
+			"schema_version": 1, "task_id": message.Payload.TaskID, "operation": message.Payload.Operation,
+			"deterministic": true, "structured_result": map[string]any{"state": "evaluated"}, "execution": handoff,
+			"created_at": w.now().UTC().Format(time.RFC3339Nano),
+		}
+		encoded, err := json.Marshal(output)
+		if err != nil {
+			return w.fail(ctx, message.Payload.TaskID, runID, fmt.Errorf("automation result could not be encoded"))
+		}
+		outputRef, err := w.storeExecutionResult(ctx, message.Payload.TaskID, runID, encoded)
+		if err != nil {
+			return err
+		}
+		_, err = w.callback.Update(ctx, message.Payload.TaskID, TaskUpdate{Status: "completed", RunID: runID, OutputRef: outputRef, Execution: handoff, Deterministic: true})
+		return err
+	}
 	if message.Payload.Operation == "delivery.qa" {
 		qaResult, qaArtifacts, err = RunQA(ctx, message.Payload.TaskID, input.Delivery, os.Getenv)
+		if err != nil {
+			return w.fail(ctx, message.Payload.TaskID, runID, err)
+		}
+		qaExecution, err = qaExecutionHandoff(message.Payload.TaskID, input.Delivery, qaResult)
 		if err != nil {
 			return w.fail(ctx, message.Payload.TaskID, runID, err)
 		}
@@ -301,6 +337,9 @@ func (w *Worker) Process(ctx context.Context, message TaskMessage) error {
 	artifactReferences := []ArtifactReference(nil)
 	toolExecutions := []ToolExecution(nil)
 	execution := map[string]any(nil)
+	if message.Payload.Operation == "delivery.qa" {
+		execution = qaExecution
+	}
 	if message.Payload.Operation == "delivery.plan" {
 		structuredResult, err = ParseDeliveryPlan(completion.Content)
 		if err != nil {
@@ -524,12 +563,88 @@ func implementationHandoffSingle(result map[string]any) map[string]any {
 // command text. The full private result remains encrypted in object storage.
 func publicationHandoff(result map[string]any) map[string]any {
 	handoff := map[string]any{}
-	for _, key := range []string{"grant_id", "workspace", "worktree", "repository_ref", "branch", "base_sha", "commit_sha", "remote_repository", "branch_published", "commit_created", "pull_request_url", "pull_request_created"} {
+	for _, key := range []string{"grant_id", "workspace", "worktree", "repository_ref", "branch", "target_branch", "base_sha", "commit_sha", "remote_repository", "branch_published", "commit_created", "pull_request_url", "pull_request_created"} {
 		if value, ok := result[key]; ok {
 			handoff[key] = value
 		}
 	}
 	return handoff
+}
+
+// qaExecutionHandoff projects only deterministic command outcomes and their
+// pre-bound matrix identity. Raw commands, output, URLs, screenshots and model
+// prose stay in encrypted object storage.
+func qaExecutionHandoff(taskID string, delivery json.RawMessage, result map[string]any) (map[string]any, error) {
+	var envelope struct {
+		Gatekeeper *releasegate.Input `json:"gatekeeper"`
+	}
+	if err := json.Unmarshal(delivery, &envelope); err != nil || envelope.Gatekeeper == nil {
+		return nil, fmt.Errorf("QA execution requires an exact control-plane matrix")
+	}
+	matrixDigest, err := releasegate.RevisionMatrixDigest(envelope.Gatekeeper.Revisions)
+	if err != nil {
+		return nil, fmt.Errorf("QA execution matrix is invalid")
+	}
+	preview, ok := result["preview"].(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("QA preview observation is invalid")
+	}
+	previewPassed, ok := preview["passed"].(bool)
+	if !ok {
+		return nil, fmt.Errorf("QA preview observation is invalid")
+	}
+	order, ok := result["repository_execution_order"].([]string)
+	if !ok {
+		return nil, fmt.Errorf("QA repository execution order is invalid")
+	}
+	runs, ok := result["repository_runs"].([]any)
+	if !ok {
+		return nil, fmt.Errorf("QA repository observations are invalid")
+	}
+	observation := qaevidence.Observation{
+		SchemaVersion: qaevidence.SchemaVersion, TaskID: strings.ToLower(strings.TrimSpace(taskID)), MatrixDigest: matrixDigest,
+		PreviewPassed: previewPassed, RepositoryExecutionOrder: append([]string(nil), order...), Repositories: make([]qaevidence.Repository, 0, len(runs)),
+	}
+	for _, rawRun := range runs {
+		run, ok := rawRun.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("QA repository observation is invalid")
+		}
+		repository := qaevidence.Repository{Reference: strings.TrimSpace(qaStringValue(run["workspace"])), Branch: strings.TrimSpace(qaStringValue(run["branch"])), Commands: []qaevidence.Command{}}
+		commands, ok := run["commands"].([]any)
+		if !ok {
+			return nil, fmt.Errorf("QA command observations are invalid")
+		}
+		for index, rawCommand := range commands {
+			command, ok := rawCommand.(map[string]any)
+			phase, phaseOK := command["phase"].(string)
+			kind, kindOK := command["kind"].(string)
+			passed, passedOK := command["passed"].(bool)
+			if !ok || !phaseOK || !kindOK || !passedOK {
+				return nil, fmt.Errorf("QA command observation is invalid")
+			}
+			repository.Commands = append(repository.Commands, qaevidence.Command{Index: index, Phase: strings.TrimSpace(phase), Kind: strings.TrimSpace(kind), Passed: passed})
+		}
+		observation.Repositories = append(observation.Repositories, repository)
+	}
+	canonical, err := qaevidence.Canonical(observation)
+	if err != nil {
+		return nil, err
+	}
+	encoded, err := json.Marshal(canonical)
+	if err != nil {
+		return nil, fmt.Errorf("QA observation could not be encoded")
+	}
+	var handoff map[string]any
+	if err := json.Unmarshal(encoded, &handoff); err != nil {
+		return nil, fmt.Errorf("QA observation could not be projected")
+	}
+	return handoff, nil
+}
+
+func qaStringValue(value any) string {
+	result, _ := value.(string)
+	return result
 }
 
 // storeExecutionResult gives every worker lease an immutable response object.
@@ -679,7 +794,7 @@ func CompletionTokensForOperation(operation string) int {
 		return DefaultCompletionTokens
 	case "delivery.implementation":
 		return miniMaxM3CompletionLimit
-	case "delivery.publish":
+	case "delivery.publish", "delivery.release_gate":
 		return 0
 	}
 	return DefaultCompletionTokens

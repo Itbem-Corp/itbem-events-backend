@@ -65,6 +65,10 @@ var modelsWithoutSeed = []interface{}{
 	&models.DeliveryProject{},
 	&models.DeliveryProjectMember{},
 	&models.DeliveryContextSource{},
+	&models.DeliveryRepositoryOnboarding{},
+	&models.DeliveryProjectVaultRevision{},
+	&models.DeliveryPolicyRevision{},
+	&models.DeliveryPolicyDecision{},
 	&models.DeliveryRequest{},
 	&models.DeliveryDecomposition{},
 	&models.DeliveryWorkItem{},
@@ -75,6 +79,7 @@ var modelsWithoutSeed = []interface{}{
 	&models.DeliveryPublicationGrant{},
 	&models.DeliveryGate{},
 	&models.DeliveryEvidence{},
+	&models.DeliveryEvent{},
 	&models.DeliveryMessage{},
 	&models.DeliveryRelease{},
 	&models.EventPhrase{},
@@ -274,6 +279,70 @@ func migrateModels(db *gorm.DB) error {
 		for _, statement := range ledgerStatements {
 			if err := tx.Exec(statement).Error; err != nil {
 				return fmt.Errorf("protect automation ledger: %w", err)
+			}
+		}
+		// Approved Vault revisions are immutable evidence. Reconciliation creates
+		// a new version; it never rewrites the historical state used by an agent,
+		// reviewer, QA run or release gate.
+		vaultStatements := []string{
+			`CREATE OR REPLACE FUNCTION prevent_delivery_vault_revision_mutation()
+			 RETURNS trigger AS $$
+			 BEGIN
+			   RAISE EXCEPTION 'delivery_project_vault_revisions are append-only';
+			 END;
+			 $$ LANGUAGE plpgsql`,
+			"DROP TRIGGER IF EXISTS delivery_project_vault_revisions_append_only ON delivery_project_vault_revisions",
+			`CREATE TRIGGER delivery_project_vault_revisions_append_only
+			 BEFORE UPDATE OR DELETE ON delivery_project_vault_revisions
+			 FOR EACH ROW EXECUTE FUNCTION prevent_delivery_vault_revision_mutation()`,
+		}
+		for _, statement := range vaultStatements {
+			if err := tx.Exec(statement).Error; err != nil {
+				return fmt.Errorf("protect project Vault revisions: %w", err)
+			}
+		}
+		// Policy content and its human decisions are separate append-only ledgers.
+		// A proposed revision has no authority until a later decision binds its
+		// exact digest; neither history can be rewritten by normal application DML.
+		policyStatements := []string{
+			`CREATE OR REPLACE FUNCTION prevent_delivery_policy_mutation()
+			 RETURNS trigger AS $$
+			 BEGIN
+			   RAISE EXCEPTION 'delivery policy ledgers are append-only';
+			 END;
+			 $$ LANGUAGE plpgsql`,
+			"DROP TRIGGER IF EXISTS delivery_policy_revisions_append_only ON delivery_policy_revisions",
+			`CREATE TRIGGER delivery_policy_revisions_append_only
+			 BEFORE UPDATE OR DELETE ON delivery_policy_revisions
+			 FOR EACH ROW EXECUTE FUNCTION prevent_delivery_policy_mutation()`,
+			"DROP TRIGGER IF EXISTS delivery_policy_decisions_append_only ON delivery_policy_decisions",
+			`CREATE TRIGGER delivery_policy_decisions_append_only
+			 BEFORE UPDATE OR DELETE ON delivery_policy_decisions
+			 FOR EACH ROW EXECUTE FUNCTION prevent_delivery_policy_mutation()`,
+		}
+		for _, statement := range policyStatements {
+			if err := tx.Exec(statement).Error; err != nil {
+				return fmt.Errorf("protect delivery policy ledgers: %w", err)
+			}
+		}
+		// Delivery events are the sequence-bearing operational history used by
+		// resumable read models. Corrections append a new event; no application
+		// path may rewrite or delete an earlier Gatekeeper decision.
+		deliveryEventStatements := []string{
+			`CREATE OR REPLACE FUNCTION prevent_delivery_event_mutation()
+			 RETURNS trigger AS $$
+			 BEGIN
+			   RAISE EXCEPTION 'delivery_events are append-only';
+			 END;
+			 $$ LANGUAGE plpgsql`,
+			"DROP TRIGGER IF EXISTS delivery_events_append_only ON delivery_events",
+			`CREATE TRIGGER delivery_events_append_only
+			 BEFORE UPDATE OR DELETE ON delivery_events
+			 FOR EACH ROW EXECUTE FUNCTION prevent_delivery_event_mutation()`,
+		}
+		for _, statement := range deliveryEventStatements {
+			if err := tx.Exec(statement).Error; err != nil {
+				return fmt.Errorf("protect delivery event ledger: %w", err)
 			}
 		}
 		return nil

@@ -19,6 +19,8 @@ func clearSecurityEnvironment(t *testing.T) {
 		"ORGANIZATION_CONTEXT_SECRET_PREVIOUS",
 		"INTERNAL_API_SECRET_PREVIOUS",
 		"SQS_AUTOMATION_QUEUE_URL",
+		"SQS_AUTOMATION_QUEUE_LANES_JSON",
+		"SQS_AUTOMATION_ROLE_DEAD_LETTER_QUEUE_URL",
 		"AUTOMATION_INPUT_BUCKET",
 		"AUTOMATION_OUTPUT_BUCKET",
 		"AUTOMATION_CALLBACK_SECRET",
@@ -117,6 +119,19 @@ func TestValidateSecurityConfigurationRequiresAutomationCallbackSecret(t *testin
 	t.Setenv("AUTOMATION_INPUT_BUCKET", "itbem-ai-inputs-prod-123-us-east-1")
 	t.Setenv("AUTOMATION_OUTPUT_BUCKET", "eventiapp-media")
 	require.ErrorContains(t, ValidateSecurityConfiguration(), "AUTOMATION_OUTPUT_BUCKET")
+}
+
+func TestValidateSecurityConfigurationTreatsRoleLanesAsAutomation(t *testing.T) {
+	clearSecurityEnvironment(t)
+	t.Setenv("ENV", "production")
+	t.Setenv("EVENT_PREVIEW_SECRET", strings.Repeat("p", 32))
+	t.Setenv("EVENT_ACCESS_SECRET", strings.Repeat("a", 32))
+	t.Setenv("INTERNAL_API_SECRET", strings.Repeat("i", 32))
+	t.Setenv("ORGANIZATION_CONTEXT_SECRET", strings.Repeat("o", 32))
+	t.Setenv("SQS_AUTOMATION_QUEUE_LANES_JSON", `{"orchestration":"queue"}`)
+	t.Setenv("AUTOMATION_INPUT_BUCKET", "itbem-ai-inputs-prod-123-us-east-1")
+	t.Setenv("AUTOMATION_OUTPUT_BUCKET", "itbem-ai-outputs-prod-123-us-east-1")
+	require.ErrorContains(t, ValidateSecurityConfiguration(), "AUTOMATION_CALLBACK_SECRET")
 }
 
 func TestValidateSecurityConfigurationRejectsStaticAWSCredentialsInDeployments(t *testing.T) {

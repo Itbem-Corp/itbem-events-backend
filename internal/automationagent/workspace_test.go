@@ -37,6 +37,48 @@ func TestLoadWorkspacesProvidesBoundedSecretFreeContext(t *testing.T) {
 	}
 }
 
+func TestLoadWorkspaceRegistryRequiresExplicitManagedDefaultBranch(t *testing.T) {
+	root := filepath.ToSlash(filepath.Join(t.TempDir(), "managed"))
+	if err := os.MkdirAll(filepath.FromSlash(root), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{
+		`{"demo":{"path":"` + root + `","repository_url":"https://example.invalid/demo.git","capabilities":["repository:read","repository:fetch"]}}`,
+		`{"demo":{"path":"` + root + `","base_branch":"trunk","capabilities":["repository:read","repository:fetch"]}}`,
+	} {
+		if _, err := LoadWorkspaceRegistry(raw); err == nil || !strings.Contains(err.Error(), "configured together") {
+			t.Fatalf("partial managed workspace identity was accepted: %s / %v", raw, err)
+		}
+	}
+	valid := `{"demo":{"path":"` + root + `","repository_url":"https://example.invalid/demo.git","base_branch":"trunk","capabilities":["repository:read","repository:fetch"]}}`
+	workspaces, err := LoadWorkspaceRegistry(valid)
+	if err != nil || workspaces["demo"].Config.BaseBranch != "trunk" {
+		t.Fatalf("explicit non-main branch was not preserved: %#v / %v", workspaces, err)
+	}
+}
+
+func TestLoadWorkspacesBindsUniqueOperatorOwnedTestKindsByPosition(t *testing.T) {
+	root := filepath.ToSlash(t.TempDir())
+	valid := `{"demo":{"path":"` + root + `","validation_commands":[["go","test","./..."]],"validation_command_kinds":["unit"],"qa_commands":[["npm","run","test:e2e"]],"qa_command_kinds":["e2e"]}}`
+	workspaces, err := LoadWorkspaces(valid)
+	if err != nil || workspaces["demo"].Config.ValidationCommandKinds[0] != "unit" || workspaces["demo"].Config.QACommandKinds[0] != "e2e" {
+		t.Fatalf("valid named command registry was rejected: %#v / %v", workspaces, err)
+	}
+	for _, raw := range []string{
+		`{"demo":{"path":"` + root + `","validation_commands":[["go","test","./..."]],"validation_command_kinds":["unit","contract"]}}`,
+		`{"demo":{"path":"` + root + `","validation_commands":[["go","test","./..."]],"validation_command_kinds":["unit"],"qa_commands":[["npm","test"]],"qa_command_kinds":["UNIT"]}}`,
+		`{"demo":{"path":"` + root + `","qa_commands":[["npm","test"]],"qa_command_kinds":[" unsafe"]}}`,
+	} {
+		if _, err := LoadWorkspaces(raw); err == nil {
+			t.Fatalf("unsafe named command registry was accepted: %s", raw)
+		}
+	}
+	legacy := `{"demo":{"path":"` + root + `","validation_commands":[["go","test","./..."]]}}`
+	if _, err := LoadWorkspaces(legacy); err != nil {
+		t.Fatalf("legacy unlabeled commands should remain executable but non-gating: %v", err)
+	}
+}
+
 func TestDescribeWorkspaceExcludesCredentialLikeFilesAndDirectories(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Mkdir(filepath.Join(root, "secrets"), 0700); err != nil {
@@ -368,10 +410,11 @@ func TestFetchWorkspaceRemoteUpdatesRefsWithoutChangingCheckout(t *testing.T) {
 	}
 }
 
-func TestSyncManagedWorkspaceClonesFastForwardsAndRejectsDirtyCheckout(t *testing.T) {
+func TestSyncManagedWorkspaceSupportsNonMainBranchAndRejectsDirtyCheckout(t *testing.T) {
 	remote := filepath.Join(t.TempDir(), "origin.git")
 	seed := t.TempDir()
-	for _, command := range [][]string{{"git", "init", "--bare", remote}, {"git", "init", "-b", "main"}, {"git", "config", "user.email", "test@example.invalid"}, {"git", "config", "user.name", "ITBEM Test"}} {
+	const baseBranch = "trunk"
+	for _, command := range [][]string{{"git", "init", "--bare", remote}, {"git", "init", "-b", baseBranch}, {"git", "config", "user.email", "test@example.invalid"}, {"git", "config", "user.name", "ITBEM Test"}} {
 		result, err := runLocal(context.Background(), seed, commandTimeout, "", command[0], command[1:]...)
 		if err != nil || result.ExitCode != 0 {
 			t.Fatalf("git setup failed: %#v / %v", result, err)
@@ -380,30 +423,30 @@ func TestSyncManagedWorkspaceClonesFastForwardsAndRejectsDirtyCheckout(t *testin
 	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("one\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	for _, command := range [][]string{{"git", "add", "README.md"}, {"git", "commit", "-m", "initial"}, {"git", "remote", "add", "origin", remote}, {"git", "push", "-u", "origin", "main"}} {
+	for _, command := range [][]string{{"git", "add", "README.md"}, {"git", "commit", "-m", "initial"}, {"git", "remote", "add", "origin", remote}, {"git", "push", "-u", "origin", baseBranch}} {
 		result, err := runLocal(context.Background(), seed, commandTimeout, "", command[0], command[1:]...)
 		if err != nil || result.ExitCode != 0 {
 			t.Fatalf("seed push failed: %#v / %v", result, err)
 		}
 	}
 	root := filepath.Join(t.TempDir(), "managed", "project")
-	workspace := Workspace{ID: "managed", Root: root, Config: WorkspaceConfig{RepositoryURL: remote, BaseBranch: "main", Capabilities: []string{WorkspaceCapabilityReadRepository, WorkspaceCapabilityFetchRemote}}}
+	workspace := Workspace{ID: "managed", Root: root, Config: WorkspaceConfig{RepositoryURL: remote, BaseBranch: baseBranch, Capabilities: []string{WorkspaceCapabilityReadRepository, WorkspaceCapabilityFetchRemote}}}
 	state, err := SyncManagedWorkspace(context.Background(), workspace)
-	if err != nil || !state.Available || state.Branch != "main" || state.HasLocalChanges {
+	if err != nil || !state.Available || state.Branch != baseBranch || state.HasLocalChanges {
 		t.Fatalf("managed clone was not ready: %#v / %v", state, err)
 	}
 	firstSHA := state.HeadSHA
 	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("two\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	for _, command := range [][]string{{"git", "add", "README.md"}, {"git", "commit", "-m", "advance"}, {"git", "push", "origin", "main"}} {
+	for _, command := range [][]string{{"git", "add", "README.md"}, {"git", "commit", "-m", "advance"}, {"git", "push", "origin", baseBranch}} {
 		result, runErr := runLocal(context.Background(), seed, commandTimeout, "", command[0], command[1:]...)
 		if runErr != nil || result.ExitCode != 0 {
 			t.Fatalf("seed advance failed: %#v / %v", result, runErr)
 		}
 	}
 	state, err = SyncManagedWorkspace(context.Background(), workspace)
-	if err != nil || state.HeadSHA == firstSHA || state.Branch != "main" {
+	if err != nil || state.HeadSHA == firstSHA || state.Branch != baseBranch {
 		t.Fatalf("managed checkout did not fast-forward: %#v / %v", state, err)
 	}
 	if err := os.WriteFile(filepath.Join(root, "local.txt"), []byte("do not overwrite"), 0600); err != nil {
@@ -504,7 +547,7 @@ func TestWorkspaceReadinessSnapshotIsSafeAndRepresentsQAAndPublicationCapabiliti
 	}
 	readiness, err := WorkspaceReadinessSnapshot(func(key string) string {
 		if key == "ITBEM_AI_WORKSPACES_JSON" {
-			return `{"dashboard":{"path":"` + filepath.ToSlash(root) + `","capabilities":["repository:read","worktree:create","patch:apply","commit:stage","branch:publish","pull_request:create"],"validation_commands":[["go","test","./..."]],"qa_commands":[["go","test","./..."]],"qa_semantic_command":["node","runner.mjs","--url","{preview_url}","--output","{artifact_path}","--plan","{qa_plan_path}"]}}`
+			return `{"dashboard":{"path":"` + filepath.ToSlash(root) + `","capabilities":["repository:read","worktree:create","patch:apply","commit:stage","branch:publish","pull_request:create"],"validation_commands":[["go","test","./..."]],"validation_command_kinds":["unit"],"qa_commands":[["go","test","./..."]],"qa_command_kinds":["integration"],"qa_semantic_command":["node","runner.mjs","--url","{preview_url}","--output","{artifact_path}","--plan","{qa_plan_path}"]}}`
 		}
 		return ""
 	})
@@ -512,7 +555,7 @@ func TestWorkspaceReadinessSnapshotIsSafeAndRepresentsQAAndPublicationCapabiliti
 		t.Fatalf("workspace readiness: %#v / %v", readiness, err)
 	}
 	entry := readiness[0]
-	if entry.ID != "dashboard" || !entry.Ready || !entry.QAReady || !entry.VisualQAReady || !entry.PublicationReady || entry.ValidationCommandCount != 1 || entry.QACommandCount != 1 {
+	if entry.ID != "dashboard" || !entry.Ready || !entry.QAReady || !entry.VisualQAReady || !entry.PublicationReady || entry.ValidationCommandCount != 1 || entry.NamedValidationCommandCount != 1 || entry.QACommandCount != 1 || entry.NamedQACommandCount != 1 {
 		t.Fatalf("unexpected readiness projection: %#v", entry)
 	}
 	encoded, err := json.Marshal(entry)
@@ -594,7 +637,7 @@ func TestWorkspaceContextExposesOnlySafeHarnessCapabilities(t *testing.T) {
 	root := t.TempDir()
 	workspace, err := RegisteredWorkspace("workspace://demo", func(key string) string {
 		if key == "ITBEM_AI_WORKSPACES_JSON" {
-			return `{"demo":{"path":"` + filepath.ToSlash(root) + `","validation_commands":[["go","test","./..."]],"qa_commands":[["npm","run","test:e2e"]],"qa_artifact_patterns":["test-results/*.xml"],"qa_screenshot_command":["npx","capture","{preview_url}","{artifact_path}"],"qa_semantic_command":["node","tools/stagehand-qa/run.mjs","--url","{preview_url}","--output","{artifact_path}"]}}`
+			return `{"demo":{"path":"` + filepath.ToSlash(root) + `","validation_commands":[["go","test","./..."]],"validation_command_kinds":["unit"],"qa_commands":[["npm","run","test:e2e"]],"qa_command_kinds":["e2e"],"qa_artifact_patterns":["test-results/*.xml"],"qa_screenshot_command":["npx","capture","{preview_url}","{artifact_path}"],"qa_semantic_command":["node","tools/stagehand-qa/run.mjs","--url","{preview_url}","--output","{artifact_path}"]}}`
 		}
 		return ""
 	})
@@ -605,7 +648,7 @@ func TestWorkspaceContextExposesOnlySafeHarnessCapabilities(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if context.Harness.ValidationCommandCount != 1 || context.Harness.QACommandCount != 1 || !context.Harness.ArtifactCollection || context.Harness.ScreenshotMode != "configured_command" || context.Harness.SemanticQAMode != "configured_command" {
+	if context.Harness.ValidationCommandCount != 1 || context.Harness.NamedValidationCommandCount != 1 || context.Harness.QACommandCount != 1 || context.Harness.NamedQACommandCount != 1 || !context.Harness.ArtifactCollection || context.Harness.ScreenshotMode != "configured_command" || context.Harness.SemanticQAMode != "configured_command" {
 		t.Fatalf("safe harness profile is incomplete: %#v", context.Harness)
 	}
 	encoded, err := json.Marshal(context)
