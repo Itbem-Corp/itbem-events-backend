@@ -37,6 +37,7 @@ itbem-events-backend/
 | `configuration/cors.go` | CORS settings |
 | `configuration/redis.go` | Redis connection |
 | `docs/agent-platform/DOMAIN_AND_THREAT_MODEL.md` | Multi-agent invariants, role separation, gates and threats |
+| `docs/agent-platform/QUALIFICATION.md` | Executable local, staging, production and recovery qualification gates |
 
 ## Models (`models/*.go`)
 

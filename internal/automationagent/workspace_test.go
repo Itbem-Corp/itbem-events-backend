@@ -390,10 +390,11 @@ func TestFetchWorkspaceRemoteUpdatesRefsWithoutChangingCheckout(t *testing.T) {
 	}
 }
 
-func TestSyncManagedWorkspaceClonesFastForwardsAndRejectsDirtyCheckout(t *testing.T) {
+func TestSyncManagedWorkspaceSupportsNonMainBranchAndRejectsDirtyCheckout(t *testing.T) {
 	remote := filepath.Join(t.TempDir(), "origin.git")
 	seed := t.TempDir()
-	for _, command := range [][]string{{"git", "init", "--bare", remote}, {"git", "init", "-b", "main"}, {"git", "config", "user.email", "test@example.invalid"}, {"git", "config", "user.name", "ITBEM Test"}} {
+	const baseBranch = "trunk"
+	for _, command := range [][]string{{"git", "init", "--bare", remote}, {"git", "init", "-b", baseBranch}, {"git", "config", "user.email", "test@example.invalid"}, {"git", "config", "user.name", "ITBEM Test"}} {
 		result, err := runLocal(context.Background(), seed, commandTimeout, "", command[0], command[1:]...)
 		if err != nil || result.ExitCode != 0 {
 			t.Fatalf("git setup failed: %#v / %v", result, err)
@@ -402,30 +403,30 @@ func TestSyncManagedWorkspaceClonesFastForwardsAndRejectsDirtyCheckout(t *testin
 	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("one\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	for _, command := range [][]string{{"git", "add", "README.md"}, {"git", "commit", "-m", "initial"}, {"git", "remote", "add", "origin", remote}, {"git", "push", "-u", "origin", "main"}} {
+	for _, command := range [][]string{{"git", "add", "README.md"}, {"git", "commit", "-m", "initial"}, {"git", "remote", "add", "origin", remote}, {"git", "push", "-u", "origin", baseBranch}} {
 		result, err := runLocal(context.Background(), seed, commandTimeout, "", command[0], command[1:]...)
 		if err != nil || result.ExitCode != 0 {
 			t.Fatalf("seed push failed: %#v / %v", result, err)
 		}
 	}
 	root := filepath.Join(t.TempDir(), "managed", "project")
-	workspace := Workspace{ID: "managed", Root: root, Config: WorkspaceConfig{RepositoryURL: remote, BaseBranch: "main", Capabilities: []string{WorkspaceCapabilityReadRepository, WorkspaceCapabilityFetchRemote}}}
+	workspace := Workspace{ID: "managed", Root: root, Config: WorkspaceConfig{RepositoryURL: remote, BaseBranch: baseBranch, Capabilities: []string{WorkspaceCapabilityReadRepository, WorkspaceCapabilityFetchRemote}}}
 	state, err := SyncManagedWorkspace(context.Background(), workspace)
-	if err != nil || !state.Available || state.Branch != "main" || state.HasLocalChanges {
+	if err != nil || !state.Available || state.Branch != baseBranch || state.HasLocalChanges {
 		t.Fatalf("managed clone was not ready: %#v / %v", state, err)
 	}
 	firstSHA := state.HeadSHA
 	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("two\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	for _, command := range [][]string{{"git", "add", "README.md"}, {"git", "commit", "-m", "advance"}, {"git", "push", "origin", "main"}} {
+	for _, command := range [][]string{{"git", "add", "README.md"}, {"git", "commit", "-m", "advance"}, {"git", "push", "origin", baseBranch}} {
 		result, runErr := runLocal(context.Background(), seed, commandTimeout, "", command[0], command[1:]...)
 		if runErr != nil || result.ExitCode != 0 {
 			t.Fatalf("seed advance failed: %#v / %v", result, runErr)
 		}
 	}
 	state, err = SyncManagedWorkspace(context.Background(), workspace)
-	if err != nil || state.HeadSHA == firstSHA || state.Branch != "main" {
+	if err != nil || state.HeadSHA == firstSHA || state.Branch != baseBranch {
 		t.Fatalf("managed checkout did not fast-forward: %#v / %v", state, err)
 	}
 	if err := os.WriteFile(filepath.Join(root, "local.txt"), []byte("do not overwrite"), 0600); err != nil {

@@ -223,6 +223,16 @@ func TestValidateApprovedBrowserQAPlanRejectsUnsafeOrUnapprovedSteps(t *testing.
 
 func TestRunQAAttachesConfiguredSemanticReportAndScreenshot(t *testing.T) {
 	root := t.TempDir()
+	captureProgram := `package main
+import (
+  "encoding/base64"
+  "os"
+)
+func main() {
+  if len(os.Args) != 3 { os.Exit(2) }
+  body, _ := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL92gAAAABJRU5ErkJggg==")
+  if err := os.WriteFile(os.Args[2], body, 0600); err != nil { panic(err) }
+}`
 	semanticProgram := `package main
 import (
   "encoding/base64"
@@ -235,12 +245,15 @@ func main() {
   body, _ := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL92gAAAABJRU5ErkJggg==")
   if err := os.WriteFile(filepath.Join(filepath.Dir(os.Args[2]), "semantic-qa.png"), body, 0600); err != nil { panic(err) }
 }`
+	if err := os.WriteFile(filepath.Join(root, "capture.go"), []byte(captureProgram), 0600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(root, "semantic.go"), []byte(semanticProgram), 0600); err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusOK) }))
 	defer server.Close()
-	registry := `{"repo":{"path":"` + filepath.ToSlash(root) + `","qa_semantic_command":["go","run","semantic.go","{preview_url}","{artifact_path}"]}}`
+	registry := `{"repo":{"path":"` + filepath.ToSlash(root) + `","qa_screenshot_command":["go","run","capture.go","{preview_url}","{artifact_path}"],"qa_semantic_command":["go","run","semantic.go","{preview_url}","{artifact_path}"]}}`
 	lookup := func(name string) string {
 		if name == "ITBEM_AI_WORKSPACES_JSON" {
 			return registry
