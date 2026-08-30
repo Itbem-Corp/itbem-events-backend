@@ -371,6 +371,7 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	protected.POST("/automation/projects/:id/repository-onboardings/inspect", delivery.InspectRepositoryOnboarding)
 	protected.POST("/automation/projects/:id/repository-onboardings/:onboardingID/approve", delivery.ApproveRepositoryOnboarding)
 	protected.GET("/automation/projects/:id/vault/revisions", delivery.ListProjectVaultRevisions)
+	protected.GET("/automation/projects/:id/delivery-policy/effective", delivery.GetEffectiveProjectPolicy)
 	protected.GET("/automation/projects/:id/requests", delivery.ListRequests)
 	protected.POST("/automation/projects/:id/requests", delivery.CreateRequest)
 	// A decomposition is only a reviewable proposal. Its explicit apply endpoint

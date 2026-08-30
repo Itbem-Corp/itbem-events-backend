@@ -56,3 +56,19 @@ change set, a repository-specific override takes precedence over a project-wide
 override; revoking the repository-specific override blocks fallback to the
 broader exception. This prevents a revoke from accidentally restoring older or
 broader permissions.
+
+## Read-only project API
+
+`GET /api/automation/projects/:id/delivery-policy/effective` accepts an
+approved Vault repository and an optional exact `change_set_id`. Project view
+authorization is required before any policy rows are read. Without a change
+set, the response is an explicit configuration preview and does not consider
+overrides.
+
+The query is bounded and fails closed instead of returning a partial policy.
+Only the latest decision for each revision is loaded, then the deterministic
+selector evaluates the hierarchy. The response contains Vault provenance,
+effective fields, fixed safety floors, safe source revision/digests and missing
+configuration. Raw proposer/approver authentication subjects and policy JSON
+storage fields are deliberately absent. This endpoint cannot create revisions,
+approve policy, enqueue work, merge, or deploy.

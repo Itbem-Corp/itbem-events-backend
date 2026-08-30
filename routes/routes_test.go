@@ -146,6 +146,7 @@ func TestConfigurarRutasRegistersFrontendContractRoutes(t *testing.T) {
 		"PUT /api/users/:id/deactivate",
 		"POST /api/users/invite",
 		"GET /api/automation/portfolio",
+		"GET /api/automation/projects/:id/delivery-policy/effective",
 		"POST /api/users/avatar",
 		"DELETE /api/users/avatar",
 		"GET /api/cache/flush/:key",
