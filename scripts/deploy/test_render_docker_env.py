@@ -100,7 +100,7 @@ class RenderDockerEnvTests(unittest.TestCase):
 
     def test_production_requires_github_review_and_automation_secrets(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
-        for name in (
+        direct_secret_names = (
             "SQS_AUTOMATION_QUEUE_URL",
             "AUTOMATION_INPUT_BUCKET",
             "AUTOMATION_OUTPUT_BUCKET",
@@ -108,11 +108,24 @@ class RenderDockerEnvTests(unittest.TestCase):
             "ITBEM_GITHUB_APP_ID",
             "ITBEM_GITHUB_INSTALLATION_IDS",
             "ITBEM_GITHUB_APP_PRIVATE_KEY",
-            "GITHUB_REVIEW_WEBHOOK_SECRET",
-            "GITHUB_REVIEW_REPOSITORIES",
-        ):
+        )
+        for name in direct_secret_names:
             self.assertIn(f"--required {name}", workflow)
             self.assertIn(f"{name}: ${{{{ secrets.{name} }}}}", workflow)
+        for runtime_name, secret_name in (
+            (
+                "GITHUB_REVIEW_WEBHOOK_SECRET",
+                "ITBEM_GITHUB_REVIEW_WEBHOOK_SECRET",
+            ),
+            (
+                "GITHUB_REVIEW_REPOSITORIES",
+                "ITBEM_GITHUB_REVIEW_REPOSITORIES",
+            ),
+        ):
+            self.assertIn(f"--required {runtime_name}", workflow)
+            self.assertIn(
+                f"{runtime_name}: ${{{{ secrets.{secret_name} }}}}", workflow
+            )
 
     def test_automatic_promotion_keeps_rollback_snapshots_bounded(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
