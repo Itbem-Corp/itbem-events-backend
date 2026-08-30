@@ -52,6 +52,15 @@ documents, so repository or PR text cannot inject an `override` property.
 
 ## Integration boundary
 
+GitHub's protected-branch review remains authoritative at the final external
+boundary. Repositories that require approval of the most recent reviewable push
+must keep the actor publishing that push distinct from the human reviewer. An
+empty commit is not a reviewable push and cannot transfer that responsibility.
+After any real candidate change, the control plane must refresh the exact head
+SHA, rerun required checks, and obtain a new approval recorded after that push;
+it must never relax branch protection or use an administrative merge to work
+around an identity collision.
+
 This package deliberately does not claim evidence provenance. The control
 plane must assemble it from its append-only ledger, approved Vault revisions,
 GitHub's current head/protection/check/review state, QA evidence, and trusted
