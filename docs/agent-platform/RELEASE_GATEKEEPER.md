@@ -106,9 +106,15 @@ blocking evidence. The completed exact-matrix QA callback appends
 binds every workspace and reviewed branch through the consumed publication
 grant, and supplies each exact remote repository/SHA to the Gatekeeper. Raw
 commands, output, finding details, and model prose are excluded. This path uses
-neither GitHub Actions nor GitHub Advanced Security. Compatibility, migration,
-dependency, environment, and recovery ledgers are still unresolved and
-blocking.
+neither GitHub Actions nor GitHub Advanced Security.
+
+Compatibility and migration safety use the same exact-matrix QA ledger without
+trusting model prose. Operator configuration reserves
+`assurance:compatibility` and `assurance:migrations`; each identity must run in
+every reviewed worktree. The resolver emits a passed matrix only when every
+repository passes, emits failed when any repository fails, and leaves the
+Gatekeeper evidence missing when any command is absent. Dependency, environment,
+and recovery ledgers are still unresolved and blocking.
 
 Policy is evaluated independently for every repository using the
 platform → organization → project → repository → bounded change-set override

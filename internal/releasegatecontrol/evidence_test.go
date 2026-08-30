@@ -42,7 +42,11 @@ func TestResolveStoredQAEvidenceLoadsOnlyExactMatrixAndCompletedTask(t *testing.
 	observation := qaevidence.Observation{
 		SchemaVersion: qaevidence.SchemaVersion, TaskID: taskID.String(), MatrixDigest: matrixDigest, PreviewPassed: true,
 		RepositoryExecutionOrder: []string{"workspace://api"},
-		Repositories:             []qaevidence.Repository{{Reference: "workspace://api", Branch: branch, Commands: []qaevidence.Command{{Index: 0, Phase: "validation", Kind: "unit", Passed: true}}}},
+		Repositories: []qaevidence.Repository{{Reference: "workspace://api", Branch: branch, Commands: []qaevidence.Command{
+			{Index: 0, Phase: "validation", Kind: "unit", Passed: true},
+			{Index: 1, Phase: "qa", Kind: compatibilityTestKind, Passed: true},
+			{Index: 2, Phase: "qa", Kind: migrationsTestKind, Passed: true},
+		}}},
 	}
 	event := controlQAEvent(t, workItemID, 7, observation, controlNow)
 	mock.ExpectQuery(`SELECT \* FROM "delivery_events" WHERE work_item_id = \$1 AND event_type = \$2 AND subject_digest = \$3.*LIMIT \$4`).
@@ -56,7 +60,8 @@ func TestResolveStoredQAEvidenceLoadsOnlyExactMatrixAndCompletedTask(t *testing.
 	input := releasegate.Input{Revisions: revisions, Policy: releasegate.Policy{RequiredTestKinds: []string{"unit"}}, Tests: []releasegate.TestEvidence{}}
 	subject := publishedReleaseSubject{Revisions: revisions, RepositoryByReference: map[string]string{"workspace://api": "example/api"}, WorktreeBranchByReference: map[string]string{"workspace://api": branch}}
 	resolved, err := resolveStoredQAEvidence(db, workItemID, input, subject, map[string][]string{"example/api": {"unit"}})
-	if err != nil || len(resolved.Tests) != 1 || resolved.Tests[0].Kind != "unit" || resolved.Tests[0].Status != releasegate.StatusPassed || resolved.Tests[0].MatrixDigest != matrixDigest {
+	if err != nil || len(resolved.Tests) != 1 || resolved.Tests[0].Kind != "unit" || resolved.Tests[0].Status != releasegate.StatusPassed || resolved.Tests[0].MatrixDigest != matrixDigest ||
+		resolved.Compatibility.Status != releasegate.StatusPassed || resolved.Compatibility.MatrixDigest != matrixDigest || resolved.Migrations.Status != releasegate.StatusPassed || resolved.Migrations.MatrixDigest != matrixDigest {
 		t.Fatalf("exact persisted QA evidence was not resolved: %#v / %v", resolved.Tests, err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -202,6 +207,54 @@ func TestQAObservationRejectsIncompleteOrAmbiguousPublicationEvidence(t *testing
 	observation.Repositories[0].Branch = "itbem-agent/99999999-9999-4999-8999-999999999999"
 	if _, err := testsFromQAObservation([]string{"unit"}, map[string][]string{"example/api": {"unit"}}, subject, observation); err == nil {
 		t.Fatal("QA evidence for a different reviewed worktree branch was accepted")
+	}
+}
+
+func TestAssuranceMatrixEvidenceRequiresNamedCommandInEveryRepository(t *testing.T) {
+	revisions := []releasegate.Revision{{Repository: "example/api", Branch: "main", SHA: strings.Repeat("a", 40)}, {Repository: "example/web", Branch: "trunk", SHA: strings.Repeat("b", 40)}}
+	matrixDigest, _ := releasegate.RevisionMatrixDigest(revisions)
+	subject := publishedReleaseSubject{
+		Revisions:                 revisions,
+		RepositoryByReference:     map[string]string{"workspace://api": "example/api", "workspace://web": "example/web"},
+		WorktreeBranchByReference: map[string]string{"workspace://api": "itbem-agent/11111111-1111-4111-8111-111111111111", "workspace://web": "itbem-agent/22222222-2222-4222-8222-222222222222"},
+	}
+	observation := qaevidence.Observation{
+		SchemaVersion: qaevidence.SchemaVersion, TaskID: "33333333-3333-4333-8333-333333333333", MatrixDigest: matrixDigest,
+		RepositoryExecutionOrder: []string{"workspace://api", "workspace://web"},
+		Repositories: []qaevidence.Repository{
+			{Reference: "workspace://api", Branch: subject.WorktreeBranchByReference["workspace://api"], Commands: []qaevidence.Command{{Index: 0, Phase: "qa", Kind: compatibilityTestKind, Passed: true}}},
+			{Reference: "workspace://web", Branch: subject.WorktreeBranchByReference["workspace://web"], Commands: []qaevidence.Command{{Index: 0, Phase: "qa", Kind: compatibilityTestKind, Passed: true}}},
+		},
+	}
+	evidence, err := namedMatrixEvidenceFromQA(compatibilityTestKind, subject, observation)
+	if err != nil || evidence.Status != releasegate.StatusPassed || evidence.MatrixDigest != matrixDigest {
+		t.Fatalf("complete passing compatibility evidence was rejected: %#v / %v", evidence, err)
+	}
+	failed := observation
+	failed.Repositories = append([]qaevidence.Repository(nil), observation.Repositories...)
+	failed.Repositories[1].Commands = append([]qaevidence.Command(nil), observation.Repositories[1].Commands...)
+	failed.Repositories[1].Commands[0].Passed = false
+	evidence, err = namedMatrixEvidenceFromQA(compatibilityTestKind, subject, failed)
+	if err != nil || evidence.Status != releasegate.StatusFailed {
+		t.Fatalf("one failed repository did not fail matrix evidence: %#v / %v", evidence, err)
+	}
+	missing := observation
+	missing.Repositories = append([]qaevidence.Repository(nil), observation.Repositories...)
+	missing.Repositories[1].Commands = nil
+	evidence, err = namedMatrixEvidenceFromQA(compatibilityTestKind, subject, missing)
+	if err != nil || evidence.Status != "" || evidence.MatrixDigest != "" {
+		t.Fatalf("missing repository command became assurance evidence: %#v / %v", evidence, err)
+	}
+	wrongBranch := observation
+	wrongBranch.Repositories = append([]qaevidence.Repository(nil), observation.Repositories...)
+	wrongBranch.Repositories[0].Branch = subject.WorktreeBranchByReference["workspace://web"]
+	if _, err := namedMatrixEvidenceFromQA(compatibilityTestKind, subject, wrongBranch); err == nil {
+		t.Fatal("assurance evidence from a different reviewed branch was accepted")
+	}
+	staleMatrix := observation
+	staleMatrix.MatrixDigest = strings.Repeat("f", 64)
+	if _, err := namedMatrixEvidenceFromQA(compatibilityTestKind, subject, staleMatrix); err == nil {
+		t.Fatal("assurance evidence for a different revision matrix was accepted")
 	}
 }
 

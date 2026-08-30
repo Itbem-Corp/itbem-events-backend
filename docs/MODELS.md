@@ -161,6 +161,9 @@ Event     Event          `gorm:"foreignKey:EventID" json:"event,omitempty"`
   output, findings, tokens, and model prose never enter the public ledger.
   Resolution maps that identity through the consumed publication grant to each
   exact remote repository/SHA immediately before Gatekeeper evaluation.
+  Reserved `assurance:compatibility` and `assurance:migrations` QA identities
+  are resolved from the same event into separate exact-matrix Gatekeeper
+  fields; missing per-repository commands remain missing evidence.
 - **AutomationAgentHeartbeat** (`models/AutomationAgentHeartbeat.go`): Short-
   lived, anonymized execution-plane presence. It records the declared worker
   role/lane, provider/model, concurrency and bounded workspace readiness, but

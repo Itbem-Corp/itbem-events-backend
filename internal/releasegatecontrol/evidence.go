@@ -28,6 +28,8 @@ const (
 	maxPolicyRevisions       = 500
 	maxPublishedChanges      = 128
 	maxAssuranceObservations = 128
+	compatibilityTestKind    = "assurance:compatibility"
+	migrationsTestKind       = "assurance:migrations"
 )
 
 // Resolve replaces all candidate policy and Vault claims with current rows from
@@ -554,6 +556,14 @@ func resolveStoredQAEvidence(db *gorm.DB, workItemID uuid.UUID, input releasegat
 		return releasegate.Input{}, err
 	}
 	input.Tests = tests
+	input.Compatibility, err = namedMatrixEvidenceFromQA(compatibilityTestKind, subject, latest.Observation)
+	if err != nil {
+		return releasegate.Input{}, err
+	}
+	input.Migrations, err = namedMatrixEvidenceFromQA(migrationsTestKind, subject, latest.Observation)
+	if err != nil {
+		return releasegate.Input{}, err
+	}
 	return input, nil
 }
 
@@ -652,6 +662,52 @@ func securityFromObservation(revisions []releasegate.Revision, subject published
 	}
 	sort.Slice(result, func(left, right int) bool { return result[left].Repository < result[right].Repository })
 	return result, nil
+}
+
+// namedMatrixEvidenceFromQA projects one reserved operator-owned command
+// identity only when it ran in every exact reviewed worktree. Missing commands
+// remain missing Gatekeeper evidence; a failure in any repository fails the
+// coordinated matrix.
+func namedMatrixEvidenceFromQA(kind string, subject publishedReleaseSubject, observation qaevidence.Observation) (releasegate.MatrixEvidence, error) {
+	if err := qaevidence.Validate(observation); err != nil {
+		return releasegate.MatrixEvidence{}, fmt.Errorf("release Gatekeeper assurance observation is invalid: %w", err)
+	}
+	matrixDigest, digestErr := releasegate.RevisionMatrixDigest(subject.Revisions)
+	if kind != strings.ToLower(strings.TrimSpace(kind)) || kind == "" || len(subject.RepositoryByReference) == 0 ||
+		digestErr != nil || !strings.EqualFold(matrixDigest, observation.MatrixDigest) || len(subject.Revisions) != len(subject.RepositoryByReference) ||
+		len(subject.RepositoryByReference) != len(subject.WorktreeBranchByReference) || len(observation.Repositories) != len(subject.RepositoryByReference) {
+		return releasegate.MatrixEvidence{}, fmt.Errorf("release Gatekeeper assurance repository set is invalid")
+	}
+	observed := make(map[string]qaevidence.Repository, len(observation.Repositories))
+	for _, repository := range observation.Repositories {
+		expectedRepository, exists := subject.RepositoryByReference[repository.Reference]
+		expectedBranch, branchExists := subject.WorktreeBranchByReference[repository.Reference]
+		if !exists || !branchExists || strings.TrimSpace(expectedRepository) == "" || repository.Branch != expectedBranch {
+			return releasegate.MatrixEvidence{}, fmt.Errorf("release Gatekeeper assurance repository provenance does not match")
+		}
+		observed[repository.Reference] = repository
+	}
+	status := releasegate.StatusPassed
+	for reference := range subject.RepositoryByReference {
+		repository, exists := observed[reference]
+		if !exists {
+			return releasegate.MatrixEvidence{}, fmt.Errorf("release Gatekeeper assurance repository set does not match")
+		}
+		found := false
+		for _, command := range repository.Commands {
+			if strings.EqualFold(command.Kind, kind) {
+				found = true
+				if !command.Passed {
+					status = releasegate.StatusFailed
+				}
+				break
+			}
+		}
+		if !found {
+			return releasegate.MatrixEvidence{}, nil
+		}
+	}
+	return releasegate.MatrixEvidence{MatrixDigest: observation.MatrixDigest, Status: status}, nil
 }
 
 type testAggregate struct {

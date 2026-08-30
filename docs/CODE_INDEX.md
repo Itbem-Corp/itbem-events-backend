@@ -66,6 +66,7 @@ itbem-events-backend/
 | AutomationAgentHeartbeat | `models/AutomationAgentHeartbeat.go` |
 | Named exact-matrix QA evidence / per-repository gate resolver | `internal/qaevidence/`, `internal/deliveryledger/qa_observation.go`, `internal/releasegatecontrol/evidence.go` |
 | Exact-matrix local security evidence / immutable resolver | `internal/securityevidence/`, `internal/qaevidence/`, `internal/deliveryledger/security_observation.go`, `controllers/automation/automation.go`, `internal/releasegatecontrol/evidence.go` |
+| Exact-matrix compatibility and migration assurance resolver | `internal/qaevidence/`, `internal/deliveryledger/qa_observation.go`, `internal/releasegatecontrol/evidence.go` |
 | Linux multiagent systemd distribution | `deploy/systemd/` |
 | Moment | `models/Moment.go` |
 | MomentType | `models/MomentType.go` |

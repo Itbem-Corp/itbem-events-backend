@@ -69,6 +69,12 @@ commands yield no event, and failed scans become Gatekeeper blockers. Commands,
 output and findings stay private. This uses neither GitHub Actions nor GitHub
 Advanced Security and requires no additional GitHub App permission.
 
+The same operator-owned registry may identify commands as
+`assurance:compatibility` and `assurance:migrations`. Both must execute in every
+reviewed worktree for their coordinated Gatekeeper matrix to exist. One failure
+fails the matrix; one missing identity keeps the evidence missing. The handoff
+still exposes only command identity and pass/fail, never command text or output.
+
 ## Continuous role-lane operation
 
 Each long-lived worker declares one exact identity with `ITBEM_AI_ROLE` and
