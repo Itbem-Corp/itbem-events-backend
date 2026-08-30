@@ -49,7 +49,9 @@ identity for private sandbox evidence and come from the QA, Release or
 Orchestrator role. It may set only `ready` or `blocked`; it cannot replace the
 source/Vault authority. Stale SHAs, unknown capabilities, duplicate results,
 unsealed evidence or an Engineer-authored readiness claim fail closed. A
-blocked probe makes the whole onboarding blocked.
+blocked probe makes the whole onboarding blocked. A canonical subject digest
+binds repository, commit, capability, executor role and evidence digest so the
+same artifact cannot be replayed to prove a different capability or checkpoint.
 
 ## Approve
 

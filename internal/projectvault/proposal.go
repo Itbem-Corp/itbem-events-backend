@@ -66,6 +66,7 @@ type CapabilityProbe struct {
 	Reason         string `json:"reason"`
 	Revision       string `json:"revision"`
 	EvidenceSHA256 string `json:"evidence_sha256"`
+	SubjectSHA256  string `json:"subject_sha256"`
 	ExecutorRole   string `json:"executor_role"`
 }
 
@@ -255,6 +256,10 @@ func ApplyCapabilityProbes(proposal Proposal, probes []CapabilityProbe) (Proposa
 		if _, duplicate := seen[probe.Name]; duplicate {
 			return Proposal{}, fmt.Errorf("duplicate capability probe")
 		}
+		subject, err := CapabilityProbeSubjectSHA256(proposal.Repository, probe)
+		if err != nil || !strings.EqualFold(subject, probe.SubjectSHA256) {
+			return Proposal{}, fmt.Errorf("capability probe subject digest is invalid")
+		}
 		seen[probe.Name] = struct{}{}
 		proposal.Capabilities[index] = Capability{
 			Name: probe.Name, State: probe.State, Reason: probe.Reason,
@@ -269,6 +274,27 @@ func ApplyCapabilityProbes(proposal Proposal, probes []CapabilityProbe) (Proposa
 		}
 	}
 	return proposal, nil
+}
+
+// CapabilityProbeSubjectSHA256 prevents an evidence digest from being replayed
+// across repositories, commits, capabilities or execution roles.
+func CapabilityProbeSubjectSHA256(repository Repository, probe CapabilityProbe) (string, error) {
+	if repository.Reference == "" || !validSHA(strings.ToLower(strings.TrimSpace(repository.Revision))) || probe.Name == "" || !validDigest(probe.EvidenceSHA256) || probe.ExecutorRole == "" {
+		return "", fmt.Errorf("capability probe subject is invalid")
+	}
+	encoded, err := json.Marshal(struct {
+		SchemaVersion  int    `json:"schema_version"`
+		Repository     string `json:"repository"`
+		Revision       string `json:"revision"`
+		Capability     string `json:"capability"`
+		ExecutorRole   string `json:"executor_role"`
+		EvidenceSHA256 string `json:"evidence_sha256"`
+	}{SchemaVersion, repository.Reference, strings.ToLower(strings.TrimSpace(repository.Revision)), strings.TrimSpace(probe.Name), strings.ToLower(strings.TrimSpace(probe.ExecutorRole)), strings.ToLower(strings.TrimSpace(probe.EvidenceSHA256))})
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
 }
 
 func validDigest(value string) bool {

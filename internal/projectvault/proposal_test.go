@@ -195,7 +195,12 @@ func TestApplyCapabilityProbesRequiresExactSHAAndSealedSandboxEvidence(t *testin
 		t.Fatal(err)
 	}
 	digest := strings.Repeat("a", 64)
-	updated, err := ApplyCapabilityProbes(proposal, []CapabilityProbe{{Name: "unit", State: "ready", Reason: "allow-listed unit command exited zero", Revision: testSHA, EvidenceSHA256: digest, ExecutorRole: "qa"}})
+	probe := CapabilityProbe{Name: "unit", State: "ready", Reason: "allow-listed unit command exited zero", Revision: testSHA, EvidenceSHA256: digest, ExecutorRole: "qa"}
+	probe.SubjectSHA256, err = CapabilityProbeSubjectSHA256(proposal.Repository, probe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := ApplyCapabilityProbes(proposal, []CapabilityProbe{probe})
 	if err != nil || updated.Readiness != "partially_ready" {
 		t.Fatalf("valid probe rejected: %#v / %v", updated, err)
 	}
@@ -205,16 +210,19 @@ func TestApplyCapabilityProbesRequiresExactSHAAndSealedSandboxEvidence(t *testin
 		}
 	}
 	invalid := []CapabilityProbe{
-		{Name: "unit", State: "ready", Reason: "stale", Revision: strings.Repeat("b", 40), EvidenceSHA256: digest, ExecutorRole: "qa"},
-		{Name: "source", State: "ready", Reason: "invented", Revision: testSHA, EvidenceSHA256: digest, ExecutorRole: "qa"},
-		{Name: "release", State: "ready", Reason: "agent says so", Revision: testSHA, EvidenceSHA256: "not-a-digest", ExecutorRole: "engineer"},
+		{Name: "unit", State: "ready", Reason: "stale", Revision: strings.Repeat("b", 40), EvidenceSHA256: digest, SubjectSHA256: probe.SubjectSHA256, ExecutorRole: "qa"},
+		{Name: "source", State: "ready", Reason: "invented", Revision: testSHA, EvidenceSHA256: digest, SubjectSHA256: probe.SubjectSHA256, ExecutorRole: "qa"},
+		{Name: "release", State: "ready", Reason: "agent says so", Revision: testSHA, EvidenceSHA256: "not-a-digest", SubjectSHA256: probe.SubjectSHA256, ExecutorRole: "engineer"},
+		{Name: "unit", State: "ready", Reason: "replayed", Revision: testSHA, EvidenceSHA256: digest, SubjectSHA256: strings.Repeat("b", 64), ExecutorRole: "qa"},
 	}
 	for _, probe := range invalid {
 		if _, err := ApplyCapabilityProbes(proposal, []CapabilityProbe{probe}); err == nil {
 			t.Fatalf("unsafe capability probe accepted: %#v", probe)
 		}
 	}
-	blocked, err := ApplyCapabilityProbes(proposal, []CapabilityProbe{{Name: "integration", State: "blocked", Reason: "sandbox dependency unavailable", Revision: testSHA, EvidenceSHA256: digest, ExecutorRole: "orchestrator"}})
+	blockedProbe := CapabilityProbe{Name: "integration", State: "blocked", Reason: "sandbox dependency unavailable", Revision: testSHA, EvidenceSHA256: digest, ExecutorRole: "orchestrator"}
+	blockedProbe.SubjectSHA256, _ = CapabilityProbeSubjectSHA256(proposal.Repository, blockedProbe)
+	blocked, err := ApplyCapabilityProbes(proposal, []CapabilityProbe{blockedProbe})
 	if err != nil || blocked.Readiness != "blocked" {
 		t.Fatalf("blocked probe did not fail readiness closed: %#v / %v", blocked, err)
 	}
