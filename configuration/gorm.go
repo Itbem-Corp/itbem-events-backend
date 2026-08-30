@@ -67,6 +67,7 @@ var modelsWithoutSeed = []interface{}{
 	&models.DeliveryContextSource{},
 	&models.DeliveryRepositoryOnboarding{},
 	&models.DeliveryProjectVaultRevision{},
+	&models.DeliveryRepositoryCapabilityProbe{},
 	&models.DeliveryPolicyRevision{},
 	&models.DeliveryPolicyDecision{},
 	&models.DeliveryRequest{},

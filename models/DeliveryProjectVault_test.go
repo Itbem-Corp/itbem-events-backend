@@ -41,3 +41,10 @@ func TestDeliveryVaultRevisionFailsClosedAndIsImmutable(t *testing.T) {
 		t.Fatal("Vault revision hooks must reject mutation")
 	}
 }
+
+func TestDeliveryRepositoryCapabilityProbeIsImmutable(t *testing.T) {
+	value := &DeliveryRepositoryCapabilityProbe{}
+	if !errors.Is(value.BeforeUpdate(&gorm.DB{}), ErrImmutableCapabilityProbe) || !errors.Is(value.BeforeDelete(&gorm.DB{}), ErrImmutableCapabilityProbe) {
+		t.Fatal("capability probe hooks must reject mutation")
+	}
+}

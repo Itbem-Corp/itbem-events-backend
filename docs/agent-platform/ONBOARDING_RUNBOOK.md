@@ -54,6 +54,12 @@ binds repository, commit, capability, `ready|blocked` verdict, executor role
 and evidence digest so the same artifact cannot be replayed with a flipped
 result or to prove a different capability/checkpoint.
 
+Accepted probe attestations are stored in an append-only ledger keyed by the
+onboarding checkpoint, producing automation task and capability. The control
+plane persists only repository/SHA, verdict, executor role, evidence digest,
+subject digest and bounded reason; updates and deletes are rejected. Re-running
+a probe therefore creates new evidence instead of rewriting the prior result.
+
 ## Approve
 
 Call
