@@ -446,6 +446,27 @@ func TestReadGitHubRepositorySourceContextUsesOnlySelectedRedactedFrozenFiles(t 
 	}
 }
 
+func TestReadGitHubEnvironmentDeclarationsReturnsNamesWithoutValues(t *testing.T) {
+	revision := strings.Repeat("e", 40)
+	body := "# names only\nAPI_URL=https://example.invalid\nexport API_KEY=must-never-persist\nINVALID-NAME=value\nAPI_KEY=duplicate\n"
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer ephemeral-installation-token" || request.Method != http.MethodGet || request.URL.Query().Get("ref") != revision || !strings.HasSuffix(request.URL.Path, "/contents/.env.example") {
+			t.Fatalf("unexpected environment declaration request: %s %s", request.Method, request.URL.String())
+		}
+		_ = json.NewEncoder(response).Encode(map[string]any{"type": "file", "encoding": "base64", "size": len(body), "content": base64.StdEncoding.EncodeToString([]byte(body))})
+	}))
+	defer server.Close()
+
+	declarations, err := ReadGitHubRepositoryEnvironmentDeclarations(context.Background(), GitHubAppConfig{APIBaseURL: server.URL}, "ephemeral-installation-token", GitHubRepositorySnapshot{Reference: "github://Itbem-Corp/repo", Revision: revision}, GitHubRepositoryMap{Revision: revision, Files: []string{".env.example", ".env.production"}})
+	if err != nil || len(declarations) != 1 || declarations[0].Path != ".env.example" || strings.Join(declarations[0].Names, ",") != "API_KEY,API_URL" {
+		t.Fatalf("unexpected environment declarations: %#v / %v", declarations, err)
+	}
+	encoded, _ := json.Marshal(declarations)
+	if strings.Contains(string(encoded), "must-never-persist") || strings.Contains(string(encoded), "example.invalid") {
+		t.Fatalf("environment values escaped name-only projection: %s", encoded)
+	}
+}
+
 func TestEscapeGitHubRepositoryContentPathPreservesValidatedDirectories(t *testing.T) {
 	if value := escapeGitHubRepositoryContentPath("docs/a file.md"); value != "docs/a%20file.md" {
 		t.Fatalf("nested GitHub contents path was escaped incorrectly: %q", value)

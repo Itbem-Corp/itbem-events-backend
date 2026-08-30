@@ -35,8 +35,10 @@ The deterministic manifest records path-only evidence for dependency
 manifests, API contracts, data schemas/migrations, CI, ownership,
 infrastructure, tests, documentation, runbooks/ADRs and allow-listed
 environment declaration templates. Secret-bearing paths and real `.env`
-files are excluded. Template contents are never fetched as source context;
-the Vault stores only their path, exact inspected SHA and confidence.
+files are excluded. A separate bounded parser may read allow-listed templates
+at the exact SHA, but emits only valid variable names and discards every value;
+raw template contents never become model context or Vault data. The Vault
+stores names, path, exact inspected SHA and confidence.
 
 `unknown` is expected when no dry-run or policy proves a capability. Do not
 change it to ready manually.

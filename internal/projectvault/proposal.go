@@ -18,8 +18,9 @@ import (
 const SchemaVersion = 1
 
 var (
-	githubComponentPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
-	scriptNamePattern      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9:_.-]{0,79}$`)
+	githubComponentPattern         = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+	scriptNamePattern              = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9:_.-]{0,79}$`)
+	environmentVariableNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
 )
 
 type Provenance struct {
@@ -116,12 +117,18 @@ type Excerpt struct {
 	Content string
 }
 
+type EnvironmentDeclaration struct {
+	Path  string
+	Names []string
+}
+
 type Input struct {
-	Repository         Repository
-	Files              []string
-	InventoryFileCount int
-	InventoryTruncated bool
-	Excerpts           []Excerpt
+	Repository              Repository
+	Files                   []string
+	InventoryFileCount      int
+	InventoryTruncated      bool
+	Excerpts                []Excerpt
+	EnvironmentDeclarations []EnvironmentDeclaration
 }
 
 // CanonicalGitHubReference accepts the user-facing HTTPS URL and the internal
@@ -181,7 +188,7 @@ func Build(input Input) (Proposal, error) {
 	stacks := detectStacks(files, revision)
 	commands := detectCommands(files, input.Excerpts, revision)
 	capabilities := capabilityMatrix(metadataProof, commands)
-	manifest := buildManifest(repository, metadataProof, files, stacks, commands)
+	manifest := buildManifest(repository, metadataProof, files, stacks, commands, input.EnvironmentDeclarations)
 	digest, err := ManifestSHA256(manifest)
 	if err != nil {
 		return Proposal{}, err
@@ -587,7 +594,7 @@ func capabilityMatrix(source Provenance, commands []ProposedCommand) []Capabilit
 	return result
 }
 
-func buildManifest(repository Repository, identity Provenance, files []string, stacks []Fact, commands []ProposedCommand) Manifest {
+func buildManifest(repository Repository, identity Provenance, files []string, stacks []Fact, commands []ProposedCommand, environment []EnvironmentDeclaration) Manifest {
 	entries := []VaultEntry{{Key: "repository.identity", Kind: "repository", Lifecycle: "active", Value: map[string]any{"reference": repository.Reference, "default_branch": repository.DefaultBranch, "revision": repository.Revision}, Provenance: []Provenance{identity}}}
 	if len(stacks) > 0 {
 		names, proofs := make([]string, 0, len(stacks)), make([]Provenance, 0, len(stacks))
@@ -631,11 +638,58 @@ func buildManifest(repository Repository, identity Provenance, files []string, s
 	addMarkerEntry("repository.environment_declarations", "configuration", isEnvironmentDeclarationPath)
 	addMarkerEntry("repository.tests", "testing", isTestPath)
 	addMarkerEntry("repository.runbooks_and_decisions", "operations", isRunbookOrDecisionPath)
+	declarations, declarationProofs := normalizedEnvironmentDeclarations(environment, files, repository.Revision)
+	if len(declarations) > 0 {
+		entries = append(entries, VaultEntry{Key: "repository.environment_variables", Kind: "configuration", Lifecycle: "active", Value: map[string]any{"declarations": declarations}, Provenance: declarationProofs})
+	}
 	for index := range entries {
 		entries[index] = normalizeVaultEntry(entries[index], repository.Revision)
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Key < entries[j].Key })
 	return Manifest{SchemaVersion: SchemaVersion, Scope: "repository", Repository: repository, Entries: entries}
+}
+
+func normalizedEnvironmentDeclarations(input []EnvironmentDeclaration, files []string, revision string) ([]map[string]any, []Provenance) {
+	eligible := map[string]struct{}{}
+	for _, file := range files {
+		if isEnvironmentDeclarationPath(strings.ToLower(file)) {
+			eligible[file] = struct{}{}
+		}
+	}
+	byPath := map[string][]string{}
+	for _, declaration := range input {
+		path := strings.Trim(strings.ReplaceAll(strings.TrimSpace(declaration.Path), `\`, "/"), "/")
+		if _, ok := eligible[path]; !ok {
+			continue
+		}
+		seen := map[string]struct{}{}
+		for _, name := range declaration.Names {
+			name = strings.TrimSpace(name)
+			if environmentVariableNamePattern.MatchString(name) {
+				seen[name] = struct{}{}
+			}
+		}
+		names := make([]string, 0, len(seen))
+		for name := range seen {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		if len(names) > 0 {
+			byPath[path] = names
+		}
+	}
+	paths := make([]string, 0, len(byPath))
+	for path := range byPath {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	values := make([]map[string]any, 0, len(paths))
+	proofs := make([]Provenance, 0, len(paths))
+	for _, path := range paths {
+		values = append(values, map[string]any{"path": path, "names": byPath[path]})
+		proofs = append(proofs, Provenance{Source: "structured_environment_template", Path: path, Revision: revision, Confidence: .95})
+	}
+	return values, proofs
 }
 
 func pathBase(value string) string {

@@ -18,7 +18,7 @@ mandatory scenarios against named tests rather than documentation claims:
 
 | Scenario | Executable evidence |
 | --- | --- |
-| Generic authorized repository onboarding | Deterministic Vault proposal and lifecycle reconciliation from immutable GitHub identity and exact SHA, including path-only API/schema/dependency/test/runbook/environment-template evidence without reading secrets |
+| Generic authorized repository onboarding | Deterministic Vault proposal and lifecycle reconciliation from immutable GitHub identity and exact SHA, including path-only API/schema/dependency/test/runbook evidence plus name-only environment declarations whose values never persist |
 | Single repository | Isolated clean worktree, bounded patch and immutable reviewed diff |
 | Heterogeneous multi-repository change | Go/Node discovery, dependency-first DAG and independent worktrees |
 | Monorepo | Module-local Go, Node and Rust command proposals without executing repository prose |

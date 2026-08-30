@@ -145,10 +145,16 @@ func inspectGitHubRepositoryForOnboarding(ctx context.Context, config automation
 				excerpts = append(excerpts, projectvault.Excerpt{Path: excerpt.Path, Content: excerpt.Content})
 			}
 		}
+		environment := make([]projectvault.EnvironmentDeclaration, 0)
+		if declarations, declarationErr := automationagent.ReadGitHubRepositoryEnvironmentDeclarations(ctx, candidate, installation.Token, snapshot, inventory); declarationErr == nil {
+			for _, declaration := range declarations {
+				environment = append(environment, projectvault.EnvironmentDeclaration{Path: declaration.Path, Names: declaration.Names})
+			}
+		}
 		return projectvault.Build(projectvault.Input{
 			Repository: projectvault.Repository{Reference: snapshot.Reference, DefaultBranch: snapshot.DefaultBranch, Revision: snapshot.Revision},
 			Files:      inventory.Files, InventoryFileCount: inventory.FileCount,
-			InventoryTruncated: inventory.InventoryTruncated, Excerpts: excerpts,
+			InventoryTruncated: inventory.InventoryTruncated, Excerpts: excerpts, EnvironmentDeclarations: environment,
 		})
 	}
 	if lastErr == nil {

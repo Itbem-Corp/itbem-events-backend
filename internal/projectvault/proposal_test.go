@@ -103,11 +103,24 @@ func TestBuildEnvironmentTemplatesAreNameOnlyEvidence(t *testing.T) {
 			".env.example", "deploy/app.env.sample", "terraform/prod.tfvars.template",
 			".env", ".env.local", ".env.production", "secrets/.env.example", "credentials/env.sample",
 		},
+		EnvironmentDeclarations: []EnvironmentDeclaration{
+			{Path: ".env.example", Names: []string{"API_URL", "API_KEY", "API_KEY", "INVALID-NAME"}},
+			{Path: ".env.production", Names: []string{"MUST_NOT_APPEAR"}},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	foundVariables := false
+	foundDeclarations := false
 	for _, entry := range proposal.Vault.Entries {
+		if entry.Key == "repository.environment_variables" {
+			encoded, _ := json.Marshal(entry)
+			if !contains(string(encoded), "API_KEY") || !contains(string(encoded), "API_URL") || contains(string(encoded), "INVALID-NAME") || contains(string(encoded), "MUST_NOT_APPEAR") {
+				t.Fatalf("unsafe environment variable projection: %s", encoded)
+			}
+			foundVariables = true
+		}
 		if entry.Key != "repository.environment_declarations" {
 			continue
 		}
@@ -116,9 +129,14 @@ func TestBuildEnvironmentTemplatesAreNameOnlyEvidence(t *testing.T) {
 		if !ok || !reflect.DeepEqual(paths, want) {
 			t.Fatalf("environment declaration paths = %#v, want %#v", entry.Value["paths"], want)
 		}
-		return
+		foundDeclarations = true
 	}
-	t.Fatal("environment declaration marker missing")
+	if !foundVariables {
+		t.Fatal("environment variable marker missing")
+	}
+	if !foundDeclarations {
+		t.Fatal("environment declaration marker missing")
+	}
 }
 
 func TestBuildProposesCommandsPerMonorepoModule(t *testing.T) {
