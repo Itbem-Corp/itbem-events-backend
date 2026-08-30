@@ -57,6 +57,18 @@ type Capability struct {
 	Evidence []Provenance `json:"evidence,omitempty"`
 }
 
+// CapabilityProbe is a value-free attestation produced by an isolated,
+// allow-listed dry-run. The evidence body remains in private object storage;
+// this contract carries only its digest and exact repository checkpoint.
+type CapabilityProbe struct {
+	Name           string `json:"name"`
+	State          string `json:"state"`
+	Reason         string `json:"reason"`
+	Revision       string `json:"revision"`
+	EvidenceSHA256 string `json:"evidence_sha256"`
+	ExecutorRole   string `json:"executor_role"`
+}
+
 type VaultHistoryEntry struct {
 	Kind            string         `json:"kind"`
 	Lifecycle       string         `json:"lifecycle"`
@@ -211,6 +223,65 @@ func Build(input Input) (Proposal, error) {
 		InventoryTruncated: input.InventoryTruncated, Stacks: stacks, Commands: commands,
 		Capabilities: capabilities, Vault: manifest, VaultSHA256: digest, VaultDiff: initialDiff,
 	}, nil
+}
+
+// ApplyCapabilityProbes projects deterministic sandbox evidence onto one
+// existing proposal. It never upgrades source/vault authority, never follows a
+// branch and never accepts an agent's prose as evidence.
+func ApplyCapabilityProbes(proposal Proposal, probes []CapabilityProbe) (Proposal, error) {
+	if !validSHA(proposal.Repository.Revision) || proposal.SchemaVersion != SchemaVersion {
+		return Proposal{}, fmt.Errorf("capability probe proposal is invalid")
+	}
+	byName := make(map[string]int, len(proposal.Capabilities))
+	for index, capability := range proposal.Capabilities {
+		byName[capability.Name] = index
+	}
+	seen := map[string]struct{}{}
+	for _, probe := range probes {
+		probe.Name = strings.TrimSpace(probe.Name)
+		probe.State = strings.ToLower(strings.TrimSpace(probe.State))
+		probe.Reason = strings.TrimSpace(probe.Reason)
+		probe.ExecutorRole = strings.ToLower(strings.TrimSpace(probe.ExecutorRole))
+		if probe.Name == "source" || probe.Name == "vault" || (probe.State != "ready" && probe.State != "blocked") || !strings.EqualFold(probe.Revision, proposal.Repository.Revision) || !validDigest(probe.EvidenceSHA256) || probe.Reason == "" || len(probe.Reason) > 500 {
+			return Proposal{}, fmt.Errorf("capability probe is invalid")
+		}
+		if probe.ExecutorRole != "qa" && probe.ExecutorRole != "release" && probe.ExecutorRole != "orchestrator" {
+			return Proposal{}, fmt.Errorf("capability probe executor role is invalid")
+		}
+		index, exists := byName[probe.Name]
+		if !exists {
+			return Proposal{}, fmt.Errorf("capability probe name is unknown")
+		}
+		if _, duplicate := seen[probe.Name]; duplicate {
+			return Proposal{}, fmt.Errorf("duplicate capability probe")
+		}
+		seen[probe.Name] = struct{}{}
+		proposal.Capabilities[index] = Capability{
+			Name: probe.Name, State: probe.State, Reason: probe.Reason,
+			Evidence: []Provenance{{Source: "sandbox_probe:" + probe.ExecutorRole, Path: "sha256:" + strings.ToLower(probe.EvidenceSHA256), Revision: proposal.Repository.Revision, Confidence: 1}},
+		}
+	}
+	proposal.Readiness = "partially_ready"
+	for _, capability := range proposal.Capabilities {
+		if capability.State == "blocked" {
+			proposal.Readiness = "blocked"
+			break
+		}
+	}
+	return proposal, nil
+}
+
+func validDigest(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if len(value) != 64 {
+		return false
+	}
+	for _, character := range value {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 const maxVaultHistoryPerEntry = 64

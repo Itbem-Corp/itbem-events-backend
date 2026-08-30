@@ -3,6 +3,7 @@ package projectvault
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -185,6 +186,37 @@ func TestBuildTreatsRepositoryTextAsData(t *testing.T) {
 		if capability.Name == "release" && capability.State != "unknown" {
 			t.Fatalf("repository prose elevated release capability: %#v", capability)
 		}
+	}
+}
+
+func TestApplyCapabilityProbesRequiresExactSHAAndSealedSandboxEvidence(t *testing.T) {
+	proposal, err := Build(Input{Repository: Repository{Reference: "github://acme/service", DefaultBranch: "main", Revision: testSHA}, Files: []string{"package.json"}, Excerpts: []Excerpt{{Path: "package.json", Content: `{"scripts":{"test":"vitest"}}`}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := strings.Repeat("a", 64)
+	updated, err := ApplyCapabilityProbes(proposal, []CapabilityProbe{{Name: "unit", State: "ready", Reason: "allow-listed unit command exited zero", Revision: testSHA, EvidenceSHA256: digest, ExecutorRole: "qa"}})
+	if err != nil || updated.Readiness != "partially_ready" {
+		t.Fatalf("valid probe rejected: %#v / %v", updated, err)
+	}
+	for _, capability := range updated.Capabilities {
+		if capability.Name == "unit" && (capability.State != "ready" || len(capability.Evidence) != 1 || capability.Evidence[0].Path != "sha256:"+digest) {
+			t.Fatalf("unit probe projection = %#v", capability)
+		}
+	}
+	invalid := []CapabilityProbe{
+		{Name: "unit", State: "ready", Reason: "stale", Revision: strings.Repeat("b", 40), EvidenceSHA256: digest, ExecutorRole: "qa"},
+		{Name: "source", State: "ready", Reason: "invented", Revision: testSHA, EvidenceSHA256: digest, ExecutorRole: "qa"},
+		{Name: "release", State: "ready", Reason: "agent says so", Revision: testSHA, EvidenceSHA256: "not-a-digest", ExecutorRole: "engineer"},
+	}
+	for _, probe := range invalid {
+		if _, err := ApplyCapabilityProbes(proposal, []CapabilityProbe{probe}); err == nil {
+			t.Fatalf("unsafe capability probe accepted: %#v", probe)
+		}
+	}
+	blocked, err := ApplyCapabilityProbes(proposal, []CapabilityProbe{{Name: "integration", State: "blocked", Reason: "sandbox dependency unavailable", Revision: testSHA, EvidenceSHA256: digest, ExecutorRole: "orchestrator"}})
+	if err != nil || blocked.Readiness != "blocked" {
+		t.Fatalf("blocked probe did not fail readiness closed: %#v / %v", blocked, err)
 	}
 }
 

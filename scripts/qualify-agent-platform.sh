@@ -12,7 +12,7 @@ run() {
 }
 
 run "generic onboarding, monorepo discovery and prompt-injection boundary" \
-  go test ./internal/projectvault -run 'Test(BuildCreatesDeterministicEvidenceBasedProposal|BuildEnvironmentTemplatesAreNameOnlyEvidence|BuildProposesCommandsPerMonorepoModule|BuildTreatsRepositoryTextAsData|ReconcilePreservesChangedRemovedAndUnchangedVaultHistory|ReconcileRejectsCrossRepositoryOrMutableHistory)$' -count=1
+  go test ./internal/projectvault -run 'Test(BuildCreatesDeterministicEvidenceBasedProposal|BuildEnvironmentTemplatesAreNameOnlyEvidence|BuildProposesCommandsPerMonorepoModule|BuildTreatsRepositoryTextAsData|ApplyCapabilityProbesRequiresExactSHAAndSealedSandboxEvidence|ReconcilePreservesChangedRemovedAndUnchangedVaultHistory|ReconcileRejectsCrossRepositoryOrMutableHistory)$' -count=1
 
 run "single-repository worktree and exact reviewed diff" \
   go test ./internal/automationagent -run 'TestRunImplementationUsesIsolatedWorktree$' -count=1

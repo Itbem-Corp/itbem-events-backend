@@ -43,6 +43,14 @@ stores names, path, exact inspected SHA and confidence.
 `unknown` is expected when no dry-run or policy proves a capability. Do not
 change it to ready manually.
 
+Capability dry-runs use a separate deterministic projection. Each result must
+name an existing capability, match the inspected full SHA, carry a SHA-256
+identity for private sandbox evidence and come from the QA, Release or
+Orchestrator role. It may set only `ready` or `blocked`; it cannot replace the
+source/Vault authority. Stale SHAs, unknown capabilities, duplicate results,
+unsealed evidence or an Engineer-authored readiness claim fail closed. A
+blocked probe makes the whole onboarding blocked.
+
 ## Approve
 
 Call
