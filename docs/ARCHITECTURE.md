@@ -452,6 +452,12 @@ if !ok || cfg == nil {
   unprivileged Unix account per lane. Global/per-lane filesystem kill switches
   prevent restart, and installation never implies activation.
 
+- Merge and release policy is evaluated by `internal/releasegate` as a pure,
+  deterministic, fail-closed decision over structured exact-SHA evidence. The
+  revision matrix and resolved policy are digest-bound; model output cannot
+  waive a reason code. An allowed decision grants no side effect by itself.
+  See `docs/agent-platform/RELEASE_GATEKEEPER.md`.
+
 - Application notifications use `services/notifications` with the durable
   outbox and worker queue. `itbem-events-workers` owns Block Kit,
   SSM webhook access, HTTP delivery, retry, and DLQ behavior. The worker is
