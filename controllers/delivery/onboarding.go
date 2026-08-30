@@ -446,7 +446,7 @@ func ProbeRepositoryOnboarding(c echo.Context) error {
 	}); err != nil {
 		return conflict(c, "Repository onboarding probe rejected", err.Error())
 	}
-	return utils.Success(c, http.StatusAccepted, "Repository onboarding capability probe queued", task)
+	return utils.Success(c, http.StatusAccepted, "Repository onboarding capability probe queued", capabilityProbeTaskView(task))
 }
 
 func ListRepositoryCapabilityProbes(c echo.Context) error {
@@ -475,12 +475,16 @@ func ListRepositoryCapabilityProbes(c echo.Context) error {
 	}
 	taskViews := make([]repositoryCapabilityProbeTask, 0, len(tasks))
 	for _, task := range tasks {
-		taskViews = append(taskViews, repositoryCapabilityProbeTask{
-			ID: task.ID, Status: task.Status,
-			AttemptCount: task.AttemptCount, CompletedAt: task.CompletedAt, CreatedAt: task.CreatedAt,
-		})
+		taskViews = append(taskViews, capabilityProbeTaskView(task))
 	}
 	return success(c, "Repository capability probes retrieved", map[string]any{"probes": probes, "tasks": taskViews})
+}
+
+func capabilityProbeTaskView(task models.AutomationTask) repositoryCapabilityProbeTask {
+	return repositoryCapabilityProbeTask{
+		ID: task.ID, Status: task.Status,
+		AttemptCount: task.AttemptCount, CompletedAt: task.CompletedAt, CreatedAt: task.CreatedAt,
+	}
 }
 
 func validateStoredOnboardingProposal(onboarding models.DeliveryRepositoryOnboarding) (projectvault.Proposal, error) {

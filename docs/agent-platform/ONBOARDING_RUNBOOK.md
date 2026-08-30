@@ -95,7 +95,9 @@ task becomes stale if another probe updates the proposal. Use
 `GET /api/automation/projects/:id/repository-onboardings/:onboardingID/probes`
 to inspect the append-only history and the safe queued/running/terminal task
 projection, then re-read the onboarding before approving its latest
-digest/SHA. Input/output object references and worker leases are never exposed.
+digest/SHA. Both the enqueue response and history expose only this safe task
+projection; input/output object references, worker leases and internal errors
+are never returned.
 
 ## Approve
 
