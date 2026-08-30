@@ -2250,7 +2250,7 @@ func codeReviewPublicationForTask(task *models.AutomationTask, raw json.RawMessa
 			return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review event contradicts its verdict")
 		}
 	case "COMMENT":
-		if verdict != "comment" && verdict != "blocked" && !(verdict == "approve" && author != "" && strings.EqualFold(actor, author)) {
+		if verdict != "comment" && verdict != "blocked" && (verdict != "approve" || author == "" || !strings.EqualFold(actor, author)) {
 			return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review comment contradicts its verdict")
 		}
 	default:

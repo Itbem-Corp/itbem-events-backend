@@ -93,11 +93,11 @@ func PublishGitHubCodeReview(ctx context.Context, boundary CodeReviewInput, revi
 	}
 	config, err := LoadGitHubAppConfig(lookup)
 	if err != nil {
-		return GitHubCodeReviewPublication{}, fmt.Errorf("Reviewer GitHub App is not configured")
+		return GitHubCodeReviewPublication{}, fmt.Errorf("reviewer GitHub App is not configured")
 	}
 	config, err = config.WithInstallationID(boundary.Remote.InstallationID)
 	if err != nil {
-		return GitHubCodeReviewPublication{}, fmt.Errorf("Reviewer GitHub App installation is not authorized")
+		return GitHubCodeReviewPublication{}, fmt.Errorf("reviewer GitHub App installation is not authorized")
 	}
 	client := &http.Client{Timeout: 20 * time.Second}
 	actor, err := readGitHubAppActor(ctx, config, client, time.Now().UTC())
@@ -325,17 +325,17 @@ func readGitHubAppActor(ctx context.Context, config GitHubAppConfig, client *htt
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("Reviewer GitHub App identity was rejected (%d)", response.StatusCode)
+		return "", fmt.Errorf("reviewer GitHub App identity was rejected (%d)", response.StatusCode)
 	}
 	var payload struct {
 		Slug string `json:"slug"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 32<<10)).Decode(&payload); err != nil {
-		return "", fmt.Errorf("Reviewer GitHub App identity is invalid")
+		return "", fmt.Errorf("reviewer GitHub App identity is invalid")
 	}
 	slug := strings.ToLower(strings.TrimSpace(payload.Slug))
 	if !githubAppSlugPattern.MatchString(slug) {
-		return "", fmt.Errorf("Reviewer GitHub App identity is invalid")
+		return "", fmt.Errorf("reviewer GitHub App identity is invalid")
 	}
 	return slug + "[bot]", nil
 }
