@@ -12,6 +12,17 @@
 
 ## Available Services
 
+### Project Vault onboarding (`internal/projectvault/`)
+
+| File | Purpose |
+|---|---|
+| `proposal.go` | Pure deterministic static onboarding: strict GitHub URL canonicalization, safe inventory normalization, evidence-backed stack/command proposals, complete capability matrix and immutable Vault manifest digest. Repository content is untrusted and commands are never executed here. |
+
+The Delivery onboarding controller supplies an immutable GitHub snapshot and
+persists the proposal. Human approval repeats the SHA and publishes repository
+context plus a new append-only Vault revision transactionally. See
+`docs/agent-platform/DOMAIN_AND_THREAT_MODEL.md`.
+
 ### Delivery workflow (`services/deliveryworkflow/`)
 
 | File | Purpose |

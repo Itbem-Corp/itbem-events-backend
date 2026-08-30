@@ -121,6 +121,14 @@ Event     Event          `gorm:"foreignKey:EventID" json:"event,omitempty"`
   agent, along with bounded context metadata such as a client-conversation
   excerpt or decision. Later edits or removal cannot silently alter approved
   context.
+- **DeliveryRepositoryOnboarding** (`models/DeliveryProjectVault.go`): Mutable,
+  human-reviewed static onboarding proposal pinned to one GitHub default-branch
+  SHA. It stores structured proposal/capability JSON, never credentials or raw
+  repository prose, and is unique by project/repository/revision.
+- **DeliveryProjectVaultRevision** (`models/DeliveryProjectVault.go`): Immutable,
+  repository-scoped curated Vault manifest with monotonic version, source SHA,
+  content digest, provenance and onboarding identity. Application hooks and a
+  PostgreSQL trigger reject update/delete; reconciliation appends a revision.
 - **DeliveryWorkItem**: Bounded request with outcome, included/excluded scope,
   acceptance criteria, generated plan, pull request and preview references.
   Its lifecycle is enforced by `services/deliveryworkflow`; human gates are

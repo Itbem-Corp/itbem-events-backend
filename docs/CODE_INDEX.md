@@ -10,6 +10,7 @@ itbem-events-backend/
 ├── cmd/api/              # API entrypoint
 ├── internal/app/         # Composition root, server setup, dependency wiring
 ├── internal/authz/       # Shared authorization helpers for protected handlers
+├── internal/projectvault/# Generic static onboarding and curated Vault proposal domain
 ├── configuration/        # DB, Redis, CORS, env setup
 ├── controllers/          # HTTP handlers (one dir per domain)
 ├── middleware/           # Echo middleware (token, redis)
@@ -35,6 +36,7 @@ itbem-events-backend/
 | `configuration/environmentVariables.go` | Env var loading into Config |
 | `configuration/cors.go` | CORS settings |
 | `configuration/redis.go` | Redis connection |
+| `docs/agent-platform/DOMAIN_AND_THREAT_MODEL.md` | Multi-agent invariants, role separation, gates and threats |
 
 ## Models (`models/*.go`)
 
@@ -59,6 +61,7 @@ itbem-events-backend/
 | ResourceType | `models/ResourceType.go` |
 | DesignTemplate | `models/DesignTemplate.go` |
 | DeliveryProject / work-item workflow | `models/DeliveryWorkflow.go` |
+| DeliveryRepositoryOnboarding / DeliveryProjectVaultRevision | `models/DeliveryProjectVault.go` |
 | AutomationTask | `models/AutomationTask.go` |
 | Moment | `models/Moment.go` |
 | MomentType | `models/MomentType.go` |
@@ -84,7 +87,7 @@ itbem-events-backend/
 | clienttypes | `controllers/clienttypes/clientTypes.go` | `/api/catalogs/client-types` |
 | clientroles | `controllers/clientroles/clientRoles.go` | `/api/catalogs/roles` |
 | cache | `controllers/cache/cache.go` | `/api/cache*` |
-| delivery | `controllers/delivery/delivery.go`, `controllers/delivery/agent_runs.go` | `/api/automation/projects*`, `/api/automation/work-items*` |
+| delivery | `controllers/delivery/delivery.go`, `controllers/delivery/agent_runs.go`, `controllers/delivery/onboarding.go` | `/api/automation/projects*`, `/api/automation/work-items*` |
 
 ## Services (`services/<domain>/`)
 

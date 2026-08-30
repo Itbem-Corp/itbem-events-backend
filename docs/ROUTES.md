@@ -53,6 +53,10 @@
 - `GET|POST /api/automation/projects` → `delivery.ListProjects` / `delivery.CreateProject`
 - `GET /api/automation/projects/:id` → `delivery.GetProject`
 - `POST /api/automation/projects/:id/context` → `delivery.CreateContext`
+- `GET /api/automation/projects/:id/repository-onboardings` → `delivery.ListRepositoryOnboardings`
+- `POST /api/automation/projects/:id/repository-onboardings/inspect` → `delivery.InspectRepositoryOnboarding` — bounded static GitHub inspection pinned to the actual default-branch SHA; creates a reviewable proposal and executes no repository code.
+- `POST /api/automation/projects/:id/repository-onboardings/:onboardingID/approve` → `delivery.ApproveRepositoryOnboarding` — explicit human/SHA gate; atomically publishes repository context and an immutable Vault revision.
+- `GET /api/automation/projects/:id/vault/revisions` → `delivery.ListProjectVaultRevisions` — append-only curated Vault history.
 - `POST /api/automation/projects/:id/work-items` → `delivery.CreateWorkItem`
 - `GET /api/automation/work-items/:id` → `delivery.GetWorkItem`
 - `GET /api/automation/work-items/:id/stream` → `delivery.StreamWorkItem` — authenticated SSE invalidation feed for live execution maps. It emits a `snapshot` on connect, then `update` only when the database-backed work-item revision changes. Its bounded payload is `{ work_item_id, revision, state, active_tasks, last_activity_at, generated_at }`; it never includes prompts, private object references, provider payloads, or task output. Connections refresh authorization after 55 seconds and clients reconnect using the SSE retry directive.

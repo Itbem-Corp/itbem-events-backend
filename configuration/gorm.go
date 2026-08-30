@@ -65,6 +65,8 @@ var modelsWithoutSeed = []interface{}{
 	&models.DeliveryProject{},
 	&models.DeliveryProjectMember{},
 	&models.DeliveryContextSource{},
+	&models.DeliveryRepositoryOnboarding{},
+	&models.DeliveryProjectVaultRevision{},
 	&models.DeliveryRequest{},
 	&models.DeliveryDecomposition{},
 	&models.DeliveryWorkItem{},
@@ -274,6 +276,26 @@ func migrateModels(db *gorm.DB) error {
 		for _, statement := range ledgerStatements {
 			if err := tx.Exec(statement).Error; err != nil {
 				return fmt.Errorf("protect automation ledger: %w", err)
+			}
+		}
+		// Approved Vault revisions are immutable evidence. Reconciliation creates
+		// a new version; it never rewrites the historical state used by an agent,
+		// reviewer, QA run or release gate.
+		vaultStatements := []string{
+			`CREATE OR REPLACE FUNCTION prevent_delivery_vault_revision_mutation()
+			 RETURNS trigger AS $$
+			 BEGIN
+			   RAISE EXCEPTION 'delivery_project_vault_revisions are append-only';
+			 END;
+			 $$ LANGUAGE plpgsql`,
+			"DROP TRIGGER IF EXISTS delivery_project_vault_revisions_append_only ON delivery_project_vault_revisions",
+			`CREATE TRIGGER delivery_project_vault_revisions_append_only
+			 BEFORE UPDATE OR DELETE ON delivery_project_vault_revisions
+			 FOR EACH ROW EXECUTE FUNCTION prevent_delivery_vault_revision_mutation()`,
+		}
+		for _, statement := range vaultStatements {
+			if err := tx.Exec(statement).Error; err != nil {
+				return fmt.Errorf("protect project Vault revisions: %w", err)
 			}
 		}
 		return nil
