@@ -240,7 +240,9 @@ them before refreshing Delivery checkpoints:
 ```
 
 This command clones a missing configured checkout, or fetches `origin`, safely
-switches it to `base_branch` (default `main`) and fast-forwards it. It refuses
+switches it to the explicitly configured `base_branch` and fast-forwards it. A
+managed registry entry must copy the branch detected during onboarding (or an
+approved override); the agent never assumes `main`. It refuses
 local changes or divergent history and never uses reset, rebase, pull or a
 task-provided remote. Refresh the project's local context afterwards so a plan
 freezes the resulting SHA. Every approved implementation still gets a distinct

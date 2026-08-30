@@ -148,9 +148,6 @@ func loadWorkspaces(raw string, requireDirectory bool) (map[string]Workspace, er
 		config.Path = root
 		config.RepositoryURL = strings.TrimSpace(config.RepositoryURL)
 		config.BaseBranch = strings.TrimSpace(config.BaseBranch)
-		if config.BaseBranch == "" {
-			config.BaseBranch = "main"
-		}
 		if err := validateWorkspaceBase(config.RepositoryURL, config.BaseBranch); err != nil {
 			return nil, fmt.Errorf("workspace %s: %w", id, err)
 		}
@@ -191,6 +188,16 @@ var gitBranchName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,126}$`)
 func validateWorkspaceBase(repositoryURL, baseBranch string) error {
 	if strings.ContainsAny(repositoryURL, "\x00\r\n") {
 		return fmt.Errorf("repository_url is invalid")
+	}
+	// A managed checkout must name the branch detected during onboarding (or
+	// another explicitly approved branch). Silently assuming `main` would make
+	// non-main repositories sync the wrong ref and violate the frozen context.
+	// Read-only local workspaces do not need a configured remote or base branch.
+	if repositoryURL == "" && baseBranch == "" {
+		return nil
+	}
+	if repositoryURL == "" || baseBranch == "" {
+		return fmt.Errorf("repository_url and base_branch must be configured together")
 	}
 	if !gitBranchName.MatchString(baseBranch) || strings.Contains(baseBranch, "..") || strings.HasSuffix(baseBranch, "/") {
 		return fmt.Errorf("base_branch is invalid")

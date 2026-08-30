@@ -37,6 +37,26 @@ func TestLoadWorkspacesProvidesBoundedSecretFreeContext(t *testing.T) {
 	}
 }
 
+func TestLoadWorkspaceRegistryRequiresExplicitManagedDefaultBranch(t *testing.T) {
+	root := filepath.ToSlash(filepath.Join(t.TempDir(), "managed"))
+	if err := os.MkdirAll(filepath.FromSlash(root), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{
+		`{"demo":{"path":"` + root + `","repository_url":"https://example.invalid/demo.git","capabilities":["repository:read","repository:fetch"]}}`,
+		`{"demo":{"path":"` + root + `","base_branch":"trunk","capabilities":["repository:read","repository:fetch"]}}`,
+	} {
+		if _, err := LoadWorkspaceRegistry(raw); err == nil || !strings.Contains(err.Error(), "configured together") {
+			t.Fatalf("partial managed workspace identity was accepted: %s / %v", raw, err)
+		}
+	}
+	valid := `{"demo":{"path":"` + root + `","repository_url":"https://example.invalid/demo.git","base_branch":"trunk","capabilities":["repository:read","repository:fetch"]}}`
+	workspaces, err := LoadWorkspaceRegistry(valid)
+	if err != nil || workspaces["demo"].Config.BaseBranch != "trunk" {
+		t.Fatalf("explicit non-main branch was not preserved: %#v / %v", workspaces, err)
+	}
+}
+
 func TestLoadWorkspacesBindsUniqueOperatorOwnedTestKindsByPosition(t *testing.T) {
 	root := filepath.ToSlash(t.TempDir())
 	valid := `{"demo":{"path":"` + root + `","validation_commands":[["go","test","./..."]],"validation_command_kinds":["unit"],"qa_commands":[["npm","run","test:e2e"]],"qa_command_kinds":["e2e"]}}`
