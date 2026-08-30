@@ -93,8 +93,9 @@ value-free evidence.
 Only one probe task may be active for an onboarding proposal digest. A prior
 task becomes stale if another probe updates the proposal. Use
 `GET /api/automation/projects/:id/repository-onboardings/:onboardingID/probes`
-to inspect the append-only history, then re-read the onboarding before
-approving its latest digest/SHA.
+to inspect the append-only history and the safe queued/running/terminal task
+projection, then re-read the onboarding before approving its latest
+digest/SHA. Input/output object references and worker leases are never exposed.
 
 ## Approve
 
@@ -103,13 +104,18 @@ Call
 with the inspected SHA:
 
 ```json
-{"expected_revision":"0123456789abcdef0123456789abcdef01234567"}
+{
+  "expected_revision": "0123456789abcdef0123456789abcdef01234567",
+  "expected_proposal_sha256": "64-character digest shown by the latest onboarding response"
+}
 ```
 
 Approval is idempotent. In one transaction it creates/updates the approved
 repository context, allocates the next repository Vault version and marks the
 proposal approved. A stale SHA, blocked proposal, malformed/tampered manifest
-or duplicate context fails closed.
+or duplicate context fails closed. The proposal digest is mandatory because a
+completed capability probe can update readiness without changing the source
+SHA; active probes block approval until their evidence is committed.
 
 Use `GET /api/automation/projects/:id/repository-onboardings` and
 `GET /api/automation/projects/:id/vault/revisions` for audit history.

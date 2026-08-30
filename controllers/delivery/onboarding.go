@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -31,7 +32,8 @@ type repositoryOnboardingRequest struct {
 }
 
 type repositoryOnboardingApprovalRequest struct {
-	ExpectedRevision string `json:"expected_revision"`
+	ExpectedRevision       string `json:"expected_revision"`
+	ExpectedProposalSHA256 string `json:"expected_proposal_sha256"`
 }
 
 type repositoryOnboardingProbeRequest struct {
@@ -40,7 +42,17 @@ type repositoryOnboardingProbeRequest struct {
 	Capabilities       []string `json:"capabilities"`
 }
 
+type repositoryCapabilityProbeTask struct {
+	ID           uuid.UUID  `json:"id"`
+	Status       string     `json:"status"`
+	ErrorMessage string     `json:"error_message,omitempty"`
+	AttemptCount int        `json:"attempt_count"`
+	CompletedAt  *time.Time `json:"completed_at,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+}
+
 var errOnboardingRejected = errors.New("repository onboarding approval rejected")
+var onboardingProposalDigest = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
 // InspectRepositoryOnboarding performs only bounded, read-only GitHub API
 // calls. It never clones code, executes repository commands or treats README
@@ -226,8 +238,9 @@ func ApproveRepositoryOnboarding(c echo.Context) error {
 		return badRequest(c, "Invalid repository onboarding approval", "expected_revision is required")
 	}
 	expectedRevision := strings.ToLower(strings.TrimSpace(request.ExpectedRevision))
-	if len(expectedRevision) != 40 {
-		return badRequest(c, "Invalid repository onboarding approval", "expected_revision must be the inspected full Git SHA")
+	expectedProposalSHA256 := strings.ToLower(strings.TrimSpace(request.ExpectedProposalSHA256))
+	if !projectvault.ValidRevision(expectedRevision) || !onboardingProposalDigest.MatchString(expectedProposalSHA256) {
+		return badRequest(c, "Invalid repository onboarding approval", "expected_revision and expected_proposal_sha256 must identify the reviewed proposal")
 	}
 	var approved models.DeliveryRepositoryOnboarding
 	var vault models.DeliveryProjectVaultRevision
@@ -251,6 +264,18 @@ func ApproveRepositoryOnboarding(c echo.Context) error {
 		}
 		if !strings.EqualFold(approved.Revision, expectedRevision) {
 			rejection = "The inspected revision changed in the approval request; inspect again before approving"
+			return errOnboardingRejected
+		}
+		if !strings.EqualFold(approved.ProposalSHA256, expectedProposalSHA256) {
+			rejection = "The capability matrix or Vault proposal changed; review the latest proposal digest before approving"
+			return errOnboardingRejected
+		}
+		var activeProbes int64
+		if err := tx.Model(&models.AutomationTask{}).Where("delivery_onboarding_id = ? AND operation = ? AND status IN ?", approved.ID, "delivery.onboarding_probe", []string{"queued", "running", "cancel_requested"}).Count(&activeProbes).Error; err != nil {
+			return err
+		}
+		if activeProbes > 0 {
+			rejection = "A capability probe is still active; wait for its exact-SHA evidence and review the updated proposal"
 			return errOnboardingRejected
 		}
 		proposal, err := validateStoredOnboardingProposal(approved)
@@ -445,7 +470,18 @@ func ListRepositoryCapabilityProbes(c echo.Context) error {
 	if err := configuration.DB.Where("project_id = ? AND onboarding_id = ?", projectID, onboardingID).Order("observed_at DESC, created_at DESC, id DESC").Limit(200).Find(&probes).Error; err != nil {
 		return utilsError(c, err)
 	}
-	return success(c, "Repository capability probes retrieved", probes)
+	var tasks []models.AutomationTask
+	if err := configuration.DB.Select("id", "status", "error_message", "attempt_count", "completed_at", "created_at").Where("delivery_onboarding_id = ? AND operation = ?", onboardingID, "delivery.onboarding_probe").Order("created_at DESC, id DESC").Limit(50).Find(&tasks).Error; err != nil {
+		return utilsError(c, err)
+	}
+	taskViews := make([]repositoryCapabilityProbeTask, 0, len(tasks))
+	for _, task := range tasks {
+		taskViews = append(taskViews, repositoryCapabilityProbeTask{
+			ID: task.ID, Status: task.Status, ErrorMessage: task.ErrorMessage,
+			AttemptCount: task.AttemptCount, CompletedAt: task.CompletedAt, CreatedAt: task.CreatedAt,
+		})
+	}
+	return success(c, "Repository capability probes retrieved", map[string]any{"probes": probes, "tasks": taskViews})
 }
 
 func validateStoredOnboardingProposal(onboarding models.DeliveryRepositoryOnboarding) (projectvault.Proposal, error) {
