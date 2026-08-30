@@ -87,8 +87,12 @@ The `release_gate` agent-run phase is available only during `release_review` to
 a release-authorized human. It is routed to the providerless `release_manager`
 worker on the `release` lane. The initial candidate is derived exclusively from
 GitHub-App-published change sets covering every repository marked `changes` in
-the approved plan; stored records alone remain blocked until the worker supplies
-fresh policy, GitHub, Vault, QA, security, environment and recovery evidence.
+the approved plan. The worker refreshes GitHub PR/branch/check state; completed
+exact-matrix QA tasks promote only configured local `security:secrets` and
+`security:high-critical` results into an immutable security event. The control
+plane independently reloads policy, Vault, QA, and security ledgers. Missing
+compatibility, migration, dependency, environment, or recovery evidence remains
+blocking.
 Gatekeeper schema v3 binds the human approval subject to the exact revision
 matrix, resolved policy digest, canonical Vault evidence digest, required test
 kinds, protected-branch requirements (including GitHub integration identity)

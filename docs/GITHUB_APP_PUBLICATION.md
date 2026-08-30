@@ -12,7 +12,8 @@ repositorios que Delivery puede publicar.
 
 No conceder administración, workflows, secretos, acciones, deployments ni
 permisos de organización salvo que un flujo distinto los requiera y se diseñe
-con otro grant.
+con otro grant. La evidencia de seguridad del Gatekeeper proviene de scanners
+locales configurados y no necesita GitHub Advanced Security.
 
 ## Instalación inicial (una sola vez)
 

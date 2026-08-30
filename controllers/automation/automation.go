@@ -15,6 +15,7 @@ import (
 	"events-stocks/internal/qaevidence"
 	"events-stocks/internal/releasegate"
 	"events-stocks/internal/releasegatecontrol"
+	"events-stocks/internal/securityevidence"
 	"events-stocks/models"
 	automationqueue "events-stocks/repositories/automationqueuerepository"
 	awsrepository "events-stocks/repositories/awsrepository"
@@ -2198,7 +2199,59 @@ func persistQAObservation(tx *gorm.DB, task *models.AutomationTask, raw json.Raw
 	if _, _, err := deliveryledger.RecordQAObservation(tx, workItemID, observation, completedAt.UTC()); err != nil {
 		return err
 	}
+	security, complete, err := securityObservationFromQA(observation)
+	if err != nil {
+		return err
+	}
+	if complete {
+		if _, _, err := deliveryledger.RecordSecurityObservation(tx, workItemID, security, completedAt.UTC()); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+const (
+	securitySecretsTestKind      = "security:secrets"
+	securityHighCriticalTestKind = "security:high-critical"
+)
+
+// securityObservationFromQA promotes only operator-owned reserved command
+// identities. Missing scanners do not become an event, so the release gate
+// remains explicitly missing instead of treating an unavailable tool as pass.
+func securityObservationFromQA(observation qaevidence.Observation) (securityevidence.Observation, bool, error) {
+	if err := qaevidence.Validate(observation); err != nil {
+		return securityevidence.Observation{}, false, err
+	}
+	repositories := make([]securityevidence.Repository, 0, len(observation.Repositories))
+	for _, repository := range observation.Repositories {
+		commands := make(map[string]qaevidence.Command, len(repository.Commands))
+		for _, command := range repository.Commands {
+			commands[strings.ToLower(command.Kind)] = command
+		}
+		secretScan, hasSecretScan := commands[securitySecretsTestKind]
+		highCritical, hasHighCritical := commands[securityHighCriticalTestKind]
+		if !hasSecretScan || !hasHighCritical {
+			return securityevidence.Observation{}, false, nil
+		}
+		highFindings := 0
+		if !highCritical.Passed {
+			// The bounded command contract exposes pass/fail, not scanner details.
+			// One means at least one high-or-critical finding was observed.
+			highFindings = 1
+		}
+		repositories = append(repositories, securityevidence.Repository{
+			Reference: repository.Reference, Branch: repository.Branch, SecretScanPassed: secretScan.Passed,
+			HighFindings: highFindings, CriticalFindings: 0,
+		})
+	}
+	security := securityevidence.Observation{
+		SchemaVersion: securityevidence.SchemaVersion, TaskID: observation.TaskID, MatrixDigest: observation.MatrixDigest, Repositories: repositories,
+	}
+	if err := securityevidence.Validate(security); err != nil {
+		return securityevidence.Observation{}, false, err
+	}
+	return security, true, nil
 }
 
 func qaObservationForTask(task *models.AutomationTask, raw json.RawMessage) (uuid.UUID, qaevidence.Observation, error) {

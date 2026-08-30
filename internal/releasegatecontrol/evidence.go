@@ -17,6 +17,7 @@ import (
 	"events-stocks/internal/projectvault"
 	"events-stocks/internal/qaevidence"
 	"events-stocks/internal/releasegate"
+	"events-stocks/internal/securityevidence"
 	"events-stocks/models"
 
 	"github.com/gofrs/uuid"
@@ -24,9 +25,9 @@ import (
 )
 
 const (
-	maxPolicyRevisions  = 500
-	maxPublishedChanges = 128
-	maxQAObservations   = 128
+	maxPolicyRevisions       = 500
+	maxPublishedChanges      = 128
+	maxAssuranceObservations = 128
 )
 
 // Resolve replaces all candidate policy and Vault claims with current rows from
@@ -79,7 +80,11 @@ func Resolve(db *gorm.DB, workItemID uuid.UUID, input releasegate.Input, evaluat
 	if err != nil {
 		return releasegate.Input{}, err
 	}
-	return resolveStoredQAEvidence(db, item.ID, resolved, subject, requiredByRepository)
+	resolved, err = resolveStoredQAEvidence(db, item.ID, resolved, subject, requiredByRepository)
+	if err != nil {
+		return releasegate.Input{}, err
+	}
+	return resolveStoredSecurityEvidence(db, item.ID, resolved, subject)
 }
 
 type publishedChangeMetadata struct {
@@ -512,10 +517,10 @@ func resolveStoredQAEvidence(db *gorm.DB, workItemID uuid.UUID, input releasegat
 	}
 	var events []models.DeliveryEvent
 	if err := db.Where("work_item_id = ? AND event_type = ? AND subject_digest = ?", workItemID, deliveryledger.EventTypeQAObserved, matrixDigest).
-		Order("sequence DESC, occurred_at DESC, id DESC").Limit(maxQAObservations + 1).Find(&events).Error; err != nil {
+		Order("sequence DESC, occurred_at DESC, id DESC").Limit(maxAssuranceObservations + 1).Find(&events).Error; err != nil {
 		return releasegate.Input{}, fmt.Errorf("load release Gatekeeper QA evidence: %w", err)
 	}
-	if len(events) > maxQAObservations {
+	if len(events) > maxAssuranceObservations {
 		return releasegate.Input{}, fmt.Errorf("release Gatekeeper QA evidence history exceeds the bounded limit")
 	}
 	if len(events) == 0 {
@@ -558,6 +563,95 @@ func validateQATaskProvenance(task models.AutomationTask, workItemID, taskID uui
 		return fmt.Errorf("release Gatekeeper QA task provenance does not match")
 	}
 	return nil
+}
+
+// resolveStoredSecurityEvidence uses only the latest immutable observation for
+// the exact matrix. Operator-owned local scanners run in the reviewed worktree;
+// their workspace identity is mapped through the consumed publication grant.
+func resolveStoredSecurityEvidence(db *gorm.DB, workItemID uuid.UUID, input releasegate.Input, subject publishedReleaseSubject) (releasegate.Input, error) {
+	if db == nil || workItemID == uuid.Nil {
+		return releasegate.Input{}, fmt.Errorf("release Gatekeeper security context is invalid")
+	}
+	matrixDigest, err := releasegate.RevisionMatrixDigest(input.Revisions)
+	if err != nil || !sameRevisionMatrix(input.Revisions, subject.Revisions) {
+		return releasegate.Input{}, fmt.Errorf("release Gatekeeper security matrix is invalid")
+	}
+	var events []models.DeliveryEvent
+	if err := db.Where("work_item_id = ? AND event_type = ? AND subject_digest = ?", workItemID, deliveryledger.EventTypeSecurityObserved, matrixDigest).
+		Order("sequence DESC, occurred_at DESC, id DESC").Limit(maxAssuranceObservations + 1).Find(&events).Error; err != nil {
+		return releasegate.Input{}, fmt.Errorf("load release Gatekeeper security evidence: %w", err)
+	}
+	if len(events) > maxAssuranceObservations {
+		return releasegate.Input{}, fmt.Errorf("release Gatekeeper security evidence history exceeds the bounded limit")
+	}
+	if len(events) == 0 {
+		return input, nil
+	}
+	projected := make([]deliveryledger.SecurityObservation, 0, len(events))
+	for _, event := range events {
+		observation, projectionErr := deliveryledger.ProjectSecurityObservation(event)
+		if projectionErr != nil {
+			return releasegate.Input{}, fmt.Errorf("release Gatekeeper security evidence integrity failed: %w", projectionErr)
+		}
+		projected = append(projected, observation)
+	}
+	latest := projected[0]
+	taskID, err := uuid.FromString(latest.Observation.TaskID)
+	if err != nil || taskID == uuid.Nil {
+		return releasegate.Input{}, fmt.Errorf("release Gatekeeper security task identity is invalid")
+	}
+	var task models.AutomationTask
+	if err := db.Select("id", "delivery_work_item_id", "operation", "evidence_subject_digest", "status", "completed_at").First(&task, taskID).Error; err != nil {
+		return releasegate.Input{}, fmt.Errorf("load release Gatekeeper security task: %w", err)
+	}
+	if err := validateSecurityTaskProvenance(task, workItemID, taskID, matrixDigest, latest.OccurredAt); err != nil {
+		return releasegate.Input{}, err
+	}
+	security, err := securityFromObservation(input.Revisions, subject, latest.Observation)
+	if err != nil {
+		return releasegate.Input{}, err
+	}
+	input.Security = security
+	return input, nil
+}
+
+func validateSecurityTaskProvenance(task models.AutomationTask, workItemID, taskID uuid.UUID, matrixDigest string, occurredAt time.Time) error {
+	if task.ID != taskID || task.DeliveryWorkItemID == nil || *task.DeliveryWorkItemID != workItemID || task.Operation != "delivery.qa" || task.Status != "completed" ||
+		task.CompletedAt == nil || !task.CompletedAt.UTC().Equal(occurredAt.UTC()) || !strings.EqualFold(strings.TrimSpace(task.EvidenceSubjectDigest), matrixDigest) || !validHex(matrixDigest, 64) {
+		return fmt.Errorf("release Gatekeeper security task provenance does not match")
+	}
+	return nil
+}
+
+func securityFromObservation(revisions []releasegate.Revision, subject publishedReleaseSubject, observation securityevidence.Observation) ([]releasegate.SecurityEvidence, error) {
+	if err := securityevidence.Validate(observation); err != nil || len(observation.Repositories) != len(revisions) || len(subject.RepositoryByReference) != len(revisions) || len(subject.WorktreeBranchByReference) != len(revisions) {
+		return nil, fmt.Errorf("release Gatekeeper security repository set does not match the publication subject")
+	}
+	required := make(map[string]string, len(revisions))
+	for _, revision := range revisions {
+		required[strings.ToLower(strings.TrimSpace(revision.Repository))] = strings.ToLower(strings.TrimSpace(revision.SHA))
+	}
+	result := make([]releasegate.SecurityEvidence, 0, len(observation.Repositories))
+	seen := make(map[string]struct{}, len(observation.Repositories))
+	for _, repository := range observation.Repositories {
+		remoteRepository, exists := subject.RepositoryByReference[repository.Reference]
+		expectedBranch, branchExists := subject.WorktreeBranchByReference[repository.Reference]
+		remoteRepository = strings.ToLower(strings.TrimSpace(remoteRepository))
+		expectedSHA, revisionExists := required[remoteRepository]
+		if !exists || !branchExists || !revisionExists || repository.Branch != expectedBranch {
+			return nil, fmt.Errorf("release Gatekeeper security repository or SHA does not match")
+		}
+		if _, duplicate := seen[remoteRepository]; duplicate {
+			return nil, fmt.Errorf("release Gatekeeper security repository is duplicated")
+		}
+		seen[remoteRepository] = struct{}{}
+		result = append(result, releasegate.SecurityEvidence{
+			Repository: remoteRepository, HeadSHA: expectedSHA, SecretScanPassed: repository.SecretScanPassed,
+			HighFindings: repository.HighFindings, CriticalFindings: repository.CriticalFindings,
+		})
+	}
+	sort.Slice(result, func(left, right int) bool { return result[left].Repository < result[right].Repository })
+	return result, nil
 }
 
 type testAggregate struct {

@@ -154,6 +154,13 @@ Event     Event          `gorm:"foreignKey:EventID" json:"event,omitempty"`
   and model prose remain private objects. The release resolver accepts only a
   completed matching task, exact workspace-to-publication/worktree mapping,
   and each repository's effective required-test policy.
+- **DeliveryEvent** security observation (`delivery.security.observed.v1`):
+  Append-only projection of operator-configured local scanner results from a
+  completed exact-matrix QA task. It stores reviewed workspace/branch identity,
+  bounded high/critical counts, and the secret-scan result; command text,
+  output, findings, tokens, and model prose never enter the public ledger.
+  Resolution maps that identity through the consumed publication grant to each
+  exact remote repository/SHA immediately before Gatekeeper evaluation.
 - **AutomationAgentHeartbeat** (`models/AutomationAgentHeartbeat.go`): Short-
   lived, anonymized execution-plane presence. It records the declared worker
   role/lane, provider/model, concurrency and bounded workspace readiness, but

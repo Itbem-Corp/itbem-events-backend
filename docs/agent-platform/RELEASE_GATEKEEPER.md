@@ -94,8 +94,21 @@ reviewed worktree branches, and maps each workspace through its consumed
 publication grant to the published GitHub repository. A required test passes
 only if it was observed passing in every repository whose effective policy
 requires it. Missing labels, stale matrices, another repository's result, or
-failed commands remain normal `required_test_*` blockers. The remaining
-security/environment ledgers are still unresolved and blocking.
+failed commands remain normal `required_test_*` blockers. The security floor is
+produced by two reserved operator-owned QA command identities:
+`security:secrets` and `security:high-critical`. They execute in each exact
+reviewed worktree on the isolated Linux QA plane; configuration may select an
+appropriate scanner for each stack without allowing the model to rename the
+result. A missing scanner produces no security event and remains
+`security_evidence_missing`; a failed secret scan or high/critical scan becomes
+blocking evidence. The completed exact-matrix QA callback appends
+`delivery.security.observed.v1`, and the resolver accepts only its newest event,
+binds every workspace and reviewed branch through the consumed publication
+grant, and supplies each exact remote repository/SHA to the Gatekeeper. Raw
+commands, output, finding details, and model prose are excluded. This path uses
+neither GitHub Actions nor GitHub Advanced Security. Compatibility, migration,
+dependency, environment, and recovery ledgers are still unresolved and
+blocking.
 
 Policy is evaluated independently for every repository using the
 platform → organization → project → repository → bounded change-set override

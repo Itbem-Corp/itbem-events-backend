@@ -50,6 +50,27 @@ func TestReleaseGateCandidateForTaskRequiresAuthenticatedRequester(t *testing.T)
 	}
 }
 
+func TestSecurityObservationPromotesOnlyCompleteOperatorNamedQACommands(t *testing.T) {
+	observation := qaevidence.Observation{
+		SchemaVersion: qaevidence.SchemaVersion, TaskID: "11111111-1111-4111-8111-111111111111", MatrixDigest: strings.Repeat("a", 64),
+		RepositoryExecutionOrder: []string{"workspace://api", "workspace://web"},
+		Repositories: []qaevidence.Repository{
+			{Reference: "workspace://api", Branch: "itbem-agent/11111111-1111-4111-8111-111111111111", Commands: []qaevidence.Command{{Index: 0, Phase: "qa", Kind: securitySecretsTestKind, Passed: true}, {Index: 1, Phase: "qa", Kind: securityHighCriticalTestKind, Passed: true}}},
+			{Reference: "workspace://web", Branch: "itbem-agent/22222222-2222-4222-8222-222222222222", Commands: []qaevidence.Command{{Index: 0, Phase: "qa", Kind: securitySecretsTestKind, Passed: false}, {Index: 1, Phase: "qa", Kind: securityHighCriticalTestKind, Passed: false}}},
+		},
+	}
+	security, complete, err := securityObservationFromQA(observation)
+	if err != nil || !complete || len(security.Repositories) != 2 || !security.Repositories[0].SecretScanPassed || security.Repositories[1].SecretScanPassed || security.Repositories[1].HighFindings != 1 {
+		t.Fatalf("complete local security scans were not promoted: %#v / %t / %v", security, complete, err)
+	}
+	missing := observation
+	missing.Repositories = append([]qaevidence.Repository(nil), observation.Repositories...)
+	missing.Repositories[0].Commands = missing.Repositories[0].Commands[:1]
+	if _, complete, err := securityObservationFromQA(missing); err != nil || complete {
+		t.Fatalf("missing local security scanner became gate evidence: %t / %v", complete, err)
+	}
+}
+
 func TestQAObservationForTaskRequiresExactQueuedMatrix(t *testing.T) {
 	workItemID, taskID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
 	digest := strings.Repeat("a", 64)

@@ -60,6 +60,15 @@ ineligible for the new matrix. The release resolver also binds every workspace
 and reviewed worktree branch to its exact GitHub App publication before a
 named test can satisfy that repository's policy.
 
+The isolated QA lane also runs the operator-configured commands identified as
+`security:secrets` and `security:high-critical` in every exact reviewed
+worktree. These identities are fixed by workspace configuration; the model
+cannot create or rename them. The completed exact-matrix callback promotes only
+their bounded pass/fail state into `delivery.security.observed.v1`. Missing
+commands yield no event, and failed scans become Gatekeeper blockers. Commands,
+output and findings stay private. This uses neither GitHub Actions nor GitHub
+Advanced Security and requires no additional GitHub App permission.
+
 ## Continuous role-lane operation
 
 Each long-lived worker declares one exact identity with `ITBEM_AI_ROLE` and
