@@ -72,3 +72,34 @@ effective fields, fixed safety floors, safe source revision/digests and missing
 configuration. Raw proposer/approver authentication subjects and policy JSON
 storage fields are deliberately absent. This endpoint cannot create revisions,
 approve policy, enqueue work, merge, or deploy.
+
+## Project management API
+
+Project policy configuration is an explicit two-person ledger workflow:
+
+- `GET /api/automation/projects/:id/delivery-policy/revisions` returns at most
+  200 safe project/repository/override proposals and their latest decision.
+- `POST /api/automation/projects/:id/delivery-policy/revisions` requires
+  project management permission and appends a digest-sealed proposal.
+- `POST /api/automation/projects/:id/delivery-policy/revisions/:revisionID/decisions`
+  requires project review permission, the exact expected digest, and appends
+  `approved` or `revoked` evidence.
+
+The project endpoint cannot create platform or organization policy. Repository
+references must already exist in the approved immutable Vault. Request and
+patch JSON use strict schemas with size limits; unknown fields, trailing JSON,
+wildcard branches, arbitrary workflow paths, invalid scopes, and overrides
+without an exact change set/reason/expiry are rejected. Overrides are limited
+to 24 hours.
+
+An approver must be a different authenticated human from the proposer. The
+revision row is locked while its latest decision is checked, so retries of an
+already-recorded state are idempotent and do not append duplicate authority.
+Revocation requires a reason. Before any decision is inserted, the stored
+patch and scope are decoded again, its immutable digest is recomputed, and the
+pure resolver revalidates it. Responses never expose proposer or decision
+authentication subjects.
+
+These endpoints only configure and decide policy evidence. They cannot enqueue
+work, create GitHub reviews, merge, release, deploy, or bypass the exact-SHA
+Gatekeeper and its non-negotiable safety floors.
