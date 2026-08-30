@@ -120,6 +120,10 @@ its approximate depth plus safe per-lane counters and role/lane heartbeats, so
 an operator can inspect and explicitly decide how to recover poisoned messages
 without silently re-running a stale review.
 
+For the dedicated Linux host, use the reviewed unit, installer and activation
+runbook in `deploy/systemd/`. The installer stages a SHA-addressed binary and
+root-only configuration but intentionally never starts or enables a service.
+
 The only billable connectivity command is explicit and guarded:
 
 ```powershell

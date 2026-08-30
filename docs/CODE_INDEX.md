@@ -64,6 +64,7 @@ itbem-events-backend/
 | DeliveryRepositoryOnboarding / DeliveryProjectVaultRevision | `models/DeliveryProjectVault.go` |
 | AutomationTask | `models/AutomationTask.go` |
 | AutomationAgentHeartbeat | `models/AutomationAgentHeartbeat.go` |
+| Linux multiagent systemd distribution | `deploy/systemd/` |
 | Moment | `models/Moment.go` |
 | MomentType | `models/MomentType.go` |
 | Color | `models/Color.go` |

@@ -1,0 +1,53 @@
+[Unit]
+Description=ITBEM AI agent role lane (%i)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=itbem-agent-%i
+Group=itbem-agent-%i
+UMask=0077
+WorkingDirectory=/var/lib/itbem-ai-agent/%i
+StateDirectory=itbem-ai-agent/%i
+Environment=ITBEM_AI_CONCURRENCY=1
+EnvironmentFile=/etc/itbem-ai-agent/common.env
+EnvironmentFile=/etc/itbem-ai-agent/roles/%i.env
+ExecCondition=/usr/bin/test ! -e /etc/itbem-ai-agent/disabled/all
+ExecCondition=/usr/bin/test ! -e /etc/itbem-ai-agent/disabled/%i
+ExecStartPre=/opt/itbem-ai-agent/current/itbem-ai-agent --doctor
+ExecStart=/opt/itbem-ai-agent/current/itbem-ai-agent
+Restart=on-failure
+RestartSec=10s
+TimeoutStartSec=90s
+TimeoutStopSec=60s
+KillSignal=SIGTERM
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectClock=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+LockPersonality=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths=/var/lib/itbem-ai-agent/%i /srv/itbem-agent-workspaces
+TasksMax=512
+LimitNOFILE=65536
+MemoryMax=4G
+
+[Install]
+WantedBy=multi-user.target
+

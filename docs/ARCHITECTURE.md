@@ -448,6 +448,9 @@ if !ok || cfg == nil {
   must be complete and use distinct queues, and aggregate health includes a
   per-lane projection plus the role DLQ. Queue membership never grants source,
   merge, release, deployment, secret, or production authority.
+  The Linux execution plane uses one hardened systemd template instance and
+  unprivileged Unix account per lane. Global/per-lane filesystem kill switches
+  prevent restart, and installation never implies activation.
 
 - Application notifications use `services/notifications` with the durable
   outbox and worker queue. `itbem-events-workers` owns Block Kit,
