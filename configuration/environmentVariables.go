@@ -29,7 +29,7 @@ func LoadConfig() *models.Config {
 
 	for i := 0; i < v.NumField(); i++ {
 		field := t.Field(i)
-		envName := fieldToEnvVar(field.Name)
+		envName := configFieldEnvVar(field)
 		envValue, exists := os.LookupEnv(envName)
 
 		if exists && strings.ToLower(envValue) == "none" {
@@ -48,6 +48,13 @@ func LoadConfig() *models.Config {
 	}
 
 	return cfg
+}
+
+func configFieldEnvVar(field reflect.StructField) string {
+	if explicit := strings.TrimSpace(field.Tag.Get("env")); explicit != "" {
+		return explicit
+	}
+	return fieldToEnvVar(field.Name)
 }
 
 // setConfigField centralizes the reflection boundary used by LoadConfig. Most

@@ -132,9 +132,9 @@ type Config struct {
 	// GitHubReviewWebhookSecret authenticates the optional pull-request review
 	// ingress. It is independent from the GitHub App private key and from the
 	// worker callback secret. When empty, the ingress is disabled.
-	GitHubReviewWebhookSecret string `required:"false"`
+	GitHubReviewWebhookSecret string `required:"false" env:"GITHUB_REVIEW_WEBHOOK_SECRET"`
 	// GitHubReviewRepositories is an explicit comma-separated allow-list such
 	// as "itbem/backend,itbem/dashboard". A GitHub App installation alone never
 	// authorizes every repository to spend local review capacity.
-	GitHubReviewRepositories string `required:"false"`
+	GitHubReviewRepositories string `required:"false" env:"GITHUB_REVIEW_REPOSITORIES"`
 }

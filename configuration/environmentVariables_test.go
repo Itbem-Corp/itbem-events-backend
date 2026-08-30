@@ -37,3 +37,20 @@ func TestSetConfigFieldRejectsMalformedTypedConfiguration(t *testing.T) {
 		t.Fatal("malformed boolean was accepted")
 	}
 }
+
+func TestConfigFieldEnvVarHonorsExplicitAcronymMapping(t *testing.T) {
+	type config struct {
+		GitHubReviewWebhookSecret string `env:"GITHUB_REVIEW_WEBHOOK_SECRET"`
+		OrdinaryValue             string
+	}
+	typ := reflect.TypeOf(config{})
+	githubField, _ := typ.FieldByName("GitHubReviewWebhookSecret")
+	ordinaryField, _ := typ.FieldByName("OrdinaryValue")
+
+	if got := configFieldEnvVar(githubField); got != "GITHUB_REVIEW_WEBHOOK_SECRET" {
+		t.Fatalf("explicit environment mapping changed: %q", got)
+	}
+	if got := configFieldEnvVar(ordinaryField); got != "ORDINARY_VALUE" {
+		t.Fatalf("default environment mapping changed: %q", got)
+	}
+}
