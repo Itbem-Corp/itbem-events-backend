@@ -5,7 +5,8 @@ systemd services. The installer never enables or starts a service.
 
 ## Preconditions
 
-- Merge and deploy the reviewed backend stack through PR #74.
+- Deploy only a backend commit with all required checks green and an
+  independent review of that exact SHA.
 - Deploy the additive queue stack from infrastructure PR #51 and record its
   exact outputs.
 - Build the binary from the exact reviewed backend commit and verify its
@@ -55,6 +56,12 @@ metadata and points the long-term shared-credentials path at `/dev/null`, so a
 missing/expired certificate fails closed instead of falling back to a machine
 or developer identity. See the official
 [credential helper guide](https://docs.aws.amazon.com/rolesanywhere/latest/userguide/credential-helper.html).
+The infrastructure profile intentionally rejects a caller-supplied role
+session name, so the helper configuration must not include
+`--role-session-name`. Copy each exact queue URL, input bucket, output bucket,
+profile ARN, role ARN and trust-anchor ARN from the reviewed stack outputs.
+Every checked-in `REPLACE_WITH_*_STACK_OUTPUT` value is deliberately invalid;
+the worker doctor must fail until an operator replaces all of them.
 
 Each temporary IAM role must be limited to that lane's queue plus task-input
 read and task-output write. Release may additionally

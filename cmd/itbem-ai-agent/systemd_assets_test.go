@@ -74,10 +74,13 @@ func TestSystemdRoleFilesBindExactLaneAndSeparateReleaseSecrets(t *testing.T) {
 	}
 	for file, identity := range roles {
 		body := systemdAsset(t, "roles", file+".env.example")
-		for _, required := range []string{"ITBEM_AI_ROLE=" + identity[0], "ITBEM_AI_QUEUE_LANE=" + identity[1], "itbem-ai-local-prod-" + identity[1], "AWS_CONFIG_FILE=/etc/itbem-ai-agent/secrets/" + file + "/aws-config", "AWS_PROFILE=itbem-agent-" + file, "AUTOMATION_CALLBACK_SECRET=", "ITBEM_AI_WORKSPACES_JSON={}"} {
+		for _, required := range []string{"ITBEM_AI_ROLE=" + identity[0], "ITBEM_AI_QUEUE_LANE=" + identity[1], "ITBEM_AI_QUEUE_URL=REPLACE_WITH_", "_QUEUE_URL_STACK_OUTPUT", "AWS_CONFIG_FILE=/etc/itbem-ai-agent/secrets/" + file + "/aws-config", "AWS_PROFILE=itbem-agent-" + file, "AUTOMATION_CALLBACK_SECRET=", "ITBEM_AI_WORKSPACES_JSON={}"} {
 			if !strings.Contains(body, required) {
 				t.Fatalf("%s role file lost %q", file, required)
 			}
+		}
+		if strings.Contains(body, "itbem-ai-local-prod-") {
+			t.Fatalf("%s role file hardcodes a deployment-specific queue", file)
 		}
 		if file == "release" {
 			if strings.Contains(body, "API_KEY") || !strings.Contains(body, "ITBEM_GITHUB_APP_PRIVATE_KEY_FILE=") {
@@ -93,6 +96,11 @@ func TestSystemdRoleFilesBindExactLaneAndSeparateReleaseSecrets(t *testing.T) {
 			t.Fatalf("common environment lost credential-chain guard %q", required)
 		}
 	}
+	for _, required := range []string{"ITBEM_AI_INPUT_BUCKET=REPLACE_WITH_INPUT_BUCKET_STACK_OUTPUT", "ITBEM_AI_OUTPUT_BUCKET=REPLACE_WITH_OUTPUT_BUCKET_STACK_OUTPUT"} {
+		if !strings.Contains(common, required) {
+			t.Fatalf("common environment lost fail-closed stack output placeholder %q", required)
+		}
+	}
 	for _, secret := range []string{"API_KEY", "PRIVATE_KEY", "CALLBACK_SECRET"} {
 		if strings.Contains(common, secret) {
 			t.Fatalf("common environment contains role secret class %q", secret)
@@ -104,7 +112,7 @@ func TestSystemdRoleFilesBindExactLaneAndSeparateReleaseSecrets(t *testing.T) {
 			t.Fatalf("Roles Anywhere template lost %q", required)
 		}
 	}
-	for _, prohibited := range []string{"aws_access_key_id", "aws_secret_access_key", "aws_session_token"} {
+	for _, prohibited := range []string{"aws_access_key_id", "aws_secret_access_key", "aws_session_token", "--role-session-name"} {
 		if strings.Contains(strings.ToLower(rolesAnywhere), prohibited) {
 			t.Fatalf("Roles Anywhere template contains long-lived credential field %q", prohibited)
 		}

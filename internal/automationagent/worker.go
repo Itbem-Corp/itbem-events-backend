@@ -130,8 +130,8 @@ type Worker struct {
 }
 
 func NewWorker(config WorkerConfig, store ObjectStore, callback TaskCallback, provider ProviderClient) (*Worker, error) {
-	if !strings.HasPrefix(config.InputBucket, "itbem-ai-inputs-") || !strings.HasPrefix(config.OutputBucket, "itbem-ai-outputs-") {
-		return nil, fmt.Errorf("worker requires dedicated ITBEM automation input and output buckets")
+	if !validPrivateBucketName(config.InputBucket) || !validPrivateBucketName(config.OutputBucket) || config.InputBucket == config.OutputBucket {
+		return nil, fmt.Errorf("worker requires distinct, valid private input and output buckets")
 	}
 	if store == nil || callback == nil || provider == nil {
 		return nil, fmt.Errorf("worker store, callback and provider are required")
@@ -186,15 +186,37 @@ func validateTaskMessageEnvelope(message TaskMessage) error {
 }
 
 func ParsePrivateReference(reference string) (bucket, key string, err error) {
-	if !strings.HasPrefix(reference, "s3://itbem-") {
-		return "", "", fmt.Errorf("reference is outside ITBEM private storage")
+	if !strings.HasPrefix(reference, "s3://") {
+		return "", "", fmt.Errorf("reference must use private object storage")
 	}
 	value := strings.TrimPrefix(reference, "s3://")
 	parts := strings.SplitN(value, "/", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+	if len(parts) != 2 || !validPrivateBucketName(parts[0]) || strings.TrimSpace(parts[1]) == "" {
 		return "", "", fmt.Errorf("invalid private object reference")
 	}
 	return parts[0], parts[1], nil
+}
+
+func validPrivateBucketName(name string) bool {
+	if len(name) < 3 || len(name) > 63 || !isLowerAlphaNumeric(rune(name[0])) {
+		return false
+	}
+	if !isLowerAlphaNumeric(rune(name[len(name)-1])) {
+		return false
+	}
+	if strings.Contains(name, "..") || strings.Contains(name, ".-") || strings.Contains(name, "-.") {
+		return false
+	}
+	for _, character := range name {
+		if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '-' && character != '.' {
+			return false
+		}
+	}
+	return true
+}
+
+func isLowerAlphaNumeric(character rune) bool {
+	return character >= 'a' && character <= 'z' || character >= '0' && character <= '9'
 }
 
 // Process returns a RetryableError when SQS must retain the message. Every

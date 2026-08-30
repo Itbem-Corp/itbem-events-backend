@@ -119,6 +119,53 @@ func TestNewWorkerRejectsPartialOrCrossRoleIdentity(t *testing.T) {
 	}
 }
 
+func TestWorkerStorageConfigurationIsGenericAndFailClosed(t *testing.T) {
+	worker, err := NewWorker(WorkerConfig{InputBucket: "acme-control-inputs-prod", OutputBucket: "acme-control-evidence-prod"}, &fakeStore{}, &fakeCallback{}, fakeProvider{})
+	if err != nil || worker.config.InputBucket != "acme-control-inputs-prod" {
+		t.Fatalf("generic private storage was rejected: %#v, %v", worker, err)
+	}
+	for name, config := range map[string]WorkerConfig{
+		"same bucket":       {InputBucket: "acme-control-data", OutputBucket: "acme-control-data"},
+		"placeholder":       {InputBucket: "INPUT_BUCKET_FROM_STACK", OutputBucket: "acme-control-evidence"},
+		"unsafe input name": {InputBucket: "acme_control_inputs", OutputBucket: "acme-control-evidence"},
+		"empty output":      {InputBucket: "acme-control-inputs"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := NewWorker(config, &fakeStore{}, &fakeCallback{}, fakeProvider{}); err == nil {
+				t.Fatalf("unsafe storage configuration accepted: %#v", config)
+			}
+		})
+	}
+}
+
+func TestPrivateReferenceAcceptsConfiguredProductAgnosticBucket(t *testing.T) {
+	bucket, key, err := ParsePrivateReference("s3://acme-control-inputs-prod/automation/inputs/task/input.json")
+	if err != nil || bucket != "acme-control-inputs-prod" || key != "automation/inputs/task/input.json" {
+		t.Fatalf("generic private reference = %q, %q, %v", bucket, key, err)
+	}
+	for _, reference := range []string{
+		"https://acme-control-inputs-prod/automation/inputs/task/input.json",
+		"s3://ACME-control-inputs/automation/inputs/task/input.json",
+		"s3://acme_control_inputs/automation/inputs/task/input.json",
+		"s3://acme-control-inputs/",
+	} {
+		if _, _, err := ParsePrivateReference(reference); err == nil {
+			t.Fatalf("unsafe private reference accepted: %s", reference)
+		}
+	}
+}
+
+func TestValidateMessagePinsTheConfiguredInputBucket(t *testing.T) {
+	message := validMessage()
+	message.Payload.InputRef = "s3://acme-control-inputs-prod/automation/inputs/task/input.json"
+	if err := ValidateMessage(message, "acme-control-inputs-prod"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateMessage(message, "another-product-inputs-prod"); err == nil {
+		t.Fatal("cross-project input bucket was accepted")
+	}
+}
+
 func TestDeliveryGovernanceInstructionPreservesHumanAuthorityWithoutTrustingAgentMessages(t *testing.T) {
 	instruction := deliveryGovernanceInstruction("delivery.plan")
 	for _, required := range []string{"delivery.gates", "author_type=human", "unresolved rework", "Messages from any other author", "never opened, satisfied, or bypassed"} {
