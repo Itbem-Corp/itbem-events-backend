@@ -723,23 +723,24 @@ type automationWorkspaceHealth struct {
 // task-scoped inspector. Workers contains only current, anonymous runtime
 // metadata so that readiness claims remain auditable in the dashboard.
 type automationHealth struct {
-	Queued                        int64                         `json:"queued"`
-	Running                       int64                         `json:"running"`
-	FailedLastDay                 int64                         `json:"failed_last_day"`
-	ExpiredLeases                 int64                         `json:"expired_leases"`
-	SpendLastDay                  int64                         `json:"spend_last_day_microusd"`
-	ActiveWorkers                 int64                         `json:"active_workers"`
-	WorkerCapacity                int64                         `json:"worker_capacity"`
-	QueueTelemetry                bool                          `json:"queue_telemetry_available"`
-	QueueVisible                  int64                         `json:"queue_visible_approximate"`
-	QueueInFlight                 int64                         `json:"queue_in_flight_approximate"`
-	QueueDelayed                  int64                         `json:"queue_delayed_approximate"`
-	DeadLetterTelemetry           bool                          `json:"dead_letter_telemetry_available"`
-	DeadLetterVisible             int64                         `json:"dead_letter_visible_approximate"`
-	OperationalTelemetryAvailable bool                          `json:"operational_telemetry_available"`
-	LastWorkerSeenAt              *time.Time                    `json:"last_worker_seen_at,omitempty"`
-	Workers                       []automationWorkerHealth      `json:"workers"`
-	ReviewIngress                 automationReviewIngressHealth `json:"review_ingress"`
+	Queued                        int64                                 `json:"queued"`
+	Running                       int64                                 `json:"running"`
+	FailedLastDay                 int64                                 `json:"failed_last_day"`
+	ExpiredLeases                 int64                                 `json:"expired_leases"`
+	SpendLastDay                  int64                                 `json:"spend_last_day_microusd"`
+	ActiveWorkers                 int64                                 `json:"active_workers"`
+	WorkerCapacity                int64                                 `json:"worker_capacity"`
+	QueueTelemetry                bool                                  `json:"queue_telemetry_available"`
+	QueueLanes                    map[string]automationqueue.LaneHealth `json:"queue_lanes,omitempty"`
+	QueueVisible                  int64                                 `json:"queue_visible_approximate"`
+	QueueInFlight                 int64                                 `json:"queue_in_flight_approximate"`
+	QueueDelayed                  int64                                 `json:"queue_delayed_approximate"`
+	DeadLetterTelemetry           bool                                  `json:"dead_letter_telemetry_available"`
+	DeadLetterVisible             int64                                 `json:"dead_letter_visible_approximate"`
+	OperationalTelemetryAvailable bool                                  `json:"operational_telemetry_available"`
+	LastWorkerSeenAt              *time.Time                            `json:"last_worker_seen_at,omitempty"`
+	Workers                       []automationWorkerHealth              `json:"workers"`
+	ReviewIngress                 automationReviewIngressHealth         `json:"review_ingress"`
 }
 
 // automationReviewIngressHealth makes automatic PR review operationally
@@ -1667,6 +1668,7 @@ func Health(c echo.Context) error {
 	if user.IsPlatformAdmin() {
 		queueHealth := automationqueue.QueueHealth(c.Request().Context())
 		result.QueueTelemetry = queueHealth.Available
+		result.QueueLanes = queueHealth.Lanes
 		result.QueueVisible, result.QueueInFlight, result.QueueDelayed = queueHealth.Visible, queueHealth.InFlight, queueHealth.Delayed
 		result.DeadLetterTelemetry, result.DeadLetterVisible = queueHealth.DeadLetterAvailable, queueHealth.DeadLetterVisible
 	}

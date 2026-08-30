@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"events-stocks/models"
+	"events-stocks/repositories/automationqueuerepository"
 	"fmt"
 	"io"
 	"net/http"
@@ -111,6 +112,28 @@ func TestAutomationReviewIngressStatusReportsOnlySafeReadiness(t *testing.T) {
 	status = automationReviewIngressStatus(&models.Config{}, 0)
 	if status.Enabled || status.WorkerAvailable || status.Ready || status.AllowedRepositoryCount != 0 {
 		t.Fatalf("disabled ingress status leaked a readiness claim: %#v", status)
+	}
+}
+
+func TestAutomationHealthExposesLaneTelemetryWithoutInventingIt(t *testing.T) {
+	withoutTelemetry, err := json.Marshal(automationHealth{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(withoutTelemetry), `"queue_lanes"`) {
+		t.Fatalf("absent lane telemetry must remain unknown, got %s", withoutTelemetry)
+	}
+
+	withTelemetry, err := json.Marshal(automationHealth{QueueLanes: map[string]automationqueuerepository.LaneHealth{
+		"review": {Available: true, Visible: 2, InFlight: 1, Delayed: 0},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{`"queue_lanes"`, `"review"`, `"available":true`, `"visible":2`, `"in_flight":1`} {
+		if !strings.Contains(string(withTelemetry), expected) {
+			t.Fatalf("lane telemetry is missing %s: %s", expected, withTelemetry)
+		}
 	}
 }
 
