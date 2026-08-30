@@ -16,6 +16,7 @@ import (
 	"events-stocks/internal/storagekeys"
 	"events-stocks/models"
 	"events-stocks/repositories/awsrepository"
+	sqsrepository "events-stocks/repositories/sqsrepository"
 	"events-stocks/services/cacheutil"
 	"events-stocks/services/ports"
 	"events-stocks/utils"
@@ -449,16 +450,6 @@ func (s *MomentService) EnqueueMediaProcessing(moment *models.Moment, rawKey, bu
 	if moment.EventID == nil {
 		return false
 	}
-	if s.mediaPublisher == nil {
-		s.failMediaProcessingJob(moment, errors.New("media publisher is not configured"))
-		return false
-	}
-	jobID, generation, err := s.prepareMediaProcessingJob(moment, rawKey)
-	if err != nil {
-		slog.Error("failed to prepare media job", "momentId", moment.ID, "error", err)
-		s.failMediaProcessingJob(moment, err)
-		return false
-	}
 	msg := dtos.NewMediaProcessMessage(
 		moment.ID.String(),
 		moment.EventID.String(),
@@ -467,9 +458,7 @@ func (s *MomentService) EnqueueMediaProcessing(moment *models.Moment, rawKey, bu
 		contentType,
 		detectMediaIsVideo(contentType, rawKey),
 	)
-	msg.JobID = jobID
-	msg.Generation = generation
-	enqueued, err := s.mediaPublisher.PublishMediaJob(msg)
+	enqueued, err := s.beginAndPublishMediaProcessing(moment, rawKey, msg)
 	if err != nil {
 		slog.Error("failed to queue media job", "momentId", moment.ID, "error", err)
 		s.failMediaProcessingJob(moment, err)
@@ -480,6 +469,52 @@ func (s *MomentService) EnqueueMediaProcessing(moment *models.Moment, rawKey, bu
 		return false
 	}
 	return enqueued
+}
+
+// beginAndPublishMediaProcessing uses the durable outbox when the repository
+// and owning Lambda queue are available. The fallback preserves legacy/test
+// adapters while keeping the same generation/CAS contract.
+func (s *MomentService) beginAndPublishMediaProcessing(moment *models.Moment, inputKey string, message dtos.MediaProcessMessage) (bool, error) {
+	if moment == nil || moment.EventID == nil {
+		return false, errors.New("media job requires a moment and event")
+	}
+	if durable, ok := s.repo.(ports.MomentProcessingOutboxRepository); ok && sqsrepository.IsConfiguredFor(message.IsVideo) {
+		jobUUID, err := uuid.NewV4()
+		if err != nil {
+			return false, err
+		}
+		message.JobID = jobUUID.String()
+		message, err = sqsrepository.NormalizeMediaJob(message)
+		if err != nil {
+			return false, err
+		}
+		generation, err := durable.BeginMediaProcessingJobWithOutbox(moment.ID, *moment.EventID, inputKey, message.JobID, message)
+		if err != nil {
+			return false, err
+		}
+		moment.ProcessingJobID = message.JobID
+		moment.ProcessingGeneration = generation
+		moment.ProcessingInputKey = inputKey
+		moment.ProcessingStatus = "pending"
+		moment.ErrorMessage = ""
+		return true, nil
+	}
+
+	if s.mediaPublisher == nil {
+		return false, errors.New("media publisher is not configured")
+	}
+	jobID, generation, err := s.prepareMediaProcessingJob(moment, inputKey)
+	if err != nil {
+		return false, err
+	}
+	message.JobID = jobID
+	message.Generation = generation
+	return s.mediaPublisher.PublishMediaJob(message)
+}
+
+func (s *MomentService) hasDurableMediaHandoff(isVideo bool) bool {
+	_, supported := s.repo.(ports.MomentProcessingOutboxRepository)
+	return supported && sqsrepository.IsConfiguredFor(isVideo)
 }
 
 // failMediaProcessingJob moves only the currently-authorized pending job to a
@@ -568,16 +603,15 @@ func (s *MomentService) RequeueMoment(moment *models.Moment) error {
 	if !strings.Contains(objectKey, "/raw/") {
 		return fmt.Errorf("cannot requeue: optimized file already processed, raw key not available")
 	}
-	if s.mediaPublisher == nil {
-		return fmt.Errorf("cannot requeue: media publisher is not configured")
-	}
-
 	contentType := moment.ContentType
 	if contentType == "" {
 		contentType = mime.TypeByExtension(filepath.Ext(objectKey))
 		if contentType == "" {
 			contentType = "application/octet-stream"
 		}
+	}
+	if s.mediaPublisher == nil && !s.hasDurableMediaHandoff(detectMediaIsVideo(contentType, objectKey)) {
+		return fmt.Errorf("cannot requeue: media publisher is not configured")
 	}
 
 	if _, supportsCAS := s.repo.(ports.MomentProcessingRepository); !supportsCAS {
@@ -587,10 +621,6 @@ func (s *MomentService) RequeueMoment(moment *models.Moment) error {
 		moment.ProcessingStatus = "pending"
 		moment.ErrorMessage = ""
 	}
-	jobID, generation, err := s.prepareMediaProcessingJob(moment, objectKey)
-	if err != nil {
-		return fmt.Errorf("requeue job preparation failed: %w", err)
-	}
 	msg := dtos.NewMediaProcessMessage(
 		moment.ID.String(),
 		moment.EventID.String(),
@@ -599,9 +629,7 @@ func (s *MomentService) RequeueMoment(moment *models.Moment) error {
 		contentType,
 		detectMediaIsVideo(contentType, objectKey),
 	)
-	msg.JobID = jobID
-	msg.Generation = generation
-	enqueued, publishErr := s.mediaPublisher.PublishMediaJob(msg)
+	enqueued, publishErr := s.beginAndPublishMediaProcessing(moment, objectKey, msg)
 	if publishErr != nil || !enqueued {
 		if publishErr == nil {
 			publishErr = errors.New("media publisher did not confirm enqueue")
@@ -675,12 +703,12 @@ func (s *MomentService) BatchReoptimize(ids []uuid.UUID) (succeeded, skipped, fa
 				contentType = "application/octet-stream"
 			}
 		}
-		originalStatus := moment.ProcessingStatus
-		originalError := moment.ErrorMessage
-		if s.mediaPublisher == nil {
+		if s.mediaPublisher == nil && !s.hasDurableMediaHandoff(detectMediaIsVideo(contentType, objectKey)) {
 			failed++
 			continue
 		}
+		originalStatus := moment.ProcessingStatus
+		originalError := moment.ErrorMessage
 		if _, supportsCAS := s.repo.(ports.MomentProcessingRepository); !supportsCAS {
 			if err := s.repo.UpdateMomentContent(moment.ID, moment.ContentURL, "pending", "", "", 0, 0, 0); err != nil {
 				failed++
@@ -690,13 +718,6 @@ func (s *MomentService) BatchReoptimize(ids []uuid.UUID) (succeeded, skipped, fa
 			moment.ProcessingStatus = "pending"
 			moment.ErrorMessage = ""
 		}
-		jobID, generation, prepareErr := s.prepareMediaProcessingJob(&moment, objectKey)
-		if prepareErr != nil {
-			failed++
-			s.restoreReoptimizationJob(&moment, originalStatus, originalError, prepareErr)
-			slog.Error("failed to prepare reoptimization job", "momentId", moment.ID, "error", prepareErr)
-			continue
-		}
 		msg := dtos.NewMediaProcessMessage(
 			moment.ID.String(),
 			moment.EventID.String(),
@@ -705,9 +726,7 @@ func (s *MomentService) BatchReoptimize(ids []uuid.UUID) (succeeded, skipped, fa
 			contentType,
 			detectMediaIsVideo(contentType, objectKey),
 		)
-		msg.JobID = jobID
-		msg.Generation = generation
-		enqueued, publishErr := s.mediaPublisher.PublishMediaJob(msg)
+		enqueued, publishErr := s.beginAndPublishMediaProcessing(&moment, objectKey, msg)
 		if publishErr != nil || !enqueued {
 			if publishErr == nil {
 				publishErr = errors.New("media publisher did not confirm enqueue")

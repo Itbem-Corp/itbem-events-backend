@@ -75,6 +75,23 @@ var AllowedMimeTypes = map[string]bool{
 	"font/sfnt":                     true,
 }
 
+var momentUploadAllowedMimeTypes = map[string]bool{
+	"image/jpeg":       true,
+	"image/png":        true,
+	"image/gif":        true,
+	"image/webp":       true,
+	"image/heic":       true,
+	"image/heif":       true,
+	"image/avif":       true,
+	"video/mp4":        true,
+	"video/webm":       true,
+	"video/quicktime":  true,
+	"video/x-m4v":      true,
+	"video/3gpp":       true,
+	"video/x-msvideo":  true,
+	"video/x-matroska": true,
+}
+
 type ResourceService struct {
 	Bucket     string
 	Provider   string
@@ -84,6 +101,12 @@ type ResourceService struct {
 	repo       ports.ResourceRepository
 	cache      ports.CacheRepository
 	storage    ports.ObjectStorageRepository
+}
+
+// CanonicalObjectKey normalizes legacy S3/CDN URLs at the storage boundary so
+// callers never use a user-controlled URL as an object identifier.
+func (rs *ResourceService) CanonicalObjectKey(raw string) string {
+	return awsrepository.S3KeyFromURL(raw, rs.Bucket)
 }
 
 type ResourceServiceDeps struct {
@@ -151,12 +174,6 @@ func (rs *ResourceService) scopedObjectPath(path string) string {
 		return path
 	}
 	return root + "/" + path
-}
-
-// CanonicalObjectKey normalizes legacy S3/CDN URLs at the storage boundary.
-// HTTP handlers and domain services can therefore operate only on object keys.
-func (rs *ResourceService) CanonicalObjectKey(raw string) string {
-	return awsrepository.S3KeyFromURL(raw, rs.Bucket)
 }
 
 func resourceServiceUnavailable() error {
@@ -947,6 +964,45 @@ func (rs *ResourceService) MarkMomentUploadConfirmed(ctx context.Context, s3Key 
 	return confirmer.MarkUploadConfirmed(ctx, filename, folder, rs.Bucket, rs.Provider)
 }
 
+func momentUploadLimit(contentType string) (int64, int) {
+	if strings.HasPrefix(contentType, "video/") {
+		return int64(MaxVideoFileSizeBytes), MaxVideoFileSizeMB
+	}
+	return int64(MaxMomentImageFileSizeBytes), MaxMomentImageFileSizeMB
+}
+
+func (rs *ResourceService) buildMomentRawKey(eventID, filename string) string {
+	u, _ := uuid.NewV4()
+	ext := ""
+	if idx := strings.LastIndex(filename, "."); idx != -1 {
+		ext = strings.ToLower(filename[idx:])
+	}
+	return rs.scopedObjectPath(fmt.Sprintf("moments/%s/raw/%s%s", eventID, u.String(), ext))
+}
+
+func normalizeMomentUploadContentType(filename, contentType string) (string, error) {
+	ct := canonicalUploadContentType(contentType)
+	if ct == "" || ct == "application/octet-stream" {
+		ext := ""
+		if idx := strings.LastIndex(filename, "."); idx != -1 {
+			ext = strings.ToLower(filename[idx+1:])
+		}
+		ct = canonicalUploadContentType(guessMimeType(ext))
+	}
+	if !momentUploadAllowedMimeTypes[ct] {
+		return "", services.ValidationError{Msg: fmt.Sprintf("unsupported file type for moments: %s", ct)}
+	}
+	return ct, nil
+}
+
+func canonicalUploadContentType(contentType string) string {
+	ct := strings.TrimSpace(strings.ToLower(contentType))
+	if ct == "image/jpg" {
+		return "image/jpeg"
+	}
+	return ct
+}
+
 // UploadToMomentsFolder is kept for backward compatibility.
 // Deprecated: use UploadRawToMomentsFolder.
 func (rs *ResourceService) UploadToMomentsFolder(
@@ -1176,10 +1232,6 @@ func (rs *ResourceService) DownloadFile(filename string) (io.ReadCloser, error) 
 		return nil, err
 	}
 	return storage.GetFileStream(filename, rs.UploadPath, rs.Bucket, rs.Provider)
-}
-
-func isAllowed(contentType string) bool {
-	return AllowedMimeTypes[canonicalUploadContentType(contentType)]
 }
 
 func requireImageUploadContentType(contentType string) error {
@@ -1451,4 +1503,92 @@ func updateFilenameExtension(filename, newContentType string) string {
 	}
 
 	return filename + ext
+}
+
+func GetPresignedURL(path string, bucket string, provider string) (string, error) {
+	return GetPresignedURLWithTTL(path, bucket, provider, 720)
+}
+
+func GetPresignedURLWithTTL(path string, bucket string, provider string, ttlMinutes int64) (string, error) {
+	if _resourceSvc == nil {
+		return "", resourceServiceUnavailable()
+	}
+	return _resourceSvc.getPresignedURLWithTTL(path, bucket, provider, ttlMinutes)
+}
+
+func (rs *ResourceService) getPresignedURLWithTTL(path string, bucket string, provider string, ttlMinutes int64) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+	storage, err := rs.requireStorage()
+	if err != nil {
+		return "", err
+	}
+
+	parts := strings.Split(path, "/")
+	if len(parts) < 2 {
+		return "", fmt.Errorf("invalid path format: %s", path)
+	}
+
+	filename := parts[len(parts)-1]
+	folder := strings.Join(parts[:len(parts)-1], "/")
+
+	return storage.GetPresignedFileURL(filename, folder, bucket, provider, int(ttlMinutes))
+}
+
+// DeleteObjectByPath elimina cualquier archivo del bucket basándose en su path completo.
+// Útil para limpiar logos, archivos de recursos, o cualquier otro objeto.
+// DeleteObjectByPath elimina cualquier archivo del bucket basándose en su path completo.
+func (rs *ResourceService) GetPresignedURL(path string) (string, error) {
+	return rs.getPresignedURLWithTTL(path, rs.Bucket, rs.Provider, 720)
+}
+
+func (rs *ResourceService) GetPresignedURLWithTTL(path string, ttlMinutes int64) (string, error) {
+	return rs.getPresignedURLWithTTL(path, rs.Bucket, rs.Provider, ttlMinutes)
+}
+
+func (rs *ResourceService) DeleteObjectByPath(fullPath string) error {
+	if fullPath == "" {
+		return nil
+	}
+
+	// El path viene como "clients/UUID/logo/nombre.webp"
+	// Lo descomponemos para el bucketrepository
+	parts := strings.Split(fullPath, "/")
+	if len(parts) < 1 {
+		return fmt.Errorf("invalid path for deletion: %s", fullPath)
+	}
+
+	filename := parts[len(parts)-1]
+
+	// Unimos el resto para obtener el folder
+	folder := ""
+	if len(parts) > 1 {
+		folder = strings.Join(parts[:len(parts)-1], "/")
+	}
+
+	storage, err := rs.requireStorage()
+	if err != nil {
+		return err
+	}
+	// 1. Verificar existencia antes de borrar
+	exists, _, err := storage.FileExists(filename, folder, rs.Bucket, rs.Provider)
+	if err != nil {
+		return fmt.Errorf("error verifying file: %w", err)
+	}
+
+	if !exists {
+		return nil
+	}
+
+	// 2. Borrado físico en S3/Cloud
+	if err := storage.DeleteFile(filename, folder, rs.Bucket, rs.Provider); err != nil {
+		return fmt.Errorf("failed to remove object from bucket: %w", err)
+	}
+
+	return nil
+}
+
+func (rs *ResourceService) DeleteObjectByPathFromBucket(fullPath, bucket string) error {
+	return rs.WithBucket(bucket).DeleteObjectByPath(fullPath)
 }

@@ -1,13 +1,16 @@
 package eventsrepository
 
 import (
+	"encoding/json"
 	"errors"
 	"events-stocks/dtos"
 	"events-stocks/models"
 	"events-stocks/repositories/gormrepository"
 	"events-stocks/repositories/guestrepository"
+	"events-stocks/repositories/outboxrepository"
 	"events-stocks/services/ports"
 	"events-stocks/utils"
+	"fmt"
 	"github.com/gofrs/uuid"
 	"golang.org/x/sync/errgroup"
 	"gorm.io/gorm"
@@ -356,34 +359,77 @@ func (r *EventsRepo) UpdateEventCoverWithVariants(id uuid.UUID, coverImageURL st
 }
 
 func (r *EventsRepo) BeginEventCoverProcessing(id uuid.UUID, pendingURL, jobID string) (*models.Event, string, error) {
-	var result models.Event
+	var result *models.Event
 	var previousPending string
 	err := gormrepository.DB().Transaction(func(tx *gorm.DB) error {
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", id).First(&result).Error; err != nil {
+		var err error
+		result, previousPending, err = beginEventCoverProcessing(tx, id, pendingURL, jobID)
+		return err
+	})
+	return result, previousPending, err
+}
+
+// BeginEventCoverProcessingWithOutbox ensures the cover's pending generation
+// and the eventual Lambda invocation either commit together or not at all.
+func (r *EventsRepo) BeginEventCoverProcessingWithOutbox(id uuid.UUID, pendingURL, jobID string, message dtos.MediaProcessMessage) (*models.Event, string, error) {
+	var result *models.Event
+	var previousPending string
+	err := gormrepository.DB().Transaction(func(tx *gorm.DB) error {
+		var err error
+		result, previousPending, err = beginEventCoverProcessing(tx, id, pendingURL, jobID)
+		if err != nil {
 			return err
 		}
-		previousPending = result.CoverPendingURL
-		result.CoverProcessingGeneration++
-		updates := map[string]interface{}{
-			"cover_pending_url":            pendingURL,
-			"cover_processing_status":      "pending",
-			"cover_processing_job_id":      jobID,
-			"cover_processing_generation":  result.CoverProcessingGeneration,
-			"cover_processing_error":       "",
-			"cover_processing_duration_ms": 0,
-			"cover_original_size_bytes":    0,
-			"cover_optimized_size_bytes":   0,
+		message.Generation = result.CoverProcessingGeneration
+		body, err := json.Marshal(message)
+		if err != nil {
+			return fmt.Errorf("marshal durable event-cover job: %w", err)
 		}
-		if err := tx.Model(&models.Event{}).Where("id = ?", id).Updates(updates).Error; err != nil {
-			return err
+		inserted, err := outboxrepository.Enqueue(tx, &models.OutboxEvent{
+			EventType:     dtos.MediaProcessEventType,
+			DedupeKey:     strings.TrimSpace(message.JobID),
+			TenantCode:    strings.TrimSpace(message.Application),
+			CorrelationID: strings.TrimSpace(message.CorrelationID),
+			Payload:       string(body),
+			State:         outboxrepository.StatePending,
+			AvailableAt:   time.Now().UTC(),
+		})
+		if err != nil {
+			return fmt.Errorf("enqueue durable event-cover job: %w", err)
 		}
-		result.CoverPendingURL = pendingURL
-		result.CoverProcessingStatus = "pending"
-		result.CoverProcessingJobID = jobID
-		result.CoverProcessingError = ""
+		if !inserted {
+			return fmt.Errorf("durable event-cover job %s already exists", message.JobID)
+		}
 		return nil
 	})
-	return &result, previousPending, err
+	return result, previousPending, err
+}
+
+func beginEventCoverProcessing(tx *gorm.DB, id uuid.UUID, pendingURL, jobID string) (*models.Event, string, error) {
+	var result models.Event
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", id).First(&result).Error; err != nil {
+		return nil, "", err
+	}
+	previousPending := result.CoverPendingURL
+	result.CoverProcessingGeneration++
+	updates := map[string]interface{}{
+		"cover_pending_url":            pendingURL,
+		"cover_processing_status":      "pending",
+		"cover_processing_job_id":      jobID,
+		"cover_processing_generation":  result.CoverProcessingGeneration,
+		"cover_processing_error":       "",
+		"cover_processing_duration_ms": 0,
+		"cover_original_size_bytes":    0,
+		"cover_optimized_size_bytes":   0,
+	}
+	if err := tx.Model(&models.Event{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+		return nil, "", err
+	}
+	result.CoverPendingURL = pendingURL
+	result.CoverProcessingStatus = "pending"
+	result.CoverProcessingJobID = jobID
+	result.CoverProcessingError = ""
+	return &result, previousPending, nil
 }
 
 func (r *EventsRepo) ApplyEventCoverProcessing(id uuid.UUID, callback dtos.MediaProcessingCallback) (*models.Event, string, models.MediaVariants, error) {

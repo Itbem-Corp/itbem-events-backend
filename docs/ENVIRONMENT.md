@@ -61,6 +61,12 @@ go run ./cmd/api
 | `SQS_IMAGE_QUEUE_URL` | no | AWS SQS queue URL for async image processing. Leave empty to disable. |
 | `SQS_VIDEO_QUEUE_URL` | no | AWS SQS queue URL for async video processing. Leave empty to disable. |
 | `SQS_WORKER_QUEUE_URL` | no | AWS SQS queue URL for derived business/data jobs handled by `itbem-events-workers`. Leave empty to keep the live analytics fallback and disable publishing. |
+| `SQS_AUTOMATION_QUEUE_URL` | no | ITBEM-only SQS pull queue consumed by the local AI agent. When set in staging/production, `AUTOMATION_CALLBACK_SECRET`, `AUTOMATION_INPUT_BUCKET`, and `AUTOMATION_OUTPUT_BUCKET` are mandatory. |
+| `AUTOMATION_INPUT_BUCKET` | no | Dedicated `itbem-ai-inputs-*` private bucket used by the dashboard to upload AI task input JSON through a short-lived signed URL. In `ENV=local` only, the authenticated control plane can proxy a bounded 256 KB JSON handoff when a browser cannot reach LocalStack; deployed environments never enable that fallback. |
+| `AUTOMATION_OUTPUT_BUCKET` | no | Dedicated `itbem-ai-outputs-*` private bucket containing agent results. The backend accepts only the deterministic task-result prefix. |
+| `AUTOMATION_CALLBACK_SECRET` | no | Dedicated 32+ byte secret used only by the local agent to report task lifecycle and MiniMax usage. Never reuse media or EventiApp secrets. |
+| `GITHUB_REVIEW_WEBHOOK_SECRET` | no | Independent webhook secret for automatic pull-request reviews. The ingress is disabled unless this and `GITHUB_REVIEW_REPOSITORIES` are both present. Do not reuse the GitHub App private key or worker callback secret. |
+| `GITHUB_REVIEW_REPOSITORIES` | no | Comma-separated explicit `owner/repository` allow-list for automatic PR review, for example `itbem/backend,itbem/dashboard`. An installed GitHub App never enables all repositories by itself. |
 | `SNS_WORKER_TOPIC_ARN` | no | EventiApp producer topic. SNS routes each workload lane to the shared Rust worker without exposing another app's topic. Production deployments require it. |
 | `EVENT_PREVIEW_SECRET` | deployed | Dedicated HMAC secret for signed dashboard preview URLs. It never falls back to another credential. Production/staging require at least 32 bytes. Generate with `openssl rand -hex 32`. |
 | `EVENT_ACCESS_SECRET` | deployed | Dedicated HMAC secret for password-gate access proofs (`X-Event-Access-Token`). It never falls back to another credential. Production/staging require at least 32 bytes. Generate with `openssl rand -hex 32`. |

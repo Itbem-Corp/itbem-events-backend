@@ -7,6 +7,7 @@ import (
 	"events-stocks/dtos"
 	"events-stocks/internal/storagekeys"
 	"events-stocks/models"
+	sqsrepository "events-stocks/repositories/sqsrepository"
 	"events-stocks/services/cacheutil"
 	"events-stocks/services/ports"
 	"events-stocks/utils"
@@ -327,6 +328,29 @@ func (s *EventService) BeginCoverProcessing(eventID uuid.UUID, pendingURL, jobID
 	}
 	_ = invalidateEventsCache(s.cache)
 	return event, previousPending, nil
+}
+
+// BeginCoverProcessingWithOutbox creates a durable Lambda handoff whenever
+// the production repository and image queue are available. The bool reports
+// whether the caller must skip its legacy direct SQS send.
+func (s *EventService) BeginCoverProcessingWithOutbox(eventID uuid.UUID, pendingURL string, message dtos.MediaProcessMessage) (*models.Event, string, bool, error) {
+	if strings.TrimSpace(message.JobID) == "" {
+		return nil, "", false, fmt.Errorf("event cover job ID is required")
+	}
+	if repository, ok := s.repo.(ports.EventCoverProcessingOutboxRepository); ok && sqsrepository.IsConfiguredFor(false) {
+		normalized, err := sqsrepository.NormalizeMediaJob(message)
+		if err != nil {
+			return nil, "", false, err
+		}
+		event, previousPending, err := repository.BeginEventCoverProcessingWithOutbox(eventID, pendingURL, normalized.JobID, normalized)
+		if err != nil {
+			return nil, "", false, err
+		}
+		_ = invalidateEventsCache(s.cache)
+		return event, previousPending, true, nil
+	}
+	event, previousPending, err := s.BeginCoverProcessing(eventID, pendingURL, message.JobID)
+	return event, previousPending, false, err
 }
 
 func (s *EventService) ApplyCoverProcessingCallback(eventID uuid.UUID, callback dtos.MediaProcessingCallback) (*models.Event, string, models.MediaVariants, error) {

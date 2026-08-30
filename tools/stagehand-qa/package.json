@@ -1,0 +1,21 @@
+{
+  "name": "itbem-stagehand-qa",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Pinned, read-only semantic browser QA runner for ITBEM Delivery.",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "dependencies": {
+    "@browserbasehq/stagehand": "3.7.1",
+    "zod": "3.25.76"
+  },
+  "overrides": {
+    "undici": "6.28.0"
+  },
+  "scripts": {
+    "check": "node --check run.mjs && node --check run.test.mjs",
+    "test": "node --test run.test.mjs"
+  }
+}

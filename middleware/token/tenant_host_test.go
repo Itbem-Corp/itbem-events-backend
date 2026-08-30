@@ -3,9 +3,9 @@ package token
 import "testing"
 
 func TestValidateTenantRequestHostBindsBrandedAPIs(t *testing.T) {
-	configured := "api.eventiapp.com.mx=*,api.itbem.com.mx=itbem,api.cafettonhouse.com=cafettonhouse"
+	configured := "api.eventiapp.com.mx=eventiapp,api.itbem.com.mx=itbem,api.cafettonhouse.com=cafettonhouse"
 	for _, tc := range []struct{ host, tenant string }{
-		{"api.eventiapp.com.mx:443", "itbem"},
+		{"api.eventiapp.com.mx:443", "eventiapp"},
 		{"api.itbem.com.mx", "itbem"},
 		{"api.cafettonhouse.com", "cafettonhouse"},
 	} {

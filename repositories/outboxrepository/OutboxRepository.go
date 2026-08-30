@@ -1,9 +1,11 @@
 package outboxrepository
 
 import (
+	"fmt"
 	"time"
 
 	"events-stocks/internal/observability"
+	"events-stocks/internal/runtimeroute"
 	"events-stocks/models"
 
 	"gorm.io/gorm"
@@ -17,6 +19,9 @@ const (
 )
 
 func Enqueue(db *gorm.DB, event *models.OutboxEvent) (bool, error) {
+	if err := ApplyRoute(event); err != nil {
+		return false, err
+	}
 	if event.State == "" {
 		event.State = StatePending
 	}
@@ -25,6 +30,31 @@ func Enqueue(db *gorm.DB, event *models.OutboxEvent) (bool, error) {
 	}
 	result := db.Clauses(clause.OnConflict{DoNothing: true}).Create(event)
 	return result.RowsAffected == 1, result.Error
+}
+
+// ApplyRoute freezes the registered runtime selection into a durable handoff.
+// It keeps direct repository enqueues from silently bypassing the dispatcher
+// routing policy and rejects a caller that tries to relabel an event.
+func ApplyRoute(event *models.OutboxEvent) error {
+	if event == nil {
+		return fmt.Errorf("outbox event is required")
+	}
+	route, err := runtimeroute.RouteFor(event.EventType)
+	if err != nil {
+		return err
+	}
+	if err := runtimeroute.Validate(route, event.TenantCode); err != nil {
+		return err
+	}
+	if event.TargetRuntime != "" && event.TargetRuntime != string(route.Runtime) {
+		return fmt.Errorf("outbox event runtime does not match registered route")
+	}
+	if event.QueueNamespace != "" && event.QueueNamespace != route.QueueNamespace {
+		return fmt.Errorf("outbox event queue namespace does not match registered route")
+	}
+	event.TargetRuntime = string(route.Runtime)
+	event.QueueNamespace = route.QueueNamespace
+	return nil
 }
 
 // ClaimBatch leases ready rows using SKIP LOCKED, allowing multiple API

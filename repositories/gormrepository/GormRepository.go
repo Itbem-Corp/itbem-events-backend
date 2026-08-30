@@ -32,6 +32,10 @@ func FirstOrCreate[T any](model *T, conditions map[string]interface{}) error {
 
 // GetFirst obtiene el primer registro que cumpla con los filtros
 func GetFirst[T any](model *T, opts QueryOptions) error {
+	if err := validateQueryOptions(opts); err != nil {
+		return err
+	}
+
 	query := configuration.DB.Model(model)
 
 	if len(opts.Preload) > 0 {
@@ -43,11 +47,7 @@ func GetFirst[T any](model *T, opts QueryOptions) error {
 		query = query.Where(opts.Filters)
 	}
 	if opts.OrderBy != "" {
-		dir := "ASC"
-		if opts.OrderDir != "" {
-			dir = opts.OrderDir
-		}
-		query = query.Order(opts.OrderBy + " " + dir)
+		query = query.Order(opts.OrderBy + " " + normalizedOrderDirection(opts.OrderDir))
 	}
 
 	return query.First(model).Error
@@ -137,6 +137,10 @@ func DeleteByFilters[T any](filters map[string]interface{}) error {
 
 // GetList obtiene una lista de registros opcionalmente filtrada por campos
 func GetList[T any](list *[]T, opts QueryOptions) error {
+	if err := validateQueryOptions(opts); err != nil {
+		return err
+	}
+
 	query := configuration.DB.Model(list)
 
 	// Preload relaciones
@@ -151,11 +155,7 @@ func GetList[T any](list *[]T, opts QueryOptions) error {
 		query = query.Where(opts.Filters)
 	}
 	if opts.OrderBy != "" {
-		dir := "ASC"
-		if opts.OrderDir != "" {
-			dir = opts.OrderDir
-		}
-		query = query.Order(opts.OrderBy + " " + dir)
+		query = query.Order(opts.OrderBy + " " + normalizedOrderDirection(opts.OrderDir))
 	}
 	if opts.Limit > 0 {
 		query = query.Limit(opts.Limit)
@@ -169,6 +169,10 @@ func GetList[T any](list *[]T, opts QueryOptions) error {
 
 // Exists verifica si existe un registro con un campo específico
 func Exists[T any](model *T, field string, value interface{}) (bool, error) {
+	if !isSafeIdentifierPath(field) {
+		return false, errors.New("invalid field name")
+	}
+
 	var count int64
 	err := configuration.DB.Model(model).Where(field+" = ?", value).Count(&count).Error
 	if err != nil {

@@ -7,6 +7,7 @@ import (
 	requestcontract "events-stocks/internal/requestcontext"
 	"events-stocks/services/applications"
 	"events-stocks/utils"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -41,8 +42,14 @@ func Require(next echo.HandlerFunc) echo.HandlerFunc {
 		sub, _ := c.Get("cognito_sub").(string)
 		tenant, _ := c.Get("tenant_code").(string)
 		session, err := sessionService.Resolve(sub, tenant)
+		if errors.Is(err, applications.ErrApplicationAccessDenied) {
+			if email, _ := c.Get("user_email").(string); strings.TrimSpace(email) != "" {
+				session, err = sessionService.ResolveWithLocalBootstrap(sub, tenant, email)
+			}
+		}
 		if err != nil {
 			if errors.Is(err, applications.ErrApplicationAccessDenied) {
+				slog.Warn("application session denied", "tenant", tenant, "reason", err.Error())
 				return utils.Error(c, http.StatusForbidden, "Application access denied", "Your account is not enabled for this application")
 			}
 			return utils.Error(c, http.StatusServiceUnavailable, "Application access unavailable", err.Error())
@@ -53,6 +60,9 @@ func Require(next echo.HandlerFunc) echo.HandlerFunc {
 		}
 		if products.RequiresEventOperationsPath(c.Request().URL.Path) && !products.SupportsEventOperations(tenant) {
 			return utils.Error(c, http.StatusForbidden, "Application surface denied", "Event operations are only available in the EventiApp application")
+		}
+		if products.RequiresAutomationPath(c.Request().URL.Path) && !products.SupportsAutomation(tenant) {
+			return utils.Error(c, http.StatusForbidden, "Application surface denied", "Automation is only available in the ITBEM application")
 		}
 		if required := requiredSurfaceCapability(c.Request().Method, c.Request().URL.Path); required != "" &&
 			!session.HasAnyCapability(strings.Split(required, "|")...) {
@@ -89,7 +99,7 @@ func validateRequestContext(c echo.Context, tenant string, session *applications
 	c.Set(ContextWorkspaceMode, resolved.WorkspaceMode)
 	if resolved.HasOrganization {
 		contextToken := strings.TrimSpace(c.Request().Header.Get(HeaderOrganizationContext))
-		if contextToken == "" && requiresOrganizationCredential(c.Request().URL.Path) {
+		if contextToken == "" && requiresOrganizationCredential(c.Request().Method, c.Request().URL.Path) {
 			return errors.New("organization context token is required")
 		}
 		if contextToken != "" && !organizationcontext.Validate(contextToken, stringContext(c, "cognito_sub"), tenant, resolved.OrganizationID) {
@@ -105,8 +115,15 @@ func validateRequestContext(c echo.Context, tenant string, session *applications
 // Session bootstrap and credential issuance must remain reachable when a
 // credential is absent or expired. Both are still protected by Cognito and the
 // application membership resolved above; neither exposes organization data.
-func requiresOrganizationCredential(path string) bool {
+func requiresOrganizationCredential(method, path string) bool {
 	path = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(path)), "/")
+	method = strings.ToUpper(strings.TrimSpace(method))
+	// The workspace selector must be able to load its eligible organization
+	// list before it has a credential for the next workspace. Authorization for
+	// this read still goes through the application capability boundary.
+	if method == http.MethodGet && path == "/api/clients" {
+		return false
+	}
 	return path != "/api/session" && path != "/api/session/organization-context"
 }
 
@@ -149,6 +166,9 @@ func requiredSurfaceCapability(method, path string) string {
 	}
 	if products.RequiresEventOperationsPath(path) {
 		return "events:view"
+	}
+	if products.RequiresAutomationPath(path) {
+		return "automation:view|automation:manage"
 	}
 	return ""
 }

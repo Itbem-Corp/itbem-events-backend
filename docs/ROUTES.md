@@ -48,6 +48,33 @@
 
 ## Protected Routes (`/api`) — Require `Authorization: Bearer <token>`
 
+### ITBEM delivery control plane
+
+- `GET|POST /api/automation/projects` → `delivery.ListProjects` / `delivery.CreateProject`
+- `GET /api/automation/projects/:id` → `delivery.GetProject`
+- `POST /api/automation/projects/:id/context` → `delivery.CreateContext`
+- `POST /api/automation/projects/:id/work-items` → `delivery.CreateWorkItem`
+- `GET /api/automation/work-items/:id` → `delivery.GetWorkItem`
+- `GET /api/automation/work-items/:id/stream` → `delivery.StreamWorkItem` — authenticated SSE invalidation feed for live execution maps. It emits a `snapshot` on connect, then `update` only when the database-backed work-item revision changes. Its bounded payload is `{ work_item_id, revision, state, active_tasks, last_activity_at, generated_at }`; it never includes prompts, private object references, provider payloads, or task output. Connections refresh authorization after 55 seconds and clients reconnect using the SSE retry directive.
+- `POST /api/automation/work-items/:id/transitions` → `delivery.TransitionWorkItem`
+- `POST /api/automation/work-items/:id/agent-runs` → `delivery.StartAgentRun`
+- `POST /api/automation/work-items/:id/evidence` → `delivery.CreateEvidence`
+- `POST /api/automation/work-items/:id/messages` → `delivery.CreateMessage`
+
+`GET /api/automation/tasks/:id/artifacts/:name` is an owner-only, task-scoped
+presigned download for private QA screenshots and other agent artifacts.
+
+Delivery submissions are deliberately gated: `submit_plan`, `submit_code_review`,
+`submit_qa` and the final `approve_release` decision require their completed
+matching agent result. Code-review submission
+also requires `pull_request_url` to be a valid HTTP(S) URL; `preview_ready`
+requires a valid HTTP(S) `preview_url`. These inputs are recorded with the
+append-only human decision and never authorize production release on their own.
+
+These private ITBEM routes require a platform administrator. Human gate decisions
+are append-only, and a code approval only authorizes controlled preview deployment;
+QA and production release remain independent gates.
+
 ### Events
 - `GET /api/events/all` → `events.ListEvents` — compatibility path for dashboard list; requires auth and returns root/all or user-scoped events
 - `GET /api/events` → `events.ListEvents` — Protected. Query params: `?client_id=UUID` (optional). Root users see all events; regular users see events for their accessible clients; with `?client_id` returns events for that client (access-checked).

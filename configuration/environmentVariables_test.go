@@ -3,56 +3,54 @@ package configuration
 import (
 	"reflect"
 	"testing"
-
-	"events-stocks/models"
 )
 
-func TestFieldToEnvVarHandlesAcronyms(t *testing.T) {
-	tests := map[string]string{
-		"AwsRegion":                 "AWS_REGION",
-		"CognitoClientId":           "COGNITO_CLIENT_ID",
-		"S3ClientId":                "S3_CLIENT_ID",
-		"S3Region":                  "S3_REGION",
-		"S3Endpoint":                "S3_ENDPOINT",
-		"S3UsePathStyle":            "S3_USE_PATH_STYLE",
-		"CDNBaseURL":                "CDN_BASE_URL",
-		"CorsAllowOrigins":          "CORS_ALLOW_ORIGINS",
-		"SQSImageQueueURL":          "SQS_IMAGE_QUEUE_URL",
-		"SQSVideoQueueURL":          "SQS_VIDEO_QUEUE_URL",
-		"SQSWorkerQueueURL":         "SQS_WORKER_QUEUE_URL",
-		"SNSWorkerTopicARN":         "SNS_WORKER_TOPIC_ARN",
-		"InternalAPISecret":         "INTERNAL_API_SECRET",
-		"InternalAPISecretPrevious": "INTERNAL_API_SECRET_PREVIOUS",
-		"DbLogLevel":                "DB_LOG_LEVEL",
+func TestSetConfigFieldSupportsTypedOptionalConfiguration(t *testing.T) {
+	type config struct {
+		Text    string
+		Reserve int
+		Enabled bool
 	}
-
-	for field, expected := range tests {
-		t.Run(field, func(t *testing.T) {
-			if got := fieldToEnvVar(field); got != expected {
-				t.Fatalf("expected %s, got %s", expected, got)
-			}
-		})
+	value := reflect.ValueOf(&config{}).Elem()
+	if err := setConfigField(value.FieldByName("Text"), "TEXT", "value"); err != nil {
+		t.Fatal(err)
+	}
+	if err := setConfigField(value.FieldByName("Reserve"), "RESERVE", "123"); err != nil {
+		t.Fatal(err)
+	}
+	if err := setConfigField(value.FieldByName("Enabled"), "ENABLED", "true"); err != nil {
+		t.Fatal(err)
+	}
+	got := value.Interface().(config)
+	if got.Text != "value" || got.Reserve != 123 || !got.Enabled {
+		t.Fatalf("unexpected typed configuration: %#v", got)
 	}
 }
 
-func TestLegacyAWSCredentialFieldsAreOptional(t *testing.T) {
-	configType := reflect.TypeOf(models.Config{})
-	for _, fieldName := range []string{
-		"CognitoClientId",
-		"CognitoClientSecret",
-		"S3ClientId",
-		"S3ClientSecret",
-		"S3Region",
-		"S3Endpoint",
-		"S3UsePathStyle",
-		"CDNBaseURL",
-	} {
-		field, ok := configType.FieldByName(fieldName)
-		if !ok {
-			t.Fatalf("models.Config field %s not found", fieldName)
-		}
-		if got := field.Tag.Get("required"); got != "false" {
-			t.Errorf("expected %s to be optional, got required=%q", fieldName, got)
-		}
+func TestSetConfigFieldRejectsMalformedTypedConfiguration(t *testing.T) {
+	integer := reflect.ValueOf(new(int)).Elem()
+	if err := setConfigField(integer, "RESERVE", "not-a-number"); err == nil {
+		t.Fatal("malformed integer was accepted")
+	}
+	boolean := reflect.ValueOf(new(bool)).Elem()
+	if err := setConfigField(boolean, "ENABLED", "perhaps"); err == nil {
+		t.Fatal("malformed boolean was accepted")
+	}
+}
+
+func TestConfigFieldEnvVarHonorsExplicitAcronymMapping(t *testing.T) {
+	type config struct {
+		GitHubReviewWebhookSecret string `env:"GITHUB_REVIEW_WEBHOOK_SECRET"`
+		OrdinaryValue             string
+	}
+	typ := reflect.TypeOf(config{})
+	githubField, _ := typ.FieldByName("GitHubReviewWebhookSecret")
+	ordinaryField, _ := typ.FieldByName("OrdinaryValue")
+
+	if got := configFieldEnvVar(githubField); got != "GITHUB_REVIEW_WEBHOOK_SECRET" {
+		t.Fatalf("explicit environment mapping changed: %q", got)
+	}
+	if got := configFieldEnvVar(ordinaryField); got != "ORDINARY_VALUE" {
+		t.Fatalf("default environment mapping changed: %q", got)
 	}
 }

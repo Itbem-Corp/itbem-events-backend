@@ -35,6 +35,7 @@ func TestRequiredSurfaceCapabilitySeparatesProducts(t *testing.T) {
 		{method: "GET", path: "/api/events", want: "events:view"},
 		{method: "GET", path: "/api/moments/activity", want: "events:view"},
 		{method: "GET", path: "/api/catalogs/design-templates", want: "events:view"},
+		{method: "POST", path: "/api/automation/tasks", want: "automation:view|automation:manage"},
 	}
 	for _, test := range tests {
 		t.Run(test.path, func(t *testing.T) {
@@ -44,11 +45,24 @@ func TestRequiredSurfaceCapabilitySeparatesProducts(t *testing.T) {
 }
 
 func TestRequiresEventOperationsIsExclusiveToTheEventDomain(t *testing.T) {
-	for _, path := range []string{"/api/events", "/api/guests/1", "/api/moments", "/api/catalogs/design-templates"} {
+	for _, path := range []string{
+		"/api/events/123/studio-workspace",
+		"/api/events/123/invitations",
+		"/api/invitations/123/resend",
+		"/api/guests/1/rsvp-token",
+		"/api/moments",
+		"/api/sections/123",
+		"/api/tables/123",
+		"/api/resources",
+		"/api/fonts/upload",
+		"/api/catalogs/design-templates",
+	} {
 		assert.True(t, products.RequiresEventOperationsPath(path), path)
 	}
 	assert.False(t, products.RequiresEventOperationsPath("/api/clients"))
 	assert.False(t, products.RequiresEventOperationsPath("/api/users"))
+	assert.True(t, products.RequiresAutomationPath("/api/automation/tasks"))
+	assert.False(t, products.RequiresAutomationPath("/api/events"))
 }
 
 func requestContextTestSession(applicationCode string, platform bool, organizations ...uuid.UUID) *applications.Session {

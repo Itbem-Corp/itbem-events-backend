@@ -6,6 +6,7 @@ import (
 	"events-stocks/services/ports"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +47,18 @@ func ClearProfileImage(userID uuid.UUID) error        { return _userSvc.ClearPro
 func SetUserRoot(userID uuid.UUID, isRoot bool) error { return _userSvc.SetUserRoot(userID, isRoot) }
 func SetUserRootLevel(userID uuid.UUID, level int) error {
 	return _userSvc.SetUserRootLevel(userID, level)
+}
+
+// BootstrapConfiguredLocalRoot is intentionally narrower than registration:
+// it is callable only after the token middleware has verified a Cognito ID
+// token and only provisions an email explicitly listed for ENV=local. It
+// exists so a fresh local database does not depend on Cognito AdminGetUser
+// credentials merely to create its first developer administrator.
+func BootstrapConfiguredLocalRoot(cognitoSub, email string) (*models.User, error) {
+	if _userSvc == nil {
+		return nil, fmt.Errorf("user service is not configured")
+	}
+	return _userSvc.BootstrapConfiguredLocalRoot(cognitoSub, email)
 }
 
 type storedObjectDeleter interface {
@@ -183,6 +196,10 @@ func (s *UserService) SyncUser(cognitoSub string) (*models.User, error) {
 
 		authUser, authErr := s.authRepo.GetUser(cognitoSub, "cognito")
 		if authErr != nil {
+			if currentUser != nil && s.allowLocalUserSyncFallback() {
+				slog.Warn("using configured local identity sync fallback", "cognito_sub", cognitoSub)
+				return currentUser, nil
+			}
 			return nil, authErr
 		}
 
@@ -194,29 +211,37 @@ func (s *UserService) SyncUser(cognitoSub string) (*models.User, error) {
 				LastName:   authUser.LastName,
 				IsActive:   authUser.IsActive,
 			}
+			if s.isConfiguredLocalBootstrapRoot(authUser.Email) {
+				currentUser.IsRoot = true
+				currentUser.RootLevel = models.RootLevelPrimary
+			}
 			if createErr := s.userRepo.CreateUser(currentUser); createErr != nil {
 				return nil, createErr
 			}
 		} else {
-			dirty := false
+			fields := map[string]interface{}{}
 			if currentUser.Email != authUser.Email {
 				currentUser.Email = authUser.Email
-				dirty = true
+				fields["email"] = currentUser.Email
 			}
 			if currentUser.FirstName != authUser.FirstName {
 				currentUser.FirstName = authUser.FirstName
-				dirty = true
+				fields["first_name"] = currentUser.FirstName
 			}
 			if currentUser.LastName != authUser.LastName {
 				currentUser.LastName = authUser.LastName
-				dirty = true
+				fields["last_name"] = currentUser.LastName
 			}
-			if dirty {
-				if updateErr := s.userRepo.UpdateUserFields(currentUser.ID, map[string]interface{}{
-					"email":      currentUser.Email,
-					"first_name": currentUser.FirstName,
-					"last_name":  currentUser.LastName,
-				}); updateErr != nil {
+			if s.isConfiguredLocalBootstrapRoot(authUser.Email) && !currentUser.IsPrimaryRoot() {
+				currentUser.IsRoot = true
+				currentUser.RootLevel = models.RootLevelPrimary
+				currentUser.IsActive = true
+				fields["is_root"] = true
+				fields["root_level"] = models.RootLevelPrimary
+				fields["is_active"] = true
+			}
+			if len(fields) > 0 {
+				if updateErr := s.userRepo.UpdateUserFields(currentUser.ID, fields); updateErr != nil {
 					slog.Warn("failed to sync user fields", "userID", currentUser.ID, "error", updateErr)
 				}
 			}
@@ -229,6 +254,72 @@ func (s *UserService) SyncUser(cognitoSub string) (*models.User, error) {
 		return nil, err
 	}
 	return value.(*models.User), nil
+}
+
+// allowLocalUserSyncFallback is intentionally narrower than a generic
+// provider-failure fallback: it requires an explicit local-development flag,
+// a pre-existing user, and a token that has already passed the API's normal
+// authentication middleware. Production therefore continues to fail closed
+// whenever Cognito cannot be consulted.
+func (s *UserService) allowLocalUserSyncFallback() bool {
+	return s != nil && s.cfg != nil && strings.EqualFold(strings.TrimSpace(s.cfg.AllowLocalUserSyncFallback), "true") && strings.EqualFold(strings.TrimSpace(os.Getenv("ENV")), "local")
+}
+
+func (s *UserService) isConfiguredLocalBootstrapRoot(email string) bool {
+	if s == nil || s.cfg == nil || !strings.EqualFold(strings.TrimSpace(os.Getenv("ENV")), "local") {
+		return false
+	}
+	normalizedEmail := strings.TrimSpace(email)
+	if normalizedEmail == "" {
+		return false
+	}
+	for _, candidate := range strings.Split(s.cfg.LocalBootstrapRootEmails, ",") {
+		if strings.EqualFold(normalizedEmail, strings.TrimSpace(candidate)) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *UserService) BootstrapConfiguredLocalRoot(cognitoSub, email string) (*models.User, error) {
+	if !s.isConfiguredLocalBootstrapRoot(email) {
+		return nil, fmt.Errorf("local bootstrap identity is not allow-listed")
+	}
+	cognitoSub = strings.TrimSpace(cognitoSub)
+	if cognitoSub == "" {
+		return nil, fmt.Errorf("local bootstrap identity is missing a Cognito subject")
+	}
+	user, err := s.userRepo.GetUserByCognitoSub(cognitoSub)
+	if err != nil && err.Error() != "record not found" {
+		return nil, err
+	}
+	if user == nil {
+		user = &models.User{
+			CognitoSub: cognitoSub,
+			Email:      strings.TrimSpace(email),
+			IsActive:   true,
+			IsRoot:     true,
+			RootLevel:  models.RootLevelPrimary,
+		}
+		if err := s.userRepo.CreateUser(user); err != nil {
+			return nil, fmt.Errorf("create configured local bootstrap user: %w", err)
+		}
+		return user, nil
+	}
+	if user.IsPrimaryRoot() && user.IsActive {
+		return user, nil
+	}
+	if err := s.userRepo.UpdateUserFields(user.ID, map[string]interface{}{
+		"is_active":  true,
+		"is_root":    true,
+		"root_level": models.RootLevelPrimary,
+	}); err != nil {
+		return nil, fmt.Errorf("promote configured local bootstrap user: %w", err)
+	}
+	user.IsActive = true
+	user.IsRoot = true
+	user.RootLevel = models.RootLevelPrimary
+	return user, nil
 }
 
 func (s *UserService) providerUserSyncedRecently(cognitoSub string, now time.Time) bool {

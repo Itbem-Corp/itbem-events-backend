@@ -26,25 +26,17 @@ var definitions = func() map[core.Code]core.Definition {
 	return items
 }()
 
-// All returns independent definitions in a stable order for setup code such as
-// application seeding. Product metadata is a core registry, so callers cannot
-// accidentally mutate the catalog that later authorization decisions use.
+// All returns a copy in a stable order for setup code such as application
+// seeding. Callers must not mutate the returned product catalog.
 func All() []core.Definition {
 	items := make([]core.Definition, len(orderedDefinitions))
-	for i, definition := range orderedDefinitions {
-		items[i] = cloneDefinition(definition)
-	}
+	copy(items, orderedDefinitions)
 	return items
 }
 
 func Resolve(value string) (core.Definition, bool) {
 	definition, ok := definitions[core.Normalize(value)]
-	return cloneDefinition(definition), ok
-}
-
-func cloneDefinition(definition core.Definition) core.Definition {
-	definition.Modules = append([]string(nil), definition.Modules...)
-	return definition
+	return definition, ok
 }
 
 func NormalizeOrDefault(value string) core.Code {
@@ -64,8 +56,19 @@ func SupportsEventOperations(value string) bool {
 	return ok && definition.SupportsEventOperations
 }
 
+func SupportsAutomation(value string) bool {
+	definition, ok := Resolve(value)
+	return ok && definition.SupportsAutomation
+}
+
 // RequiresEventOperationsPath keeps EventiApp-owned HTTP surfaces in the
 // EventiApp module while callers keep a generic product-boundary check.
 func RequiresEventOperationsPath(path string) bool {
 	return eventiapp.OwnsProtectedSurface(path)
+}
+
+// RequiresAutomationPath keeps orchestration and local-agent operations out
+// of the EventiApp API domain even though both products share core services.
+func RequiresAutomationPath(path string) bool {
+	return itbem.OwnsAutomationSurface(path)
 }
