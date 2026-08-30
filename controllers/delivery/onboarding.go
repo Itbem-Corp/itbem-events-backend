@@ -45,7 +45,6 @@ type repositoryOnboardingProbeRequest struct {
 type repositoryCapabilityProbeTask struct {
 	ID           uuid.UUID  `json:"id"`
 	Status       string     `json:"status"`
-	ErrorMessage string     `json:"error_message,omitempty"`
 	AttemptCount int        `json:"attempt_count"`
 	CompletedAt  *time.Time `json:"completed_at,omitempty"`
 	CreatedAt    time.Time  `json:"created_at"`
@@ -471,13 +470,13 @@ func ListRepositoryCapabilityProbes(c echo.Context) error {
 		return utilsError(c, err)
 	}
 	var tasks []models.AutomationTask
-	if err := configuration.DB.Select("id", "status", "error_message", "attempt_count", "completed_at", "created_at").Where("delivery_onboarding_id = ? AND operation = ?", onboardingID, "delivery.onboarding_probe").Order("created_at DESC, id DESC").Limit(50).Find(&tasks).Error; err != nil {
+	if err := configuration.DB.Select("id", "status", "attempt_count", "completed_at", "created_at").Where("delivery_onboarding_id = ? AND operation = ?", onboardingID, "delivery.onboarding_probe").Order("created_at DESC, id DESC").Limit(50).Find(&tasks).Error; err != nil {
 		return utilsError(c, err)
 	}
 	taskViews := make([]repositoryCapabilityProbeTask, 0, len(tasks))
 	for _, task := range tasks {
 		taskViews = append(taskViews, repositoryCapabilityProbeTask{
-			ID: task.ID, Status: task.Status, ErrorMessage: task.ErrorMessage,
+			ID: task.ID, Status: task.Status,
 			AttemptCount: task.AttemptCount, CompletedAt: task.CompletedAt, CreatedAt: task.CreatedAt,
 		})
 	}
