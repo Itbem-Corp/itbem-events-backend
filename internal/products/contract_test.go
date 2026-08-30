@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -15,7 +16,11 @@ func TestPinnedProductContractMatchesBackendRegistry(t *testing.T) {
 	var contract struct {
 		SchemaVersion int `json:"schemaVersion"`
 		Products      []struct {
-			Code         string `json:"code"`
+			Code     string `json:"code"`
+			Identity struct {
+				Name         string `json:"name"`
+				ProductLabel string `json:"productLabel"`
+			} `json:"identity"`
 			Capabilities struct {
 				AllowsPlatformAuthority bool `json:"allowsPlatformAuthority"`
 				SupportsEventOperations bool `json:"supportsEventOperations"`
@@ -35,7 +40,13 @@ func TestPinnedProductContractMatchesBackendRegistry(t *testing.T) {
 	}
 	for _, external := range contract.Products {
 		local, ok := Resolve(external.Code)
-		if !ok || local.AllowsPlatformAuthority != external.Capabilities.AllowsPlatformAuthority || local.SupportsEventOperations != external.Capabilities.SupportsEventOperations || local.SupportsAutomation != external.Capabilities.SupportsAutomation {
+		if !ok ||
+			local.Name != external.Identity.Name ||
+			local.ProductLabel != external.Identity.ProductLabel ||
+			!slices.Equal(local.Modules, external.Modules) ||
+			local.AllowsPlatformAuthority != external.Capabilities.AllowsPlatformAuthority ||
+			local.SupportsEventOperations != external.Capabilities.SupportsEventOperations ||
+			local.SupportsAutomation != external.Capabilities.SupportsAutomation {
 			t.Fatalf("backend registry diverged for product %q", external.Code)
 		}
 	}
