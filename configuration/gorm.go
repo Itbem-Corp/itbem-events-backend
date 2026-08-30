@@ -67,6 +67,8 @@ var modelsWithoutSeed = []interface{}{
 	&models.DeliveryContextSource{},
 	&models.DeliveryRepositoryOnboarding{},
 	&models.DeliveryProjectVaultRevision{},
+	&models.DeliveryPolicyRevision{},
+	&models.DeliveryPolicyDecision{},
 	&models.DeliveryRequest{},
 	&models.DeliveryDecomposition{},
 	&models.DeliveryWorkItem{},
@@ -297,6 +299,30 @@ func migrateModels(db *gorm.DB) error {
 		for _, statement := range vaultStatements {
 			if err := tx.Exec(statement).Error; err != nil {
 				return fmt.Errorf("protect project Vault revisions: %w", err)
+			}
+		}
+		// Policy content and its human decisions are separate append-only ledgers.
+		// A proposed revision has no authority until a later decision binds its
+		// exact digest; neither history can be rewritten by normal application DML.
+		policyStatements := []string{
+			`CREATE OR REPLACE FUNCTION prevent_delivery_policy_mutation()
+			 RETURNS trigger AS $$
+			 BEGIN
+			   RAISE EXCEPTION 'delivery policy ledgers are append-only';
+			 END;
+			 $$ LANGUAGE plpgsql`,
+			"DROP TRIGGER IF EXISTS delivery_policy_revisions_append_only ON delivery_policy_revisions",
+			`CREATE TRIGGER delivery_policy_revisions_append_only
+			 BEFORE UPDATE OR DELETE ON delivery_policy_revisions
+			 FOR EACH ROW EXECUTE FUNCTION prevent_delivery_policy_mutation()`,
+			"DROP TRIGGER IF EXISTS delivery_policy_decisions_append_only ON delivery_policy_decisions",
+			`CREATE TRIGGER delivery_policy_decisions_append_only
+			 BEFORE UPDATE OR DELETE ON delivery_policy_decisions
+			 FOR EACH ROW EXECUTE FUNCTION prevent_delivery_policy_mutation()`,
+		}
+		for _, statement := range policyStatements {
+			if err := tx.Exec(statement).Error; err != nil {
+				return fmt.Errorf("protect delivery policy ledgers: %w", err)
 			}
 		}
 		// Delivery events are the sequence-bearing operational history used by
