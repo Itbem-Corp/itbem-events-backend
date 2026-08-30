@@ -27,13 +27,23 @@ explicit empty test list is meaningful only for a configured `review_only`
 project. Merge/release modes must name at least one required test. Every mode
 must explicitly configure target branches. Merge/release also configure a
 non-force merge method; release additionally requires a workflow, environment,
-health checks and recovery classification.
+explicit secret-reference and variable-reference lists, health checks and a
+recovery classification. The two reference lists must be present even when
+empty, so the resolver can distinguish an operator decision that no GitHub
+environment values are needed from missing configuration.
 
 Target branch authorization is exact and case-sensitive; wildcards are not
 accepted. Deployment workflow identity is restricted to a concrete
 `.github/workflows/*.yml` or `.yaml` file. These checks still have to be
 reapplied by the later exact-SHA action adapter immediately before it requests
 any merge or deployment capability.
+
+Secret and variable references contain names only, never values. They are
+canonical uppercase identifiers, unique case-insensitively, limited to 64 per
+list and cannot use GitHub's reserved `GITHUB_` prefix. They are operator-owned
+policy; neither model output nor workflow prose may invent them. A later
+release adapter checks only that the configured names exist in the configured
+GitHub environment and remains unable to read secret values.
 
 Safety floors are code, not configuration. No layer can disable exact-SHA
 evidence, independent review, Vault reconciliation, secret scanning, zero

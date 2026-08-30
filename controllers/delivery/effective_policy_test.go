@@ -46,7 +46,7 @@ func TestBuildEffectivePolicySnapshotUsesExplicitEmptyCollections(t *testing.T) 
 		t.Fatal(err)
 	}
 	value := string(encoded)
-	for _, collection := range []string{`"required_test_kinds":[]`, `"allowed_target_branches":[]`, `"required_health_checks":[]`, `"required_post_merge_checks":[]`, `"sources":[]`, `"missing":[]`} {
+	for _, collection := range []string{`"required_test_kinds":[]`, `"allowed_target_branches":[]`, `"required_secret_references":[]`, `"required_variable_references":[]`, `"required_health_checks":[]`, `"required_post_merge_checks":[]`, `"sources":[]`, `"missing":[]`} {
 		if !strings.Contains(value, collection) {
 			t.Fatalf("safe policy collection was not explicit (%s): %s", collection, value)
 		}

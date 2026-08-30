@@ -170,6 +170,10 @@ Event     Event          `gorm:"foreignKey:EventID" json:"event,omitempty"`
   Recovery evidence is reconstructed from every effective repository policy;
   the most constrained classification becomes the exact-matrix composite and
   irreversible recovery still requires a distinct exact-subject human grant.
+  Release policy also carries explicit, canonical names for required GitHub
+  environment secrets and variables. Empty lists are meaningful and must be
+  approved explicitly; secret values are never stored in policy, Postgres,
+  Vault manifests, event payloads, or API responses.
 - **AutomationAgentHeartbeat** (`models/AutomationAgentHeartbeat.go`): Short-
   lived, anonymized execution-plane presence. It records the declared worker
   role/lane, provider/model, concurrency and bounded workspace readiness, but

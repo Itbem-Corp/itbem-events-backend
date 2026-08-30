@@ -50,15 +50,17 @@ type Context struct {
 // list can deliberately configure a review-only project with no test runner.
 // Safety floors are not fields: no layer can disable them.
 type Patch struct {
-	Mode                    *DeliveryMode `json:"mode,omitempty"`
-	RequiredTestKinds       *[]string     `json:"required_test_kinds,omitempty"`
-	AllowedTargetBranches   *[]string     `json:"allowed_target_branches,omitempty"`
-	MergeMethod             *string       `json:"merge_method,omitempty"`
-	DeploymentWorkflow      *string       `json:"deployment_workflow,omitempty"`
-	DeploymentEnvironment   *string       `json:"deployment_environment,omitempty"`
-	RequiredHealthChecks    *[]string     `json:"required_health_checks,omitempty"`
-	RequiredPostMergeChecks *[]string     `json:"required_post_merge_checks,omitempty"`
-	RecoveryDefault         *string       `json:"recovery_default,omitempty"`
+	Mode                       *DeliveryMode `json:"mode,omitempty"`
+	RequiredTestKinds          *[]string     `json:"required_test_kinds,omitempty"`
+	AllowedTargetBranches      *[]string     `json:"allowed_target_branches,omitempty"`
+	MergeMethod                *string       `json:"merge_method,omitempty"`
+	DeploymentWorkflow         *string       `json:"deployment_workflow,omitempty"`
+	DeploymentEnvironment      *string       `json:"deployment_environment,omitempty"`
+	RequiredSecretReferences   *[]string     `json:"required_secret_references,omitempty"`
+	RequiredVariableReferences *[]string     `json:"required_variable_references,omitempty"`
+	RequiredHealthChecks       *[]string     `json:"required_health_checks,omitempty"`
+	RequiredPostMergeChecks    *[]string     `json:"required_post_merge_checks,omitempty"`
+	RecoveryDefault            *string       `json:"recovery_default,omitempty"`
 }
 
 // Layer is an immutable policy content revision plus trusted approval
@@ -106,31 +108,36 @@ type Source struct {
 }
 
 type ResolvedPolicy struct {
-	SchemaVersion           int          `json:"schema_version"`
-	Context                 Context      `json:"context"`
-	Mode                    DeliveryMode `json:"mode,omitempty"`
-	RequiredTestKinds       []string     `json:"required_test_kinds"`
-	AllowedTargetBranches   []string     `json:"allowed_target_branches"`
-	MergeMethod             string       `json:"merge_method,omitempty"`
-	DeploymentWorkflow      string       `json:"deployment_workflow,omitempty"`
-	DeploymentEnvironment   string       `json:"deployment_environment,omitempty"`
-	RequiredHealthChecks    []string     `json:"required_health_checks"`
-	RequiredPostMergeChecks []string     `json:"required_post_merge_checks"`
-	RecoveryDefault         string       `json:"recovery_default,omitempty"`
-	Safety                  SafetyFloor  `json:"safety"`
-	Sources                 []Source     `json:"sources"`
-	Resolved                bool         `json:"resolved"`
-	Missing                 []string     `json:"missing"`
-	Digest                  string       `json:"digest"`
-	explicitTests           bool
-	explicitBranches        bool
+	SchemaVersion              int          `json:"schema_version"`
+	Context                    Context      `json:"context"`
+	Mode                       DeliveryMode `json:"mode,omitempty"`
+	RequiredTestKinds          []string     `json:"required_test_kinds"`
+	AllowedTargetBranches      []string     `json:"allowed_target_branches"`
+	MergeMethod                string       `json:"merge_method,omitempty"`
+	DeploymentWorkflow         string       `json:"deployment_workflow,omitempty"`
+	DeploymentEnvironment      string       `json:"deployment_environment,omitempty"`
+	RequiredSecretReferences   []string     `json:"required_secret_references"`
+	RequiredVariableReferences []string     `json:"required_variable_references"`
+	RequiredHealthChecks       []string     `json:"required_health_checks"`
+	RequiredPostMergeChecks    []string     `json:"required_post_merge_checks"`
+	RecoveryDefault            string       `json:"recovery_default,omitempty"`
+	Safety                     SafetyFloor  `json:"safety"`
+	Sources                    []Source     `json:"sources"`
+	Resolved                   bool         `json:"resolved"`
+	Missing                    []string     `json:"missing"`
+	Digest                     string       `json:"digest"`
+	explicitTests              bool
+	explicitBranches           bool
+	explicitSecretReferences   bool
+	explicitVariableReferences bool
 }
 
 var (
-	identityPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:/+-]{0,127}$`)
-	namePattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 _./:+-]{0,127}$`)
-	workflowPattern = regexp.MustCompile(`^\.github/workflows/[A-Za-z0-9][A-Za-z0-9_.-]{0,119}\.ya?ml$`)
-	digestPattern   = regexp.MustCompile(`^[a-f0-9]{64}$`)
+	identityPattern             = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:/+-]{0,127}$`)
+	namePattern                 = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 _./:+-]{0,127}$`)
+	workflowPattern             = regexp.MustCompile(`^\.github/workflows/[A-Za-z0-9][A-Za-z0-9_.-]{0,119}\.ya?ml$`)
+	environmentReferencePattern = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,127}$`)
+	digestPattern               = regexp.MustCompile(`^[a-f0-9]{64}$`)
 )
 
 func safetyFloor() SafetyFloor {
@@ -180,6 +187,7 @@ func Resolve(context Context, layers []Layer, now time.Time) (ResolvedPolicy, er
 	result := ResolvedPolicy{
 		SchemaVersion: SchemaVersion, Context: normalizedContext, Safety: safetyFloor(),
 		RequiredTestKinds: []string{}, AllowedTargetBranches: []string{}, RequiredHealthChecks: []string{},
+		RequiredSecretReferences: []string{}, RequiredVariableReferences: []string{},
 		RequiredPostMergeChecks: []string{}, Sources: []Source{}, Missing: []string{},
 	}
 	ordered := append([]Layer(nil), layers...)
@@ -202,6 +210,8 @@ func Resolve(context Context, layers []Layer, now time.Time) (ResolvedPolicy, er
 	result.RequiredTestKinds = canonicalNames(result.RequiredTestKinds)
 	result.AllowedTargetBranches = canonicalBranches(result.AllowedTargetBranches)
 	result.RequiredHealthChecks = canonicalNames(result.RequiredHealthChecks)
+	result.RequiredSecretReferences = canonicalEnvironmentReferences(result.RequiredSecretReferences)
+	result.RequiredVariableReferences = canonicalEnvironmentReferences(result.RequiredVariableReferences)
 	result.RequiredPostMergeChecks = canonicalNames(result.RequiredPostMergeChecks)
 	result.Missing = missingConfiguration(result)
 	result.Resolved = len(result.Missing) == 0
@@ -326,6 +336,12 @@ func validatePatch(patch Patch) error {
 	if patch.DeploymentEnvironment != nil && !validName(*patch.DeploymentEnvironment) {
 		return fmt.Errorf("deployment environment is invalid")
 	}
+	if patch.RequiredSecretReferences != nil && !validEnvironmentReferences(*patch.RequiredSecretReferences) {
+		return fmt.Errorf("required secret references are invalid")
+	}
+	if patch.RequiredVariableReferences != nil && !validEnvironmentReferences(*patch.RequiredVariableReferences) {
+		return fmt.Errorf("required variable references are invalid")
+	}
 	if patch.RequiredHealthChecks != nil && !validNames(*patch.RequiredHealthChecks, false) {
 		return fmt.Errorf("required health checks are invalid")
 	}
@@ -362,6 +378,14 @@ func applyPatch(policy *ResolvedPolicy, patch Patch) {
 	if patch.DeploymentEnvironment != nil {
 		policy.DeploymentEnvironment = strings.TrimSpace(*patch.DeploymentEnvironment)
 	}
+	if patch.RequiredSecretReferences != nil {
+		policy.RequiredSecretReferences = append([]string(nil), (*patch.RequiredSecretReferences)...)
+		policy.explicitSecretReferences = true
+	}
+	if patch.RequiredVariableReferences != nil {
+		policy.RequiredVariableReferences = append([]string(nil), (*patch.RequiredVariableReferences)...)
+		policy.explicitVariableReferences = true
+	}
 	if patch.RequiredHealthChecks != nil {
 		policy.RequiredHealthChecks = append([]string(nil), (*patch.RequiredHealthChecks)...)
 	}
@@ -394,6 +418,12 @@ func missingConfiguration(policy ResolvedPolicy) []string {
 		if policy.DeploymentEnvironment == "" {
 			missing = append(missing, "deployment_environment")
 		}
+		if !policy.explicitSecretReferences {
+			missing = append(missing, "required_secret_references")
+		}
+		if !policy.explicitVariableReferences {
+			missing = append(missing, "required_variable_references")
+		}
 		if len(policy.RequiredHealthChecks) == 0 {
 			missing = append(missing, "required_health_checks")
 		}
@@ -408,6 +438,7 @@ func missingConfiguration(policy ResolvedPolicy) []string {
 func resolvedDigest(policy ResolvedPolicy) (string, error) {
 	copy := policy
 	copy.Digest, copy.explicitTests, copy.explicitBranches = "", false, false
+	copy.explicitSecretReferences, copy.explicitVariableReferences = false, false
 	encoded, err := json.Marshal(copy)
 	if err != nil {
 		return "", fmt.Errorf("encode resolved delivery policy: %w", err)
@@ -433,6 +464,14 @@ func canonicalPatch(patch Patch) Patch {
 	if patch.DeploymentEnvironment != nil {
 		value := strings.TrimSpace(*patch.DeploymentEnvironment)
 		clone.DeploymentEnvironment = &value
+	}
+	if patch.RequiredSecretReferences != nil {
+		values := canonicalEnvironmentReferences(*patch.RequiredSecretReferences)
+		clone.RequiredSecretReferences = &values
+	}
+	if patch.RequiredVariableReferences != nil {
+		values := canonicalEnvironmentReferences(*patch.RequiredVariableReferences)
+		clone.RequiredVariableReferences = &values
 	}
 	if patch.RecoveryDefault != nil {
 		value := strings.ToLower(strings.TrimSpace(*patch.RecoveryDefault))
@@ -468,6 +507,33 @@ func canonicalNames(values []string) []string {
 
 func canonicalBranches(values []string) []string {
 	return canonicalNames(values)
+}
+
+func canonicalEnvironmentReferences(values []string) []string {
+	result := make([]string, len(values))
+	for index, value := range values {
+		result[index] = strings.ToUpper(strings.TrimSpace(value))
+	}
+	sort.Strings(result)
+	return result
+}
+
+func validEnvironmentReferences(values []string) bool {
+	if len(values) > 64 {
+		return false
+	}
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		canonical := strings.ToUpper(strings.TrimSpace(value))
+		if !environmentReferencePattern.MatchString(canonical) || strings.HasPrefix(canonical, "GITHUB_") {
+			return false
+		}
+		if _, duplicate := seen[canonical]; duplicate {
+			return false
+		}
+		seen[canonical] = struct{}{}
+	}
+	return true
 }
 
 func validNames(values []string, allowEmpty bool) bool {

@@ -26,21 +26,23 @@ type effectivePolicySource struct {
 }
 
 type effectivePolicyProjection struct {
-	SchemaVersion           int                         `json:"schema_version"`
-	Mode                    deliverypolicy.DeliveryMode `json:"mode,omitempty"`
-	RequiredTestKinds       []string                    `json:"required_test_kinds"`
-	AllowedTargetBranches   []string                    `json:"allowed_target_branches"`
-	MergeMethod             string                      `json:"merge_method,omitempty"`
-	DeploymentWorkflow      string                      `json:"deployment_workflow,omitempty"`
-	DeploymentEnvironment   string                      `json:"deployment_environment,omitempty"`
-	RequiredHealthChecks    []string                    `json:"required_health_checks"`
-	RequiredPostMergeChecks []string                    `json:"required_post_merge_checks"`
-	RecoveryDefault         string                      `json:"recovery_default,omitempty"`
-	Safety                  deliverypolicy.SafetyFloor  `json:"safety"`
-	Sources                 []effectivePolicySource     `json:"sources"`
-	Resolved                bool                        `json:"resolved"`
-	Missing                 []string                    `json:"missing"`
-	Digest                  string                      `json:"digest"`
+	SchemaVersion              int                         `json:"schema_version"`
+	Mode                       deliverypolicy.DeliveryMode `json:"mode,omitempty"`
+	RequiredTestKinds          []string                    `json:"required_test_kinds"`
+	AllowedTargetBranches      []string                    `json:"allowed_target_branches"`
+	MergeMethod                string                      `json:"merge_method,omitempty"`
+	DeploymentWorkflow         string                      `json:"deployment_workflow,omitempty"`
+	DeploymentEnvironment      string                      `json:"deployment_environment,omitempty"`
+	RequiredSecretReferences   []string                    `json:"required_secret_references"`
+	RequiredVariableReferences []string                    `json:"required_variable_references"`
+	RequiredHealthChecks       []string                    `json:"required_health_checks"`
+	RequiredPostMergeChecks    []string                    `json:"required_post_merge_checks"`
+	RecoveryDefault            string                      `json:"recovery_default,omitempty"`
+	Safety                     deliverypolicy.SafetyFloor  `json:"safety"`
+	Sources                    []effectivePolicySource     `json:"sources"`
+	Resolved                   bool                        `json:"resolved"`
+	Missing                    []string                    `json:"missing"`
+	Digest                     string                      `json:"digest"`
 }
 
 type effectivePolicyVaultEvidence struct {
@@ -147,6 +149,7 @@ func buildEffectivePolicySnapshot(projectID uuid.UUID, repository, changeSetID s
 		SchemaVersion: policy.SchemaVersion, Mode: policy.Mode,
 		RequiredTestKinds: append([]string{}, policy.RequiredTestKinds...), AllowedTargetBranches: append([]string{}, policy.AllowedTargetBranches...),
 		MergeMethod: policy.MergeMethod, DeploymentWorkflow: policy.DeploymentWorkflow, DeploymentEnvironment: policy.DeploymentEnvironment,
+		RequiredSecretReferences: append([]string{}, policy.RequiredSecretReferences...), RequiredVariableReferences: append([]string{}, policy.RequiredVariableReferences...),
 		RequiredHealthChecks: append([]string{}, policy.RequiredHealthChecks...), RequiredPostMergeChecks: append([]string{}, policy.RequiredPostMergeChecks...),
 		RecoveryDefault: policy.RecoveryDefault, Safety: policy.Safety, Sources: sources,
 		Resolved: policy.Resolved, Missing: append([]string{}, policy.Missing...), Digest: policy.Digest,

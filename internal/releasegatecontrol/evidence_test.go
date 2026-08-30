@@ -643,9 +643,12 @@ func controlPolicy(t *testing.T, project models.DeliveryProject, branches []stri
 	mode, method := deliverypolicy.ModeRelease, "squash"
 	tests, health := []string{"unit", "contract"}, []string{"health"}
 	workflow, environment, recovery := ".github/workflows/deploy.yml", "production", string(releasegate.RecoveryRollback)
+	secretReferences, variableReferences := []string{}, []string{}
 	patch := deliverypolicy.Patch{
 		Mode: &mode, MergeMethod: &method, RequiredTestKinds: &tests, AllowedTargetBranches: &branches,
-		DeploymentWorkflow: &workflow, DeploymentEnvironment: &environment, RequiredHealthChecks: &health, RecoveryDefault: &recovery,
+		DeploymentWorkflow: &workflow, DeploymentEnvironment: &environment,
+		RequiredSecretReferences: &secretReferences, RequiredVariableReferences: &variableReferences,
+		RequiredHealthChecks: &health, RecoveryDefault: &recovery,
 	}
 	id := uuid.Must(uuid.NewV4())
 	layer := deliverypolicy.Layer{

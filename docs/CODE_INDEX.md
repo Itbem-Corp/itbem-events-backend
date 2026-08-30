@@ -69,6 +69,7 @@ itbem-events-backend/
 | Exact-matrix compatibility and migration assurance resolver | `internal/qaevidence/`, `internal/deliveryledger/qa_observation.go`, `internal/releasegatecontrol/evidence.go` |
 | Frozen repository/work-item dependency Gatekeeper resolver | `models/DeliveryWorkflow.go`, `internal/qaevidence/`, `internal/releasegatecontrol/evidence.go` |
 | Effective-policy composite recovery resolver | `internal/deliverypolicy/`, `internal/deliverypolicystore/`, `internal/releasegatecontrol/evidence.go` |
+| Explicit release environment secret/variable reference policy and safe projection | `internal/deliverypolicy/policy.go`, `controllers/delivery/effective_policy.go` |
 | Linux multiagent systemd distribution | `deploy/systemd/` |
 | Moment | `models/Moment.go` |
 | MomentType | `models/MomentType.go` |

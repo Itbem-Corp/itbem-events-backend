@@ -107,7 +107,7 @@ func TestReviewOnlyRequiresAnExplicitEmptyTestPolicyAndNeverGrantsMerge(t *testi
 	}
 }
 
-func TestReleasePolicyRequiresWorkflowEnvironmentHealthAndRecovery(t *testing.T) {
+func TestReleasePolicyRequiresWorkflowEnvironmentReferencesHealthAndRecovery(t *testing.T) {
 	context := releaseContext()
 	mode, mergeMethod := ModeRelease, "merge"
 	tests, branches := []string{"unit"}, []string{"production"}
@@ -118,19 +118,42 @@ func TestReleasePolicyRequiresWorkflowEnvironmentHealthAndRecovery(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"deployment_workflow", "deployment_environment", "required_health_checks", "recovery_default"} {
+	for _, required := range []string{"deployment_workflow", "deployment_environment", "required_secret_references", "required_variable_references", "required_health_checks", "recovery_default"} {
 		if !contains(policy.Missing, required) {
 			t.Fatalf("release policy did not report %s: %#v", required, policy.Missing)
 		}
 	}
 	workflow, environment, recovery := ".github/workflows/deploy.yml", "production", "rollback"
 	health := []string{"api readiness"}
+	secrets, variables := []string{"database_url", "aws_role_arn"}, []string{}
 	repository := approvedLayer(t, LevelRepository, context, Patch{
-		DeploymentWorkflow: &workflow, DeploymentEnvironment: &environment, RequiredHealthChecks: &health, RecoveryDefault: &recovery,
+		DeploymentWorkflow: &workflow, DeploymentEnvironment: &environment,
+		RequiredSecretReferences: &secrets, RequiredVariableReferences: &variables,
+		RequiredHealthChecks: &health, RecoveryDefault: &recovery,
 	})
 	policy, err = Resolve(context, []Layer{base, repository}, policyNow)
 	if err != nil || !policy.Resolved || !policy.GatePolicyFor(releasegate.ActionRelease).Resolved {
 		t.Fatalf("complete release policy did not resolve: %#v / %v", policy, err)
+	}
+	if strings.Join(policy.RequiredSecretReferences, ",") != "AWS_ROLE_ARN,DATABASE_URL" || policy.RequiredVariableReferences == nil || len(policy.RequiredVariableReferences) != 0 {
+		t.Fatalf("environment references were not explicit and canonical: %#v / %#v", policy.RequiredSecretReferences, policy.RequiredVariableReferences)
+	}
+}
+
+func TestPolicyRejectsUnsafeEnvironmentReferences(t *testing.T) {
+	context := releaseContext()
+	for name, values := range map[string][]string{
+		"reserved":      {"GITHUB_TOKEN"},
+		"punctuation":   {"DATABASE-URL"},
+		"duplicate":     {"database_url", "DATABASE_URL"},
+		"leading digit": {"2FA_SECRET"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			layer := approvedLayer(t, LevelRepository, context, Patch{RequiredSecretReferences: &values})
+			if _, err := Resolve(context, []Layer{layer}, policyNow); err == nil {
+				t.Fatalf("unsafe environment reference was accepted: %#v", values)
+			}
+		})
 	}
 }
 
