@@ -382,6 +382,7 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	protected.GET("/automation/work-items/:id", delivery.GetWorkItem)
 	protected.GET("/automation/work-items/:id/stream", delivery.StreamWorkItem)
 	protected.GET("/automation/work-items/:id/execution-graph", delivery.GetExecutionGraph)
+	protected.GET("/automation/work-items/:id/release-gate/evaluations", delivery.ListReleaseGateEvaluations)
 	protected.GET("/automation/work-items/:id/budget", delivery.GetWorkItemBudget)
 	protected.PUT("/automation/work-items/:id/budget", delivery.UpdateWorkItemBudget)
 	protected.GET("/automation/work-items/:id/plans", delivery.ListPlans)

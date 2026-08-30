@@ -71,6 +71,8 @@ SELECT
   (SELECT MAX(gate.created_at) FROM delivery_gates AS gate WHERE gate.work_item_id = work_item.id) AS gate_created_at,
   (SELECT COUNT(*) FROM delivery_evidences AS evidence WHERE evidence.work_item_id = work_item.id) AS evidence_count,
   (SELECT MAX(evidence.created_at) FROM delivery_evidences AS evidence WHERE evidence.work_item_id = work_item.id) AS evidence_created_at,
+  (SELECT COUNT(*) FROM delivery_events AS delivery_event WHERE delivery_event.work_item_id = work_item.id) AS delivery_event_count,
+  (SELECT MAX(delivery_event.occurred_at) FROM delivery_events AS delivery_event WHERE delivery_event.work_item_id = work_item.id) AS delivery_event_occurred_at,
   (SELECT COUNT(*) FROM delivery_messages AS message WHERE message.work_item_id = work_item.id) AS message_count,
   (SELECT MAX(message.created_at) FROM delivery_messages AS message WHERE message.work_item_id = work_item.id) AS message_created_at,
   (SELECT COUNT(*) FROM automation_executions AS execution WHERE execution.delivery_work_item_id = work_item.id) AS execution_count,
@@ -101,6 +103,8 @@ type deliveryWorkItemStreamRevisionSource struct {
 	GateCreatedAt             sql.NullTime `gorm:"column:gate_created_at"`
 	EvidenceCount             int64        `gorm:"column:evidence_count"`
 	EvidenceCreatedAt         sql.NullTime `gorm:"column:evidence_created_at"`
+	DeliveryEventCount        int64        `gorm:"column:delivery_event_count"`
+	DeliveryEventOccurredAt   sql.NullTime `gorm:"column:delivery_event_occurred_at"`
 	MessageCount              int64        `gorm:"column:message_count"`
 	MessageCreatedAt          sql.NullTime `gorm:"column:message_created_at"`
 	ExecutionCount            int64        `gorm:"column:execution_count"`
@@ -164,6 +168,7 @@ func deliveryWorkItemStreamRevision(source deliveryWorkItemStreamRevisionSource)
 		strconv.FormatInt(source.PublicationGrantCount, 10), deliveryWorkItemStreamNullTime(source.PublicationGrantUpdatedAt),
 		strconv.FormatInt(source.GateCount, 10), deliveryWorkItemStreamNullTime(source.GateCreatedAt),
 		strconv.FormatInt(source.EvidenceCount, 10), deliveryWorkItemStreamNullTime(source.EvidenceCreatedAt),
+		strconv.FormatInt(source.DeliveryEventCount, 10), deliveryWorkItemStreamNullTime(source.DeliveryEventOccurredAt),
 		strconv.FormatInt(source.MessageCount, 10), deliveryWorkItemStreamNullTime(source.MessageCreatedAt),
 		strconv.FormatInt(source.ExecutionCount, 10), deliveryWorkItemStreamNullTime(source.ExecutionCompletedAt),
 		strconv.FormatInt(source.ToolExecutionCount, 10), deliveryWorkItemStreamNullTime(source.ToolExecutionCompletedAt),
@@ -183,6 +188,7 @@ func deliveryWorkItemStreamLastActivity(source deliveryWorkItemStreamRevisionSou
 		source.PublicationGrantUpdatedAt,
 		source.GateCreatedAt,
 		source.EvidenceCreatedAt,
+		source.DeliveryEventOccurredAt,
 		source.MessageCreatedAt,
 		source.ExecutionCompletedAt,
 		source.ToolExecutionCompletedAt,

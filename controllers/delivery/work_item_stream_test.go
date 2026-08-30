@@ -40,6 +40,12 @@ func TestDeliveryWorkItemStreamRevisionTracksEveryObservableActivitySource(t *te
 	if third := deliveryWorkItemStreamRevision(source); third == first {
 		t.Fatal("a human gate must invalidate the delivery work item")
 	}
+
+	source.GateCount--
+	source.DeliveryEventCount++
+	if fourth := deliveryWorkItemStreamRevision(source); fourth == first {
+		t.Fatal("an append-only delivery event must invalidate the delivery work item")
+	}
 }
 
 func TestDeliveryWorkItemStreamLastActivityUsesLatestSafeTimestamp(t *testing.T) {
@@ -84,13 +90,13 @@ func TestDeliveryWorkItemStreamQueryStaysBoundedAndDoesNotSelectPrivateAgentData
 	query := strings.ToLower(strings.Join(strings.Fields(deliveryWorkItemStreamRevisionSQL), " "))
 	for _, table := range []string{
 		"delivery_work_items", "automation_tasks", "delivery_plans", "delivery_change_sets",
-		"delivery_gates", "delivery_evidences", "delivery_messages", "automation_executions", "automation_tool_executions",
+		"delivery_gates", "delivery_evidences", "delivery_events", "delivery_messages", "automation_executions", "automation_tool_executions",
 	} {
 		if !strings.Contains(query, table) {
 			t.Fatalf("stream revision must notice %s changes", table)
 		}
 	}
-	for _, forbidden := range []string{"output_ref", "input_ref", "usage_json", "structured_json", "error_message", "request_ref", "response_ref"} {
+	for _, forbidden := range []string{"output_ref", "input_ref", "usage_json", "structured_json", "error_message", "request_ref", "response_ref", "payload_json"} {
 		if strings.Contains(query, forbidden) {
 			t.Fatalf("stream revision must not read or disclose private field %q", forbidden)
 		}

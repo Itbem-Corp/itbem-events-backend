@@ -148,6 +148,7 @@ type DeliveryWorkItem struct {
 	Dependencies       []DeliveryWorkItemDependency `gorm:"foreignKey:WorkItemID" json:"dependencies,omitempty" validate:"-"`
 	Gates              []DeliveryGate               `gorm:"foreignKey:WorkItemID" json:"gates,omitempty" validate:"-"`
 	Evidence           []DeliveryEvidence           `gorm:"foreignKey:WorkItemID" json:"evidence,omitempty" validate:"-"`
+	Events             []DeliveryEvent              `gorm:"foreignKey:WorkItemID" json:"-" validate:"-"`
 	Messages           []DeliveryMessage            `gorm:"foreignKey:WorkItemID" json:"messages,omitempty" validate:"-"`
 	AutomationTasks    []AutomationTask             `gorm:"foreignKey:DeliveryWorkItemID" json:"automation_tasks,omitempty" validate:"-"`
 	CreatedAt          time.Time                    `json:"created_at"`
@@ -351,6 +352,24 @@ type DeliveryEvidence struct {
 	CapturedBy   string     `gorm:"type:varchar(128);not null;default:''" json:"captured_by,omitempty"`
 	CapturedAt   *time.Time `gorm:"index" json:"captured_at,omitempty"`
 	CreatedAt    time.Time  `json:"created_at"`
+}
+
+// DeliveryEvent is the append-only, sequence-bearing event ledger for one
+// work item. Payload is private control-plane evidence; browser read models
+// must expose a deliberately smaller projection instead of this row.
+type DeliveryEvent struct {
+	ID            uuid.UUID `gorm:"type:uuid;default:uuid_generate_v4();primaryKey" json:"-"`
+	WorkItemID    uuid.UUID `gorm:"type:uuid;not null;uniqueIndex:idx_delivery_event_sequence;index" json:"-"`
+	Sequence      int64     `gorm:"not null;uniqueIndex:idx_delivery_event_sequence" json:"sequence"`
+	EventType     string    `gorm:"type:varchar(96);not null;index" json:"event_type"`
+	DedupeKey     string    `gorm:"type:varchar(256);not null;uniqueIndex" json:"-"`
+	SubjectDigest string    `gorm:"type:varchar(64);not null;default:'';index" json:"subject_digest,omitempty"`
+	PayloadJSON   string    `gorm:"type:jsonb;not null" json:"-"`
+	PayloadDigest string    `gorm:"type:varchar(64);not null;index" json:"payload_digest"`
+	ActorType     string    `gorm:"type:varchar(24);not null;index" json:"actor_type"`
+	ActorID       string    `gorm:"type:varchar(128);not null;index" json:"-"`
+	OccurredAt    time.Time `gorm:"not null;index" json:"occurred_at"`
+	CreatedAt     time.Time `gorm:"not null;index" json:"created_at"`
 }
 
 func (evidence DeliveryEvidence) MarshalJSON() ([]byte, error) {

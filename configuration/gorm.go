@@ -77,6 +77,7 @@ var modelsWithoutSeed = []interface{}{
 	&models.DeliveryPublicationGrant{},
 	&models.DeliveryGate{},
 	&models.DeliveryEvidence{},
+	&models.DeliveryEvent{},
 	&models.DeliveryMessage{},
 	&models.DeliveryRelease{},
 	&models.EventPhrase{},
@@ -296,6 +297,26 @@ func migrateModels(db *gorm.DB) error {
 		for _, statement := range vaultStatements {
 			if err := tx.Exec(statement).Error; err != nil {
 				return fmt.Errorf("protect project Vault revisions: %w", err)
+			}
+		}
+		// Delivery events are the sequence-bearing operational history used by
+		// resumable read models. Corrections append a new event; no application
+		// path may rewrite or delete an earlier Gatekeeper decision.
+		deliveryEventStatements := []string{
+			`CREATE OR REPLACE FUNCTION prevent_delivery_event_mutation()
+			 RETURNS trigger AS $$
+			 BEGIN
+			   RAISE EXCEPTION 'delivery_events are append-only';
+			 END;
+			 $$ LANGUAGE plpgsql`,
+			"DROP TRIGGER IF EXISTS delivery_events_append_only ON delivery_events",
+			`CREATE TRIGGER delivery_events_append_only
+			 BEFORE UPDATE OR DELETE ON delivery_events
+			 FOR EACH ROW EXECUTE FUNCTION prevent_delivery_event_mutation()`,
+		}
+		for _, statement := range deliveryEventStatements {
+			if err := tx.Exec(statement).Error; err != nil {
+				return fmt.Errorf("protect delivery event ledger: %w", err)
 			}
 		}
 		return nil
