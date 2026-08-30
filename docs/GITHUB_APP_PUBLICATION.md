@@ -1,10 +1,21 @@
 # GitHub App para publicación controlada
 
-La plataforma de Delivery no debe publicar con la llave SSH ni con un token
-personal de una persona. El worker usa una GitHub App instalada sólo en los
-repositorios que Delivery puede publicar.
+La plataforma no publica con llaves SSH ni tokens personales. Usa dos GitHub
+Apps privadas e independientes, instaladas sólo en repositorios autorizados:
+una identidad **Reviewer** para revisiones y otra **Release** para publicación
+controlada. Compartir una App entre ambos roles rompe la independencia y no es
+una configuración válida.
 
-## Permisos mínimos de la App
+## Permisos mínimos de las Apps
+
+Reviewer App:
+
+- **Contents: Read-only**: obtener y volver a comprobar el diff exacto.
+- **Pull requests: Read and write**: leer el head/autor y publicar únicamente
+  `COMMENT`, `APPROVE` o `REQUEST_CHANGES`.
+- **Metadata: Read-only**: obligatorio para GitHub Apps.
+
+Release App:
 
 - **Contents: Read and write**: subir únicamente la rama autorizada.
 - **Pull requests: Read and write**: crear el PR de la rama autorizada.
@@ -26,9 +37,9 @@ workflow, modificar secrets, administrar environments, mergear ni desplegar.
 
 ## Instalación inicial (una sola vez)
 
-1. En la organización de GitHub, crear una **GitHub App** privada para Delivery.
+1. En la organización de GitHub, crear dos **GitHub Apps** privadas: Reviewer y Release.
 2. En **Repository access**, seleccionar **Only select repositories** y añadir únicamente los repositorios que ese entorno puede publicar. No elegir acceso a todos los repositorios de la organización.
-3. Conceder sólo los permisos de la sección anterior y generar una llave privada de la App. La llave no se descarga ni se pega en el dashboard.
+3. Conceder a cada App sólo sus permisos y generar una llave privada distinta. Las llaves no se pegan en el dashboard ni se comparten entre procesos.
 4. Instalar la App en la organización y anotar el identificador de instalación. Mantener una instalación distinta por entorno cuando producción y pruebas no compartan el mismo perímetro.
 5. Guardar los tres secretos del siguiente apartado en el control plane y, desde **Delivery → una tarea → Integración de publicación**, usar **Verificar conexión**. La comprobación usa un token efímero y una lectura mínima; no lista repositorios ni muestra credenciales.
 
@@ -43,7 +54,7 @@ modelo.
 
 ```dotenv
 ITBEM_GITHUB_APP_ID=12345
-ITBEM_GITHUB_INSTALLATION_ID=67890
+ITBEM_GITHUB_INSTALLATION_IDS=67890
 ITBEM_GITHUB_APP_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
 ITBEM_GITHUB_API_BASE_URL=https://api.github.com
 
@@ -60,9 +71,7 @@ en PostgreSQL, S3, output del agente, screenshots, prompts ni logs.
 
 ## Revisión automática de pull requests
 
-La misma GitHub App puede habilitar revisión automática con permisos mínimos
-**Pull requests: Read-only** y **Metadata: Read-only** (Contents no es
-necesario para esta ruta). Configura en GitHub un webhook `pull_request` con
+La Reviewer App recibe el webhook `pull_request` con
 content type `application/json`, el secreto independiente
 `GITHUB_REVIEW_WEBHOOK_SECRET`, y como URL:
 
@@ -74,9 +83,18 @@ La entrada permanece apagada hasta que el secreto y la allow-list exacta
 firma HMAC SHA-256 sobre el cuerpo crudo, descarga un diff limitado de la
 comparación exacta base SHA → head SHA, y crea un único task `code.review` por
 `repository + PR number + head SHA`. La redelivery no crea un segundo task;
-un commit nuevo sí recibe una revisión nueva. El webhook no escribe comentarios,
-no aprueba, no publica y no ejecuta código: deposita la revisión privada en la
-misma cola única del agente.
+un commit nuevo sí recibe una revisión nueva. El webhook no ejecuta código ni
+publica directamente: congela diff, digest, instalación y SHA, y deposita el
+trabajo en la lane Review.
+
+Después de validar la salida estructurada contra ese diff, un relay
+determinista obtiene un token efímero restringido al repositorio, vuelve a
+comprobar que el PR sigue abierto y en el mismo SHA, y publica la revisión. Un
+marcador de sujeto+payload hace el efecto idempotente tras reinicios. Si ya
+existe un resultado diferente para el mismo sujeto, falla cerrado. Si la App
+Reviewer fuera autora del PR, un `APPROVE` se degrada a `COMMENT` y la revisión
+humana independiente continúa pendiente. PostgreSQL conserva sólo identidad,
+URL y digests públicos; la prosa completa permanece en evidencia privada.
 
 La entrada admite ráfagas breves normales de GitHub, pero limita el tráfico por
 origen antes de analizar el cuerpo. Si GitHub recibe `429`, debe reintentar el
@@ -102,7 +120,8 @@ una revisión automática nueva.
    commit local si hay cambios, publica exclusivamente esa rama y crea el PR
    sólo si ambas capacidades fueron otorgadas. Un reintento busca el PR abierto
    de la misma rama en vez de crear un duplicado.
-6. Merge y deployment siguen fuera de las capacidades del agente.
+6. Reviewer nunca modifica código, mergea ni despliega. Release sólo actúa
+   cuando el Gatekeeper determinista confirma todas las puertas del SHA final.
 
 ## Operación y trazabilidad
 

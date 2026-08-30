@@ -74,10 +74,11 @@ const maxGitHubInstallationIDs = 16
 // GitHubPullRequestState is the small mutable PR checkpoint used solely to
 // reject obsolete webhook deliveries. It carries no source or account data.
 type GitHubPullRequestState struct {
-	HeadSHA string
-	Open    bool
-	Draft   bool
-	Merged  bool
+	HeadSHA     string
+	AuthorActor string
+	Open        bool
+	Draft       bool
+	Merged      bool
 }
 
 // ReadGitHubPullRequestState confirms the mutable PR state immediately before
@@ -111,11 +112,14 @@ func ReadGitHubPullRequestState(ctx context.Context, config GitHubAppConfig, tok
 		Head   struct {
 			SHA string `json:"sha"`
 		} `json:"head"`
+		User struct {
+			Login string `json:"login"`
+		} `json:"user"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 32<<10)).Decode(&payload); err != nil || !validGitHubCommitSHA(strings.ToLower(strings.TrimSpace(payload.Head.SHA))) {
 		return GitHubPullRequestState{}, fmt.Errorf("GitHub pull request state is invalid")
 	}
-	return GitHubPullRequestState{HeadSHA: strings.ToLower(strings.TrimSpace(payload.Head.SHA)), Open: strings.EqualFold(strings.TrimSpace(payload.State), "open"), Draft: payload.Draft, Merged: payload.Merged}, nil
+	return GitHubPullRequestState{HeadSHA: strings.ToLower(strings.TrimSpace(payload.Head.SHA)), AuthorActor: strings.ToLower(strings.TrimSpace(payload.User.Login)), Open: strings.EqualFold(strings.TrimSpace(payload.State), "open"), Draft: payload.Draft, Merged: payload.Merged}, nil
 }
 
 // ReadGitHubPullRequestPatch downloads the immutable compare diff between the

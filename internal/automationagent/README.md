@@ -212,12 +212,20 @@ root-only configuration but intentionally never starts or enables a service.
 Every lane has a private `0700` workspace root and its own registry; sharing a
 checkout across Engineer, Reviewer, QA or Release is unsupported. Preflight
 uses the separate oneshot `itbem-ai-agent-doctor@.service`, which cannot poll
-SQS or mutate the checkout. The Release doctor fails closed when its GitHub App
-identity is absent even though that lane intentionally has no model key.
+SQS or mutate the checkout. Review and Release each fail closed when their own,
+distinct GitHub App identity is absent; Release intentionally has no model key.
 On an on-premises host, each lane uses an independent IAM Roles Anywhere
 `credential_process` profile, with EC2 metadata and long-lived shared access
 keys disabled. The AWS SDK therefore receives only renewable temporary
 sessions scoped to that lane.
+
+For a signed `code.review` webhook task, the Reviewer freezes repository, PR,
+installation, head SHA and patch digest before inference. Its deterministic
+relay validates all inline line ranges, rechecks the live head, mints a
+repository-scoped installation token, and publishes exactly one idempotent
+GitHub review. Model output never calls GitHub itself. Release credentials are
+not present in the Review service, and Review credentials are not present in
+Release.
 
 The only billable connectivity command is explicit and guarded:
 

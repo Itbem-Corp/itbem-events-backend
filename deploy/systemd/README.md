@@ -18,8 +18,12 @@ systemd services. The installer never enables or starts a service.
   never install IAM access keys. AWS Roles Anywhere has no additional service
   charge, while AWS Private CA does, so this runbook does not require Private
   CA. An EC2 deployment must use per-lane instance/task roles instead.
-- Keep the GitHub App PEM and explicit comma-separated installation allow-list
-  only in the release secret file. Model keys belong only to inference roles;
+- Use two distinct GitHub Apps. Keep the Reviewer App PEM and explicit
+  installation allow-list only in the review secret file; it needs metadata
+  and contents read plus pull-request read/write solely to publish reviews.
+  Keep the Release App PEM and allow-list only in the release secret file; it
+  owns approved publication and release operations. Never reuse either App or
+  its PEM across the two lanes. Model keys belong only to inference roles;
   Release must not contain one.
 
 ## Install without activation
@@ -32,7 +36,8 @@ sudoedit /etc/itbem-ai-agent/roles/engineering.env
 sudoedit /etc/itbem-ai-agent/roles/review.env
 sudoedit /etc/itbem-ai-agent/roles/qa.env
 sudoedit /etc/itbem-ai-agent/roles/release.env
-sudo install -m 0640 -o root -g itbem-agent-release /secure/source/bema-review-bot.pem /etc/itbem-ai-agent/secrets/release/github-app.pem
+sudo install -m 0640 -o root -g itbem-agent-review /secure/source/bema-review-bot.pem /etc/itbem-ai-agent/secrets/review/github-app.pem
+sudo install -m 0640 -o root -g itbem-agent-release /secure/source/bema-delivery-bot.pem /etc/itbem-ai-agent/secrets/release/github-app.pem
 ```
 
 Each role file owns its own `ITBEM_AI_WORKSPACES_JSON`. Register only managed
@@ -87,9 +92,9 @@ done
 ```
 
 The doctor unit runs only the local, non-billable `--doctor` command and cannot
-poll SQS or mutate a workspace. The Release doctor additionally fails unless
-its GitHub App identity is complete; other lanes may remain locally useful
-without publication authority. Do not enable the worker units or configure
+poll SQS or mutate a workspace. Review and Release each fail unless their own
+GitHub App identity is complete; other lanes remain locally useful without
+publication authority. Do not enable the worker units or configure
 backend lane routing until all five preflights, queue IAM checks and heartbeat
 identities are verified. Then start the role units, switch the backend with the
 complete lane map in one deployment, and observe one canary per lane. The

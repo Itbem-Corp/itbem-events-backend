@@ -153,6 +153,12 @@ Event     Event          `gorm:"foreignKey:EventID" json:"event,omitempty"`
   carry an optional `EvidenceSubjectDigest` fixed at enqueue time; QA uses it
   to bind observations to the exact multi-repository release matrix without
   granting the task merge or release authority.
+- **AutomationCodeReviewPublication**
+  (`models/AutomationCodeReviewPublication.go`): Append-only public proof that
+  the isolated Reviewer App published one validated GitHub review for an exact
+  repository, PR, head SHA and patch digest. It stores actor, event, review URL
+  and deterministic subject/payload digests; findings and model prose stay in
+  private evidence. Update/delete hooks reject history rewriting.
 - **DeliveryEvent** QA observation (`delivery.qa.observed.v2`): Append-only,
   sequence-bearing result for one exact QA task and matrix digest. It stores
   only repository execution order plus operator-owned test identities and

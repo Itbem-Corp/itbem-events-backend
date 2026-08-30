@@ -177,6 +177,50 @@ func TestGitHubReviewWebhookAdmissionIsExplicitAndSignatureBound(t *testing.T) {
 	}
 }
 
+func TestCodeReviewPublicationForTaskRequiresExactIndependentGitHubEvidence(t *testing.T) {
+	taskID := uuid.Must(uuid.NewV4())
+	subject := strings.Repeat("a", 64)
+	task := &models.AutomationTask{
+		ID: taskID, RequestedBy: "github-app-review", Operation: "code.review", EvidenceSubjectDigest: subject,
+		CorrelationID: "github-pr:itbem/backend:42:" + strings.Repeat("b", 40),
+	}
+	execution := automationagent.GitHubCodeReviewPublication{
+		SchemaVersion: 1, Repository: "itbem/backend", PullRequest: 42, HeadSHA: strings.Repeat("b", 40),
+		PatchSHA256: strings.Repeat("c", 64), SubjectSHA256: subject, PayloadSHA256: strings.Repeat("d", 64),
+		Verdict: "approve", Event: "APPROVE", ReviewID: 77,
+		ReviewURL:     "https://github.com/itbem/backend/pull/42#pullrequestreview-77",
+		ReviewerActor: "reviewer-bot[bot]", AuthorActor: "engineer-bot[bot]", PublishedAt: time.Now().UTC(),
+	}
+	raw, _ := json.Marshal(execution)
+	publication, err := codeReviewPublicationForTask(task, raw)
+	if err != nil || publication.AutomationTaskID != uuid.Nil || publication.ReviewerActor != "reviewer-bot[bot]" {
+		t.Fatalf("valid review publication rejected: %#v / %v", publication, err)
+	}
+	for name, mutate := range map[string]func(*models.AutomationTask, *automationagent.GitHubCodeReviewPublication){
+		"stale subject": func(_ *models.AutomationTask, value *automationagent.GitHubCodeReviewPublication) {
+			value.SubjectSHA256 = strings.Repeat("e", 64)
+		},
+		"self approval": func(_ *models.AutomationTask, value *automationagent.GitHubCodeReviewPublication) {
+			value.AuthorActor = value.ReviewerActor
+		},
+		"wrong PR": func(_ *models.AutomationTask, value *automationagent.GitHubCodeReviewPublication) {
+			value.PullRequest = 43
+		},
+		"wrong operation": func(value *models.AutomationTask, _ *automationagent.GitHubCodeReviewPublication) {
+			value.Operation = "delivery.qa"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidateTask, candidateExecution := *task, execution
+			mutate(&candidateTask, &candidateExecution)
+			candidateRaw, _ := json.Marshal(candidateExecution)
+			if _, err := codeReviewPublicationForTask(&candidateTask, candidateRaw); err == nil {
+				t.Fatal("invalid GitHub review publication evidence was accepted")
+			}
+		})
+	}
+}
+
 func TestSupersedeQueuedGitHubReviewsTargetsOnlyOlderQueuedHeadsForTheSamePR(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {

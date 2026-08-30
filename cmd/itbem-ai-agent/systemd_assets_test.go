@@ -64,7 +64,7 @@ func TestSystemdDoctorIsReadOnlyAndCannotConsumeQueueWork(t *testing.T) {
 	}
 }
 
-func TestSystemdRoleFilesBindExactLaneAndSeparateReleaseSecrets(t *testing.T) {
+func TestSystemdRoleFilesBindExactLaneAndSeparatePublicationSecrets(t *testing.T) {
 	roles := map[string][2]string{
 		"orchestration": {"orchestrator", "orchestration"},
 		"engineering":   {"principal_engineer", "engineering"},
@@ -85,6 +85,10 @@ func TestSystemdRoleFilesBindExactLaneAndSeparateReleaseSecrets(t *testing.T) {
 		if file == "release" {
 			if strings.Contains(body, "API_KEY") || !strings.Contains(body, "ITBEM_GITHUB_APP_PRIVATE_KEY_FILE=") {
 				t.Fatal("release role mixed model and publication secrets")
+			}
+		} else if file == "review" {
+			if !strings.Contains(body, "MINIMAX_API_KEY=") || !strings.Contains(body, "ITBEM_GITHUB_APP_PRIVATE_KEY_FILE=/etc/itbem-ai-agent/secrets/review/github-app.pem") {
+				t.Fatal("review role lost its separate model or publication secret reference")
 			}
 		} else if !strings.Contains(body, "MINIMAX_API_KEY=") || strings.Contains(body, "GITHUB_APP_PRIVATE_KEY") {
 			t.Fatalf("%s role has the wrong secret class", file)

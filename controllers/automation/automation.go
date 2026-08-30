@@ -87,6 +87,14 @@ type githubPullRequestWebhook struct {
 	} `json:"pull_request"`
 }
 
+type githubReviewTaskView struct {
+	ID           uuid.UUID  `json:"id"`
+	Status       string     `json:"status"`
+	AttemptCount int        `json:"attempt_count"`
+	CompletedAt  *time.Time `json:"completed_at,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+}
+
 // GitHubPullRequestReviewWebhook converts an explicitly permitted, signed PR
 // event into the same durable private code.review task used everywhere else.
 // It cannot comment, approve, merge, publish or run code. The App API is used
@@ -125,7 +133,7 @@ func GitHubPullRequestReviewWebhook(c echo.Context) error {
 	}
 	var existing models.AutomationTask
 	if err := configuration.DB.First(&existing, taskID).Error; err == nil {
-		return utils.Success(c, http.StatusAccepted, "GitHub review already queued", existing)
+		return utils.Success(c, http.StatusAccepted, "GitHub review already queued", githubReviewTaskProjection(existing))
 	} else if err != gorm.ErrRecordNotFound {
 		return utils.Error(c, http.StatusServiceUnavailable, "GitHub review unavailable", "")
 	}
@@ -156,6 +164,14 @@ func GitHubPullRequestReviewWebhook(c echo.Context) error {
 	if err != nil {
 		return utils.Error(c, http.StatusConflict, "GitHub review rejected", "The pull request diff is not reviewable within the configured safety limits")
 	}
+	review, err = automationagent.BindCodeReviewRemoteTarget(review, event.Number, event.Installation.ID)
+	if err != nil {
+		return utils.Error(c, http.StatusConflict, "GitHub review rejected", "The remote review target is invalid")
+	}
+	reviewSubject, err := automationagent.CodeReviewPublicationSubjectSHA256(review)
+	if err != nil {
+		return utils.Error(c, http.StatusConflict, "GitHub review rejected", "The remote review subject could not be sealed")
+	}
 	input, err := json.Marshal(automationagent.TaskInput{Prompt: "Review this immutable pull request diff. Report only reproducible issues grounded in the supplied patch.", Delivery: mustJSON(review)})
 	if err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "GitHub review failed", "")
@@ -165,7 +181,7 @@ func GitHubPullRequestReviewWebhook(c echo.Context) error {
 		return utils.Error(c, http.StatusServiceUnavailable, "GitHub review unavailable", "")
 	}
 	jobID := uuid.NewV5(uuid.NamespaceURL, "itbem/github-review-job/"+identity)
-	task := &models.AutomationTask{ID: taskID, JobID: jobID, RequestedBy: "github-app-review", CorrelationID: "github-pr:" + identity, Operation: "code.review", MaxCompletionTokens: automationagent.CompletionTokensForOperation("code.review"), InputRef: "s3://" + cfg.AutomationInputBucket + "/" + inputKey, Status: "queued"}
+	task := &models.AutomationTask{ID: taskID, JobID: jobID, RequestedBy: "github-app-review", CorrelationID: "github-pr:" + identity, Operation: "code.review", EvidenceSubjectDigest: reviewSubject, MaxCompletionTokens: automationagent.CompletionTokensForOperation("code.review"), InputRef: "s3://" + cfg.AutomationInputBucket + "/" + inputKey, Status: "queued"}
 	message := automationqueue.Message{SchemaVersion: 1, JobID: jobID.String(), TenantCode: "itbem", CorrelationID: task.CorrelationID, Type: "ai.local.process"}
 	message.Payload.TaskID, message.Payload.Operation, message.Payload.MaxCompletionTokens, message.Payload.InputRef, message.Payload.Attempt = taskID.String(), task.Operation, task.MaxCompletionTokens, task.InputRef, 1
 	created := false
@@ -200,11 +216,15 @@ func GitHubPullRequestReviewWebhook(c echo.Context) error {
 	}
 	if !created {
 		if err := configuration.DB.First(&existing, taskID).Error; err == nil {
-			return utils.Success(c, http.StatusAccepted, "GitHub review already queued", existing)
+			return utils.Success(c, http.StatusAccepted, "GitHub review already queued", githubReviewTaskProjection(existing))
 		}
 		return utils.Error(c, http.StatusConflict, "GitHub review already queued", "")
 	}
-	return utils.Success(c, http.StatusAccepted, "GitHub pull request review queued", task)
+	return utils.Success(c, http.StatusAccepted, "GitHub pull request review queued", githubReviewTaskProjection(*task))
+}
+
+func githubReviewTaskProjection(task models.AutomationTask) githubReviewTaskView {
+	return githubReviewTaskView{ID: task.ID, Status: task.Status, AttemptCount: task.AttemptCount, CompletedAt: task.CompletedAt, CreatedAt: task.CreatedAt}
 }
 
 func supersedeQueuedGitHubReviews(tx *gorm.DB, prIdentity string, replacementID uuid.UUID, now time.Time) error {
@@ -2028,8 +2048,8 @@ func Complete(c echo.Context) error {
 		if task.Operation == "delivery.release_gate" {
 			limit = 256 * 1024
 		}
-		if request.Status != "completed" || (task.Operation != "delivery.implementation" && task.Operation != "delivery.onboarding_probe" && task.Operation != "delivery.publish" && task.Operation != "delivery.release_gate" && task.Operation != "delivery.qa") || len(request.Execution) > limit || !json.Valid(request.Execution) {
-			return utils.Error(c, http.StatusBadRequest, "Invalid automation execution", "only a bounded completed delivery implementation, onboarding probe, publication, QA, or release Gatekeeper run may register execution metadata")
+		if request.Status != "completed" || (task.Operation != "code.review" && task.Operation != "delivery.implementation" && task.Operation != "delivery.onboarding_probe" && task.Operation != "delivery.publish" && task.Operation != "delivery.release_gate" && task.Operation != "delivery.qa") || len(request.Execution) > limit || !json.Valid(request.Execution) {
+			return utils.Error(c, http.StatusBadRequest, "Invalid automation execution", "only a bounded completed review or delivery execution may register execution metadata")
 		}
 	}
 	if request.Deterministic && (request.Status != "completed" || (task.Operation != "delivery.onboarding_probe" && task.Operation != "delivery.publish" && task.Operation != "delivery.release_gate")) {
@@ -2040,6 +2060,9 @@ func Complete(c echo.Context) error {
 	}
 	if task.Operation == "delivery.onboarding_probe" && request.Status == "completed" && (!request.Deterministic || len(request.Execution) == 0) {
 		return utils.Error(c, http.StatusBadRequest, "Invalid automation result", "onboarding probe completion requires deterministic execution evidence")
+	}
+	if task.Operation == "code.review" && task.RequestedBy == "github-app-review" && request.Status == "completed" && len(request.Execution) == 0 {
+		return utils.Error(c, http.StatusBadRequest, "Invalid automation result", "remote code review completion requires exact GitHub publication evidence")
 	}
 	toolExecutionRows, toolExecutionErr := buildToolExecutionLedger(cfg, &task, ledgerRunID, request.Status, request.ToolExecutions, request.Artifacts, time.Now().UTC())
 	if toolExecutionErr != nil {
@@ -2139,6 +2162,11 @@ func Complete(c echo.Context) error {
 			}
 		}
 		if !cancellationRequested && request.Status == "completed" && len(request.Execution) > 0 {
+			if task.Operation == "code.review" {
+				if err := persistCodeReviewPublication(tx, &task, request.Execution, completedAt); err != nil {
+					return err
+				}
+			}
 			if task.Operation == "delivery.onboarding_probe" {
 				if err := persistOnboardingCapabilityProbes(tx, &task, request.Execution, completedAt); err != nil {
 					return err
@@ -2174,6 +2202,77 @@ func Complete(c echo.Context) error {
 		return utils.Error(c, http.StatusConflict, "Automation result ignored", "Task is not awaiting a result")
 	}
 	return c.NoContent(http.StatusNoContent)
+}
+
+func persistCodeReviewPublication(tx *gorm.DB, task *models.AutomationTask, raw json.RawMessage, completedAt time.Time) error {
+	publication, err := codeReviewPublicationForTask(task, raw)
+	if err != nil {
+		return err
+	}
+	publication.AutomationTaskID, publication.PublishedAt = task.ID, publication.PublishedAt.UTC()
+	if publication.PublishedAt.After(completedAt.Add(time.Minute)) {
+		return fmt.Errorf("code review publication time is invalid")
+	}
+	return tx.Create(&publication).Error
+}
+
+func codeReviewPublicationForTask(task *models.AutomationTask, raw json.RawMessage) (models.AutomationCodeReviewPublication, error) {
+	if task == nil || task.ID == uuid.Nil || task.Operation != "code.review" || task.RequestedBy != "github-app-review" || !artifactDigestPattern.MatchString(strings.ToLower(strings.TrimSpace(task.EvidenceSubjectDigest))) {
+		return models.AutomationCodeReviewPublication{}, fmt.Errorf("only an exact webhook review task may publish GitHub review evidence")
+	}
+	var execution automationagent.GitHubCodeReviewPublication
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&execution); err != nil {
+		return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review publication evidence is invalid")
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review publication evidence is invalid")
+	}
+	repository := strings.ToLower(strings.TrimSpace(execution.Repository))
+	verdict := strings.ToLower(strings.TrimSpace(execution.Verdict))
+	event := strings.ToUpper(strings.TrimSpace(execution.Event))
+	actor := strings.ToLower(strings.TrimSpace(execution.ReviewerActor))
+	author := strings.ToLower(strings.TrimSpace(execution.AuthorActor))
+	if execution.SchemaVersion != 1 || !githubRepositoryPattern.MatchString(repository) || execution.PullRequest < 1 || !gitCommitSHA.MatchString(strings.ToLower(strings.TrimSpace(execution.HeadSHA))) || !artifactDigestPattern.MatchString(strings.ToLower(strings.TrimSpace(execution.PatchSHA256))) || !artifactDigestPattern.MatchString(strings.ToLower(strings.TrimSpace(execution.SubjectSHA256))) || !artifactDigestPattern.MatchString(strings.ToLower(strings.TrimSpace(execution.PayloadSHA256))) || !strings.EqualFold(execution.SubjectSHA256, task.EvidenceSubjectDigest) || execution.ReviewID < 1 || actor == "" || execution.PublishedAt.IsZero() {
+		return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review publication evidence is invalid")
+	}
+	if task.CorrelationID != "github-pr:"+repository+":"+strconv.Itoa(execution.PullRequest)+":"+strings.ToLower(execution.HeadSHA) || !validGitHubReviewURL(execution.ReviewURL, repository, execution.PullRequest, execution.ReviewID) {
+		return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review publication does not match its queued pull request")
+	}
+	switch event {
+	case "APPROVE":
+		if verdict != "approve" || author == "" || strings.EqualFold(actor, author) {
+			return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review approval is not independent")
+		}
+	case "REQUEST_CHANGES":
+		if verdict != "request_changes" {
+			return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review event contradicts its verdict")
+		}
+	case "COMMENT":
+		if verdict != "comment" && verdict != "blocked" && !(verdict == "approve" && author != "" && strings.EqualFold(actor, author)) {
+			return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review comment contradicts its verdict")
+		}
+	default:
+		return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review event is invalid")
+	}
+	return models.AutomationCodeReviewPublication{
+		Repository: repository, PullRequest: execution.PullRequest, HeadSHA: strings.ToLower(execution.HeadSHA), PatchSHA256: strings.ToLower(execution.PatchSHA256),
+		SubjectSHA256: strings.ToLower(execution.SubjectSHA256), PayloadSHA256: strings.ToLower(execution.PayloadSHA256), Verdict: verdict, Event: event,
+		ReviewID: execution.ReviewID, ReviewURL: strings.TrimSpace(execution.ReviewURL), ReviewerActor: actor, AuthorActor: author, PublishedAt: execution.PublishedAt,
+	}, nil
+}
+
+func validGitHubReviewURL(value, repository string, pullRequest int, reviewID int64) bool {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || parsed.Scheme != "https" || !strings.EqualFold(parsed.Hostname(), "github.com") || parsed.User != nil || parsed.RawQuery != "" || pullRequest < 1 || reviewID < 1 {
+		return false
+	}
+	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	if len(parts) != 4 || !strings.EqualFold(parts[0]+"/"+parts[1], repository) || parts[2] != "pull" || parts[3] != strconv.Itoa(pullRequest) {
+		return false
+	}
+	return parsed.Fragment == "pullrequestreview-"+strconv.FormatInt(reviewID, 10)
 }
 
 func persistOnboardingCapabilityProbes(tx *gorm.DB, task *models.AutomationTask, raw json.RawMessage, completedAt time.Time) error {
