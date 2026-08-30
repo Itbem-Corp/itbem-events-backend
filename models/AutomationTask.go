@@ -10,12 +10,13 @@ import (
 // request. Inputs and outputs are object references, never the heavyweight or
 // sensitive payload itself.
 type AutomationTask struct {
-	ID                 uuid.UUID  `gorm:"type:uuid;default:uuid_generate_v4();primaryKey" json:"id"`
-	JobID              uuid.UUID  `gorm:"type:uuid;not null;uniqueIndex" json:"job_id"`
-	RequestedBy        string     `gorm:"type:varchar(128);not null;index" json:"requested_by"`
-	DeliveryWorkItemID *uuid.UUID `gorm:"type:uuid;index" json:"delivery_work_item_id,omitempty"`
-	CorrelationID      string     `gorm:"type:varchar(64);not null;index" json:"correlation_id"`
-	Operation          string     `gorm:"type:varchar(96);not null;index" json:"operation"`
+	ID                   uuid.UUID  `gorm:"type:uuid;default:uuid_generate_v4();primaryKey" json:"id"`
+	JobID                uuid.UUID  `gorm:"type:uuid;not null;uniqueIndex" json:"job_id"`
+	RequestedBy          string     `gorm:"type:varchar(128);not null;index" json:"requested_by"`
+	DeliveryWorkItemID   *uuid.UUID `gorm:"type:uuid;index" json:"delivery_work_item_id,omitempty"`
+	DeliveryOnboardingID *uuid.UUID `gorm:"type:uuid;index" json:"delivery_onboarding_id,omitempty"`
+	CorrelationID        string     `gorm:"type:varchar(64);not null;index" json:"correlation_id"`
+	Operation            string     `gorm:"type:varchar(96);not null;index" json:"operation"`
 	// EvidenceSubjectDigest binds deterministic evidence-producing work to the
 	// exact control-plane subject selected when it was enqueued (for example a
 	// coordinated repository/target/SHA matrix). It grants no capability.
