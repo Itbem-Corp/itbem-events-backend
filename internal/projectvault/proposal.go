@@ -399,7 +399,7 @@ func safeFiles(values []string) []string {
 				break
 			}
 		}
-		if !unsafe {
+		if !unsafe && safeVaultInventoryPath(value) {
 			seen[value] = struct{}{}
 		}
 	}
@@ -409,6 +409,54 @@ func safeFiles(values []string) []string {
 	}
 	sort.Strings(result)
 	return result
+}
+
+// safeVaultInventoryPath is deliberately stricter than a normal source tree
+// walk. Vault onboarding records file names as evidence, so secret-bearing
+// paths are excluded even though this package never reads their contents. A
+// small allow-list admits environment *templates* by name; their contents are
+// still never selected as source context by the GitHub adapter.
+func safeVaultInventoryPath(value string) bool {
+	lower := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), `\`, "/"))
+	base := lower[strings.LastIndex(lower, "/")+1:]
+	if isEnvironmentDeclarationPath(lower) {
+		return !hasSensitivePathSegment(lower)
+	}
+	if strings.HasPrefix(base, ".env") || base == "id_rsa" || base == "id_ed25519" || hasSensitivePathSegment(lower) {
+		return false
+	}
+	for _, fragment := range []string{"credential", "secret", "private_key", "api_key", "apikey", "access_key", "token", "password", "service_account"} {
+		if strings.Contains(lower, fragment) {
+			return false
+		}
+	}
+	for _, extension := range []string{".pem", ".key", ".p12", ".pfx", ".jks", ".keystore"} {
+		if strings.HasSuffix(base, extension) {
+			return false
+		}
+	}
+	return true
+}
+
+func hasSensitivePathSegment(value string) bool {
+	for _, segment := range strings.Split(value, "/") {
+		switch segment {
+		case ".git", ".aws", ".ssh", "secrets", "credentials", "node_modules", "vendor", ".next", ".turbo", "dist", "build", "coverage", "__pycache__":
+			return true
+		}
+	}
+	return false
+}
+
+func isEnvironmentDeclarationPath(value string) bool {
+	value = strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), `\`, "/"))
+	base := value[strings.LastIndex(value, "/")+1:]
+	for _, suffix := range []string{".example", ".sample", ".template", ".dist"} {
+		if base == ".env"+suffix || base == "env"+suffix || strings.HasSuffix(base, ".env"+suffix) || strings.HasSuffix(base, ".tfvars"+suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func detectStacks(files []string, revision string) []Fact {
@@ -577,11 +625,76 @@ func buildManifest(repository Repository, identity Provenance, files []string, s
 		return strings.HasSuffix(path, ".tf") || strings.Contains(path, "cloudformation") || strings.Contains(path, "serverless.") || strings.HasSuffix(path, "cdk.json")
 	})
 	addMarkerEntry("repository.documentation", "documentation", func(path string) bool { return path == "readme.md" || strings.HasPrefix(path, "docs/") })
+	addMarkerEntry("repository.api_contracts", "contract", isAPIContractPath)
+	addMarkerEntry("repository.data_schemas", "data_schema", isDataSchemaPath)
+	addMarkerEntry("repository.dependencies", "dependency", isDependencyManifestPath)
+	addMarkerEntry("repository.environment_declarations", "configuration", isEnvironmentDeclarationPath)
+	addMarkerEntry("repository.tests", "testing", isTestPath)
+	addMarkerEntry("repository.runbooks_and_decisions", "operations", isRunbookOrDecisionPath)
 	for index := range entries {
 		entries[index] = normalizeVaultEntry(entries[index], repository.Revision)
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Key < entries[j].Key })
 	return Manifest{SchemaVersion: SchemaVersion, Scope: "repository", Repository: repository, Entries: entries}
+}
+
+func pathBase(value string) string {
+	return value[strings.LastIndex(value, "/")+1:]
+}
+
+func hasPathSegment(value string, candidates ...string) bool {
+	for _, segment := range strings.Split(value, "/") {
+		for _, candidate := range candidates {
+			if segment == candidate {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isAPIContractPath(path string) bool {
+	base := pathBase(path)
+	return strings.HasSuffix(base, ".proto") || strings.HasSuffix(base, ".graphql") || strings.HasSuffix(base, ".graphqls") ||
+		base == "openapi.json" || base == "openapi.yaml" || base == "openapi.yml" ||
+		base == "swagger.json" || base == "swagger.yaml" || base == "swagger.yml" ||
+		base == "asyncapi.json" || base == "asyncapi.yaml" || base == "asyncapi.yml"
+}
+
+func isDataSchemaPath(path string) bool {
+	base := pathBase(path)
+	return hasPathSegment(path, "migration", "migrations", "alembic") || base == "schema.prisma" || base == "schema.sql" ||
+		(strings.HasSuffix(base, ".sql") && (strings.Contains(base, "schema") || strings.Contains(base, "migration")))
+}
+
+func isDependencyManifestPath(path string) bool {
+	base := pathBase(path)
+	switch base {
+	case "package.json", "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb", "deno.json", "deno.lock",
+		"go.mod", "go.sum", "cargo.toml", "cargo.lock", "pyproject.toml", "poetry.lock", "pipfile", "pipfile.lock", "uv.lock",
+		"gemfile", "gemfile.lock", "composer.json", "composer.lock", "pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts",
+		"deps.edn", "mix.exs", "mix.lock", "package.swift", "package.resolved", "pubspec.yaml", "pubspec.lock":
+		return true
+	}
+	return strings.HasPrefix(base, "requirements") && strings.HasSuffix(base, ".txt")
+}
+
+func isTestPath(path string) bool {
+	base := pathBase(path)
+	if hasPathSegment(path, "test", "tests", "__tests__", "e2e", "integration", "integration-tests") || strings.HasPrefix(base, "playwright.config.") || strings.HasPrefix(base, "cypress.config.") {
+		return true
+	}
+	for _, marker := range []string{"_test.go", "_test.rs", ".test.js", ".test.jsx", ".test.ts", ".test.tsx", ".spec.js", ".spec.jsx", ".spec.ts", ".spec.tsx"} {
+		if strings.HasSuffix(base, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func isRunbookOrDecisionPath(path string) bool {
+	base := pathBase(path)
+	return hasPathSegment(path, "runbook", "runbooks", "adr", "adrs", "decisions") || strings.HasPrefix(base, "runbook") || strings.HasPrefix(base, "adr-")
 }
 
 func validSHA(value string) bool {

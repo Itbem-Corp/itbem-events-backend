@@ -28,9 +28,13 @@ func TestCanonicalGitHubReference(t *testing.T) {
 
 func TestBuildCreatesDeterministicEvidenceBasedProposal(t *testing.T) {
 	input := Input{
-		Repository:         Repository{Reference: "https://github.com/acme/platform", DefaultBranch: "trunk", Revision: testSHA},
-		Files:              []string{"package.json", "pnpm-lock.yaml", ".github/workflows/ci.yml", "CODEOWNERS", "docs/ARCHITECTURE.md", "../secret", "package.json"},
-		InventoryFileCount: 6,
+		Repository: Repository{Reference: "https://github.com/acme/platform", DefaultBranch: "trunk", Revision: testSHA},
+		Files: []string{
+			"package.json", "pnpm-lock.yaml", ".github/workflows/ci.yml", "CODEOWNERS", "docs/ARCHITECTURE.md",
+			"api/openapi.yaml", "db/migrations/001_create.sql", ".env.example", "src/service.test.ts", "docs/runbooks/release.md",
+			".env.production", "secrets/key.txt", "../secret", "package.json",
+		},
+		InventoryFileCount: 12,
 		Excerpts:           []Excerpt{{Path: "package.json", Content: `{"scripts":{"test":"vitest","test:e2e":"playwright test","build":"vite build","bad;name":"ignored"}}`}},
 	}
 	first, err := Build(input)
@@ -73,6 +77,48 @@ func TestBuildCreatesDeterministicEvidenceBasedProposal(t *testing.T) {
 			t.Fatalf("unsafe path entered vault: %s", encoded)
 		}
 	}
+	entries := map[string]VaultEntry{}
+	for _, entry := range first.Vault.Entries {
+		entries[entry.Key] = entry
+	}
+	wantMarkers := []string{
+		"repository.api_contracts", "repository.data_schemas", "repository.dependencies",
+		"repository.environment_declarations", "repository.tests", "repository.runbooks_and_decisions",
+	}
+	for _, key := range wantMarkers {
+		if _, exists := entries[key]; !exists {
+			t.Fatalf("missing generic Vault marker %q: %#v", key, first.Vault.Entries)
+		}
+	}
+	encodedVault, _ := json.Marshal(first.Vault)
+	if contains(string(encodedVault), ".env.production") || contains(string(encodedVault), "secrets/key.txt") {
+		t.Fatalf("secret-bearing inventory entered Vault: %s", encodedVault)
+	}
+}
+
+func TestBuildEnvironmentTemplatesAreNameOnlyEvidence(t *testing.T) {
+	proposal, err := Build(Input{
+		Repository: Repository{Reference: "github://acme/service", DefaultBranch: "main", Revision: testSHA},
+		Files: []string{
+			".env.example", "deploy/app.env.sample", "terraform/prod.tfvars.template",
+			".env", ".env.local", ".env.production", "secrets/.env.example", "credentials/env.sample",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range proposal.Vault.Entries {
+		if entry.Key != "repository.environment_declarations" {
+			continue
+		}
+		paths, ok := entry.Value["paths"].([]string)
+		want := []string{".env.example", "deploy/app.env.sample", "terraform/prod.tfvars.template"}
+		if !ok || !reflect.DeepEqual(paths, want) {
+			t.Fatalf("environment declaration paths = %#v, want %#v", entry.Value["paths"], want)
+		}
+		return
+	}
+	t.Fatal("environment declaration marker missing")
 }
 
 func TestBuildProposesCommandsPerMonorepoModule(t *testing.T) {

@@ -391,6 +391,7 @@ func TestReadGitHubRepositoryMapOnlyReturnsSafeFileInventory(t *testing.T) {
 		_ = json.NewEncoder(response).Encode(map[string]any{"tree": []map[string]string{
 			{"path": "README.md", "type": "blob"},
 			{"path": "cmd/api/main.go", "type": "blob"},
+			{"path": ".env.example", "type": "blob"},
 			{"path": ".env.production", "type": "blob"},
 			{"path": "node_modules/ignored.js", "type": "blob"},
 			{"path": "secrets/key.txt", "type": "blob"},
@@ -403,7 +404,7 @@ func TestReadGitHubRepositoryMapOnlyReturnsSafeFileInventory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read repository map: %v", err)
 	}
-	if result.Revision != revision || result.FileCount != 2 || result.InventoryTruncated || strings.Join(result.Files, ",") != "README.md,cmd/api/main.go" {
+	if result.Revision != revision || result.FileCount != 3 || result.InventoryTruncated || strings.Join(result.Files, ",") != ".env.example,README.md,cmd/api/main.go" {
 		t.Fatalf("unexpected safe repository map: %#v", result)
 	}
 }
@@ -432,12 +433,12 @@ func TestReadGitHubRepositorySourceContextUsesOnlySelectedRedactedFrozenFiles(t 
 	}))
 	defer server.Close()
 
-	source, err := ReadGitHubRepositorySourceContext(context.Background(), GitHubAppConfig{APIBaseURL: server.URL}, "ephemeral-installation-token", GitHubRepositorySnapshot{Reference: "github://Itbem-Corp/repo", Revision: revision}, GitHubRepositoryMap{Revision: revision, Files: []string{"README.md", "package.json", "src/main.ts", "docs/architecture.md", ".env", "secrets/key.txt"}})
+	source, err := ReadGitHubRepositorySourceContext(context.Background(), GitHubAppConfig{APIBaseURL: server.URL}, "ephemeral-installation-token", GitHubRepositorySnapshot{Reference: "github://Itbem-Corp/repo", Revision: revision}, GitHubRepositoryMap{Revision: revision, Files: []string{"README.md", "package.json", "src/main.ts", "docs/architecture.md", ".env", ".env.example", "secrets/key.txt"}})
 	if err != nil {
 		t.Fatalf("read bounded remote source context: %v", err)
 	}
 	encoded, marshalErr := json.Marshal(source)
-	if marshalErr != nil || len(source.Excerpts) != 4 || !seen["README.md"] || source.RedactedValues == 0 || strings.Contains(string(encoded), "must-not-reach-a-model") {
+	if marshalErr != nil || len(source.Excerpts) != 4 || !seen["README.md"] || seen[".env.example"] || source.RedactedValues == 0 || strings.Contains(string(encoded), "must-not-reach-a-model") {
 		t.Fatalf("remote context must contain selected redacted source only: %#v / %#v / %v", source, seen, marshalErr)
 	}
 	if _, err := ReadGitHubRepositorySourceContext(context.Background(), GitHubAppConfig{APIBaseURL: server.URL}, "ephemeral-installation-token", GitHubRepositorySnapshot{Reference: "github://Itbem-Corp/repo", Revision: revision}, GitHubRepositoryMap{Revision: strings.Repeat("d", 40)}); err == nil {

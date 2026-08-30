@@ -296,7 +296,7 @@ func ReadGitHubRepositoryMap(ctx context.Context, config GitHubAppConfig, token 
 			continue
 		}
 		path := strings.Trim(strings.TrimSpace(entry.Path), "/")
-		if path == "" || len(path) > 240 || strings.Contains(path, "../") || !safeGitHubRepositoryMapPath(path) {
+		if path == "" || len(path) > 240 || strings.Contains(path, "../") || !safeGitHubRepositoryInventoryPath(path) {
 			continue
 		}
 		fileCount++
@@ -428,6 +428,34 @@ func safeGitHubRepositoryMapPath(value string) bool {
 		return false
 	}
 	for _, segment := range strings.Split(value, "/") {
+		if excludedDirectory(segment) {
+			return false
+		}
+	}
+	return true
+}
+
+// safeGitHubRepositoryInventoryPath permits only the names of conventional
+// environment declaration templates in addition to normal safe source paths.
+// ReadGitHubRepositorySourceContext still calls safeGitHubRepositoryMapPath,
+// so template contents can never enter model context or the Vault proposal.
+func safeGitHubRepositoryInventoryPath(value string) bool {
+	if safeGitHubRepositoryMapPath(value) {
+		return true
+	}
+	lower := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), `\`, "/"))
+	base := lower[strings.LastIndex(lower, "/")+1:]
+	allowed := false
+	for _, suffix := range []string{".example", ".sample", ".template", ".dist"} {
+		if base == ".env"+suffix || base == "env"+suffix || strings.HasSuffix(base, ".env"+suffix) || strings.HasSuffix(base, ".tfvars"+suffix) {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return false
+	}
+	for _, segment := range strings.Split(lower, "/") {
 		if excludedDirectory(segment) {
 			return false
 		}

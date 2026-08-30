@@ -31,6 +31,13 @@ branch, pins its full SHA, reads a bounded safe tree and stores a proposal.
 Review repository/default branch/SHA, inventory truncation, detected stacks,
 proposed commands, every capability state, provenance and the Vault digest.
 
+The deterministic manifest records path-only evidence for dependency
+manifests, API contracts, data schemas/migrations, CI, ownership,
+infrastructure, tests, documentation, runbooks/ADRs and allow-listed
+environment declaration templates. Secret-bearing paths and real `.env`
+files are excluded. Template contents are never fetched as source context;
+the Vault stores only their path, exact inspected SHA and confidence.
+
 `unknown` is expected when no dry-run or policy proves a capability. Do not
 change it to ready manually.
 
