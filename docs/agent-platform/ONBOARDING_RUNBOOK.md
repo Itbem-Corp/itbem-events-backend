@@ -60,6 +60,42 @@ plane persists only repository/SHA, verdict, executor role, evidence digest,
 subject digest and bounded reason; updates and deletes are rejected. Re-running
 a probe therefore creates new evidence instead of rewriting the prior result.
 
+### Execute command capability probes
+
+Before approval, register the repository on the Linux execution plane with
+the exact GitHub `repository_url`, inspected `base_branch`, and
+`repository:read`, `repository:fetch`, and `worktree:create` capabilities.
+Give every executable validation/QA command a matching operator-owned kind.
+The API accepts only capability names; it never accepts argv or a local path.
+
+Call
+`POST /api/automation/projects/:id/repository-onboardings/:onboardingID/probes`:
+
+```json
+{
+  "expected_revision": "0123456789abcdef0123456789abcdef01234567",
+  "workspace_reference": "workspace://service",
+  "capabilities": ["unit", "integration", "contract"]
+}
+```
+
+Supported command probes are `unit`, `integration`, `contract`, `e2e`,
+`preview`, `staging`, `health`, and `recovery`. The QA lane fetches origin with
+pruning, verifies that the inspected SHA belongs to the configured remote
+default branch, creates a detached ephemeral worktree at that exact SHA, and
+runs only the matching registry commands with worker credentials removed from
+the environment. A missing/non-zero command records `blocked`; exit zero
+records `ready`. Changing HEAD or a tracked file fails the task, and the
+ephemeral worktree is removed. Command output is redacted and reduced to a
+digest before encrypted evidence is stored; the callback contains only sealed
+value-free evidence.
+
+Only one probe task may be active for an onboarding proposal digest. A prior
+task becomes stale if another probe updates the proposal. Use
+`GET /api/automation/projects/:id/repository-onboardings/:onboardingID/probes`
+to inspect the append-only history, then re-read the onboarding before
+approving its latest digest/SHA.
+
 ## Approve
 
 Call
@@ -93,8 +129,8 @@ to conceal drift.
 
 ## Current safety boundary
 
-This foundation performs static inspection only. Command dry-run, branch/PR
-write, review, QA, preview, staging, release, health and recovery capabilities
-remain unknown/proposed until their dedicated isolated capability probes and
-policies are implemented. Onboarding approval does not authorize merge or
-deployment.
+Static inspection plus isolated command dry-runs can prove the eight local
+harness capabilities above. Branch/PR write, independent review, release and
+other cloud authority remain unknown until their separate GitHub/policy probes
+are implemented; they cannot be inferred from a passing repository command.
+Onboarding approval does not authorize merge or deployment.

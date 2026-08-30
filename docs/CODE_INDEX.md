@@ -63,6 +63,7 @@ itbem-events-backend/
 | DesignTemplate | `models/DesignTemplate.go` |
 | DeliveryProject / work-item workflow | `models/DeliveryWorkflow.go` |
 | DeliveryRepositoryOnboarding / DeliveryProjectVaultRevision | `models/DeliveryProjectVault.go` |
+| Append-only repository capability probe evidence | `models/DeliveryRepositoryCapabilityProbe.go`, `internal/automationagent/onboarding_probe.go`, `controllers/delivery/onboarding.go`, `controllers/automation/automation.go` |
 | AutomationTask | `models/AutomationTask.go` |
 | AutomationAgentHeartbeat | `models/AutomationAgentHeartbeat.go` |
 | Named exact-matrix QA evidence / per-repository gate resolver | `internal/qaevidence/`, `internal/deliveryledger/qa_observation.go`, `internal/releasegatecontrol/evidence.go` |

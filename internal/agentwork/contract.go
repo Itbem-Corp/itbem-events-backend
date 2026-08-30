@@ -28,16 +28,17 @@ const (
 )
 
 const (
-	OperationAIChat                 = "ai.chat"
-	OperationDocumentAnalyze        = "document.analyze"
-	OperationCodeReview             = "code.review"
-	OperationProductIdeate          = "product.ideate"
-	OperationDeliveryPlan           = "delivery.plan"
-	OperationDeliveryImplementation = "delivery.implementation"
-	OperationDeliveryPublish        = "delivery.publish"
-	OperationDeliveryReleaseGate    = "delivery.release_gate"
-	OperationDeliveryQA             = "delivery.qa"
-	OperationDeliverySummary        = "delivery.summary"
+	OperationAIChat                  = "ai.chat"
+	OperationDocumentAnalyze         = "document.analyze"
+	OperationCodeReview              = "code.review"
+	OperationProductIdeate           = "product.ideate"
+	OperationDeliveryPlan            = "delivery.plan"
+	OperationDeliveryImplementation  = "delivery.implementation"
+	OperationDeliveryOnboardingProbe = "delivery.onboarding_probe"
+	OperationDeliveryPublish         = "delivery.publish"
+	OperationDeliveryReleaseGate     = "delivery.release_gate"
+	OperationDeliveryQA              = "delivery.qa"
+	OperationDeliverySummary         = "delivery.summary"
 )
 
 type Assignment struct {
@@ -55,7 +56,7 @@ func AssignmentForOperation(operation string) (Assignment, bool) {
 		return Assignment{Role: RolePrincipalEngineer, Lane: LaneEngineering}, true
 	case OperationCodeReview:
 		return Assignment{Role: RoleReviewer, Lane: LaneReview}, true
-	case OperationDeliveryQA:
+	case OperationDeliveryQA, OperationDeliveryOnboardingProbe:
 		return Assignment{Role: RoleQA, Lane: LaneQA}, true
 	case OperationDeliveryPublish, OperationDeliveryReleaseGate:
 		return Assignment{Role: RoleReleaseManager, Lane: LaneRelease}, true

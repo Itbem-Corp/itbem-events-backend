@@ -369,6 +369,8 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	protected.POST("/automation/projects/:id/context/:sourceID/fetch-local-remote", delivery.FetchLocalWorkspaceRemoteRefs)
 	protected.GET("/automation/projects/:id/repository-onboardings", delivery.ListRepositoryOnboardings)
 	protected.POST("/automation/projects/:id/repository-onboardings/inspect", delivery.InspectRepositoryOnboarding)
+	protected.POST("/automation/projects/:id/repository-onboardings/:onboardingID/probes", delivery.ProbeRepositoryOnboarding)
+	protected.GET("/automation/projects/:id/repository-onboardings/:onboardingID/probes", delivery.ListRepositoryCapabilityProbes)
 	protected.POST("/automation/projects/:id/repository-onboardings/:onboardingID/approve", delivery.ApproveRepositoryOnboarding)
 	protected.GET("/automation/projects/:id/vault/revisions", delivery.ListProjectVaultRevisions)
 	protected.GET("/automation/projects/:id/delivery-policy/effective", delivery.GetEffectiveProjectPolicy)

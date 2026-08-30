@@ -144,6 +144,30 @@ type Input struct {
 	EnvironmentDeclarations []EnvironmentDeclaration
 }
 
+// ValidateStoredProposal re-establishes every immutable identity carried by a
+// persisted onboarding proposal before it may be approved or extended with
+// deterministic probe evidence. Keeping this validation in the Vault domain
+// prevents different controllers from accepting subtly different checkpoint
+// rules.
+func ValidateStoredProposal(raw, repositoryReference, defaultBranch, revision, readiness, proposalSHA256, vaultSHA256 string) (Proposal, error) {
+	var proposal Proposal
+	if err := json.Unmarshal([]byte(raw), &proposal); err != nil {
+		return proposal, err
+	}
+	vaultDigest, err := ManifestSHA256(proposal.Vault)
+	if err != nil || !strings.EqualFold(vaultDigest, vaultSHA256) || !strings.EqualFold(vaultDigest, proposal.VaultSHA256) || proposal.SchemaVersion != SchemaVersion || proposal.Vault.SchemaVersion != SchemaVersion {
+		return proposal, fmt.Errorf("vault digest or schema mismatch")
+	}
+	if proposal.Repository.Reference != repositoryReference || !strings.EqualFold(proposal.Repository.Revision, revision) || proposal.Repository.DefaultBranch != defaultBranch {
+		return proposal, fmt.Errorf("repository checkpoint mismatch")
+	}
+	proposalDigest, err := ProposalSHA256(proposal)
+	if err != nil || !strings.EqualFold(proposalDigest, proposalSHA256) || proposal.Readiness != readiness {
+		return proposal, fmt.Errorf("proposal digest or readiness mismatch")
+	}
+	return proposal, nil
+}
+
 // CanonicalGitHubReference accepts the user-facing HTTPS URL and the internal
 // github:// reference. It rejects credentials, query strings, fragments,
 // subpaths and non-GitHub hosts before any network operation occurs.

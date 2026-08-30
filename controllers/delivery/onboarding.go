@@ -8,6 +8,9 @@ import (
 	"events-stocks/internal/automationagent"
 	"events-stocks/internal/projectvault"
 	"events-stocks/models"
+	automationqueue "events-stocks/repositories/automationqueuerepository"
+	awsrepository "events-stocks/repositories/awsrepository"
+	outboxService "events-stocks/services/outbox"
 	"events-stocks/utils"
 	"fmt"
 	"net/http"
@@ -29,6 +32,12 @@ type repositoryOnboardingRequest struct {
 
 type repositoryOnboardingApprovalRequest struct {
 	ExpectedRevision string `json:"expected_revision"`
+}
+
+type repositoryOnboardingProbeRequest struct {
+	ExpectedRevision   string   `json:"expected_revision"`
+	WorkspaceReference string   `json:"workspace_reference"`
+	Capabilities       []string `json:"capabilities"`
 }
 
 var errOnboardingRejected = errors.New("repository onboarding approval rejected")
@@ -320,23 +329,130 @@ func ApproveRepositoryOnboarding(c echo.Context) error {
 	return success(c, "Repository onboarding approved", map[string]any{"onboarding": approved, "vault_revision": vault})
 }
 
+// ProbeRepositoryOnboarding queues a deterministic QA-lane dry-run for the
+// exact inspected SHA. The request chooses only capability identities and a
+// registered workspace ID; executable argv remains operator-owned on Linux.
+func ProbeRepositoryOnboarding(c echo.Context) error {
+	projectID, err := id(c, "project")
+	if err != nil {
+		return err
+	}
+	actor, err := projectActor(c, projectID, deliveryManage)
+	if err != nil {
+		return err
+	}
+	onboardingID, err := uuid.FromString(strings.TrimSpace(c.Param("onboardingID")))
+	if err != nil || onboardingID == uuid.Nil {
+		return badRequest(c, "Invalid repository onboarding", "onboarding ID must be a UUID")
+	}
+	var request repositoryOnboardingProbeRequest
+	if err := c.Bind(&request); err != nil {
+		return badRequest(c, "Invalid repository onboarding probe", "expected_revision, workspace_reference, and capabilities are required")
+	}
+	expectedRevision := strings.ToLower(strings.TrimSpace(request.ExpectedRevision))
+	capabilities, err := automationagent.NormalizeOnboardingProbeCapabilities(request.Capabilities)
+	if err != nil || !projectvault.ValidRevision(expectedRevision) {
+		return badRequest(c, "Invalid repository onboarding probe", "only supported command capabilities and the inspected full Git SHA may be probed")
+	}
+	cfg, _ := c.Get("config").(*models.Config)
+	if cfg == nil || strings.TrimSpace(cfg.AutomationInputBucket) == "" || !automationqueue.IsConfigured() {
+		return conflict(c, "Repository onboarding probe unavailable", "The automation queue or private input storage is not configured")
+	}
+	var onboarding models.DeliveryRepositoryOnboarding
+	if err := configuration.DB.Where("id = ? AND project_id = ?", onboardingID, projectID).First(&onboarding).Error; err != nil {
+		return lookup(c, "Repository onboarding", err)
+	}
+	if onboarding.Status != "proposed" || !strings.EqualFold(onboarding.Revision, expectedRevision) {
+		return conflict(c, "Repository onboarding probe rejected", "Probe the current proposed onboarding at its exact inspected SHA")
+	}
+	if _, err := validateStoredOnboardingProposal(onboarding); err != nil {
+		return conflict(c, "Repository onboarding probe rejected", "The stored proposal no longer matches its immutable checkpoint")
+	}
+	delivery, err := automationagent.BuildOnboardingProbeDelivery(request.WorkspaceReference, onboarding.RepositoryReference, onboarding.DefaultBranch, onboarding.Revision, capabilities)
+	if err != nil {
+		return badRequest(c, "Invalid repository onboarding probe", err.Error())
+	}
+	taskID, jobID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
+	inputJSON, err := json.Marshal(automationagent.TaskInput{Delivery: delivery})
+	if err != nil {
+		return utilsError(c, err)
+	}
+	inputKey := "automation/inputs/" + taskID.String() + "/input.json"
+	if err := awsrepository.UploadEncryptedJSON(c.Request().Context(), inputJSON, inputKey, cfg.AutomationInputBucket); err != nil {
+		return conflict(c, "Repository onboarding probe unavailable", "Could not write the private exact-SHA probe input")
+	}
+	task := models.AutomationTask{
+		ID: taskID, JobID: jobID, RequestedBy: actor.CognitoSub, DeliveryOnboardingID: &onboarding.ID,
+		CorrelationID: "onboarding:" + onboarding.ID.String(), Operation: "delivery.onboarding_probe",
+		EvidenceSubjectDigest: onboarding.ProposalSHA256, MaxCompletionTokens: 0,
+		InputRef: "s3://" + cfg.AutomationInputBucket + "/" + inputKey, Status: "queued",
+	}
+	message := automationqueue.Message{SchemaVersion: 1, JobID: jobID.String(), TenantCode: "itbem", CorrelationID: task.CorrelationID, Type: "ai.local.process"}
+	message.Payload.TaskID, message.Payload.Operation, message.Payload.MaxCompletionTokens, message.Payload.InputRef, message.Payload.Attempt = task.ID.String(), task.Operation, 0, task.InputRef, 1
+	if err := configuration.DB.Transaction(func(tx *gorm.DB) error {
+		var lockedProject models.DeliveryProject
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id").First(&lockedProject, projectID).Error; err != nil {
+			return err
+		}
+		var locked models.DeliveryRepositoryOnboarding
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND project_id = ?", onboarding.ID, projectID).First(&locked).Error; err != nil {
+			return err
+		}
+		if locked.Status != "proposed" || !strings.EqualFold(locked.Revision, expectedRevision) || !strings.EqualFold(locked.ProposalSHA256, task.EvidenceSubjectDigest) {
+			return fmt.Errorf("onboarding proposal changed before the probe was queued")
+		}
+		var active int64
+		if err := tx.Model(&models.AutomationTask{}).Where("delivery_onboarding_id = ? AND operation = ? AND status IN ?", locked.ID, task.Operation, []string{"queued", "running", "cancel_requested"}).Count(&active).Error; err != nil {
+			return err
+		}
+		if active > 0 {
+			return fmt.Errorf("an active capability probe already exists for this onboarding")
+		}
+		if err := tx.Create(&task).Error; err != nil {
+			return err
+		}
+		enqueued, err := outboxService.EnqueueAutomationProcess(c.Request().Context(), tx, message)
+		if err != nil || !enqueued {
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("onboarding capability probe was not enqueued")
+		}
+		return nil
+	}); err != nil {
+		return conflict(c, "Repository onboarding probe rejected", err.Error())
+	}
+	return utils.Success(c, http.StatusAccepted, "Repository onboarding capability probe queued", task)
+}
+
+func ListRepositoryCapabilityProbes(c echo.Context) error {
+	projectID, err := id(c, "project")
+	if err != nil {
+		return err
+	}
+	if _, err := projectActor(c, projectID, deliveryView); err != nil {
+		return err
+	}
+	onboardingID, err := uuid.FromString(strings.TrimSpace(c.Param("onboardingID")))
+	if err != nil || onboardingID == uuid.Nil {
+		return badRequest(c, "Invalid repository onboarding", "onboarding ID must be a UUID")
+	}
+	var onboarding models.DeliveryRepositoryOnboarding
+	if err := configuration.DB.Select("id").Where("id = ? AND project_id = ?", onboardingID, projectID).First(&onboarding).Error; err != nil {
+		return lookup(c, "Repository onboarding", err)
+	}
+	var probes []models.DeliveryRepositoryCapabilityProbe
+	if err := configuration.DB.Where("project_id = ? AND onboarding_id = ?", projectID, onboardingID).Order("observed_at DESC, created_at DESC, id DESC").Limit(200).Find(&probes).Error; err != nil {
+		return utilsError(c, err)
+	}
+	return success(c, "Repository capability probes retrieved", probes)
+}
+
 func validateStoredOnboardingProposal(onboarding models.DeliveryRepositoryOnboarding) (projectvault.Proposal, error) {
-	var proposal projectvault.Proposal
-	if err := json.Unmarshal([]byte(onboarding.ProposalJSON), &proposal); err != nil {
-		return proposal, err
-	}
-	digest, err := projectvault.ManifestSHA256(proposal.Vault)
-	if err != nil || digest != onboarding.VaultSHA256 || digest != proposal.VaultSHA256 || proposal.SchemaVersion != projectvault.SchemaVersion || proposal.Vault.SchemaVersion != projectvault.SchemaVersion {
-		return proposal, fmt.Errorf("vault digest or schema mismatch")
-	}
-	if proposal.Repository.Reference != onboarding.RepositoryReference || proposal.Repository.Revision != onboarding.Revision || proposal.Repository.DefaultBranch != onboarding.DefaultBranch {
-		return proposal, fmt.Errorf("repository checkpoint mismatch")
-	}
-	proposalDigest, err := projectvault.ProposalSHA256(proposal)
-	if err != nil || proposalDigest != onboarding.ProposalSHA256 || proposal.Readiness != onboarding.Readiness {
-		return proposal, fmt.Errorf("proposal digest or readiness mismatch")
-	}
-	return proposal, nil
+	return projectvault.ValidateStoredProposal(
+		onboarding.ProposalJSON, onboarding.RepositoryReference, onboarding.DefaultBranch,
+		onboarding.Revision, onboarding.Readiness, onboarding.ProposalSHA256, onboarding.VaultSHA256,
+	)
 }
 
 func onboardingRepositoryName(reference string) string {

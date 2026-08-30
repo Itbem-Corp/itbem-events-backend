@@ -265,6 +265,31 @@ func (w *Worker) Process(ctx context.Context, message TaskMessage) error {
 	var qaResult map[string]any
 	var qaArtifacts []LocalArtifact
 	var qaExecution map[string]any
+	if message.Payload.Operation == "delivery.onboarding_probe" {
+		probeResult, probeExecution, runErr := RunOnboardingCapabilityProbes(ctx, message.Payload.TaskID, input.Delivery, os.Getenv)
+		if runErr != nil {
+			return w.fail(ctx, message.Payload.TaskID, runID, runErr)
+		}
+		handoff, mapErr := onboardingProbeExecutionMap(probeExecution)
+		if mapErr != nil {
+			return w.fail(ctx, message.Payload.TaskID, runID, fmt.Errorf("onboarding capability probe handoff could not be encoded"))
+		}
+		output := map[string]any{
+			"schema_version": 1, "task_id": message.Payload.TaskID, "operation": message.Payload.Operation,
+			"deterministic": true, "structured_result": probeResult, "execution": handoff,
+			"created_at": w.now().UTC().Format(time.RFC3339Nano),
+		}
+		encoded, encodeErr := json.Marshal(output)
+		if encodeErr != nil {
+			return w.fail(ctx, message.Payload.TaskID, runID, fmt.Errorf("onboarding capability probe result could not be encoded"))
+		}
+		outputRef, storeErr := w.storeExecutionResult(ctx, message.Payload.TaskID, runID, encoded)
+		if storeErr != nil {
+			return storeErr
+		}
+		_, callbackErr := w.callback.Update(ctx, message.Payload.TaskID, TaskUpdate{Status: "completed", RunID: runID, OutputRef: outputRef, Execution: handoff, Deterministic: true})
+		return callbackErr
+	}
 	if message.Payload.Operation == "delivery.publish" {
 		publication, runErr := RunPublication(ctx, input.Delivery, os.Getenv)
 		if runErr != nil {
@@ -816,7 +841,7 @@ func CompletionTokensForOperation(operation string) int {
 		return DefaultCompletionTokens
 	case "delivery.implementation":
 		return miniMaxM3CompletionLimit
-	case "delivery.publish", "delivery.release_gate":
+	case "delivery.onboarding_probe", "delivery.publish", "delivery.release_gate":
 		return 0
 	}
 	return DefaultCompletionTokens

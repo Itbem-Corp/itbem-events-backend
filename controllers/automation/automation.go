@@ -13,6 +13,7 @@ import (
 	"events-stocks/internal/automationagent"
 	"events-stocks/internal/deliveryledger"
 	"events-stocks/internal/environmentevidence"
+	"events-stocks/internal/projectvault"
 	"events-stocks/internal/qaevidence"
 	"events-stocks/internal/releasegate"
 	"events-stocks/internal/releasegatecontrol"
@@ -53,16 +54,17 @@ var workerWorkspaceIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,
 const maxGitHubReviewWebhookBytes = 1 << 20
 
 var allowedOperations = map[string]struct{}{
-	"ai.chat":                 {},
-	"document.analyze":        {},
-	"code.review":             {},
-	"product.ideate":          {},
-	"delivery.plan":           {},
-	"delivery.implementation": {},
-	"delivery.publish":        {},
-	"delivery.release_gate":   {},
-	"delivery.qa":             {},
-	"delivery.summary":        {},
+	"ai.chat":                   {},
+	"document.analyze":          {},
+	"code.review":               {},
+	"product.ideate":            {},
+	"delivery.plan":             {},
+	"delivery.implementation":   {},
+	"delivery.onboarding_probe": {},
+	"delivery.publish":          {},
+	"delivery.release_gate":     {},
+	"delivery.qa":               {},
+	"delivery.summary":          {},
 }
 
 type githubPullRequestWebhook struct {
@@ -2026,15 +2028,18 @@ func Complete(c echo.Context) error {
 		if task.Operation == "delivery.release_gate" {
 			limit = 256 * 1024
 		}
-		if request.Status != "completed" || (task.Operation != "delivery.implementation" && task.Operation != "delivery.publish" && task.Operation != "delivery.release_gate" && task.Operation != "delivery.qa") || len(request.Execution) > limit || !json.Valid(request.Execution) {
-			return utils.Error(c, http.StatusBadRequest, "Invalid automation execution", "only a bounded completed delivery implementation, publication, QA, or release Gatekeeper run may register execution metadata")
+		if request.Status != "completed" || (task.Operation != "delivery.implementation" && task.Operation != "delivery.onboarding_probe" && task.Operation != "delivery.publish" && task.Operation != "delivery.release_gate" && task.Operation != "delivery.qa") || len(request.Execution) > limit || !json.Valid(request.Execution) {
+			return utils.Error(c, http.StatusBadRequest, "Invalid automation execution", "only a bounded completed delivery implementation, onboarding probe, publication, QA, or release Gatekeeper run may register execution metadata")
 		}
 	}
-	if request.Deterministic && (request.Status != "completed" || (task.Operation != "delivery.publish" && task.Operation != "delivery.release_gate")) {
-		return utils.Error(c, http.StatusBadRequest, "Invalid automation result", "only delivery publication or release Gatekeeper may be deterministic")
+	if request.Deterministic && (request.Status != "completed" || (task.Operation != "delivery.onboarding_probe" && task.Operation != "delivery.publish" && task.Operation != "delivery.release_gate")) {
+		return utils.Error(c, http.StatusBadRequest, "Invalid automation result", "only onboarding probes, delivery publication, or release Gatekeeper may be deterministic")
 	}
 	if task.Operation == "delivery.release_gate" && request.Status == "completed" && (!request.Deterministic || len(request.Execution) == 0) {
 		return utils.Error(c, http.StatusBadRequest, "Invalid automation result", "release Gatekeeper completion requires deterministic execution evidence")
+	}
+	if task.Operation == "delivery.onboarding_probe" && request.Status == "completed" && (!request.Deterministic || len(request.Execution) == 0) {
+		return utils.Error(c, http.StatusBadRequest, "Invalid automation result", "onboarding probe completion requires deterministic execution evidence")
 	}
 	toolExecutionRows, toolExecutionErr := buildToolExecutionLedger(cfg, &task, ledgerRunID, request.Status, request.ToolExecutions, request.Artifacts, time.Now().UTC())
 	if toolExecutionErr != nil {
@@ -2134,6 +2139,11 @@ func Complete(c echo.Context) error {
 			}
 		}
 		if !cancellationRequested && request.Status == "completed" && len(request.Execution) > 0 {
+			if task.Operation == "delivery.onboarding_probe" {
+				if err := persistOnboardingCapabilityProbes(tx, &task, request.Execution, completedAt); err != nil {
+					return err
+				}
+			}
 			if task.Operation == "delivery.implementation" {
 				if err := persistImplementationChangeSet(tx, &task, request.Execution, completedAt); err != nil {
 					return err
@@ -2164,6 +2174,79 @@ func Complete(c echo.Context) error {
 		return utils.Error(c, http.StatusConflict, "Automation result ignored", "Task is not awaiting a result")
 	}
 	return c.NoContent(http.StatusNoContent)
+}
+
+func persistOnboardingCapabilityProbes(tx *gorm.DB, task *models.AutomationTask, raw json.RawMessage, completedAt time.Time) error {
+	if tx == nil || completedAt.IsZero() {
+		return fmt.Errorf("only a bounded onboarding task may append capability probes")
+	}
+	execution, queuedSubject, err := onboardingCapabilityProbeForTask(task, raw)
+	if err != nil {
+		return err
+	}
+	var onboarding models.DeliveryRepositoryOnboarding
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", *task.DeliveryOnboardingID).First(&onboarding).Error; err != nil {
+		return err
+	}
+	if onboarding.Status != "proposed" || !strings.EqualFold(onboarding.ProposalSHA256, queuedSubject) || onboarding.RepositoryReference != execution.RepositoryReference || onboarding.DefaultBranch != execution.DefaultBranch || !strings.EqualFold(onboarding.Revision, execution.Revision) {
+		return fmt.Errorf("onboarding capability probe subject is stale or mismatched")
+	}
+	proposal, err := projectvault.ValidateStoredProposal(
+		onboarding.ProposalJSON, onboarding.RepositoryReference, onboarding.DefaultBranch,
+		onboarding.Revision, onboarding.Readiness, onboarding.ProposalSHA256, onboarding.VaultSHA256,
+	)
+	if err != nil {
+		return err
+	}
+	updated, err := projectvault.ApplyCapabilityProbes(proposal, execution.Probes)
+	if err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(updated)
+	if err != nil {
+		return err
+	}
+	proposalDigest, err := projectvault.ProposalSHA256(updated)
+	if err != nil {
+		return err
+	}
+	for _, probe := range execution.Probes {
+		row := models.DeliveryRepositoryCapabilityProbe{
+			ProjectID: onboarding.ProjectID, OnboardingID: onboarding.ID, AutomationTaskID: task.ID,
+			RepositoryReference: execution.RepositoryReference, Revision: execution.Revision,
+			Capability: probe.Name, State: probe.State, ExecutorRole: execution.ExecutorRole,
+			EvidenceSHA256: strings.ToLower(probe.EvidenceSHA256), SubjectSHA256: strings.ToLower(probe.SubjectSHA256),
+			Reason: probe.Reason, ObservedAt: completedAt.UTC(),
+		}
+		if err := tx.Create(&row).Error; err != nil {
+			return err
+		}
+	}
+	result := tx.Model(&models.DeliveryRepositoryOnboarding{}).
+		Where("id = ? AND status = ? AND proposal_sha256 = ?", onboarding.ID, "proposed", onboarding.ProposalSHA256).
+		Updates(map[string]any{"proposal_json": string(encoded), "proposal_sha256": proposalDigest, "readiness": updated.Readiness})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return fmt.Errorf("onboarding capability probe lost its proposal checkpoint")
+	}
+	return nil
+}
+
+func onboardingCapabilityProbeForTask(task *models.AutomationTask, raw json.RawMessage) (automationagent.OnboardingProbeExecution, string, error) {
+	if task == nil || task.ID == uuid.Nil || task.Operation != "delivery.onboarding_probe" || task.DeliveryOnboardingID == nil || *task.DeliveryOnboardingID == uuid.Nil {
+		return automationagent.OnboardingProbeExecution{}, "", fmt.Errorf("only a bounded onboarding task may append capability probes")
+	}
+	execution, err := automationagent.DecodeOnboardingProbeExecution(raw)
+	if err != nil || execution.TaskID != task.ID.String() {
+		return automationagent.OnboardingProbeExecution{}, "", fmt.Errorf("onboarding capability probes do not match their automation task")
+	}
+	queuedSubject := strings.ToLower(strings.TrimSpace(task.EvidenceSubjectDigest))
+	if !artifactDigestPattern.MatchString(queuedSubject) {
+		return automationagent.OnboardingProbeExecution{}, "", fmt.Errorf("onboarding capability probe task has no exact proposal subject")
+	}
+	return execution, queuedSubject, nil
 }
 
 func persistReleaseGateEvaluation(tx *gorm.DB, task *models.AutomationTask, raw json.RawMessage, completedAt time.Time) error {

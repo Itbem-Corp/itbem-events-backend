@@ -17,6 +17,7 @@ func TestAssignmentForOperationIsExhaustiveAndRoleIsolated(t *testing.T) {
 		{OperationDeliveryImplementation, RolePrincipalEngineer, LaneEngineering},
 		{OperationCodeReview, RoleReviewer, LaneReview},
 		{OperationDeliveryQA, RoleQA, LaneQA},
+		{OperationDeliveryOnboardingProbe, RoleQA, LaneQA},
 		{OperationDeliveryPublish, RoleReleaseManager, LaneRelease},
 		{OperationDeliveryReleaseGate, RoleReleaseManager, LaneRelease},
 	}

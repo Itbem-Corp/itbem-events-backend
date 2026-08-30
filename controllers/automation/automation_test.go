@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"events-stocks/internal/automationagent"
 	"events-stocks/internal/environmentevidence"
+	"events-stocks/internal/projectvault"
 	"events-stocks/internal/qaevidence"
 	"events-stocks/internal/releasegate"
 	"events-stocks/models"
@@ -27,6 +29,38 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
+
+func TestOnboardingCapabilityProbeForTaskBindsTaskAndProposalSubject(t *testing.T) {
+	taskID, onboardingID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
+	revision, evidenceDigest := strings.Repeat("a", 40), strings.Repeat("b", 64)
+	probe := projectvault.CapabilityProbe{Name: "unit", State: "ready", Reason: "operator-owned capability command exited zero at the exact repository SHA", Revision: revision, EvidenceSHA256: evidenceDigest, ExecutorRole: "qa"}
+	probe.SubjectSHA256, _ = projectvault.CapabilityProbeSubjectSHA256(projectvault.Repository{Reference: "github://acme/service", Revision: revision}, probe)
+	execution := automationagent.OnboardingProbeExecution{SchemaVersion: 1, TaskID: taskID.String(), RepositoryReference: "github://acme/service", DefaultBranch: "main", Revision: revision, WorkspaceReference: "workspace://service", ExecutorRole: "qa", Probes: []projectvault.CapabilityProbe{probe}}
+	raw, _ := json.Marshal(execution)
+	task := models.AutomationTask{ID: taskID, Operation: "delivery.onboarding_probe", DeliveryOnboardingID: &onboardingID, EvidenceSubjectDigest: strings.Repeat("c", 64)}
+	actual, subject, err := onboardingCapabilityProbeForTask(&task, raw)
+	if err != nil || actual.TaskID != taskID.String() || subject != task.EvidenceSubjectDigest {
+		t.Fatalf("exact onboarding probe task rejected: %#v / %q / %v", actual, subject, err)
+	}
+	for _, mutate := range []func(*models.AutomationTask, *automationagent.OnboardingProbeExecution){
+		func(task *models.AutomationTask, _ *automationagent.OnboardingProbeExecution) {
+			task.Operation = "delivery.qa"
+		},
+		func(task *models.AutomationTask, _ *automationagent.OnboardingProbeExecution) {
+			task.EvidenceSubjectDigest = "invalid"
+		},
+		func(_ *models.AutomationTask, execution *automationagent.OnboardingProbeExecution) {
+			execution.TaskID = uuid.Must(uuid.NewV4()).String()
+		},
+	} {
+		candidateTask, candidateExecution := task, execution
+		mutate(&candidateTask, &candidateExecution)
+		candidateRaw, _ := json.Marshal(candidateExecution)
+		if _, _, err := onboardingCapabilityProbeForTask(&candidateTask, candidateRaw); err == nil {
+			t.Fatal("onboarding probe outside its queued subject was accepted")
+		}
+	}
+}
 
 func TestReleaseGateCandidateForTaskRequiresAuthenticatedRequester(t *testing.T) {
 	workItemID := uuid.Must(uuid.NewV4())
@@ -779,7 +813,7 @@ func TestExecutionResultReferenceMatchesOnlyItsOriginalRun(t *testing.T) {
 func TestDeliveryOperationsRemainExplicitlyAllowlisted(t *testing.T) {
 	for _, operation := range []string{
 		"ai.chat", "document.analyze", "code.review", "product.ideate",
-		"delivery.plan", "delivery.implementation", "delivery.publish", "delivery.qa", "delivery.summary",
+		"delivery.plan", "delivery.implementation", "delivery.onboarding_probe", "delivery.publish", "delivery.qa", "delivery.summary",
 	} {
 		if _, allowed := allowedOperations[operation]; !allowed {
 			t.Fatalf("expected operation to be enabled: %s", operation)
@@ -796,7 +830,7 @@ func TestGenericTaskOperationsCannotBypassDeliveryGates(t *testing.T) {
 			t.Fatalf("generic operation %s should remain available", operation)
 		}
 	}
-	for _, operation := range []string{"delivery.plan", "delivery.implementation", "delivery.publish", "delivery.qa", "delivery.summary", "shell.execute"} {
+	for _, operation := range []string{"delivery.plan", "delivery.implementation", "delivery.onboarding_probe", "delivery.publish", "delivery.qa", "delivery.summary", "shell.execute"} {
 		if genericTaskOperationAllowed(operation) {
 			t.Fatalf("operation %s must not be started through the generic task endpoint", operation)
 		}

@@ -37,13 +37,14 @@ func TestParseQueueTargetsRoutesEveryOperationToItsRoleLane(t *testing.T) {
 		t.Fatal(err)
 	}
 	tests := map[string]string{
-		agentwork.OperationAIChat:                 "orchestration",
-		agentwork.OperationDeliverySummary:        "orchestration",
-		agentwork.OperationDeliveryPlan:           "engineering",
-		agentwork.OperationDeliveryImplementation: "engineering",
-		agentwork.OperationCodeReview:             "review",
-		agentwork.OperationDeliveryQA:             "qa",
-		agentwork.OperationDeliveryPublish:        "release",
+		agentwork.OperationAIChat:                  "orchestration",
+		agentwork.OperationDeliverySummary:         "orchestration",
+		agentwork.OperationDeliveryPlan:            "engineering",
+		agentwork.OperationDeliveryImplementation:  "engineering",
+		agentwork.OperationCodeReview:              "review",
+		agentwork.OperationDeliveryQA:              "qa",
+		agentwork.OperationDeliveryOnboardingProbe: "qa",
+		agentwork.OperationDeliveryPublish:         "release",
 	}
 	for operation, lane := range tests {
 		queueURL, routeErr := targets.queueURLForOperation(operation)
