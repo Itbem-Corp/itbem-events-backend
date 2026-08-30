@@ -55,6 +55,13 @@ GitHub's current head/protection/check/review state, QA evidence, and trusted
 human identities. Repository content is data and must never populate policy or
 approval fields.
 
+The release worker now refreshes the published pull request through a
+repository-scoped GitHub App token. It requires the PR to remain open and
+non-draft, binds the matrix to its current head SHA and actual base branch, and
+projects only decisive approvals/change requests. Protection rules and checks
+remain intentionally unresolved until their dedicated bounded adapter runs;
+therefore PR metadata alone always produces a blocked decision.
+
 An `allowed` decision is not itself a merge or deployment capability. The
 future DevOps executor must:
 

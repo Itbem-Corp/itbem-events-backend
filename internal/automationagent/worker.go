@@ -262,7 +262,7 @@ func (w *Worker) Process(ctx context.Context, message TaskMessage) error {
 		return err
 	}
 	if message.Payload.Operation == "delivery.release_gate" {
-		gateInput, runErr := RunReleaseGate(input.Delivery)
+		gateInput, runErr := RunReleaseGateWithGitHub(ctx, input.Delivery, os.Getenv)
 		if runErr != nil {
 			return w.fail(ctx, message.Payload.TaskID, runID, runErr)
 		}

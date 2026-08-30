@@ -23,6 +23,12 @@ mints a short-lived token restricted to that one repository. This supports
 authorized repositories across organizations without accidentally selecting
 the first configured installation or falling back to a user PAT/SSH key.
 
+Before a release-gate callback, the release worker also rereads every published
+PR with that repository-scoped token. A changed head, closed/draft PR,
+ambiguous change set or unbounded review history fails the run. Current base
+branch and decisive reviews replace stored mutable claims; branch protection
+and checks remain explicitly unknown until collected separately.
+
 ## Continuous role-lane operation
 
 Each long-lived worker declares one exact identity with `ITBEM_AI_ROLE` and
