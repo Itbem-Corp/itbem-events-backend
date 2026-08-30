@@ -107,6 +107,38 @@ Event     Event          `gorm:"foreignKey:EventID" json:"event,omitempty"`
 
 ---
 
+### Delivery workflow (ITBEM only)
+
+- **Files**: `models/DeliveryWorkflow.go`, `models/AutomationTask.go`
+- **Purpose**: Private, human-gated software delivery orchestration. It is not
+  an EventiApp feature and remains behind the ITBEM automation surface.
+- **DeliveryProject**: Belongs to one Client and owns context sources and work
+  items. It stores only references to private repositories, documents,
+  conversations and decisions.
+- **DeliveryContextSource**: Versioned source descriptor (`kind`, `reference`,
+  `revision`, freshness state). A work item records immutable snapshots of the
+  source identity (`kind`, `name`) and exact reference/revision used by the
+  agent, along with bounded context metadata such as a client-conversation
+  excerpt or decision. Later edits or removal cannot silently alter approved
+  context.
+- **DeliveryWorkItem**: Bounded request with outcome, included/excluded scope,
+  acceptance criteria, generated plan, pull request and preview references.
+  Its lifecycle is enforced by `services/deliveryworkflow`; human gates are
+  required before implementation, QA and release transitions.
+- **DeliveryGate**: Append-only human decision for `plan`, `code_review`,
+  `qa_review` or `release`. Comments and evidence checklist are retained with
+  the approver and timestamp.
+- **DeliveryEvidence**: Reference to a private screenshot, test result, diff,
+  report or other artifact. Large payloads never live in Postgres.
+- **DeliveryMessage**: Human or agent message tied to the work item and the
+  active phase, preserving change requests in context.
+- **AutomationTask**: Existing local-agent queue record. It may link to a
+  `DeliveryWorkItem`; standalone legacy automation tasks remain valid. A
+  completed delivery task is recorded as immutable private report evidence
+  before its plan, code, or QA review can be opened.
+
+---
+
 ### User
 - **File**: `models/User.go`
 - **Purpose**: System users, linked to AWS Cognito

@@ -28,6 +28,10 @@ Wait for healthy status:
 docker compose ps
 ```
 
+`healthy` only confirms that the PostgreSQL process is alive. Before starting
+the isolated AI control plane, it also performs a read-only database query; see
+[Local PostgreSQL recovery](LOCAL_DATABASE_RECOVERY.md) if that check fails.
+
 ### 2. Set up backend
 
 ```bash
@@ -108,13 +112,14 @@ CORS_ALLOW_ORIGINS=http://localhost:3000,http://localhost:4321
 # Stop containers (keep data)
 docker compose down
 
-# Stop + wipe all data (fresh DB)
-docker compose down -v
-
 # View logs
 docker compose logs -f postgres
 docker compose logs -f redis
 ```
+
+Resetting with `docker compose down -v` deletes local database data. Do it only
+after preserving anything needed and explicitly deciding that the local data is
+disposable. See [Local PostgreSQL recovery](LOCAL_DATABASE_RECOVERY.md).
 
 ---
 

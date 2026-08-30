@@ -6,6 +6,7 @@ import (
 	"events-stocks/utils"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gofrs/uuid"
@@ -144,6 +145,7 @@ func TestConfigurarRutasRegistersFrontendContractRoutes(t *testing.T) {
 		"PUT /api/users/:id/activate",
 		"PUT /api/users/:id/deactivate",
 		"POST /api/users/invite",
+		"GET /api/automation/portfolio",
 		"POST /api/users/avatar",
 		"DELETE /api/users/avatar",
 		"GET /api/cache/flush/:key",
@@ -214,6 +216,27 @@ func TestPublicRateLimiterDenyHandlerUsesAPIResponseEnvelope(t *testing.T) {
 	assert.Equal(t, "Too many requests, please slow down", body["message"])
 	assert.NotContains(t, body, "data")
 	assert.NotContains(t, body, "error")
+}
+
+func TestGitHubReviewRateLimiterUsesSafeWebhookEnvelope(t *testing.T) {
+	e := echo.New()
+	e.POST("/github", func(c echo.Context) error { return c.NoContent(http.StatusNoContent) }, githubReviewRateLimiter())
+	for index := 0; index < 20; index++ {
+		request := httptest.NewRequest(http.MethodPost, "/github", nil)
+		request.RemoteAddr = "198.51.100.8:9000"
+		response := httptest.NewRecorder()
+		e.ServeHTTP(response, request)
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("burst request %d = %d", index, response.Code)
+		}
+	}
+	request := httptest.NewRequest(http.MethodPost, "/github", nil)
+	request.RemoteAddr = "198.51.100.8:9000"
+	response := httptest.NewRecorder()
+	e.ServeHTTP(response, request)
+	if response.Code != http.StatusTooManyRequests || !strings.Contains(response.Body.String(), "Too many GitHub review events") {
+		t.Fatalf("webhook rate limit response = %d %s", response.Code, response.Body.String())
+	}
 }
 
 func TestPublicAccessCacheControlMarksProofHeaderRequestsNoStore(t *testing.T) {

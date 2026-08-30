@@ -199,10 +199,6 @@ func (s *EventAnalyticsService) AdjustAnalytics(eventID uuid.UUID, field string,
 	_ = s.UpdateEventAnalytics(analytics)
 }
 
-func applyIncrement(a *models.EventAnalytics, field string) {
-	applyDelta(a, field, 1)
-}
-
 func applyDelta(a *models.EventAnalytics, field string, delta int) {
 	switch field {
 	case "views":

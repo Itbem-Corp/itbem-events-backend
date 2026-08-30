@@ -17,6 +17,7 @@ type Definition struct {
 	Modules                 []string
 	AllowsPlatformAuthority bool
 	SupportsEventOperations bool
+	SupportsAutomation      bool
 }
 
 func (c Code) String() string { return string(c) }

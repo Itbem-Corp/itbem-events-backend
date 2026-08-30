@@ -26,6 +26,9 @@ type Client struct {
 	Children []Client   `gorm:"foreignKey:ParentID" json:"children,omitempty"`
 
 	Members []ClientMember `gorm:"foreignKey:ClientID" json:"members,omitempty"`
+	// DeliveryProfile is ITBEM-only operational context. It intentionally
+	// avoids changing the shared organization contract used by EventiApp.
+	DeliveryProfile *DeliveryClientProfile `gorm:"foreignKey:ClientID" json:"delivery_profile,omitempty" validate:"-"`
 
 	CreatedAt time.Time      `json:"created_at"`
 	UpdatedAt time.Time      `json:"updated_at"`

@@ -47,11 +47,22 @@ func expectOrganizations(mock sqlmock.Sqlmock, applicationID, userID uuid.UUID, 
 		WillReturnRows(rows)
 }
 
+func expectPlatformOrganizations(mock sqlmock.Sqlmock, rows *sqlmock.Rows) {
+	mock.ExpectQuery(`SELECT\s+clients.id`).WillReturnRows(rows)
+}
+
+func expectNoUserApplicationPolicy(mock sqlmock.Sqlmock, userID, applicationID uuid.UUID) {
+	mock.ExpectQuery(`SELECT \* FROM "user_application_policies"`).WithArgs(userID, applicationID, 1).
+		WillReturnError(gorm.ErrRecordNotFound)
+}
+
 func TestResolveAllowsPlatformAdminOnlyWhenApplicationEnablesIt(t *testing.T) {
 	db, mock := applicationServiceTestDB(t)
 	userID := uuid.Must(uuid.NewV4())
 	appID := expectApplication(mock, "itbem", true)
-	expectOrganizations(mock, appID, userID, sqlmock.NewRows([]string{"id", "name", "code", "logo", "access_role"}))
+	expectPlatformOrganizations(mock, sqlmock.NewRows([]string{"id", "name", "code", "logo", "access_role"}).
+		AddRow(uuid.Must(uuid.NewV4()), "Platform", "platform", "", "PLATFORM"))
+	expectNoUserApplicationPolicy(mock, userID, appID)
 	service := NewSessionService(db, func(string) (*models.User, error) {
 		return &models.User{ID: userID, IsRoot: true, RootLevel: models.RootLevelPrimary, IsActive: true}, nil
 	})
@@ -61,6 +72,7 @@ func TestResolveAllowsPlatformAdminOnlyWhenApplicationEnablesIt(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "itbem", session.Application.Code)
 	assert.Contains(t, session.Capabilities, "organizations:manage")
+	assert.Len(t, session.Organizations, 1)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -69,6 +81,7 @@ func TestResolveDeniesIdentityWithoutApplicationMembership(t *testing.T) {
 	userID := uuid.Must(uuid.NewV4())
 	appID := expectApplication(mock, "cafettonhouse", false)
 	expectOrganizations(mock, appID, userID, sqlmock.NewRows([]string{"id", "name", "code", "logo", "access_role"}))
+	expectNoUserApplicationPolicy(mock, userID, appID)
 	service := NewSessionService(db, func(string) (*models.User, error) {
 		return &models.User{ID: userID, IsActive: true}, nil
 	})
@@ -99,6 +112,7 @@ func TestResolveReturnsExplicitOrganizationAccessAndCachesSession(t *testing.T) 
 	appID := expectApplication(mock, "cafettonhouse", false)
 	expectOrganizations(mock, appID, userID, sqlmock.NewRows([]string{"id", "name", "code", "logo", "access_role"}).
 		AddRow(clientID, "Cafetton House", "cafettonhouse", "", "Owner"))
+	expectNoUserApplicationPolicy(mock, userID, appID)
 	service := NewSessionService(db, func(string) (*models.User, error) {
 		return &models.User{ID: userID, IsActive: true}, nil
 	})

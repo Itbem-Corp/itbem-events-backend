@@ -94,11 +94,6 @@ func InitEventsController(
 	phraseRepo = phrases
 }
 
-func coverViewURL(path string) string {
-	viewURL, _ := coverViewURLWithExpiry(path)
-	return viewURL
-}
-
 func coverViewURLWithExpiry(path string, buckets ...string) (string, *time.Time) {
 	return resourceViewURLWithExpiry(path, eventCoverViewURLTTLMinutes, buckets...)
 }

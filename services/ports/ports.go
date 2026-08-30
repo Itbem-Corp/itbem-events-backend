@@ -115,6 +115,13 @@ type EventCoverProcessingRepository interface {
 	ApplyEventCoverProcessing(id uuid.UUID, callback dtos.MediaProcessingCallback) (*models.Event, string, models.MediaVariants, error)
 }
 
+// EventCoverProcessingOutboxRepository atomically records a pending cover
+// generation and its dedicated media-Lambda handoff. It is optional so
+// existing lightweight repositories retain the direct/S3 fallback path.
+type EventCoverProcessingOutboxRepository interface {
+	BeginEventCoverProcessingWithOutbox(id uuid.UUID, pendingURL, jobID string, message dtos.MediaProcessMessage) (*models.Event, string, error)
+}
+
 type EventsPageRepository interface {
 	ListEventPage(clientID, userID *uuid.UUID, query dtos.EventListQuery) ([]models.Event, int, dtos.EventListCounts, error)
 }
@@ -231,6 +238,13 @@ type MomentRepository interface {
 type MomentProcessingRepository interface {
 	BeginMediaProcessingJob(id, eventID uuid.UUID, inputKey, jobID string) (int64, error)
 	ApplyMediaProcessingUpdate(id, eventID uuid.UUID, jobID string, generation int64, allowedCurrentStatuses []string, contentURL, processingStatus, thumbnailURL, errorMessage string, durationMs, originalBytes, optimizedBytes int64, mediaVariants models.MediaVariants) (bool, error)
+}
+
+// MomentProcessingOutboxRepository performs the pending-state transition and
+// durable Lambda handoff atomically. It is deliberately optional so legacy
+// adapters and focused service tests can retain the direct publisher fallback.
+type MomentProcessingOutboxRepository interface {
+	BeginMediaProcessingJobWithOutbox(id, eventID uuid.UUID, inputKey, jobID string, message dtos.MediaProcessMessage) (int64, error)
 }
 
 type EventTableRepository interface {

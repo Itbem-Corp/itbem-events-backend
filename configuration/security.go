@@ -32,6 +32,15 @@ func ValidateSecurityConfiguration() error {
 		"INTERNAL_API_SECRET",
 		"ORGANIZATION_CONTEXT_SECRET",
 	}
+	if securityEnvironmentValue("SQS_AUTOMATION_QUEUE_URL") != "" {
+		required = append(required, "AUTOMATION_CALLBACK_SECRET")
+		if bucket := securityEnvironmentValue("AUTOMATION_INPUT_BUCKET"); !strings.HasPrefix(bucket, "itbem-ai-inputs-") {
+			return fmt.Errorf("AUTOMATION_INPUT_BUCKET must identify the dedicated ITBEM automation input bucket")
+		}
+		if bucket := securityEnvironmentValue("AUTOMATION_OUTPUT_BUCKET"); !strings.HasPrefix(bucket, "itbem-ai-outputs-") {
+			return fmt.Errorf("AUTOMATION_OUTPUT_BUCKET must identify the dedicated ITBEM automation output bucket")
+		}
+	}
 	values := make(map[string]string, len(required)+3)
 	for _, name := range required {
 		value := securityEnvironmentValue(name)
@@ -52,6 +61,12 @@ func ValidateSecurityConfiguration() error {
 			return fmt.Errorf("ORGANIZATION_CONTEXT_SECRET_PREVIOUS must contain at least %d bytes when configured", minimumSigningSecretBytes)
 		}
 		values["ORGANIZATION_CONTEXT_SECRET_PREVIOUS"] = previous
+	}
+	if previous := securityEnvironmentValue("AUTOMATION_CALLBACK_SECRET_PREVIOUS"); previous != "" {
+		if len([]byte(previous)) < minimumSigningSecretBytes {
+			return fmt.Errorf("AUTOMATION_CALLBACK_SECRET_PREVIOUS must contain at least %d bytes when configured", minimumSigningSecretBytes)
+		}
+		values["AUTOMATION_CALLBACK_SECRET_PREVIOUS"] = previous
 	}
 	if err := validateProductionOrigins(securityEnvironmentValue("CORS_ALLOW_ORIGINS")); err != nil {
 		return err

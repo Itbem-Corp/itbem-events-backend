@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 
 	productmetricshttp "events-stocks/internal/observability/productmetricshttp"
 	"events-stocks/internal/products"
@@ -30,19 +29,13 @@ type Hooks struct {
 	GetEventMemberRole    func(eventID, userID uuid.UUID) (role string, found bool, err error)
 }
 
-var (
-	hooks   Hooks
-	hooksMu sync.RWMutex
-)
+var hooks Hooks
 
 func Configure(configured Hooks) {
-	hooksMu.Lock()
-	defer hooksMu.Unlock()
 	hooks = configured
 }
 
 func ReplaceHooksForTest(replacement Hooks) func() {
-	hooksMu.Lock()
 	previous := hooks
 	if replacement.SyncUser != nil {
 		hooks.SyncUser = replacement.SyncUser
@@ -74,18 +67,9 @@ func ReplaceHooksForTest(replacement Hooks) func() {
 	if replacement.GetEventMemberRole != nil {
 		hooks.GetEventMemberRole = replacement.GetEventMemberRole
 	}
-	hooksMu.Unlock()
 	return func() {
-		hooksMu.Lock()
-		defer hooksMu.Unlock()
 		hooks = previous
 	}
-}
-
-func configuredHooks() Hooks {
-	hooksMu.RLock()
-	defer hooksMu.RUnlock()
-	return hooks
 }
 
 type Failure struct {
@@ -175,12 +159,11 @@ func cognitoSubFromContext(c echo.Context) (string, error) {
 }
 
 func currentUserByCognitoSub(cognitoSub string) (*models.User, error) {
-	syncUser := configuredHooks().SyncUser
-	if syncUser == nil {
+	if hooks.SyncUser == nil {
 		return nil, dependencyFailure("SyncUser")
 	}
 
-	user, err := syncUser(cognitoSub)
+	user, err := hooks.SyncUser(cognitoSub)
 	if err != nil {
 		return nil, &Failure{Status: http.StatusUnauthorized, Message: "User not found", Detail: err.Error()}
 	}
@@ -222,11 +205,10 @@ func RequireClientAccess(user *models.User, clientID uuid.UUID) error {
 	if user.IsPlatformAdmin() {
 		return nil
 	}
-	checkAccess := configuredHooks().CheckAccessRecursive
-	if checkAccess == nil {
+	if hooks.CheckAccessRecursive == nil {
 		return dependencyFailure("CheckAccessRecursive")
 	}
-	allowed, _ := checkAccess(user.ID, clientID)
+	allowed, _ := hooks.CheckAccessRecursive(user.ID, clientID)
 	if !allowed {
 		return &Failure{
 			Status:  http.StatusForbidden,
@@ -250,11 +232,10 @@ func RequireClientCapability(user *models.User, clientID uuid.UUID, capability C
 		}
 		return &Failure{Status: http.StatusForbidden, Message: "Access denied", Detail: "Your platform administrator level cannot perform this action"}
 	}
-	checkAccess := configuredHooks().CheckAccessRecursive
-	if checkAccess == nil {
+	if hooks.CheckAccessRecursive == nil {
 		return dependencyFailure("CheckAccessRecursive")
 	}
-	allowed, role := checkAccess(user.ID, clientID)
+	allowed, role := hooks.CheckAccessRecursive(user.ID, clientID)
 	if !allowed || !roleHasCapability(role, capability) {
 		return &Failure{Status: http.StatusForbidden, Message: "Access denied", Detail: "Your organization role cannot perform this action"}
 	}
@@ -265,13 +246,12 @@ func requireTenantClientBoundary(user *models.User, clientID uuid.UUID) error {
 	if user == nil || strings.TrimSpace(user.AuthTenantCode) == "" || products.NormalizeOrDefault(user.AuthTenantCode) == products.DefaultCode {
 		return nil
 	}
-	getClientByID := configuredHooks().GetClientByID
-	if getClientByID == nil {
+	if hooks.GetClientByID == nil {
 		return dependencyFailure("GetClientByID")
 	}
 	currentID := clientID
 	for depth := 0; depth < 32 && currentID != uuid.Nil; depth++ {
-		client, err := getClientByID(currentID)
+		client, err := hooks.GetClientByID(currentID)
 		if err != nil || client == nil {
 			return &Failure{Status: http.StatusForbidden, Message: "Access denied", Detail: "Client is outside the authenticated tenant"}
 		}
@@ -341,13 +321,21 @@ func RequireEventAccess(c echo.Context, eventID uuid.UUID) (*models.User, *model
 		return nil, nil, err
 	}
 
+	eventLookup := hooks.GetEventByIDRaw
 	user, event, err := loadEventAccessInputs(
 		func() (*models.User, error) {
 			user, loadErr := currentUserByCognitoSub(cognitoSub)
 			return scopeUserToTenant(c, user), loadErr
 		},
 		func() (*models.Event, error) {
-			return lookupEventByID(eventID)
+			if eventLookup == nil {
+				return nil, dependencyFailure("GetEventByIDRaw")
+			}
+			event, lookupErr := eventLookup(eventID)
+			if lookupErr != nil {
+				return nil, lookupFailure("Event", lookupErr)
+			}
+			return event, nil
 		},
 	)
 	if err != nil {
@@ -374,11 +362,10 @@ func EnsureEventIDAccess(user *models.User, eventID uuid.UUID) (*models.Event, e
 }
 
 func lookupEventByID(eventID uuid.UUID) (*models.Event, error) {
-	getEventByID := configuredHooks().GetEventByIDRaw
-	if getEventByID == nil {
+	if hooks.GetEventByIDRaw == nil {
 		return nil, dependencyFailure("GetEventByIDRaw")
 	}
-	event, err := getEventByID(eventID)
+	event, err := hooks.GetEventByIDRaw(eventID)
 	if err != nil {
 		return nil, lookupFailure("Event", err)
 	}
@@ -480,9 +467,8 @@ func RequireEventCapability(c echo.Context, eventID uuid.UUID, capability Capabi
 	if err := RequireClientCapability(user, *event.ClientID, capability); err != nil {
 		return nil, nil, err
 	}
-	getEventMemberRole := configuredHooks().GetEventMemberRole
-	if getEventMemberRole != nil {
-		role, found, memberErr := getEventMemberRole(eventID, user.ID)
+	if hooks.GetEventMemberRole != nil {
+		role, found, memberErr := hooks.GetEventMemberRole(eventID, user.ID)
 		if memberErr != nil {
 			return nil, nil, &Failure{Status: http.StatusInternalServerError, Message: "Authorization error", Detail: memberErr.Error()}
 		}
@@ -543,11 +529,10 @@ func RequireEventSectionCapability(c echo.Context, sectionID uuid.UUID, capabili
 }
 
 func EnsureEventSectionAccess(user *models.User, sectionID uuid.UUID) (*models.EventSection, error) {
-	getEventSectionByID := configuredHooks().GetEventSectionByID
-	if getEventSectionByID == nil {
+	if hooks.GetEventSectionByID == nil {
 		return nil, dependencyFailure("GetEventSectionByID")
 	}
-	section, err := getEventSectionByID(sectionID)
+	section, err := hooks.GetEventSectionByID(sectionID)
 	if err != nil {
 		return nil, lookupFailure("Event section", err)
 	}
@@ -591,11 +576,10 @@ func RequireMomentCapability(c echo.Context, momentID uuid.UUID, capability Capa
 }
 
 func EnsureMomentAccess(user *models.User, momentID uuid.UUID) (*models.Moment, error) {
-	getMomentByID := configuredHooks().GetMomentByID
-	if getMomentByID == nil {
+	if hooks.GetMomentByID == nil {
 		return nil, dependencyFailure("GetMomentByID")
 	}
-	moment, err := getMomentByID(momentID)
+	moment, err := hooks.GetMomentByID(momentID)
 	if err != nil {
 		return nil, lookupFailure("Moment", err)
 	}
@@ -641,11 +625,10 @@ func RequireGuestCapability(c echo.Context, guestID uuid.UUID, capability Capabi
 }
 
 func EnsureGuestAccess(user *models.User, guestID uuid.UUID) (*models.Guest, error) {
-	getGuestByID := configuredHooks().GetGuestByID
-	if getGuestByID == nil {
+	if hooks.GetGuestByID == nil {
 		return nil, dependencyFailure("GetGuestByID")
 	}
-	guest, err := getGuestByID(guestID)
+	guest, err := hooks.GetGuestByID(guestID)
 	if err != nil {
 		return nil, lookupFailure("Guest", err)
 	}
@@ -668,11 +651,10 @@ func RequireInvitationAccess(c echo.Context, invitationID uuid.UUID) (*models.Us
 		return nil, nil, err
 	}
 
-	getInvitationByID := configuredHooks().GetInvitationByIDLite
-	if getInvitationByID == nil {
+	if hooks.GetInvitationByIDLite == nil {
 		return nil, nil, dependencyFailure("GetInvitationByIDLite")
 	}
-	invitation, err := getInvitationByID(invitationID)
+	invitation, err := hooks.GetInvitationByIDLite(invitationID)
 	if err != nil {
 		return nil, nil, lookupFailure("Invitation", err)
 	}
@@ -706,11 +688,10 @@ func RequireResourceAccess(c echo.Context, resourceID uuid.UUID) (*models.User, 
 		return nil, nil, err
 	}
 
-	getResourceByID := configuredHooks().GetResourceByID
-	if getResourceByID == nil {
+	if hooks.GetResourceByID == nil {
 		return nil, nil, dependencyFailure("GetResourceByID")
 	}
-	resource, err := getResourceByID(resourceID)
+	resource, err := hooks.GetResourceByID(resourceID)
 	if err != nil {
 		return nil, nil, lookupFailure("Resource", err)
 	}

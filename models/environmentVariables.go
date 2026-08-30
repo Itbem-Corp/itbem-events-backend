@@ -3,6 +3,16 @@ package models
 type Config struct {
 	// Server
 	Port string `required:"false"`
+	// AllowLocalUserSyncFallback is deliberately opt-in and only honored when
+	// ENV=local. It keeps an already authenticated local user usable when the
+	// development control plane has no AWS administrative credentials to call
+	// Cognito AdminGetUser after a restart.
+	AllowLocalUserSyncFallback string `required:"false"`
+	// LocalBootstrapRootEmails is an explicit, comma-separated allow-list used
+	// only with ENV=local. It can provision the first authenticated local
+	// platform administrator without putting an identity, password or privilege
+	// grant in source control. It is ignored in every deployed environment.
+	LocalBootstrapRootEmails string `required:"false"`
 
 	// AWS
 	AwsRegion         string `required:"true"`
@@ -17,7 +27,9 @@ type Config struct {
 	CognitoAllowedClientIds string `required:"false"`
 	CognitoTenantClientMap  string `required:"false"`
 	// TenantHostMap binds branded API hosts to the Cognito tenant audience.
-	// Use "api.eventiapp.com.mx=*" only for the migration-compatible platform host.
+	// Use explicit product bindings in deployed environments, for example
+	// "api.eventiapp.com.mx=eventiapp,api.itbem.com.mx=itbem". A wildcard is
+	// only appropriate for an intentional local-development platform host.
 	TenantHostMap string `required:"false"`
 	// JwtClockSkewSeconds is an explicit deployment-level JWT leeway. Keep it
 	// empty in production; local environments with a skewed host clock may opt in.
@@ -50,8 +62,11 @@ type Config struct {
 	DbLogLevel string `required:"false"`
 
 	// Redis
-	RedisHost     string `required:"true"`
-	RedisPassword string `required:"true"`
+	RedisHost string `required:"true"`
+	// The supported local Valkey compose service deliberately has no password.
+	// Production may set one, but startup must not reject the documented local
+	// environment simply because this optional value is absent.
+	RedisPassword string `required:"false"`
 	RedisDb       string `required:"true"`
 	RedisTls      string `required:"true"`
 
@@ -73,6 +88,33 @@ type Config struct {
 	SQSVideoQueueURL string `required:"false"` // itbem-media-videos queue
 	// Business/data jobs consumed by itbem-events-workers (never media jobs).
 	SQSWorkerQueueURL string `required:"false"`
+	// SQSAutomationQueueURL is the ITBEM-only pull queue consumed by the local
+	// AI agent. It must never point to an EventiApp worker or media queue.
+	SQSAutomationQueueURL string `required:"false"`
+	// SQSAutomationDeadLetterQueueURL is the dedicated failure queue paired
+	// with SQSAutomationQueueURL. It is read for operator health only; the API
+	// never consumes or republishes its messages automatically.
+	SQSAutomationDeadLetterQueueURL string `required:"false"`
+	AutomationInputBucket           string `required:"false"`
+	// AutomationOutputBucket stores local-agent results independently from inputs.
+	AutomationOutputBucket string `required:"false"`
+	// AutomationPricingJSON is a server-owned, versioned price catalog. It may
+	// be empty for subscription-backed environments, where execution usage is
+	// still recorded but cost is intentionally marked unpriced rather than guessed.
+	AutomationPricingJSON string `required:"false"`
+	// AutomationBudgetProvider and AutomationBudgetModel declare the non-secret
+	// provider/model pair used for conservative admission reservations. They
+	// must mirror the local worker deployment; an enforced budget fails closed
+	// when that pair is absent from the server-owned pricing catalog.
+	AutomationBudgetProvider string `required:"false"`
+	AutomationBudgetModel    string `required:"false"`
+	// AutomationQASemanticInputTokenReserve and
+	// AutomationQASemanticOutputTokenReserve are conservative upper bounds for
+	// the separate Stagehand semantic/browser QA model call. They are added to
+	// delivery.qa admission holds before a task is queued. Zero uses safe
+	// defaults so a missing non-secret setting cannot under-reserve a QA run.
+	AutomationQASemanticInputTokenReserve  int `required:"false"`
+	AutomationQASemanticOutputTokenReserve int `required:"false"`
 	// SQSEndpoint is only for isolated SQS-compatible integration environments.
 	// Leave empty in AWS deployments so the SDK resolves the normal AWS endpoint.
 	SQSEndpoint       string `required:"false"`
@@ -83,4 +125,16 @@ type Config struct {
 	// Must match INTERNAL_API_SECRET in Lambda environment variables.
 	InternalAPISecret         string `required:"false"`
 	InternalAPISecretPrevious string `required:"false"`
+	// AutomationCallbackSecret authenticates the locally operated AI agent when
+	// it reports a task result. Rotate via the previous value without downtime.
+	AutomationCallbackSecret         string `required:"false"`
+	AutomationCallbackSecretPrevious string `required:"false"`
+	// GitHubReviewWebhookSecret authenticates the optional pull-request review
+	// ingress. It is independent from the GitHub App private key and from the
+	// worker callback secret. When empty, the ingress is disabled.
+	GitHubReviewWebhookSecret string `required:"false"`
+	// GitHubReviewRepositories is an explicit comma-separated allow-list such
+	// as "itbem/backend,itbem/dashboard". A GitHub App installation alone never
+	// authorizes every repository to spend local review capacity.
+	GitHubReviewRepositories string `required:"false"`
 }

@@ -60,6 +60,26 @@ func validateTenantRequestHost(host, tenant, configured string) error {
 	return nil
 }
 
+// RequireTenantHost binds an unauthenticated API surface to one product's
+// branded hostname. It uses the same mapping as authenticated requests, so a
+// public EventiApp URL cannot be served through an ITBEM or Cafetton host.
+// An empty map remains valid for local development; deployed environments must
+// set TenantHostMap with the branded hosts they expose.
+func RequireTenantHost(cfg *models.Config, tenant string) echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			configured := ""
+			if cfg != nil {
+				configured = cfg.TenantHostMap
+			}
+			if err := validateTenantRequestHost(c.Request().Host, tenant, configured); err != nil {
+				return utils.Error(c, http.StatusForbidden, "Tenant hostname mismatch", err.Error())
+			}
+			return next(c)
+		}
+	}
+}
+
 func allowedClientIDs(cfg *models.Config) map[string]struct{} {
 	result := make(map[string]struct{})
 	for _, id := range strings.Split(cfg.CognitoAllowedClientIds, ",") {

@@ -19,6 +19,10 @@ import (
 type UserSyncFunc func(cognitoSub string) (*models.User, error)
 type ProfileImageURLFunc func(user *models.User) string
 
+// LocalIdentityBootstrapFunc may only be configured by the local app runtime.
+// Its implementation must fail closed outside local development.
+type LocalIdentityBootstrapFunc func(cognitoSub, email string) (*models.User, error)
+
 type OrganizationAccess struct {
 	ID           uuid.UUID `json:"id"`
 	Name         string    `json:"name"`
@@ -46,6 +50,7 @@ type SessionService struct {
 	db              *gorm.DB
 	syncUser        UserSyncFunc
 	profileImageURL ProfileImageURLFunc
+	localBootstrap  LocalIdentityBootstrapFunc
 	cacheMu         sync.RWMutex
 	cache           map[string]cachedSession
 }
@@ -65,13 +70,36 @@ func NewSessionService(db *gorm.DB, syncUser UserSyncFunc, profileImageURL ...Pr
 	return service
 }
 
+// ConfigureLocalBootstrap attaches the deliberately local-only first-user
+// bootstrapper. Production does not configure it, and the bootstrapper itself
+// checks ENV=local plus its explicit identity allow-list.
+func (service *SessionService) ConfigureLocalBootstrap(bootstrap LocalIdentityBootstrapFunc) {
+	if service != nil {
+		service.localBootstrap = bootstrap
+	}
+}
+
+// ResolveWithLocalBootstrap retries a denied initial session only after an
+// authenticated token supplied an email claim. It never consumes a request
+// body and does not weaken normal application access in deployed environments.
+func (service *SessionService) ResolveWithLocalBootstrap(cognitoSub, tenantCode, email string) (*Session, error) {
+	if service == nil || service.localBootstrap == nil || strings.TrimSpace(email) == "" {
+		return nil, fmt.Errorf("%w: local bootstrap is unavailable", ErrApplicationAccessDenied)
+	}
+	if _, err := service.localBootstrap(cognitoSub, email); err != nil {
+		return nil, fmt.Errorf("%w: local bootstrap denied", ErrApplicationAccessDenied)
+	}
+	service.invalidateCognitoSub(cognitoSub)
+	return service.Resolve(cognitoSub, tenantCode)
+}
+
 func (service *SessionService) Resolve(cognitoSub, tenantCode string) (*Session, error) {
 	if service == nil || service.db == nil || service.syncUser == nil {
 		return nil, fmt.Errorf("application session service is not configured")
 	}
 	definition, known := products.Resolve(tenantCode)
 	if !known {
-		return nil, ErrApplicationAccessDenied
+		return nil, fmt.Errorf("%w: unknown product", ErrApplicationAccessDenied)
 	}
 	code := definition.Code.String()
 	cacheKey := applicationSessionCacheKey(code, cognitoSub)
@@ -82,21 +110,33 @@ func (service *SessionService) Resolve(cognitoSub, tenantCode string) (*Session,
 	var application models.Application
 	if err := service.db.Where("LOWER(code) = ? AND is_active = true", code).First(&application).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, ErrApplicationAccessDenied
+			return nil, fmt.Errorf("%w: application is disabled", ErrApplicationAccessDenied)
 		}
 		return nil, fmt.Errorf("load application: %w", err)
 	}
 	user, err := service.syncUser(cognitoSub)
 	if err != nil || user == nil || !user.IsActive {
-		return nil, ErrApplicationAccessDenied
+		return nil, fmt.Errorf("%w: user is unavailable", ErrApplicationAccessDenied)
 	}
 
-	organizations, err := service.organizationAccess(user.ID, application.ID)
+	var organizations []OrganizationAccess
+	if application.AllowsPlatformAdmin && user.IsPlatformAdmin() {
+		organizations, err = service.platformOrganizationAccess()
+	} else {
+		organizations, err = service.organizationAccess(user.ID, application.ID)
+	}
 	if err != nil {
 		return nil, err
 	}
+	policy, policyExists, err := service.userApplicationPolicy(user.ID, application.ID)
+	if err != nil {
+		return nil, err
+	}
+	if policyExists && !policy.IsActive {
+		return nil, fmt.Errorf("%w: application policy is inactive", ErrApplicationAccessDenied)
+	}
 	if (!application.AllowsPlatformAdmin || !user.IsPlatformAdmin()) && len(organizations) == 0 {
-		return nil, ErrApplicationAccessDenied
+		return nil, fmt.Errorf("%w: no eligible organization", ErrApplicationAccessDenied)
 	}
 	for index := range organizations {
 		organizations[index].Capabilities = applicationOrganizationCapabilities(
@@ -109,16 +149,46 @@ func (service *SessionService) Resolve(cognitoSub, tenantCode string) (*Session,
 	if service.profileImageURL != nil {
 		profileImage = service.profileImageURL(user)
 	}
+	capabilities := effectiveApplicationCapabilities(application, user, organizations)
+	if policyExists {
+		capabilities = intersectCapabilities(capabilities, policy.Capabilities)
+	}
 	session := &Session{
 		Application:   application,
 		User:          dtos.NewUserProfileResponse(user, profileImage),
 		Organizations: organizations,
-		Capabilities:  effectiveApplicationCapabilities(application, user, organizations),
+		Capabilities:  capabilities,
 	}
 	service.cacheMu.Lock()
 	service.cache[cacheKey] = cachedSession{session: session, expiresAt: time.Now().Add(sessionCacheTTL)}
 	service.cacheMu.Unlock()
 	return session, nil
+}
+
+func (service *SessionService) userApplicationPolicy(userID, applicationID uuid.UUID) (*models.UserApplicationPolicy, bool, error) {
+	var policy models.UserApplicationPolicy
+	err := service.db.Where("user_id = ? AND application_id = ?", userID, applicationID).First(&policy).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("load user application policy: %w", err)
+	}
+	return &policy, true, nil
+}
+
+func intersectCapabilities(base []string, permitted models.StringList) []string {
+	allowed := make(map[string]struct{}, len(permitted))
+	for _, capability := range permitted {
+		allowed[capability] = struct{}{}
+	}
+	result := make([]string, 0, len(base))
+	for _, capability := range base {
+		if _, ok := allowed[capability]; ok {
+			result = append(result, capability)
+		}
+	}
+	return result
 }
 
 // applicationSessionCacheKey is process-local, but remains versioned and
@@ -287,6 +357,31 @@ func (service *SessionService) organizationAccess(userID, applicationID uuid.UUI
 	return organizations, nil
 }
 
+// platformOrganizationAccess supplies the exact set of active workspaces that
+// a platform root may enter. This keeps the workspace switcher and the signed
+// organization-context endpoint on the same authorization boundary: roots are
+// never limited to an incidental membership, but cannot mint a context for an
+// arbitrary UUID either.
+func (service *SessionService) platformOrganizationAccess() ([]OrganizationAccess, error) {
+	organizations := make([]OrganizationAccess, 0)
+	err := service.db.Raw(`
+		SELECT
+			clients.id,
+			clients.name,
+			clients.code,
+			clients.logo,
+			'PLATFORM' AS access_role
+		FROM clients
+		WHERE clients.deleted_at IS NULL
+			AND clients.is_active = true
+		ORDER BY clients.name ASC
+	`).Scan(&organizations).Error
+	if err != nil {
+		return nil, fmt.Errorf("load platform organizations: %w", err)
+	}
+	return organizations, nil
+}
+
 func effectiveApplicationCapabilities(
 	application models.Application,
 	user *models.User,
@@ -309,6 +404,9 @@ func effectiveApplicationCapabilities(
 			if user.IsPrimaryRoot() {
 				capabilities.add("events:create", "events:manage", "events:delete")
 			}
+		}
+		if moduleEnabled(application.Modules, "automation") {
+			capabilities.add("automation:view", "automation:manage")
 		}
 		if moduleEnabled(application.Modules, "users") {
 			capabilities.add("platform:users:view", "platform:users:support")
@@ -339,6 +437,9 @@ func effectiveApplicationCapabilities(
 	}
 	if !moduleEnabled(application.Modules, "metrics") {
 		capabilities.remove("metrics:view")
+	}
+	if !moduleEnabled(application.Modules, "automation") {
+		capabilities.remove("automation:view", "automation:manage")
 	}
 	return capabilities.values()
 }
@@ -379,6 +480,9 @@ func applicationOrganizationCapabilities(application models.Application, role st
 	}
 	if !moduleEnabled(application.Modules, "metrics") {
 		capabilities.remove("metrics:view")
+	}
+	if !moduleEnabled(application.Modules, "automation") {
+		capabilities.remove("automation:view", "automation:manage")
 	}
 	return capabilities.values()
 }
