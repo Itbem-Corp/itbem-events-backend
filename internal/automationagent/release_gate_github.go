@@ -79,7 +79,7 @@ func RunReleaseGateWithGitHub(ctx context.Context, delivery json.RawMessage, loo
 		input.Branches = append(input.Branches, releasegate.BranchEvidence{
 			Repository: repository, HeadSHA: evidence.HeadSHA,
 			Mergeable: evidence.Mergeable, ConflictFree: evidence.ConflictFree,
-			ProtectionEvaluated: false, RequiredChecks: []string{},
+			ProtectionEvaluated: false, RequiredChecks: []releasegate.RequiredCheck{},
 		})
 		input.Reviews = append(input.Reviews, evidence.Reviews...)
 	}

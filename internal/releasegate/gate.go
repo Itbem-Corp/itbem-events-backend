@@ -15,7 +15,7 @@ import (
 	"strings"
 )
 
-const SchemaVersion = 2
+const SchemaVersion = 3
 const maxInputBytes = 1 << 20
 
 type Action string
@@ -53,20 +53,29 @@ type Policy struct {
 	RequiredTestKinds []string `json:"required_test_kinds"`
 }
 
+// RequiredCheck binds a protected-branch context to its configured GitHub App
+// integration when GitHub supplies one. IntegrationID zero means the branch
+// rule accepts any producer, but multiple producers then remain ambiguous.
+type RequiredCheck struct {
+	Name          string `json:"name"`
+	IntegrationID int64  `json:"integration_id,omitempty"`
+}
+
 type BranchEvidence struct {
-	Repository          string   `json:"repository"`
-	HeadSHA             string   `json:"head_sha"`
-	Mergeable           bool     `json:"mergeable"`
-	ConflictFree        bool     `json:"conflict_free"`
-	ProtectionEvaluated bool     `json:"protection_evaluated"`
-	RequiredChecks      []string `json:"required_checks"`
+	Repository          string          `json:"repository"`
+	HeadSHA             string          `json:"head_sha"`
+	Mergeable           bool            `json:"mergeable"`
+	ConflictFree        bool            `json:"conflict_free"`
+	ProtectionEvaluated bool            `json:"protection_evaluated"`
+	RequiredChecks      []RequiredCheck `json:"required_checks"`
 }
 
 type CheckEvidence struct {
-	Repository string         `json:"repository"`
-	Name       string         `json:"name"`
-	HeadSHA    string         `json:"head_sha"`
-	Status     EvidenceStatus `json:"status"`
+	Repository    string         `json:"repository"`
+	Name          string         `json:"name"`
+	IntegrationID int64          `json:"integration_id,omitempty"`
+	HeadSHA       string         `json:"head_sha"`
+	Status        EvidenceStatus `json:"status"`
 }
 
 type ReviewEvidence struct {
@@ -145,15 +154,16 @@ type Reason struct {
 }
 
 type Decision struct {
-	SchemaVersion int      `json:"schema_version"`
-	Action        Action   `json:"action"`
-	ChangeSetID   string   `json:"change_set_id"`
-	MatrixDigest  string   `json:"matrix_digest,omitempty"`
-	PolicyDigest  string   `json:"policy_digest,omitempty"`
-	VaultDigest   string   `json:"vault_digest,omitempty"`
-	SubjectDigest string   `json:"subject_digest,omitempty"`
-	State         string   `json:"state"`
-	Reasons       []Reason `json:"reasons"`
+	SchemaVersion      int      `json:"schema_version"`
+	Action             Action   `json:"action"`
+	ChangeSetID        string   `json:"change_set_id"`
+	MatrixDigest       string   `json:"matrix_digest,omitempty"`
+	PolicyDigest       string   `json:"policy_digest,omitempty"`
+	VaultDigest        string   `json:"vault_digest,omitempty"`
+	RequirementsDigest string   `json:"requirements_digest,omitempty"`
+	SubjectDigest      string   `json:"subject_digest,omitempty"`
+	State              string   `json:"state"`
+	Reasons            []Reason `json:"reasons"`
 }
 
 var changeSetPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
@@ -225,6 +235,52 @@ func VaultEvidenceDigest(values []VaultEvidence) (string, error) {
 	return hex.EncodeToString(digest[:]), nil
 }
 
+// BranchRequirementsDigest binds the approval subject to the exact protected
+// branch requirements, including any GitHub App integration identity. Runtime
+// pass/fail state is revalidated separately and does not redefine the policy.
+func BranchRequirementsDigest(values []BranchEvidence) (string, error) {
+	if len(values) == 0 || len(values) > 64 {
+		return "", fmt.Errorf("branch requirements size is invalid")
+	}
+	type requirement struct {
+		Repository          string          `json:"repository"`
+		HeadSHA             string          `json:"head_sha"`
+		ProtectionEvaluated bool            `json:"protection_evaluated"`
+		RequiredChecks      []RequiredCheck `json:"required_checks"`
+	}
+	normalized := make([]requirement, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		repository := strings.ToLower(strings.TrimSpace(value.Repository))
+		headSHA := strings.ToLower(strings.TrimSpace(value.HeadSHA))
+		if !validRepository(repository) || !validSHA(headSHA) || !validRequiredChecks(value.RequiredChecks) {
+			return "", fmt.Errorf("branch requirements are invalid")
+		}
+		if _, duplicate := seen[repository]; duplicate {
+			return "", fmt.Errorf("branch requirements repository is duplicated")
+		}
+		seen[repository] = struct{}{}
+		checks := append([]RequiredCheck(nil), value.RequiredChecks...)
+		for index := range checks {
+			checks[index].Name = strings.ToLower(strings.TrimSpace(checks[index].Name))
+		}
+		sort.Slice(checks, func(left, right int) bool {
+			if checks[left].Name != checks[right].Name {
+				return checks[left].Name < checks[right].Name
+			}
+			return checks[left].IntegrationID < checks[right].IntegrationID
+		})
+		normalized = append(normalized, requirement{Repository: repository, HeadSHA: headSHA, ProtectionEvaluated: value.ProtectionEvaluated, RequiredChecks: checks})
+	}
+	sort.Slice(normalized, func(left, right int) bool { return normalized[left].Repository < normalized[right].Repository })
+	encoded, err := json.Marshal(normalized)
+	if err != nil {
+		return "", fmt.Errorf("encode branch requirements: %w", err)
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
+}
+
 // Evaluate always fails closed. Missing, malformed, stale, contradictory, or
 // failed evidence yields a blocked decision with stable machine reason codes.
 func Evaluate(input Input) Decision {
@@ -255,10 +311,16 @@ func Evaluate(input Input) Decision {
 	} else {
 		decision.VaultDigest = vaultDigest
 	}
-	decision.SubjectDigest = subjectDigest(input.Action, decision.MatrixDigest, decision.PolicyDigest, decision.VaultDigest, input.Policy.RequiredTestKinds, input.Recovery.Classification)
+	requirementsDigest, requirementsDigestErr := BranchRequirementsDigest(input.Branches)
+	if requirementsDigestErr != nil {
+		add("branch_requirements_digest_invalid", "", "branch_requirements")
+	} else {
+		decision.RequirementsDigest = requirementsDigest
+	}
+	decision.SubjectDigest = subjectDigest(input.Action, decision.MatrixDigest, decision.PolicyDigest, decision.VaultDigest, decision.RequirementsDigest, input.Policy.RequiredTestKinds, input.Recovery.Classification)
 
 	branches := uniqueBranches(input.Branches, add)
-	checks := uniqueChecks(input.Checks, add)
+	checks := groupChecks(input.Checks, add)
 	reviews := groupReviews(input.Reviews)
 	vault := uniqueVault(input.Vault, add)
 	security := uniqueSecurity(input.Security, add)
@@ -278,17 +340,36 @@ func Evaluate(input Input) Decision {
 			if !branch.Mergeable || !branch.ConflictFree {
 				add("branch_not_mergeable", revision.Repository, "mergeability")
 			}
-			if !validUniqueNames(branch.RequiredChecks) {
+			if !validRequiredChecks(branch.RequiredChecks) {
 				add("required_checks_invalid", revision.Repository, "required_checks")
 			} else {
 				for _, required := range branch.RequiredChecks {
-					check, exists := checks[repositoryKey+"\x00"+strings.ToLower(required)]
-					if !exists {
-						add("required_check_missing", revision.Repository, required)
+					candidates := checks[repositoryKey+"\x00"+strings.ToLower(required.Name)]
+					var check CheckEvidence
+					matched := false
+					if required.IntegrationID > 0 {
+						for _, candidate := range candidates {
+							if candidate.IntegrationID == required.IntegrationID {
+								check, matched = candidate, true
+								break
+							}
+						}
+						if !matched && len(candidates) > 0 {
+							add("required_check_source_mismatch", revision.Repository, required.Name)
+							continue
+						}
+					} else if len(candidates) == 1 {
+						check, matched = candidates[0], true
+					} else if len(candidates) > 1 {
+						add("required_check_source_ambiguous", revision.Repository, required.Name)
+						continue
+					}
+					if !matched {
+						add("required_check_missing", revision.Repository, required.Name)
 					} else if !equalSHA(check.HeadSHA, revision.SHA) {
-						add("required_check_stale", revision.Repository, required)
+						add("required_check_stale", revision.Repository, required.Name)
 					} else if check.Status != StatusPassed {
-						add("required_check_failed", revision.Repository, required)
+						add("required_check_failed", revision.Repository, required.Name)
 					}
 				}
 			}
@@ -444,6 +525,22 @@ func validUniqueNames(values []string) bool {
 	return true
 }
 
+func validRequiredChecks(values []RequiredCheck) bool {
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		name := strings.TrimSpace(value.Name)
+		if name != value.Name || !evidenceNamePattern.MatchString(name) || value.IntegrationID < 0 {
+			return false
+		}
+		key := strings.ToLower(name) + "\x00" + fmt.Sprint(value.IntegrationID)
+		if _, duplicate := seen[key]; duplicate {
+			return false
+		}
+		seen[key] = struct{}{}
+	}
+	return true
+}
+
 func uniqueBranches(values []BranchEvidence, add func(string, string, string)) map[string]BranchEvidence {
 	result := map[string]BranchEvidence{}
 	for _, value := range values {
@@ -461,20 +558,23 @@ func uniqueBranches(values []BranchEvidence, add func(string, string, string)) m
 	return result
 }
 
-func uniqueChecks(values []CheckEvidence, add func(string, string, string)) map[string]CheckEvidence {
-	result := map[string]CheckEvidence{}
+func groupChecks(values []CheckEvidence, add func(string, string, string)) map[string][]CheckEvidence {
+	result := map[string][]CheckEvidence{}
+	seen := map[string]struct{}{}
 	for _, value := range values {
 		name := strings.TrimSpace(value.Name)
 		key := strings.ToLower(strings.TrimSpace(value.Repository)) + "\x00" + strings.ToLower(name)
-		if !validRepository(value.Repository) || !evidenceNamePattern.MatchString(name) {
+		identityKey := key + "\x00" + fmt.Sprint(value.IntegrationID)
+		if name != value.Name || !validRepository(value.Repository) || !evidenceNamePattern.MatchString(name) || value.IntegrationID < 0 {
 			add("check_evidence_invalid", "", "check")
 			continue
 		}
-		if _, duplicate := result[key]; duplicate {
+		if _, duplicate := seen[identityKey]; duplicate {
 			add("check_evidence_duplicate", value.Repository, name)
 			continue
 		}
-		result[key] = value
+		seen[identityKey] = struct{}{}
+		result[key] = append(result[key], value)
 	}
 	return result
 }
@@ -564,20 +664,21 @@ func evaluateRecovery(evidence RecoveryEvidence, matrixDigest string, add func(s
 	}
 }
 
-func subjectDigest(action Action, matrixDigest, policyDigest, vaultDigest string, requiredTestKinds []string, recovery RecoveryClassification) string {
+func subjectDigest(action Action, matrixDigest, policyDigest, vaultDigest, requirementsDigest string, requiredTestKinds []string, recovery RecoveryClassification) string {
 	kinds := append([]string(nil), requiredTestKinds...)
 	for index := range kinds {
 		kinds[index] = strings.ToLower(strings.TrimSpace(kinds[index]))
 	}
 	sort.Strings(kinds)
 	encoded, _ := json.Marshal(struct {
-		Action       Action                 `json:"action"`
-		MatrixDigest string                 `json:"matrix_digest"`
-		PolicyDigest string                 `json:"policy_digest"`
-		VaultDigest  string                 `json:"vault_digest"`
-		Recovery     RecoveryClassification `json:"recovery"`
-		Tests        []string               `json:"required_test_kinds"`
-	}{Action: action, MatrixDigest: matrixDigest, PolicyDigest: strings.ToLower(strings.TrimSpace(policyDigest)), VaultDigest: strings.ToLower(strings.TrimSpace(vaultDigest)), Recovery: recovery, Tests: kinds})
+		Action             Action                 `json:"action"`
+		MatrixDigest       string                 `json:"matrix_digest"`
+		PolicyDigest       string                 `json:"policy_digest"`
+		VaultDigest        string                 `json:"vault_digest"`
+		RequirementsDigest string                 `json:"requirements_digest"`
+		Recovery           RecoveryClassification `json:"recovery"`
+		Tests              []string               `json:"required_test_kinds"`
+	}{Action: action, MatrixDigest: matrixDigest, PolicyDigest: strings.ToLower(strings.TrimSpace(policyDigest)), VaultDigest: strings.ToLower(strings.TrimSpace(vaultDigest)), RequirementsDigest: strings.ToLower(strings.TrimSpace(requirementsDigest)), Recovery: recovery, Tests: kinds})
 	digest := sha256.Sum256(encoded)
 	return hex.EncodeToString(digest[:])
 }

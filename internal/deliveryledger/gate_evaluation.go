@@ -19,7 +19,7 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-const EventTypeReleaseGateEvaluated = "delivery.release_gate.evaluated.v2"
+const EventTypeReleaseGateEvaluated = "delivery.release_gate.evaluated.v3"
 
 type gateEvaluationPayload struct {
 	SchemaVersion int                  `json:"schema_version"`
@@ -31,17 +31,18 @@ type gateEvaluationPayload struct {
 // event. It deliberately excludes the exact input, actors, repository matrix,
 // Vault revision IDs, and any future private evidence references.
 type GateEvaluation struct {
-	EventID       uuid.UUID            `json:"event_id"`
-	Sequence      int64                `json:"sequence"`
-	Action        releasegate.Action   `json:"action"`
-	ChangeSetID   string               `json:"change_set_id"`
-	MatrixDigest  string               `json:"matrix_digest,omitempty"`
-	PolicyDigest  string               `json:"policy_digest,omitempty"`
-	VaultDigest   string               `json:"vault_digest,omitempty"`
-	SubjectDigest string               `json:"subject_digest,omitempty"`
-	State         string               `json:"state"`
-	Reasons       []releasegate.Reason `json:"reasons"`
-	OccurredAt    time.Time            `json:"occurred_at"`
+	EventID            uuid.UUID            `json:"event_id"`
+	Sequence           int64                `json:"sequence"`
+	Action             releasegate.Action   `json:"action"`
+	ChangeSetID        string               `json:"change_set_id"`
+	MatrixDigest       string               `json:"matrix_digest,omitempty"`
+	PolicyDigest       string               `json:"policy_digest,omitempty"`
+	VaultDigest        string               `json:"vault_digest,omitempty"`
+	RequirementsDigest string               `json:"requirements_digest,omitempty"`
+	SubjectDigest      string               `json:"subject_digest,omitempty"`
+	State              string               `json:"state"`
+	Reasons            []releasegate.Reason `json:"reasons"`
+	OccurredAt         time.Time            `json:"occurred_at"`
 }
 
 // RecordGateEvaluation evaluates and appends one immutable ledger event. It
@@ -101,9 +102,9 @@ func newGateEvaluationEvent(workItemID uuid.UUID, input releasegate.Input, occur
 	payloadDigest := hex.EncodeToString(digest[:])
 	return models.DeliveryEvent{
 		WorkItemID: workItemID, EventType: EventTypeReleaseGateEvaluated,
-		DedupeKey:     workItemID.String() + ":release-gate-v2:" + payloadDigest,
+		DedupeKey:     workItemID.String() + ":release-gate-v3:" + payloadDigest,
 		SubjectDigest: decision.SubjectDigest, PayloadJSON: string(payload), PayloadDigest: payloadDigest,
-		ActorType: "system", ActorID: "release-gate/v2", OccurredAt: occurredAt.UTC(), CreatedAt: occurredAt.UTC(),
+		ActorType: "system", ActorID: "release-gate/v3", OccurredAt: occurredAt.UTC(), CreatedAt: occurredAt.UTC(),
 	}, nil
 }
 
@@ -128,7 +129,7 @@ func ProjectGateEvaluation(event models.DeliveryEvent) (GateEvaluation, error) {
 	return GateEvaluation{
 		EventID: event.ID, Sequence: event.Sequence, Action: decoded.Decision.Action,
 		ChangeSetID: decoded.Decision.ChangeSetID, MatrixDigest: decoded.Decision.MatrixDigest,
-		PolicyDigest: decoded.Decision.PolicyDigest, VaultDigest: decoded.Decision.VaultDigest,
+		PolicyDigest: decoded.Decision.PolicyDigest, VaultDigest: decoded.Decision.VaultDigest, RequirementsDigest: decoded.Decision.RequirementsDigest,
 		SubjectDigest: decoded.Decision.SubjectDigest, State: decoded.Decision.State,
 		Reasons: append([]releasegate.Reason(nil), decoded.Decision.Reasons...), OccurredAt: event.OccurredAt.UTC(),
 	}, nil
@@ -191,9 +192,13 @@ func canonicalGateInput(input releasegate.Input) releasegate.Input {
 	clone.Tests = append([]releasegate.TestEvidence(nil), input.Tests...)
 	clone.Security = append([]releasegate.SecurityEvidence(nil), input.Security...)
 	for index := range clone.Branches {
-		clone.Branches[index].RequiredChecks = append([]string(nil), clone.Branches[index].RequiredChecks...)
+		clone.Branches[index].RequiredChecks = append([]releasegate.RequiredCheck(nil), clone.Branches[index].RequiredChecks...)
 		sort.Slice(clone.Branches[index].RequiredChecks, func(left, right int) bool {
-			return strings.ToLower(clone.Branches[index].RequiredChecks[left]) < strings.ToLower(clone.Branches[index].RequiredChecks[right])
+			leftCheck, rightCheck := clone.Branches[index].RequiredChecks[left], clone.Branches[index].RequiredChecks[right]
+			if !strings.EqualFold(leftCheck.Name, rightCheck.Name) {
+				return strings.ToLower(leftCheck.Name) < strings.ToLower(rightCheck.Name)
+			}
+			return leftCheck.IntegrationID < rightCheck.IntegrationID
 		})
 	}
 	sort.Slice(clone.Policy.RequiredTestKinds, func(left, right int) bool {
@@ -206,7 +211,12 @@ func canonicalGateInput(input releasegate.Input) releasegate.Input {
 		return strings.ToLower(clone.Branches[left].Repository) < strings.ToLower(clone.Branches[right].Repository)
 	})
 	sort.Slice(clone.Checks, func(left, right int) bool {
-		return strings.ToLower(clone.Checks[left].Repository+"\x00"+clone.Checks[left].Name) < strings.ToLower(clone.Checks[right].Repository+"\x00"+clone.Checks[right].Name)
+		leftKey := strings.ToLower(clone.Checks[left].Repository + "\x00" + clone.Checks[left].Name)
+		rightKey := strings.ToLower(clone.Checks[right].Repository + "\x00" + clone.Checks[right].Name)
+		if leftKey != rightKey {
+			return leftKey < rightKey
+		}
+		return clone.Checks[left].IntegrationID < clone.Checks[right].IntegrationID
 	})
 	sort.Slice(clone.Reviews, func(left, right int) bool {
 		return strings.ToLower(clone.Reviews[left].Repository+"\x00"+clone.Reviews[left].ReviewerActor) < strings.ToLower(clone.Reviews[right].Repository+"\x00"+clone.Reviews[right].ReviewerActor)

@@ -38,12 +38,12 @@ func validGateInput(t *testing.T) releasegate.Input {
 			RequiredTestKinds: []string{"unit", "contract"},
 		},
 		Branches: []releasegate.BranchEvidence{
-			{Repository: testRepositoryA, HeadSHA: revisions[0].SHA, Mergeable: true, ConflictFree: true, ProtectionEvaluated: true, RequiredChecks: []string{"security", "ci"}},
-			{Repository: testRepositoryB, HeadSHA: revisions[1].SHA, Mergeable: true, ConflictFree: true, ProtectionEvaluated: true, RequiredChecks: []string{"build"}},
+			{Repository: testRepositoryA, HeadSHA: revisions[0].SHA, Mergeable: true, ConflictFree: true, ProtectionEvaluated: true, RequiredChecks: []releasegate.RequiredCheck{{Name: "security", IntegrationID: 42}, {Name: "ci"}}},
+			{Repository: testRepositoryB, HeadSHA: revisions[1].SHA, Mergeable: true, ConflictFree: true, ProtectionEvaluated: true, RequiredChecks: []releasegate.RequiredCheck{{Name: "build"}}},
 		},
 		Checks: []releasegate.CheckEvidence{
 			{Repository: testRepositoryA, Name: "ci", HeadSHA: revisions[0].SHA, Status: releasegate.StatusPassed},
-			{Repository: testRepositoryA, Name: "security", HeadSHA: revisions[0].SHA, Status: releasegate.StatusPassed},
+			{Repository: testRepositoryA, Name: "security", IntegrationID: 42, HeadSHA: revisions[0].SHA, Status: releasegate.StatusPassed},
 			{Repository: testRepositoryB, Name: "build", HeadSHA: revisions[1].SHA, Status: releasegate.StatusPassed},
 		},
 		Reviews: []releasegate.ReviewEvidence{
@@ -124,7 +124,7 @@ func TestProjectGateEvaluationVerifiesIntegrityAndKeepsPrivateEvidenceOut(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if projection.State != "allowed" || projection.Sequence != 7 || projection.PolicyDigest == "" || projection.VaultDigest == "" || projection.SubjectDigest == "" {
+	if projection.State != "allowed" || projection.Sequence != 7 || projection.PolicyDigest == "" || projection.VaultDigest == "" || projection.RequirementsDigest == "" || projection.SubjectDigest == "" {
 		t.Fatalf("unexpected projection: %#v", projection)
 	}
 	encoded, err := json.Marshal(projection)
@@ -148,7 +148,7 @@ func TestProjectGateEvaluationVerifiesIntegrityAndKeepsPrivateEvidenceOut(t *tes
 		t.Fatal("an invalid ledger envelope must fail closed")
 	}
 	legacyEnvelope := event
-	legacyEnvelope.EventType = "delivery.release_gate.evaluated.v1"
+	legacyEnvelope.EventType = "delivery.release_gate.evaluated.v2"
 	if _, err := ProjectGateEvaluation(legacyEnvelope); err == nil {
 		t.Fatal("a legacy Gatekeeper event must not authorize the v2 contract")
 	}

@@ -89,11 +89,12 @@ worker on the `release` lane. The initial candidate is derived exclusively from
 GitHub-App-published change sets covering every repository marked `changes` in
 the approved plan; stored records alone remain blocked until the worker supplies
 fresh policy, GitHub, Vault, QA, security, environment and recovery evidence.
-Gatekeeper schema v2 binds the human approval subject to the exact revision
+Gatekeeper schema v3 binds the human approval subject to the exact revision
 matrix, resolved policy digest, canonical Vault evidence digest, required test
-kinds and recovery classification. Any policy or Vault revision/reconciliation
-change therefore makes the previous approval stale. Legacy v1 events remain
-auditable but cannot authorize a v2 action.
+kinds, protected-branch requirements (including GitHub integration identity)
+and recovery classification. Any policy, Vault revision/reconciliation or
+required-check identity change therefore makes the previous approval stale.
+Legacy v1/v2 events remain auditable but cannot authorize a v3 action.
 
 ### Events
 - `GET /api/events/all` → `events.ListEvents` — compatibility path for dashboard list; requires auth and returns root/all or user-scoped events

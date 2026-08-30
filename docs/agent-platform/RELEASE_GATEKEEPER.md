@@ -16,8 +16,10 @@ must carry the same matrix digest. Advancing any repository or changing a
 configured branch invalidates that evidence.
 
 The approval subject also binds the action (`merge` or `release`), resolved
-hierarchical policy digest, and recovery classification. A human approval for
-a previous SHA matrix, action, policy, or recovery posture cannot be reused.
+hierarchical policy digest, protected-branch requirements, GitHub integration
+identity for pinned checks, and recovery classification. A human approval for
+a previous SHA matrix, action, policy, check producer, or recovery posture
+cannot be reused.
 
 ## Required evidence
 

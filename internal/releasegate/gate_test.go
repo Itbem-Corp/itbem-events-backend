@@ -37,7 +37,7 @@ func validInput(t *testing.T, action Action, revisions []Revision) Input {
 	}
 	for index, revision := range revisions {
 		check := "ci/required-" + string(rune('a'+index))
-		input.Branches = append(input.Branches, BranchEvidence{Repository: revision.Repository, HeadSHA: revision.SHA, Mergeable: true, ConflictFree: true, ProtectionEvaluated: true, RequiredChecks: []string{check}})
+		input.Branches = append(input.Branches, BranchEvidence{Repository: revision.Repository, HeadSHA: revision.SHA, Mergeable: true, ConflictFree: true, ProtectionEvaluated: true, RequiredChecks: []RequiredCheck{{Name: check}}})
 		input.Checks = append(input.Checks, CheckEvidence{Repository: revision.Repository, Name: check, HeadSHA: revision.SHA, Status: StatusPassed})
 		input.Reviews = append(input.Reviews, ReviewEvidence{Repository: revision.Repository, HeadSHA: revision.SHA, AuthorActor: "engineer-" + revision.Repository, ReviewerActor: "reviewer-" + revision.Repository, Approved: true})
 		input.Vault = append(input.Vault, VaultEvidence{Repository: revision.Repository, HeadSHA: revision.SHA, RevisionID: "vault-" + revision.Repository, Reconciled: true})
@@ -45,6 +45,74 @@ func validInput(t *testing.T, action Action, revisions []Revision) Input {
 	}
 	input.HumanApproval = &HumanApproval{Actor: "delivery-owner", ActorType: "human", SubjectDigest: expectedSubjectDigest(t, input), Approved: true}
 	return input
+}
+
+func TestEvaluateBindsRequiredCheckToIntegrationIdentity(t *testing.T) {
+	input := validInput(t, ActionRelease, []Revision{{Repository: repositoryA, Branch: "production", SHA: shaA}})
+	input.Branches[0].RequiredChecks[0].IntegrationID = 42
+	input.Checks[0].IntegrationID = 7
+	decision := Evaluate(input)
+	if decision.State != "blocked" || !hasReason(decision, "required_check_source_mismatch") {
+		t.Fatalf("a same-name check from another integration was accepted: %#v", decision)
+	}
+	input.Checks[0].IntegrationID = 42
+	input.HumanApproval.SubjectDigest = expectedSubjectDigest(t, input)
+	if decision := Evaluate(input); decision.State != "allowed" {
+		t.Fatalf("the exact configured check integration was blocked: %#v", decision)
+	}
+}
+
+func TestEvaluateBlocksAmbiguousUnpinnedCheckProducer(t *testing.T) {
+	input := validInput(t, ActionRelease, []Revision{{Repository: repositoryA, Branch: "production", SHA: shaA}})
+	name := input.Branches[0].RequiredChecks[0].Name
+	input.Checks = []CheckEvidence{
+		{Repository: repositoryA, Name: name, IntegrationID: 7, HeadSHA: shaA, Status: StatusPassed},
+		{Repository: repositoryA, Name: name, IntegrationID: 42, HeadSHA: shaA, Status: StatusPassed},
+	}
+	decision := Evaluate(input)
+	if decision.State != "blocked" || !hasReason(decision, "required_check_source_ambiguous") {
+		t.Fatalf("an unpinned same-name check with multiple producers was accepted: %#v", decision)
+	}
+}
+
+func TestEvaluateMakesHumanApprovalStaleWhenRequiredCheckIdentityChanges(t *testing.T) {
+	input := validInput(t, ActionRelease, []Revision{{Repository: repositoryA, Branch: "production", SHA: shaA}})
+	input.Branches[0].RequiredChecks[0].IntegrationID = 42
+	input.Checks[0].IntegrationID = 42
+	decision := Evaluate(input)
+	if decision.State != "blocked" || !hasReason(decision, "human_approval_stale") {
+		t.Fatalf("approval bound to older branch requirements was accepted: %#v", decision)
+	}
+	input.HumanApproval.SubjectDigest = expectedSubjectDigest(t, input)
+	if decision := Evaluate(input); decision.State != "allowed" {
+		t.Fatalf("fresh approval for exact branch requirements was blocked: %#v", decision)
+	}
+}
+
+func TestBranchRequirementsDigestIsCanonicalAndIntegrationSensitive(t *testing.T) {
+	forward := []BranchEvidence{
+		{Repository: repositoryA, HeadSHA: shaA, ProtectionEvaluated: true, RequiredChecks: []RequiredCheck{{Name: "security", IntegrationID: 42}, {Name: "ci"}}},
+		{Repository: repositoryB, HeadSHA: shaB, ProtectionEvaluated: true, RequiredChecks: []RequiredCheck{{Name: "build", IntegrationID: 7}}},
+	}
+	reverse := []BranchEvidence{
+		{Repository: repositoryB, HeadSHA: shaB, ProtectionEvaluated: true, RequiredChecks: []RequiredCheck{{Name: "build", IntegrationID: 7}}},
+		{Repository: repositoryA, HeadSHA: shaA, ProtectionEvaluated: true, RequiredChecks: []RequiredCheck{{Name: "ci"}, {Name: "security", IntegrationID: 42}}},
+	}
+	first, err := BranchRequirementsDigest(forward)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := BranchRequirementsDigest(reverse)
+	if err != nil || first != second {
+		t.Fatalf("equivalent requirements changed digest: %s / %s / %v", first, second, err)
+	}
+	changed := append([]BranchEvidence(nil), forward...)
+	changed[0].RequiredChecks = append([]RequiredCheck(nil), forward[0].RequiredChecks...)
+	changed[0].RequiredChecks[0].IntegrationID = 99
+	third, err := BranchRequirementsDigest(changed)
+	if err != nil || third == first {
+		t.Fatalf("required integration identity did not change digest: %s / %s / %v", first, third, err)
+	}
 }
 
 func expectedSubjectDigest(t *testing.T, input Input) string {
@@ -57,7 +125,11 @@ func expectedSubjectDigest(t *testing.T, input Input) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return subjectDigest(input.Action, matrixDigest, input.Policy.Digest, vaultDigest, input.Policy.RequiredTestKinds, input.Recovery.Classification)
+	requirementsDigest, err := BranchRequirementsDigest(input.Branches)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return subjectDigest(input.Action, matrixDigest, input.Policy.Digest, vaultDigest, requirementsDigest, input.Policy.RequiredTestKinds, input.Recovery.Classification)
 }
 
 func hasReason(decision Decision, code string) bool {
@@ -72,7 +144,7 @@ func hasReason(decision Decision, code string) bool {
 func TestEvaluateAllowsCompleteSingleRepositoryMerge(t *testing.T) {
 	input := validInput(t, ActionMerge, []Revision{{Repository: repositoryA, Branch: "trunk", SHA: shaA}})
 	decision := Evaluate(input)
-	if decision.State != "allowed" || len(decision.Reasons) != 0 || !validDigest(decision.MatrixDigest) || !validDigest(decision.PolicyDigest) || !validDigest(decision.VaultDigest) || !validDigest(decision.SubjectDigest) {
+	if decision.State != "allowed" || len(decision.Reasons) != 0 || !validDigest(decision.MatrixDigest) || !validDigest(decision.PolicyDigest) || !validDigest(decision.VaultDigest) || !validDigest(decision.RequirementsDigest) || !validDigest(decision.SubjectDigest) {
 		t.Fatalf("complete exact-SHA evidence must allow merge: %#v", decision)
 	}
 }
