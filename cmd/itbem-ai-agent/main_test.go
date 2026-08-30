@@ -1,10 +1,29 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"events-stocks/internal/agentwork"
+	"events-stocks/internal/automationagent"
 	"strings"
 	"testing"
 )
+
+func TestProviderForRuntimeOmitsModelCredentialOnlyForReleaseWorker(t *testing.T) {
+	release := automationagent.RuntimeConfig{WorkerConfig: automationagent.WorkerConfig{Role: agentwork.RoleReleaseManager, Lane: agentwork.LaneRelease}}
+	provider, name, model, err := providerForRuntime(release, func(string) string { return "" })
+	if err != nil || provider == nil || name != "" || model != "" {
+		t.Fatalf("release provider = %T %q %q %v", provider, name, model, err)
+	}
+	if _, err := provider.Complete(context.Background(), nil, 0); err == nil {
+		t.Fatal("deterministic release provider allowed a model call")
+	}
+
+	reviewer := automationagent.RuntimeConfig{WorkerConfig: automationagent.WorkerConfig{Role: agentwork.RoleReviewer, Lane: agentwork.LaneReview}}
+	if provider, _, _, err := providerForRuntime(reviewer, func(string) string { return "" }); err == nil || provider != nil {
+		t.Fatalf("reviewer started without provider credential: %T %v", provider, err)
+	}
+}
 
 func TestDoctorReportFailsClosedWithoutExecutionDependenciesAndNeverLeaksValues(t *testing.T) {
 	report, ready, err := doctorReport(func(key string) string {

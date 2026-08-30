@@ -22,6 +22,13 @@ rejected before input retrieval, callback lease acquisition or provider use.
 The empty identity remains accepted only while draining the retained combined
 queue during migration.
 
+The `release_manager/release` worker is deterministic and starts without any
+model API key. Its provider/model heartbeat fields must remain empty. Every
+other role, including the temporary combined worker, still requires its scoped
+model provider because it can execute at least one inference operation. This
+keeps GitHub publication authority and model credentials out of the same
+release process unless a future reviewed operation explicitly needs both.
+
 SQS leases, idempotent callbacks, output reuse and visibility heartbeats make
 redelivery safe. Set `ITBEM_AI_CONCURRENCY=1` for a strictly serial role, or
 raise it only for independent workspaces with available provider capacity. The

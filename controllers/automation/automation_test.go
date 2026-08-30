@@ -194,6 +194,21 @@ func TestNormalizeWorkerRoleLaneKeepsLegacyVisibleAndRejectsCrossRoleIdentity(t 
 	}
 }
 
+func TestValidWorkerProviderAllowsProviderlessReleaseOnly(t *testing.T) {
+	if !validWorkerProvider("release_manager", "release", "", "") {
+		t.Fatal("providerless deterministic release worker was rejected")
+	}
+	if validWorkerProvider("release_manager", "release", "minimax", "MiniMax-M3") {
+		t.Fatal("release worker retained an unnecessary model credential")
+	}
+	if validWorkerProvider("reviewer", "review", "", "") {
+		t.Fatal("review worker was allowed without a model provider")
+	}
+	if !validWorkerProvider("reviewer", "review", "minimax", "MiniMax-M3") {
+		t.Fatal("configured review provider was rejected")
+	}
+}
+
 func TestRecentCostLedgerSelectionIncludesEveryBillableComponentWithoutPrivateReferences(t *testing.T) {
 	for _, column := range []string{
 		"execution.input_cost_micros",

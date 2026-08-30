@@ -1800,6 +1800,14 @@ func normalizeWorkerRoleLane(role, lane string) (string, string, error) {
 	return role, lane, nil
 }
 
+func validWorkerProvider(role, lane, provider, model string) bool {
+	provider, model = strings.TrimSpace(provider), strings.TrimSpace(model)
+	if role == string(agentwork.RoleReleaseManager) && lane == string(agentwork.LaneRelease) {
+		return provider == "" && model == ""
+	}
+	return providerAllowed(provider) && model != "" && len(model) <= 128
+}
+
 // AgentHeartbeat gives the dashboard a real liveness signal from the isolated
 // worker. It is callback-secret authenticated and stores no host, queue or
 // credential information.
@@ -1818,11 +1826,14 @@ func AgentHeartbeat(c echo.Context) error {
 	if _, err := uuid.FromString(workerID); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid agent heartbeat", "")
 	}
-	if !providerAllowed(request.Provider) || len(strings.TrimSpace(request.Model)) == 0 || len(strings.TrimSpace(request.Model)) > 128 || request.Concurrency < 1 || request.Concurrency > 8 {
+	if request.Concurrency < 1 || request.Concurrency > 8 {
 		return utils.Error(c, http.StatusBadRequest, "Invalid agent heartbeat", "")
 	}
 	role, lane, err := normalizeWorkerRoleLane(request.Role, request.Lane)
 	if err != nil {
+		return utils.Error(c, http.StatusBadRequest, "Invalid agent heartbeat", "")
+	}
+	if !validWorkerProvider(role, lane, request.Provider, request.Model) {
 		return utils.Error(c, http.StatusBadRequest, "Invalid agent heartbeat", "")
 	}
 	startedAt, err := time.Parse(time.RFC3339, strings.TrimSpace(request.StartedAt))
