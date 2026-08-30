@@ -44,6 +44,9 @@ func TestBuildCreatesDeterministicEvidenceBasedProposal(t *testing.T) {
 	if first.VaultSHA256 != second.VaultSHA256 || first.Readiness != "partially_ready" || first.Repository.DefaultBranch != "trunk" {
 		t.Fatalf("proposal is not deterministic/current: %#v / %#v", first, second)
 	}
+	if len(first.VaultDiff.Added) != len(first.Vault.Entries) || len(first.VaultDiff.Modified) != 0 || len(first.VaultDiff.Removed) != 0 {
+		t.Fatalf("initial Vault diff = %#v", first.VaultDiff)
+	}
 	if len(first.Stacks) != 1 || first.Stacks[0].Name != "node" {
 		t.Fatalf("stack detection = %#v", first.Stacks)
 	}
@@ -130,6 +133,65 @@ func TestBuildRejectsMutableOrMalformedIdentity(t *testing.T) {
 		if _, err := Build(Input{Repository: repository, Files: []string{"go.mod"}}); err == nil {
 			t.Fatalf("invalid repository accepted: %#v", repository)
 		}
+	}
+}
+
+func TestReconcilePreservesChangedRemovedAndUnchangedVaultHistory(t *testing.T) {
+	nextSHA := "89abcdef0123456789abcdef0123456789abcdef"
+	previous, err := Build(Input{
+		Repository: Repository{Reference: "github://acme/service", DefaultBranch: "main", Revision: testSHA},
+		Files:      []string{"go.mod", "CODEOWNERS", "docs/architecture.md"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := Build(Input{
+		Repository: Repository{Reference: "github://acme/service", DefaultBranch: "main", Revision: nextSHA},
+		Files:      []string{"package.json", "package-lock.json", "CODEOWNERS"},
+		Excerpts:   []Excerpt{{Path: "package.json", Content: `{"scripts":{"test":"vitest"}}`}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciled, err := Reconcile(current, previous.Vault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repeated, err := Reconcile(current, previous.Vault)
+	if err != nil || repeated.VaultSHA256 != reconciled.VaultSHA256 {
+		t.Fatalf("vault reconciliation is not deterministic: %v / %s / %s", err, reconciled.VaultSHA256, repeated.VaultSHA256)
+	}
+	entries := map[string]VaultEntry{}
+	for _, entry := range reconciled.Vault.Entries {
+		entries[entry.Key] = entry
+	}
+	stack := entries["repository.stacks"]
+	if stack.Lifecycle != "active" || stack.ValidFromSHA != nextSHA || stack.ValidThroughSHA != nextSHA || len(stack.History) != 1 || stack.History[0].Kind != "architecture" || stack.History[0].Lifecycle != "deprecated" || stack.History[0].ValidFromSHA != testSHA || stack.History[0].ValidThroughSHA != testSHA || stack.History[0].TransitionSHA != nextSHA {
+		t.Fatalf("changed stack history = %#v", stack)
+	}
+	documentation := entries["repository.documentation"]
+	if documentation.Lifecycle != "removed" || documentation.LifecycleSHA != nextSHA || documentation.ValidFromSHA != testSHA || documentation.ValidThroughSHA != testSHA {
+		t.Fatalf("removed documentation history = %#v", documentation)
+	}
+	ownership := entries["repository.ownership"]
+	if ownership.Lifecycle != "active" || ownership.ValidFromSHA != testSHA || ownership.ValidThroughSHA != nextSHA || len(ownership.History) != 0 {
+		t.Fatalf("unchanged ownership history = %#v", ownership)
+	}
+	if digest, _ := ManifestSHA256(reconciled.Vault); digest != reconciled.VaultSHA256 {
+		t.Fatalf("reconciled Vault digest mismatch: %s != %s", digest, reconciled.VaultSHA256)
+	}
+}
+
+func TestReconcileRejectsCrossRepositoryOrMutableHistory(t *testing.T) {
+	previous, _ := Build(Input{Repository: Repository{Reference: "github://acme/service", DefaultBranch: "main", Revision: testSHA}, Files: []string{"go.mod"}})
+	current, _ := Build(Input{Repository: Repository{Reference: "github://other/service", DefaultBranch: "main", Revision: "89abcdef0123456789abcdef0123456789abcdef"}, Files: []string{"go.mod"}})
+	if _, err := Reconcile(current, previous.Vault); err == nil {
+		t.Fatal("cross-repository Vault history was accepted")
+	}
+	current.Repository.Reference, current.Vault.Repository.Reference = previous.Repository.Reference, previous.Repository.Reference
+	previous.Vault.Entries = append(previous.Vault.Entries, previous.Vault.Entries[0])
+	if _, err := Reconcile(current, previous.Vault); err == nil {
+		t.Fatal("ambiguous previous Vault history was accepted")
 	}
 }
 

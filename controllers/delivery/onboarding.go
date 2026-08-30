@@ -24,6 +24,7 @@ import (
 
 type repositoryOnboardingRequest struct {
 	RepositoryURL string `json:"repository_url"`
+	Revision      string `json:"revision,omitempty"`
 }
 
 type repositoryOnboardingApprovalRequest struct {
@@ -56,13 +57,21 @@ func InspectRepositoryOnboarding(c echo.Context) error {
 	if err != nil {
 		return badRequest(c, "Invalid repository onboarding", err.Error())
 	}
+	expectedRevision := strings.ToLower(strings.TrimSpace(request.Revision))
+	if expectedRevision != "" && !projectvault.ValidRevision(expectedRevision) {
+		return badRequest(c, "Invalid repository onboarding", "revision must be an immutable full Git commit SHA")
+	}
 	appConfig, err := automationagent.LoadGitHubAppConfig(os.Getenv)
 	if err != nil {
 		return conflict(c, "Repository onboarding unavailable", "Configure the GitHub App before inspecting a repository")
 	}
-	proposal, err := inspectGitHubRepositoryForOnboarding(c.Request().Context(), appConfig, reference, time.Now().UTC())
+	proposal, err := inspectGitHubRepositoryForOnboarding(c.Request().Context(), appConfig, reference, expectedRevision, time.Now().UTC())
 	if err != nil {
 		return conflict(c, "Repository onboarding blocked", "No configured GitHub App installation could inspect the repository and its immutable tree")
+	}
+	proposal, err = reconcileOnboardingProposal(configuration.DB, projectID, proposal)
+	if err != nil {
+		return conflict(c, "Repository Vault reconciliation blocked", "The latest approved Vault could not be verified and reconciled safely")
 	}
 	proposalJSON, err := json.Marshal(proposal)
 	if err != nil {
@@ -98,7 +107,7 @@ func InspectRepositoryOnboarding(c echo.Context) error {
 	return created(c, "Repository onboarding proposed", onboarding)
 }
 
-func inspectGitHubRepositoryForOnboarding(ctx context.Context, config automationagent.GitHubAppConfig, reference string, now time.Time) (projectvault.Proposal, error) {
+func inspectGitHubRepositoryForOnboarding(ctx context.Context, config automationagent.GitHubAppConfig, reference, expectedRevision string, now time.Time) (projectvault.Proposal, error) {
 	configs := []automationagent.GitHubAppConfig{config}
 	if len(config.InstallationIDs) > 0 {
 		configs = make([]automationagent.GitHubAppConfig, 0, len(config.InstallationIDs))
@@ -120,7 +129,7 @@ func inspectGitHubRepositoryForOnboarding(ctx context.Context, config automation
 			lastErr = err
 			continue
 		}
-		snapshot, err := automationagent.ReadGitHubRepositorySnapshot(ctx, candidate, installation.Token, reference)
+		snapshot, err := automationagent.ReadGitHubRepositorySnapshotAtRevision(ctx, candidate, installation.Token, reference, expectedRevision)
 		if err != nil {
 			lastErr = err
 			continue
@@ -148,8 +157,40 @@ func inspectGitHubRepositoryForOnboarding(ctx context.Context, config automation
 	return projectvault.Proposal{}, lastErr
 }
 
+func reconcileOnboardingProposal(db *gorm.DB, projectID uuid.UUID, proposal projectvault.Proposal) (projectvault.Proposal, error) {
+	if db == nil || projectID == uuid.Nil {
+		return projectvault.Proposal{}, fmt.Errorf("Vault reconciliation context is invalid")
+	}
+	var previous models.DeliveryProjectVaultRevision
+	err := db.Where("project_id = ? AND repository_reference = ?", projectID, proposal.Repository.Reference).
+		Order("version DESC, published_at DESC, id DESC").First(&previous).Error
+	if err == gorm.ErrRecordNotFound {
+		return proposal, nil
+	}
+	if err != nil {
+		return projectvault.Proposal{}, err
+	}
+	var manifest projectvault.Manifest
+	if previous.ProjectID != projectID || previous.RepositoryReference != proposal.Repository.Reference || previous.SchemaVersion != projectvault.SchemaVersion ||
+		json.Unmarshal([]byte(previous.ManifestJSON), &manifest) != nil || manifest.Repository.Reference != previous.RepositoryReference || !strings.EqualFold(manifest.Repository.Revision, previous.Revision) {
+		return projectvault.Proposal{}, fmt.Errorf("latest approved Vault identity is invalid")
+	}
+	digest, err := projectvault.ManifestSHA256(manifest)
+	if err != nil || !strings.EqualFold(digest, previous.ContentSHA256) {
+		return projectvault.Proposal{}, fmt.Errorf("latest approved Vault digest is invalid")
+	}
+	var source models.DeliveryRepositoryOnboarding
+	if err := db.Where("id = ? AND project_id = ?", previous.SourceOnboardingID, projectID).First(&source).Error; err != nil {
+		return projectvault.Proposal{}, fmt.Errorf("latest approved Vault provenance is missing")
+	}
+	if source.Status != "approved" || source.RepositoryReference != previous.RepositoryReference || !strings.EqualFold(source.Revision, previous.Revision) || !strings.EqualFold(source.VaultSHA256, previous.ContentSHA256) || source.ApprovedAt == nil || strings.TrimSpace(source.ApprovedBy) == "" || !strings.EqualFold(source.ApprovedBy, previous.PublishedBy) || !source.ApprovedAt.UTC().Equal(previous.PublishedAt.UTC()) {
+		return projectvault.Proposal{}, fmt.Errorf("latest approved Vault provenance is invalid")
+	}
+	return projectvault.Reconcile(proposal, manifest)
+}
+
 // ApproveRepositoryOnboarding is the explicit human boundary that publishes a
-// repository checkpoint and its first immutable Vault revision. The caller
+// repository checkpoint and its next immutable Vault revision. The caller
 // must repeat the expected SHA, preventing a stale UI approval from silently
 // accepting a later repository state.
 func ApproveRepositoryOnboarding(c echo.Context) error {

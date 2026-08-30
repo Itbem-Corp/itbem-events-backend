@@ -19,6 +19,13 @@ Call `POST /api/automation/projects/:id/repository-onboardings/inspect`:
 {"repository_url":"https://github.com/example/service"}
 ```
 
+For a pull-request or coordinated change, pin the exact 40-character head SHA
+instead of following a mutable branch:
+
+```json
+{"repository_url":"https://github.com/example/service","revision":"0123456789abcdef0123456789abcdef01234567"}
+```
+
 The backend tries only configured installations, resolves the actual default
 branch, pins its full SHA, reads a bounded safe tree and stores a proposal.
 Review repository/default branch/SHA, inventory truncation, detected stacks,
@@ -50,7 +57,13 @@ Use `GET /api/automation/projects/:id/repository-onboardings` and
 When the repository advances or its API, schema, dependency, infrastructure,
 environment declaration, workflow, ownership, tests, decision or runbook
 changes, inspect the new SHA and approve another Vault version. Historical
-revisions are append-only. Never edit or delete them to conceal drift.
+revisions are append-only. Reconciliation compares structured values rather
+than prose or agent claims: new facts become `active`, replaced values are
+retained as `deprecated` history, absent facts become `removed`, and unchanged
+facts preserve their original `valid_from_sha` while advancing
+`valid_through_sha`. The proposal exposes an added/modified/unchanged/removed
+diff and binds it to both Vault digests. Never edit or delete prior revisions
+to conceal drift.
 
 ## Current safety boundary
 

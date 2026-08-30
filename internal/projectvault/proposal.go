@@ -56,33 +56,59 @@ type Capability struct {
 	Evidence []Provenance `json:"evidence,omitempty"`
 }
 
+type VaultHistoryEntry struct {
+	Kind            string         `json:"kind"`
+	Lifecycle       string         `json:"lifecycle"`
+	Value           map[string]any `json:"value"`
+	Provenance      []Provenance   `json:"provenance"`
+	ValidFromSHA    string         `json:"valid_from_sha"`
+	ValidThroughSHA string         `json:"valid_through_sha"`
+	TransitionSHA   string         `json:"transition_sha"`
+}
+
 type VaultEntry struct {
-	Key        string         `json:"key"`
-	Kind       string         `json:"kind"`
-	Lifecycle  string         `json:"lifecycle"`
-	Value      map[string]any `json:"value"`
-	Provenance []Provenance   `json:"provenance"`
+	Key              string              `json:"key"`
+	Kind             string              `json:"kind"`
+	Lifecycle        string              `json:"lifecycle"`
+	LifecycleSHA     string              `json:"lifecycle_sha"`
+	ValidFromSHA     string              `json:"valid_from_sha"`
+	ValidThroughSHA  string              `json:"valid_through_sha"`
+	Value            map[string]any      `json:"value"`
+	Provenance       []Provenance        `json:"provenance"`
+	History          []VaultHistoryEntry `json:"history,omitempty"`
+	HistoryTruncated bool                `json:"history_truncated,omitempty"`
 }
 
 type Manifest struct {
-	SchemaVersion int          `json:"schema_version"`
-	Scope         string       `json:"scope"`
-	Repository    Repository   `json:"repository"`
-	Entries       []VaultEntry `json:"entries"`
+	SchemaVersion    int          `json:"schema_version"`
+	Scope            string       `json:"scope"`
+	Repository       Repository   `json:"repository"`
+	Entries          []VaultEntry `json:"entries"`
+	HistoryTruncated bool         `json:"history_truncated,omitempty"`
+}
+
+type VaultDiff struct {
+	Added     []string `json:"added"`
+	Modified  []string `json:"modified"`
+	Unchanged []string `json:"unchanged"`
+	Removed   []string `json:"removed"`
 }
 
 type Proposal struct {
-	SchemaVersion      int               `json:"schema_version"`
-	Repository         Repository        `json:"repository"`
-	Readiness          string            `json:"readiness"`
-	TrustBoundary      string            `json:"trust_boundary"`
-	InventoryFileCount int               `json:"inventory_file_count"`
-	InventoryTruncated bool              `json:"inventory_truncated"`
-	Stacks             []Fact            `json:"stacks"`
-	Commands           []ProposedCommand `json:"commands"`
-	Capabilities       []Capability      `json:"capabilities"`
-	Vault              Manifest          `json:"vault"`
-	VaultSHA256        string            `json:"vault_sha256"`
+	SchemaVersion       int               `json:"schema_version"`
+	Repository          Repository        `json:"repository"`
+	Readiness           string            `json:"readiness"`
+	TrustBoundary       string            `json:"trust_boundary"`
+	InventoryFileCount  int               `json:"inventory_file_count"`
+	InventoryTruncated  bool              `json:"inventory_truncated"`
+	Stacks              []Fact            `json:"stacks"`
+	Commands            []ProposedCommand `json:"commands"`
+	Capabilities        []Capability      `json:"capabilities"`
+	Vault               Manifest          `json:"vault"`
+	VaultSHA256         string            `json:"vault_sha256"`
+	PreviousRevision    string            `json:"previous_revision,omitempty"`
+	PreviousVaultSHA256 string            `json:"previous_vault_sha256,omitempty"`
+	VaultDiff           VaultDiff         `json:"vault_diff"`
 }
 
 type Excerpt struct {
@@ -164,6 +190,10 @@ func Build(input Input) (Proposal, error) {
 	if len(files) == 0 {
 		readiness = "blocked"
 	}
+	initialDiff := VaultDiff{Added: make([]string, 0, len(manifest.Entries)), Modified: []string{}, Unchanged: []string{}, Removed: []string{}}
+	for _, entry := range manifest.Entries {
+		initialDiff.Added = append(initialDiff.Added, entry.Key)
+	}
 	fileCount := input.InventoryFileCount
 	if fileCount < len(files) {
 		fileCount = len(files)
@@ -172,8 +202,164 @@ func Build(input Input) (Proposal, error) {
 		SchemaVersion: SchemaVersion, Repository: repository, Readiness: readiness,
 		TrustBoundary: "repository_content_is_untrusted_data", InventoryFileCount: fileCount,
 		InventoryTruncated: input.InventoryTruncated, Stacks: stacks, Commands: commands,
-		Capabilities: capabilities, Vault: manifest, VaultSHA256: digest,
+		Capabilities: capabilities, Vault: manifest, VaultSHA256: digest, VaultDiff: initialDiff,
 	}, nil
+}
+
+const maxVaultHistoryPerEntry = 64
+
+// Reconcile carries a previously approved Vault forward to one newly inspected
+// immutable repository SHA. Current static evidence remains authoritative;
+// changed facts retain the replaced value as deprecated history and absent
+// facts remain visible as removed. No repository prose or agent output can
+// choose lifecycle state.
+func Reconcile(proposal Proposal, previous Manifest) (Proposal, error) {
+	current := proposal.Vault
+	if proposal.SchemaVersion != SchemaVersion || current.SchemaVersion != SchemaVersion || previous.SchemaVersion != SchemaVersion || current.Scope != "repository" || previous.Scope != "repository" {
+		return Proposal{}, fmt.Errorf("vault reconciliation schema is invalid")
+	}
+	if current.Repository.Reference != previous.Repository.Reference || !validSHA(current.Repository.Revision) || !validSHA(previous.Repository.Revision) {
+		return Proposal{}, fmt.Errorf("vault reconciliation checkpoints are invalid")
+	}
+	if current.Repository.Revision == previous.Repository.Revision {
+		digest, err := ManifestSHA256(previous)
+		if err != nil {
+			return Proposal{}, err
+		}
+		proposal.Vault, proposal.VaultSHA256 = previous, digest
+		proposal.PreviousRevision, proposal.PreviousVaultSHA256 = previous.Repository.Revision, digest
+		proposal.VaultDiff = VaultDiff{Added: []string{}, Modified: []string{}, Unchanged: []string{}, Removed: []string{}}
+		return proposal, nil
+	}
+	previousDigest, err := ManifestSHA256(previous)
+	if err != nil {
+		return Proposal{}, err
+	}
+	diff := VaultDiff{Added: []string{}, Modified: []string{}, Unchanged: []string{}, Removed: []string{}}
+	previousByKey := make(map[string]VaultEntry, len(previous.Entries))
+	for _, entry := range previous.Entries {
+		if strings.TrimSpace(entry.Key) == "" {
+			return Proposal{}, fmt.Errorf("previous vault contains an invalid entry")
+		}
+		if _, duplicate := previousByKey[entry.Key]; duplicate {
+			return Proposal{}, fmt.Errorf("previous vault contains duplicate entries")
+		}
+		previousByKey[entry.Key] = normalizeVaultEntry(entry, previous.Repository.Revision)
+	}
+	result := make([]VaultEntry, 0, len(current.Entries)+len(previous.Entries))
+	seen := make(map[string]struct{}, len(current.Entries))
+	for _, entry := range current.Entries {
+		if strings.TrimSpace(entry.Key) == "" {
+			return Proposal{}, fmt.Errorf("current vault contains an invalid entry")
+		}
+		if _, duplicate := seen[entry.Key]; duplicate {
+			return Proposal{}, fmt.Errorf("current vault contains duplicate entries")
+		}
+		seen[entry.Key] = struct{}{}
+		entry = normalizeVaultEntry(entry, current.Repository.Revision)
+		if prior, exists := previousByKey[entry.Key]; exists {
+			if vaultEntryEquivalent(entry, prior) && prior.Lifecycle != "removed" {
+				diff.Unchanged = append(diff.Unchanged, entry.Key)
+				entry.ValidFromSHA = prior.ValidFromSHA
+				entry.History = append([]VaultHistoryEntry(nil), prior.History...)
+				entry.HistoryTruncated = prior.HistoryTruncated
+			} else {
+				diff.Modified = append(diff.Modified, entry.Key)
+				lifecycle := "deprecated"
+				transition := current.Repository.Revision
+				if prior.Lifecycle == "removed" {
+					lifecycle, transition = "removed", prior.LifecycleSHA
+				}
+				entry.History = append([]VaultHistoryEntry(nil), prior.History...)
+				entry.History = append(entry.History, vaultHistorySnapshot(prior, lifecycle, transition, previous.Repository.Revision))
+				entry.HistoryTruncated = prior.HistoryTruncated
+				trimVaultHistory(&entry)
+			}
+		} else {
+			diff.Added = append(diff.Added, entry.Key)
+		}
+		entry.Lifecycle = "active"
+		entry.LifecycleSHA = current.Repository.Revision
+		entry.ValidThroughSHA = current.Repository.Revision
+		result = append(result, entry)
+	}
+	for _, prior := range previousByKey {
+		if _, exists := seen[prior.Key]; exists {
+			continue
+		}
+		if prior.Lifecycle != "removed" {
+			diff.Removed = append(diff.Removed, prior.Key)
+			prior.Lifecycle = "removed"
+			prior.LifecycleSHA = current.Repository.Revision
+			prior.ValidThroughSHA = previous.Repository.Revision
+		}
+		result = append(result, prior)
+	}
+	sort.Slice(result, func(left, right int) bool { return result[left].Key < result[right].Key })
+	current.Entries = result
+	for _, entry := range result {
+		if entry.HistoryTruncated {
+			current.HistoryTruncated = true
+			break
+		}
+	}
+	for _, values := range [][]string{diff.Added, diff.Modified, diff.Unchanged, diff.Removed} {
+		sort.Strings(values)
+	}
+	digest, err := ManifestSHA256(current)
+	if err != nil {
+		return Proposal{}, err
+	}
+	proposal.Vault, proposal.VaultSHA256 = current, digest
+	proposal.PreviousRevision, proposal.PreviousVaultSHA256, proposal.VaultDiff = previous.Repository.Revision, previousDigest, diff
+	return proposal, nil
+}
+
+func normalizeVaultEntry(entry VaultEntry, revision string) VaultEntry {
+	if entry.Lifecycle == "" {
+		entry.Lifecycle = "active"
+	}
+	if entry.LifecycleSHA == "" {
+		entry.LifecycleSHA = revision
+	}
+	if entry.ValidFromSHA == "" {
+		entry.ValidFromSHA = revision
+	}
+	if entry.ValidThroughSHA == "" {
+		entry.ValidThroughSHA = revision
+	}
+	return entry
+}
+
+func vaultEntryEquivalent(left, right VaultEntry) bool {
+	leftJSON, leftErr := json.Marshal(struct {
+		Kind  string         `json:"kind"`
+		Value map[string]any `json:"value"`
+	}{left.Kind, left.Value})
+	rightJSON, rightErr := json.Marshal(struct {
+		Kind  string         `json:"kind"`
+		Value map[string]any `json:"value"`
+	}{right.Kind, right.Value})
+	return leftErr == nil && rightErr == nil && string(leftJSON) == string(rightJSON)
+}
+
+func vaultHistorySnapshot(entry VaultEntry, lifecycle, transitionSHA, fallbackThroughSHA string) VaultHistoryEntry {
+	through := entry.ValidThroughSHA
+	if through == "" {
+		through = fallbackThroughSHA
+	}
+	return VaultHistoryEntry{
+		Kind: entry.Kind, Lifecycle: lifecycle, Value: entry.Value, Provenance: entry.Provenance,
+		ValidFromSHA: entry.ValidFromSHA, ValidThroughSHA: through, TransitionSHA: transitionSHA,
+	}
+}
+
+func trimVaultHistory(entry *VaultEntry) {
+	if len(entry.History) <= maxVaultHistoryPerEntry {
+		return
+	}
+	entry.History = append([]VaultHistoryEntry(nil), entry.History[len(entry.History)-maxVaultHistoryPerEntry:]...)
+	entry.HistoryTruncated = true
 }
 
 // ManifestSHA256 is the stable content identity stored next to each immutable
@@ -391,6 +577,9 @@ func buildManifest(repository Repository, identity Provenance, files []string, s
 		return strings.HasSuffix(path, ".tf") || strings.Contains(path, "cloudformation") || strings.Contains(path, "serverless.") || strings.HasSuffix(path, "cdk.json")
 	})
 	addMarkerEntry("repository.documentation", "documentation", func(path string) bool { return path == "readme.md" || strings.HasPrefix(path, "docs/") })
+	for index := range entries {
+		entries[index] = normalizeVaultEntry(entries[index], repository.Revision)
+	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Key < entries[j].Key })
 	return Manifest{SchemaVersion: SchemaVersion, Scope: "repository", Repository: repository, Entries: entries}
 }
@@ -405,4 +594,8 @@ func validSHA(value string) bool {
 		}
 	}
 	return true
+}
+
+func ValidRevision(value string) bool {
+	return validSHA(strings.ToLower(strings.TrimSpace(value)))
 }

@@ -183,6 +183,14 @@ type GitHubRepositorySourceContext struct {
 // an explicitly registered github://owner/repository source. It is read-only:
 // no clone, fetch, branch, PR or repository setting is modified.
 func ReadGitHubRepositorySnapshot(ctx context.Context, config GitHubAppConfig, token, reference string) (GitHubRepositorySnapshot, error) {
+	return ReadGitHubRepositorySnapshotAtRevision(ctx, config, token, reference, "")
+}
+
+// ReadGitHubRepositorySnapshotAtRevision freezes either the default branch or
+// one explicitly supplied full commit SHA. The latter is used to reconcile a
+// Vault against an immutable pull-request head without following a mutable
+// branch name. GitHub must resolve the commit inside the authorized repository.
+func ReadGitHubRepositorySnapshotAtRevision(ctx context.Context, config GitHubAppConfig, token, reference, expectedRevision string) (GitHubRepositorySnapshot, error) {
 	repository, err := parseGitHubRepositoryReference(reference)
 	if err != nil {
 		return GitHubRepositorySnapshot{}, err
@@ -210,7 +218,13 @@ func ReadGitHubRepositorySnapshot(ctx context.Context, config GitHubAppConfig, t
 	if err := json.NewDecoder(response.Body).Decode(&metadata); err != nil || strings.TrimSpace(metadata.DefaultBranch) == "" {
 		return GitHubRepositorySnapshot{}, fmt.Errorf("GitHub repository metadata is invalid")
 	}
-	commitURL := baseURL + "/commits/" + url.PathEscape(metadata.DefaultBranch)
+	commitReference := strings.ToLower(strings.TrimSpace(expectedRevision))
+	if commitReference == "" {
+		commitReference = strings.TrimSpace(metadata.DefaultBranch)
+	} else if !validGitHubCommitSHA(commitReference) {
+		return GitHubRepositorySnapshot{}, fmt.Errorf("GitHub repository revision must be a full commit SHA")
+	}
+	commitURL := baseURL + "/commits/" + url.PathEscape(commitReference)
 	request, err = githubAppRequest(ctx, http.MethodGet, commitURL, token, nil)
 	if err != nil {
 		return GitHubRepositorySnapshot{}, err
@@ -229,7 +243,11 @@ func ReadGitHubRepositorySnapshot(ctx context.Context, config GitHubAppConfig, t
 	if err := json.NewDecoder(response.Body).Decode(&commit); err != nil || !validGitHubCommitSHA(commit.SHA) {
 		return GitHubRepositorySnapshot{}, fmt.Errorf("GitHub default branch revision is invalid")
 	}
-	return GitHubRepositorySnapshot{Reference: "github://" + repository.Owner + "/" + repository.Name, Revision: strings.ToLower(commit.SHA), DefaultBranch: strings.TrimSpace(metadata.DefaultBranch)}, nil
+	resolvedRevision := strings.ToLower(strings.TrimSpace(commit.SHA))
+	if expectedRevision != "" && resolvedRevision != strings.ToLower(strings.TrimSpace(expectedRevision)) {
+		return GitHubRepositorySnapshot{}, fmt.Errorf("GitHub repository revision did not resolve to the expected commit")
+	}
+	return GitHubRepositorySnapshot{Reference: "github://" + repository.Owner + "/" + repository.Name, Revision: resolvedRevision, DefaultBranch: strings.TrimSpace(metadata.DefaultBranch)}, nil
 }
 
 // ReadGitHubRepositoryMap reads the Git tree for one already-frozen GitHub

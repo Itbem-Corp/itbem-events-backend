@@ -353,6 +353,32 @@ func TestReadGitHubRepositorySnapshotUsesOnlyRegisteredReference(t *testing.T) {
 	}
 }
 
+func TestReadGitHubRepositorySnapshotCanFreezeAnExactAuthorizedCommit(t *testing.T) {
+	revision := strings.Repeat("b", 40)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer ephemeral-installation-token" {
+			t.Fatal("installation token must only be sent as an authorization header")
+		}
+		switch request.URL.Path {
+		case "/repos/Itbem-Corp/repo":
+			_ = json.NewEncoder(response).Encode(map[string]string{"default_branch": "trunk"})
+		case "/repos/Itbem-Corp/repo/commits/" + revision:
+			_ = json.NewEncoder(response).Encode(map[string]string{"sha": revision})
+		default:
+			t.Fatalf("unexpected remote read: %s", request.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	snapshot, err := ReadGitHubRepositorySnapshotAtRevision(context.Background(), GitHubAppConfig{APIBaseURL: server.URL}, "ephemeral-installation-token", "github://Itbem-Corp/repo", revision)
+	if err != nil || snapshot.Revision != revision || snapshot.DefaultBranch != "trunk" {
+		t.Fatalf("unexpected exact remote snapshot: %#v / %v", snapshot, err)
+	}
+	if _, err := ReadGitHubRepositorySnapshotAtRevision(context.Background(), GitHubAppConfig{APIBaseURL: server.URL}, "ephemeral-installation-token", "github://Itbem-Corp/repo", "main"); err == nil {
+		t.Fatal("mutable branch name was accepted as an exact Vault checkpoint")
+	}
+}
+
 func TestReadGitHubRepositoryMapOnlyReturnsSafeFileInventory(t *testing.T) {
 	revision := strings.Repeat("b", 40)
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
