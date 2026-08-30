@@ -57,11 +57,19 @@ func TestResolveStoredQAEvidenceLoadsOnlyExactMatrixAndCompletedTask(t *testing.
 		WithArgs(taskID, 1).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "delivery_work_item_id", "operation", "evidence_subject_digest", "status", "completed_at"}).
 			AddRow(taskID, workItemID, "delivery.qa", matrixDigest, "completed", controlNow))
+	mock.ExpectQuery(`SELECT .* FROM "delivery_context_snapshots" WHERE work_item_id = \$1 AND kind = \$2.*LIMIT \$3`).
+		WithArgs(workItemID, "repository", maxDependencyRows+1).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "work_item_id", "kind", "reference", "metadata_json"}).
+			AddRow(uuid.Must(uuid.NewV4()), workItemID, "repository", "workspace://api", `{}`))
+	mock.ExpectQuery(`SELECT dependency\..*FROM delivery_work_item_dependencies AS dependency.*WHERE dependency\.work_item_id = \$1.*LIMIT \$2`).
+		WithArgs(workItemID, maxDependencyRows+1).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "work_item_id", "depends_on_work_item_id", "state"}))
 	input := releasegate.Input{Revisions: revisions, Policy: releasegate.Policy{RequiredTestKinds: []string{"unit"}}, Tests: []releasegate.TestEvidence{}}
 	subject := publishedReleaseSubject{Revisions: revisions, RepositoryByReference: map[string]string{"workspace://api": "example/api"}, WorktreeBranchByReference: map[string]string{"workspace://api": branch}}
 	resolved, err := resolveStoredQAEvidence(db, workItemID, input, subject, map[string][]string{"example/api": {"unit"}})
 	if err != nil || len(resolved.Tests) != 1 || resolved.Tests[0].Kind != "unit" || resolved.Tests[0].Status != releasegate.StatusPassed || resolved.Tests[0].MatrixDigest != matrixDigest ||
-		resolved.Compatibility.Status != releasegate.StatusPassed || resolved.Compatibility.MatrixDigest != matrixDigest || resolved.Migrations.Status != releasegate.StatusPassed || resolved.Migrations.MatrixDigest != matrixDigest {
+		resolved.Compatibility.Status != releasegate.StatusPassed || resolved.Compatibility.MatrixDigest != matrixDigest || resolved.Migrations.Status != releasegate.StatusPassed || resolved.Migrations.MatrixDigest != matrixDigest ||
+		resolved.Dependencies.Status != releasegate.StatusPassed || resolved.Dependencies.MatrixDigest != matrixDigest {
 		t.Fatalf("exact persisted QA evidence was not resolved: %#v / %v", resolved.Tests, err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -255,6 +263,56 @@ func TestAssuranceMatrixEvidenceRequiresNamedCommandInEveryRepository(t *testing
 	staleMatrix.MatrixDigest = strings.Repeat("f", 64)
 	if _, err := namedMatrixEvidenceFromQA(compatibilityTestKind, subject, staleMatrix); err == nil {
 		t.Fatal("assurance evidence for a different revision matrix was accepted")
+	}
+}
+
+func TestDependencyEvidenceRequiresReleasedTasksAndQAOrderThatRespectsFrozenDAG(t *testing.T) {
+	workItemID := uuid.Must(uuid.NewV4())
+	revisions := []releasegate.Revision{{Repository: "example/api", Branch: "main", SHA: strings.Repeat("a", 40)}, {Repository: "example/web", Branch: "trunk", SHA: strings.Repeat("b", 40)}}
+	matrixDigest, _ := releasegate.RevisionMatrixDigest(revisions)
+	subject := publishedReleaseSubject{
+		Revisions:                 revisions,
+		RepositoryByReference:     map[string]string{"workspace://api": "example/api", "workspace://web": "example/web"},
+		WorktreeBranchByReference: map[string]string{"workspace://api": "itbem-agent/11111111-1111-4111-8111-111111111111", "workspace://web": "itbem-agent/22222222-2222-4222-8222-222222222222"},
+	}
+	observation := qaevidence.Observation{
+		SchemaVersion: qaevidence.SchemaVersion, TaskID: "33333333-3333-4333-8333-333333333333", MatrixDigest: matrixDigest,
+		RepositoryExecutionOrder: []string{"workspace://api", "workspace://web"},
+		Repositories: []qaevidence.Repository{
+			{Reference: "workspace://api", Branch: subject.WorktreeBranchByReference["workspace://api"], Commands: []qaevidence.Command{}},
+			{Reference: "workspace://web", Branch: subject.WorktreeBranchByReference["workspace://web"], Commands: []qaevidence.Command{}},
+		},
+	}
+	snapshots := []models.DeliveryContextSnapshot{
+		{ID: uuid.Must(uuid.NewV4()), WorkItemID: workItemID, Kind: "repository", Reference: "workspace://api", MetadataJSON: `{}`},
+		{ID: uuid.Must(uuid.NewV4()), WorkItemID: workItemID, Kind: "repository", Reference: "workspace://web", MetadataJSON: `{"depends_on_repositories":["workspace://api"]}`},
+	}
+	releasedDependency := workItemDependencyState{ID: uuid.Must(uuid.NewV4()), WorkItemID: workItemID, DependsOnWorkItemID: uuid.Must(uuid.NewV4()), State: "released"}
+	evidence, err := dependencyEvidenceFromControlPlane(workItemID, subject, observation, snapshots, []workItemDependencyState{releasedDependency})
+	if err != nil || evidence.Status != releasegate.StatusPassed || evidence.MatrixDigest != matrixDigest {
+		t.Fatalf("valid dependency evidence was rejected: %#v / %v", evidence, err)
+	}
+	reversed := observation
+	reversed.RepositoryExecutionOrder = []string{"workspace://web", "workspace://api"}
+	evidence, err = dependencyEvidenceFromControlPlane(workItemID, subject, reversed, snapshots, []workItemDependencyState{releasedDependency})
+	if err != nil || evidence.Status != releasegate.StatusFailed {
+		t.Fatalf("QA order that violated the repository DAG did not fail: %#v / %v", evidence, err)
+	}
+	pendingDependency := releasedDependency
+	pendingDependency.State = "release_review"
+	evidence, err = dependencyEvidenceFromControlPlane(workItemID, subject, observation, snapshots, []workItemDependencyState{pendingDependency})
+	if err != nil || evidence.Status != releasegate.StatusFailed {
+		t.Fatalf("unreleased work-item dependency did not fail: %#v / %v", evidence, err)
+	}
+	cyclic := append([]models.DeliveryContextSnapshot(nil), snapshots...)
+	cyclic[0].MetadataJSON = `{"depends_on_repositories":["workspace://web"]}`
+	if _, err := dependencyEvidenceFromControlPlane(workItemID, subject, observation, cyclic, nil); err == nil {
+		t.Fatal("cyclic frozen repository dependencies were accepted")
+	}
+	missingWorkItem := releasedDependency
+	missingWorkItem.State = ""
+	if _, err := dependencyEvidenceFromControlPlane(workItemID, subject, observation, snapshots, []workItemDependencyState{missingWorkItem}); err == nil {
+		t.Fatal("dependency row whose prerequisite work item is missing was accepted")
 	}
 }
 

@@ -164,6 +164,9 @@ Event     Event          `gorm:"foreignKey:EventID" json:"event,omitempty"`
   Reserved `assurance:compatibility` and `assurance:migrations` QA identities
   are resolved from the same event into separate exact-matrix Gatekeeper
   fields; missing per-repository commands remain missing evidence.
+  Dependency assurance combines its repository execution order with frozen
+  `DeliveryContextSnapshot` dependency edges and current released states from
+  `DeliveryWorkItemDependency`; no worker-provided dependency verdict is used.
 - **AutomationAgentHeartbeat** (`models/AutomationAgentHeartbeat.go`): Short-
   lived, anonymized execution-plane presence. It records the declared worker
   role/lane, provider/model, concurrency and bounded workspace readiness, but

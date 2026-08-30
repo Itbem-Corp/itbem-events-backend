@@ -113,8 +113,16 @@ trusting model prose. Operator configuration reserves
 `assurance:compatibility` and `assurance:migrations`; each identity must run in
 every reviewed worktree. The resolver emits a passed matrix only when every
 repository passes, emits failed when any repository fails, and leaves the
-Gatekeeper evidence missing when any command is absent. Dependency, environment,
-and recovery ledgers are still unresolved and blocking.
+Gatekeeper evidence missing when any command is absent.
+
+Dependency readiness is derived by the control plane, never asserted by a
+model. It reloads the frozen repository topology, rejects malformed, missing,
+duplicate, or cyclic edges, and verifies that the exact QA repository execution
+order places each changed dependency before its consumer. It also reloads every
+declared work-item prerequisite and requires it to be `released`. The resulting
+matrix is failed for a valid but unsatisfied order/prerequisite and invalid
+control-plane data aborts evaluation. Environment and recovery ledgers are still
+unresolved and blocking.
 
 Policy is evaluated independently for every repository using the
 platform → organization → project → repository → bounded change-set override

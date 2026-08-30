@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"events-stocks/internal/releasegate"
 	"events-stocks/internal/securityevidence"
 	"events-stocks/models"
+	"events-stocks/services/deliveryworkflow"
 
 	"github.com/gofrs/uuid"
 	"gorm.io/gorm"
@@ -28,6 +30,7 @@ const (
 	maxPolicyRevisions       = 500
 	maxPublishedChanges      = 128
 	maxAssuranceObservations = 128
+	maxDependencyRows        = 128
 	compatibilityTestKind    = "assurance:compatibility"
 	migrationsTestKind       = "assurance:migrations"
 )
@@ -564,6 +567,10 @@ func resolveStoredQAEvidence(db *gorm.DB, workItemID uuid.UUID, input releasegat
 	if err != nil {
 		return releasegate.Input{}, err
 	}
+	input.Dependencies, err = resolveStoredDependencyEvidence(db, workItemID, subject, latest.Observation)
+	if err != nil {
+		return releasegate.Input{}, err
+	}
 	return input, nil
 }
 
@@ -708,6 +715,177 @@ func namedMatrixEvidenceFromQA(kind string, subject publishedReleaseSubject, obs
 		}
 	}
 	return releasegate.MatrixEvidence{MatrixDigest: observation.MatrixDigest, Status: status}, nil
+}
+
+type workItemDependencyState struct {
+	ID                  uuid.UUID `gorm:"column:id"`
+	WorkItemID          uuid.UUID `gorm:"column:work_item_id"`
+	DependsOnWorkItemID uuid.UUID `gorm:"column:depends_on_work_item_id"`
+	State               string    `gorm:"column:state"`
+}
+
+// resolveStoredDependencyEvidence combines immutable repository topology with
+// the exact QA execution order and current control-plane work-item prerequisites.
+// Model text and worker-supplied dependency claims are never consulted.
+func resolveStoredDependencyEvidence(db *gorm.DB, workItemID uuid.UUID, subject publishedReleaseSubject, observation qaevidence.Observation) (releasegate.MatrixEvidence, error) {
+	if db == nil || workItemID == uuid.Nil {
+		return releasegate.MatrixEvidence{}, fmt.Errorf("release Gatekeeper dependency context is invalid")
+	}
+	var snapshots []models.DeliveryContextSnapshot
+	if err := db.Select("id", "work_item_id", "kind", "reference", "metadata_json").
+		Where("work_item_id = ? AND kind = ?", workItemID, "repository").Order("id ASC").Limit(maxDependencyRows + 1).Find(&snapshots).Error; err != nil {
+		return releasegate.MatrixEvidence{}, fmt.Errorf("load release Gatekeeper repository dependencies: %w", err)
+	}
+	if len(snapshots) > maxDependencyRows {
+		return releasegate.MatrixEvidence{}, fmt.Errorf("release Gatekeeper repository dependency history exceeds the bounded limit")
+	}
+	var dependencies []workItemDependencyState
+	if err := db.Table("delivery_work_item_dependencies AS dependency").
+		Select("dependency.id", "dependency.work_item_id", "dependency.depends_on_work_item_id", "dependency_item.state").
+		Joins("LEFT JOIN delivery_work_items AS dependency_item ON dependency_item.id = dependency.depends_on_work_item_id").
+		Where("dependency.work_item_id = ?", workItemID).Order("dependency.id ASC").Limit(maxDependencyRows + 1).Scan(&dependencies).Error; err != nil {
+		return releasegate.MatrixEvidence{}, fmt.Errorf("load release Gatekeeper work-item dependencies: %w", err)
+	}
+	if len(dependencies) > maxDependencyRows {
+		return releasegate.MatrixEvidence{}, fmt.Errorf("release Gatekeeper work-item dependency history exceeds the bounded limit")
+	}
+	return dependencyEvidenceFromControlPlane(workItemID, subject, observation, snapshots, dependencies)
+}
+
+func dependencyEvidenceFromControlPlane(workItemID uuid.UUID, subject publishedReleaseSubject, observation qaevidence.Observation, snapshots []models.DeliveryContextSnapshot, workItemDependencies []workItemDependencyState) (releasegate.MatrixEvidence, error) {
+	matrixDigest, digestErr := releasegate.RevisionMatrixDigest(subject.Revisions)
+	if workItemID == uuid.Nil || digestErr != nil || !strings.EqualFold(matrixDigest, observation.MatrixDigest) || qaevidence.Validate(observation) != nil ||
+		len(subject.Revisions) == 0 || len(subject.Revisions) != len(subject.RepositoryByReference) || len(subject.RepositoryByReference) != len(subject.WorktreeBranchByReference) ||
+		len(observation.Repositories) != len(subject.RepositoryByReference) || len(snapshots) == 0 || len(snapshots) > maxDependencyRows || len(workItemDependencies) > maxDependencyRows {
+		return releasegate.MatrixEvidence{}, fmt.Errorf("release Gatekeeper dependency evidence identity is invalid")
+	}
+	known := make(map[string]models.DeliveryContextSnapshot, len(snapshots))
+	for _, snapshot := range snapshots {
+		reference := strings.TrimSpace(snapshot.Reference)
+		if snapshot.ID == uuid.Nil || snapshot.WorkItemID != workItemID || snapshot.Kind != "repository" || reference != snapshot.Reference || !validFrozenRepositoryReference(reference) {
+			return releasegate.MatrixEvidence{}, fmt.Errorf("release Gatekeeper frozen repository dependency is invalid")
+		}
+		if _, duplicate := known[reference]; duplicate {
+			return releasegate.MatrixEvidence{}, fmt.Errorf("release Gatekeeper frozen repository dependency is duplicated")
+		}
+		known[reference] = snapshot
+	}
+	edges := make(map[string][]string, len(known))
+	for reference, snapshot := range known {
+		var metadata map[string]json.RawMessage
+		rawMetadata := strings.TrimSpace(snapshot.MetadataJSON)
+		if rawMetadata == "" {
+			rawMetadata = "{}"
+		}
+		if len(rawMetadata) > 64<<10 || json.Unmarshal([]byte(rawMetadata), &metadata) != nil || metadata == nil {
+			return releasegate.MatrixEvidence{}, fmt.Errorf("release Gatekeeper frozen repository metadata is invalid")
+		}
+		dependencies := []string{}
+		if raw, exists := metadata["depends_on_repositories"]; exists {
+			if string(raw) == "null" || json.Unmarshal(raw, &dependencies) != nil || len(dependencies) > maxDependencyRows {
+				return releasegate.MatrixEvidence{}, fmt.Errorf("release Gatekeeper frozen repository dependencies are invalid")
+			}
+		}
+		seen := make(map[string]struct{}, len(dependencies))
+		for _, dependency := range dependencies {
+			if dependency != strings.TrimSpace(dependency) || dependency == reference {
+				return releasegate.MatrixEvidence{}, fmt.Errorf("release Gatekeeper frozen repository dependency edge is invalid")
+			}
+			if _, exists := known[dependency]; !exists {
+				return releasegate.MatrixEvidence{}, fmt.Errorf("release Gatekeeper frozen repository dependency target is missing")
+			}
+			if _, duplicate := seen[dependency]; duplicate {
+				return releasegate.MatrixEvidence{}, fmt.Errorf("release Gatekeeper frozen repository dependency edge is duplicated")
+			}
+			seen[dependency] = struct{}{}
+			edges[reference] = append(edges[reference], dependency)
+		}
+	}
+	if err := validateDependencyDAG(edges); err != nil {
+		return releasegate.MatrixEvidence{}, err
+	}
+	observedBranches := make(map[string]string, len(observation.Repositories))
+	for _, repository := range observation.Repositories {
+		expectedRepository, exists := subject.RepositoryByReference[repository.Reference]
+		expectedBranch, branchExists := subject.WorktreeBranchByReference[repository.Reference]
+		if !exists || !branchExists || strings.TrimSpace(expectedRepository) == "" || repository.Branch != expectedBranch {
+			return releasegate.MatrixEvidence{}, fmt.Errorf("release Gatekeeper dependency QA provenance does not match")
+		}
+		observedBranches[repository.Reference] = repository.Branch
+	}
+	positions := make(map[string]int, len(observation.RepositoryExecutionOrder))
+	for index, reference := range observation.RepositoryExecutionOrder {
+		if _, selected := subject.RepositoryByReference[reference]; !selected {
+			return releasegate.MatrixEvidence{}, fmt.Errorf("release Gatekeeper dependency QA order is outside the publication subject")
+		}
+		positions[reference] = index
+	}
+	status := releasegate.StatusPassed
+	for reference := range subject.RepositoryByReference {
+		if _, exists := known[reference]; !exists {
+			return releasegate.MatrixEvidence{}, fmt.Errorf("release Gatekeeper dependency topology omits a published repository")
+		}
+		if _, exists := observedBranches[reference]; !exists {
+			return releasegate.MatrixEvidence{}, fmt.Errorf("release Gatekeeper dependency QA set is incomplete")
+		}
+		for _, dependency := range edges[reference] {
+			if _, selected := subject.RepositoryByReference[dependency]; selected && positions[dependency] >= positions[reference] {
+				status = releasegate.StatusFailed
+			}
+		}
+	}
+	seenWorkItems := make(map[uuid.UUID]struct{}, len(workItemDependencies))
+	for _, dependency := range workItemDependencies {
+		state := strings.TrimSpace(dependency.State)
+		if dependency.ID == uuid.Nil || dependency.WorkItemID != workItemID || dependency.DependsOnWorkItemID == uuid.Nil || dependency.DependsOnWorkItemID == workItemID || state == "" {
+			return releasegate.MatrixEvidence{}, fmt.Errorf("release Gatekeeper work-item dependency is invalid")
+		}
+		if _, duplicate := seenWorkItems[dependency.DependsOnWorkItemID]; duplicate {
+			return releasegate.MatrixEvidence{}, fmt.Errorf("release Gatekeeper work-item dependency is duplicated")
+		}
+		seenWorkItems[dependency.DependsOnWorkItemID] = struct{}{}
+		if state != deliveryworkflow.StateReleased {
+			status = releasegate.StatusFailed
+		}
+	}
+	return releasegate.MatrixEvidence{MatrixDigest: matrixDigest, Status: status}, nil
+}
+
+var frozenWorkspaceReferencePattern = regexp.MustCompile(`^workspace://[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
+
+func validFrozenRepositoryReference(reference string) bool {
+	if frozenWorkspaceReferencePattern.MatchString(reference) {
+		return true
+	}
+	canonical, err := projectvault.CanonicalGitHubReference(reference)
+	return err == nil && canonical == reference
+}
+
+func validateDependencyDAG(edges map[string][]string) error {
+	states := make(map[string]uint8, len(edges))
+	var visit func(string) error
+	visit = func(reference string) error {
+		switch states[reference] {
+		case 1:
+			return fmt.Errorf("release Gatekeeper frozen repository dependencies contain a cycle")
+		case 2:
+			return nil
+		}
+		states[reference] = 1
+		for _, dependency := range edges[reference] {
+			if err := visit(dependency); err != nil {
+				return err
+			}
+		}
+		states[reference] = 2
+		return nil
+	}
+	for reference := range edges {
+		if err := visit(reference); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type testAggregate struct {

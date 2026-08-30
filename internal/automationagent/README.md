@@ -75,6 +75,12 @@ reviewed worktree for their coordinated Gatekeeper matrix to exist. One failure
 fails the matrix; one missing identity keeps the evidence missing. The handoff
 still exposes only command identity and pass/fail, never command text or output.
 
+Dependency readiness is not a command identity. The control plane combines the
+frozen repository DAG with the exact QA execution order and current states of
+declared prerequisite work items. Changed dependencies must run before their
+consumers and every prerequisite task must already be released; model prose or
+a worker-authored dependency verdict cannot satisfy this gate.
+
 ## Continuous role-lane operation
 
 Each long-lived worker declares one exact identity with `ITBEM_AI_ROLE` and
