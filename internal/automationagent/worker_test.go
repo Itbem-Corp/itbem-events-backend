@@ -265,6 +265,8 @@ func TestCodeReviewPromptPinsBoundedStringArrayTypes(t *testing.T) {
 		"each contain at most 12 items",
 		`"review_scope":["authentication flow","regression tests"]`,
 		`"findings":[]`,
+		"any critical, high, or medium finding requires request_changes",
+		"Routine test-plan steps are not coverage gaps",
 	} {
 		if !strings.Contains(system, required) {
 			t.Fatalf("code review schema guidance lost %q: %s", required, system)
