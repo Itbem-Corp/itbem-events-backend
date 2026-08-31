@@ -305,14 +305,23 @@ func TestGitHubReviewCorrelationIsBoundedStableAndHeadSpecific(t *testing.T) {
 }
 
 func TestRetryCodeReviewIsNarrowAndPreservesTheFrozenInputBoundary(t *testing.T) {
-	failed := &models.AutomationTask{RequestedBy: "github-app-review", Operation: "code.review", Status: "failed", InputRef: "s3://itbem-ai-inputs-local/automation/inputs/original/input.json"}
+	digest := strings.Repeat("a", 64)
+	failed := &models.AutomationTask{ID: uuid.Must(uuid.NewV4()), JobID: uuid.Must(uuid.NewV4()), RequestedBy: "github-app-review", CorrelationID: "github-pr:subject:head", Operation: "code.review", Status: "failed", EvidenceSubjectDigest: digest, MaxCompletionTokens: 4096, InputRef: "s3://itbem-ai-inputs-local/automation/inputs/original/input.json"}
 	if !retryableCodeReviewTask(failed) {
 		t.Fatal("a failed frozen code review must be retryable")
 	}
+	retry, err := newCodeReviewRetryTask(failed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retry.ID == failed.ID || retry.JobID == failed.JobID || retry.Status != "queued" || retry.InputRef != failed.InputRef || retry.EvidenceSubjectDigest != digest || retry.CorrelationID != failed.CorrelationID || retry.RequestedBy != failed.RequestedBy || retry.MaxCompletionTokens != failed.MaxCompletionTokens {
+		t.Fatalf("retry did not preserve the immutable review boundary: %#v", retry)
+	}
 	for _, task := range []*models.AutomationTask{
-		{Operation: "code.review", Status: "completed", InputRef: failed.InputRef},
-		{Operation: "ai.chat", Status: "failed", InputRef: failed.InputRef},
-		{Operation: "code.review", Status: "failed"},
+		{Operation: "code.review", Status: "completed", InputRef: failed.InputRef, EvidenceSubjectDigest: digest},
+		{Operation: "ai.chat", Status: "failed", InputRef: failed.InputRef, EvidenceSubjectDigest: digest},
+		{Operation: "code.review", Status: "failed", EvidenceSubjectDigest: digest},
+		{Operation: "code.review", Status: "failed", InputRef: failed.InputRef, EvidenceSubjectDigest: "invalid"},
 	} {
 		if retryableCodeReviewTask(task) {
 			t.Fatalf("unexpected retry eligibility: %#v", task)

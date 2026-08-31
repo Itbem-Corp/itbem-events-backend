@@ -1073,18 +1073,11 @@ func RetryCodeReview(c echo.Context) error {
 		return utils.Error(c, http.StatusForbidden, "Forbidden", "You cannot retry this automation task")
 	}
 
-	newTaskID, newJobID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
-	retry := &models.AutomationTask{
-		ID:                  newTaskID,
-		JobID:               newJobID,
-		RequestedBy:         original.RequestedBy,
-		DeliveryWorkItemID:  original.DeliveryWorkItemID,
-		CorrelationID:       original.CorrelationID,
-		Operation:           original.Operation,
-		MaxCompletionTokens: original.MaxCompletionTokens,
-		InputRef:            original.InputRef,
-		Status:              "queued",
+	retry, err := newCodeReviewRetryTask(&original)
+	if err != nil {
+		return utils.Error(c, http.StatusConflict, "Automation retry rejected", "The failed review no longer has a valid immutable evidence boundary")
 	}
+	newTaskID, newJobID := retry.ID, retry.JobID
 	message := automationqueue.Message{SchemaVersion: 1, JobID: newJobID.String(), TenantCode: "itbem", CorrelationID: retry.CorrelationID, Type: "ai.local.process"}
 	message.Payload.TaskID, message.Payload.Operation, message.Payload.MaxCompletionTokens, message.Payload.InputRef, message.Payload.Attempt = newTaskID.String(), retry.Operation, retry.MaxCompletionTokens, retry.InputRef, 1
 	if err := configuration.DB.Transaction(func(tx *gorm.DB) error {
@@ -3133,7 +3126,29 @@ func mayCancelTask(c echo.Context, task *models.AutomationTask, requestedBy stri
 }
 
 func retryableCodeReviewTask(task *models.AutomationTask) bool {
-	return task != nil && task.Operation == "code.review" && task.Status == "failed" && strings.TrimSpace(task.InputRef) != ""
+	return task != nil && task.Operation == "code.review" && task.Status == "failed" && strings.TrimSpace(task.InputRef) != "" && artifactDigestPattern.MatchString(strings.ToLower(strings.TrimSpace(task.EvidenceSubjectDigest)))
+}
+
+// newCodeReviewRetryTask preserves the frozen input and its evidence subject.
+// A retry is a new billable execution, not a new review target; dropping the
+// subject digest would make an otherwise successful exact-SHA publication
+// unverifiable at callback time.
+func newCodeReviewRetryTask(original *models.AutomationTask) (*models.AutomationTask, error) {
+	if !retryableCodeReviewTask(original) {
+		return nil, fmt.Errorf("code review retry boundary is invalid")
+	}
+	return &models.AutomationTask{
+		ID:                    uuid.Must(uuid.NewV4()),
+		JobID:                 uuid.Must(uuid.NewV4()),
+		RequestedBy:           original.RequestedBy,
+		DeliveryWorkItemID:    original.DeliveryWorkItemID,
+		CorrelationID:         original.CorrelationID,
+		Operation:             original.Operation,
+		EvidenceSubjectDigest: strings.ToLower(strings.TrimSpace(original.EvidenceSubjectDigest)),
+		MaxCompletionTokens:   original.MaxCompletionTokens,
+		InputRef:              original.InputRef,
+		Status:                "queued",
+	}, nil
 }
 
 // mayRetryAutomationTask is intentionally no broader than cancellation. A
