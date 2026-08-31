@@ -37,6 +37,8 @@ go run ./cmd/api
 | `AWS_SESSION_TOKEN` | no | Standard temporary-session token when the selected credentials require one. Read directly by the SDK. |
 | `COGNITO_AWS_REGION` | **yes** | AWS region for Cognito (often same as `AWS_REGION`) |
 | `COGNITO_USER_POOL_ID` | **yes** | Cognito User Pool ID (`us-east-1_XXXXXXXXX`) |
+| `OIDC_ISSUER_URL` | local qualification only | Optional disposable JWT issuer override. It is accepted only when paired with `OIDC_JWKS_URL`, `ENV=local`, and the URL is absolute HTTP(S) loopback with no credentials, query, or fragment. Deployed environments fail closed when it is present. |
+| `OIDC_JWKS_URL` | local qualification only | JWKS endpoint paired with `OIDC_ISSUER_URL` under the same loopback-only restrictions. Production authentication always resolves to the configured Cognito pool. |
 | `COGNITO_CLIENT_ID` | no | **Deprecated backend alias** for a static AWS IAM access key. Used only when `COGNITO_CLIENT_SECRET` is also present. It is not the dashboard Cognito App Client ID. |
 | `COGNITO_CLIENT_SECRET` | no | **Deprecated backend alias** for a static AWS IAM secret key. Used only as a complete pair with `COGNITO_CLIENT_ID`. |
 | `COGNITO_ALLOWED_CLIENT_IDS` | production | Comma-separated Cognito App Client IDs whose signed ID tokens the API accepts. |
@@ -115,6 +117,22 @@ Both members must be non-empty. A missing or partial legacy pair is ignored and
 the standard chain remains active. Do not place a Cognito App Client ID or App
 Client secret in the backend aliases. Dashboard OAuth/App Client configuration
 belongs in `dashboard-ts/.env.local`.
+
+### Disposable local OIDC qualification
+
+`cmd/itbem-local-oidc` is an active, test-only fixture for authenticated local
+qualification. It requires `ENV=local`, binds to an explicit loopback address,
+uses a process-ephemeral RSA key, serves only health and JWKS endpoints, and
+writes one short-lived token to a caller-supplied private file. It does not
+serve tokens over HTTP. The backend accepts its issuer only when both OIDC
+variables pass the loopback checks above. The fixture, token and ready file are
+removed when qualification ends; none belongs in an environment file, Vault,
+CI artifact, task payload, log, or deployed runtime.
+
+Production and staging remain Cognito-backed. Setting either override outside
+`ENV=local`, setting only one member, or providing a non-loopback/credentialed
+URL makes authentication initialization fail and every protected request stays
+closed; it never falls back to the custom provider or silently bypasses Cognito.
 
 ## GitHub Actions secrets mapping
 

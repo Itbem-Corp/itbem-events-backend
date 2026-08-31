@@ -7,7 +7,10 @@ import (
 	"events-stocks/utils"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -93,8 +96,71 @@ func allowedClientIDs(cfg *models.Config) map[string]struct{} {
 	return result
 }
 
-func validateCognitoIdentityClaims(claims jwt.MapClaims, cfg *models.Config) (string, string, string, error) {
-	issuer := fmt.Sprintf("https://cognito-idp.%s.amazonaws.com/%s", cfg.CognitoAwsRegion, cfg.CognitoUserPoolId)
+type identityProviderEndpoints struct {
+	issuer  string
+	jwksURL string
+}
+
+func resolveIdentityProviderEndpoints(cfg *models.Config, environment string) (identityProviderEndpoints, error) {
+	if cfg == nil {
+		return identityProviderEndpoints{}, fmt.Errorf("authentication configuration is missing")
+	}
+	defaultIssuer := fmt.Sprintf("https://cognito-idp.%s.amazonaws.com/%s", cfg.CognitoAwsRegion, cfg.CognitoUserPoolId)
+	issuerOverride := strings.TrimSpace(cfg.OIDCIssuerURL)
+	jwksOverride := strings.TrimSpace(cfg.OIDCJWKSURL)
+	if issuerOverride == "" && jwksOverride == "" {
+		return identityProviderEndpoints{
+			issuer:  defaultIssuer,
+			jwksURL: defaultIssuer + "/.well-known/jwks.json",
+		}, nil
+	}
+	if issuerOverride == "" || jwksOverride == "" {
+		return identityProviderEndpoints{}, fmt.Errorf("OIDC_ISSUER_URL and OIDC_JWKS_URL must be configured together")
+	}
+	if !strings.EqualFold(strings.TrimSpace(environment), "local") {
+		return identityProviderEndpoints{}, fmt.Errorf("custom OIDC endpoints are restricted to ENV=local")
+	}
+	issuer, err := validateLoopbackIdentityURL("OIDC_ISSUER_URL", issuerOverride)
+	if err != nil {
+		return identityProviderEndpoints{}, err
+	}
+	jwksURL, err := validateLoopbackIdentityURL("OIDC_JWKS_URL", jwksOverride)
+	if err != nil {
+		return identityProviderEndpoints{}, err
+	}
+	return identityProviderEndpoints{
+		issuer:  strings.TrimRight(issuer, "/"),
+		jwksURL: jwksURL,
+	}, nil
+}
+
+func validateLoopbackIdentityURL(name, raw string) (string, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("%s must be an absolute loopback URL", name)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("%s must use http or https", name)
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("%s must not contain credentials, a query, or a fragment", name)
+	}
+	hostname := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	if hostname != "localhost" {
+		address := net.ParseIP(hostname)
+		if address == nil || !address.IsLoopback() {
+			return "", fmt.Errorf("%s must resolve explicitly to loopback", name)
+		}
+	}
+	return parsed.String(), nil
+}
+
+func validateIdentityClaims(claims jwt.MapClaims, cfg *models.Config) (string, string, string, error) {
+	endpoints, err := resolveIdentityProviderEndpoints(cfg, os.Getenv("ENV"))
+	if err != nil {
+		return "", "", "", err
+	}
+	issuer := endpoints.issuer
 	if claims["iss"] != issuer {
 		return "", "", "", fmt.Errorf("issuer does not match configured user pool")
 	}
@@ -120,15 +186,20 @@ func validateCognitoIdentityClaims(claims jwt.MapClaims, cfg *models.Config) (st
 }
 
 var (
-	jwks   *keyfunc.JWKS
-	jwksMu sync.RWMutex
+	jwks          *keyfunc.JWKS
+	jwksSourceURL string
+	jwksMu        sync.RWMutex
 )
 
 // initJWKS descarga las llaves públicas de AWS una sola vez y las cachea.
 // Goroutine-safe via double-checked locking.
 func initJWKS(cfg *models.Config) error {
+	endpoints, err := resolveIdentityProviderEndpoints(cfg, os.Getenv("ENV"))
+	if err != nil {
+		return err
+	}
 	jwksMu.RLock()
-	if jwks != nil {
+	if jwks != nil && jwksSourceURL == endpoints.jwksURL {
 		jwksMu.RUnlock()
 		return nil
 	}
@@ -136,11 +207,9 @@ func initJWKS(cfg *models.Config) error {
 
 	jwksMu.Lock()
 	defer jwksMu.Unlock()
-	if jwks != nil { // double-check after acquiring write lock
+	if jwks != nil && jwksSourceURL == endpoints.jwksURL { // double-check after acquiring write lock
 		return nil
 	}
-
-	jwksURL := fmt.Sprintf("https://cognito-idp.%s.amazonaws.com/%s/.well-known/jwks.json", cfg.CognitoAwsRegion, cfg.CognitoUserPoolId)
 
 	options := keyfunc.Options{
 		RefreshInterval:  time.Hour,
@@ -150,11 +219,15 @@ func initJWKS(cfg *models.Config) error {
 		},
 	}
 
-	var err error
-	jwks, err = keyfunc.Get(jwksURL, options)
+	loaded, err := keyfunc.Get(endpoints.jwksURL, options)
 	if err != nil {
-		return fmt.Errorf("failed to get JWKS from AWS: %w", err)
+		return fmt.Errorf("failed to get identity provider JWKS: %w", err)
 	}
+	if jwks != nil {
+		jwks.EndBackground()
+	}
+	jwks = loaded
+	jwksSourceURL = endpoints.jwksURL
 	return nil
 }
 
@@ -197,12 +270,6 @@ func Autenticacion(cfg *models.Config) echo.MiddlewareFunc {
 				return utils.Error(c, http.StatusUnauthorized, "Token corrupto", "No se pudieron leer los claims")
 			}
 
-			// Validamos que sea de nuestro User Pool (Issuer)
-			issuer := fmt.Sprintf("https://cognito-idp.%s.amazonaws.com/%s", cfg.CognitoAwsRegion, cfg.CognitoUserPoolId)
-			if claims["iss"] != issuer {
-				return utils.Error(c, http.StatusUnauthorized, "Fuente no confiable", "El issuer del token no coincide con el pool configurado")
-			}
-
 			// Obtenemos el ID único de usuario (SUB)
 			_, ok = claims["sub"].(string)
 			if !ok {
@@ -210,7 +277,7 @@ func Autenticacion(cfg *models.Config) echo.MiddlewareFunc {
 			}
 
 			// Inyectamos datos al contexto para usarlos en los controladores
-			validatedSub, audience, tenantCode, validationErr := validateCognitoIdentityClaims(claims, cfg)
+			validatedSub, audience, tenantCode, validationErr := validateIdentityClaims(claims, cfg)
 			if validationErr != nil {
 				return utils.Error(c, http.StatusUnauthorized, "Token no confiable", validationErr.Error())
 			}

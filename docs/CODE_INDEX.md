@@ -29,6 +29,7 @@ itbem-events-backend/
 | File | Purpose |
 |------|---------|
 | `cmd/api/main.go` | Small executable entrypoint |
+| `cmd/itbem-local-oidc/main.go` | Disposable loopback-only signed identity fixture for authenticated local qualification |
 | `internal/app/app.go` | startup, middleware, dependency wiring, graceful shutdown |
 | `internal/authz/authz.go` | Shared user/event/client/resource authorization helpers |
 | `routes/routes.go` | All API routes — `ConfigurarRutas` |
@@ -38,6 +39,7 @@ itbem-events-backend/
 | `configuration/redis.go` | Redis connection |
 | `docs/agent-platform/DOMAIN_AND_THREAT_MODEL.md` | Multi-agent invariants, role separation, gates and threats |
 | `docs/agent-platform/QUALIFICATION.md` | Executable local, staging, production and recovery qualification gates |
+| `deploy/staging/control-plane.compose.yml` | Digest-pinned, tmpfs-only PostgreSQL/Valkey/Moto dependencies for isolated authenticated qualification |
 
 ## Models (`models/*.go`)
 
@@ -186,7 +188,7 @@ itbem-events-backend/
 
 | File | Purpose |
 |------|---------|
-| `middleware/token/token_middleware.go` | JWT validation (Cognito) |
+| `middleware/token/token_middleware.go` | JWT validation (Cognito in deployed environments; paired loopback issuer override for isolated local qualification only) |
 | `middleware/redis/redis_middleware.go` | Auto cache loading |
 
 ## Seeds (`seeds/`)

@@ -20,7 +20,7 @@ func TestValidateCognitoIdentityClaimsBindsAudienceToTenant(t *testing.T) {
 		"sub":       "user-123",
 	}
 
-	subject, audience, tenant, err := validateCognitoIdentityClaims(claims, cfg)
+	subject, audience, tenant, err := validateIdentityClaims(claims, cfg)
 	if err != nil || subject != "user-123" || audience != "client-itbem" || tenant != "itbem" {
 		t.Fatalf("unexpected result: sub=%q aud=%q tenant=%q err=%v", subject, audience, tenant, err)
 	}
@@ -40,7 +40,7 @@ func TestValidateCognitoIdentityClaimsRejectsUnsafeTokens(t *testing.T) {
 	}
 	for name, claims := range tests {
 		t.Run(name, func(t *testing.T) {
-			if _, _, _, err := validateCognitoIdentityClaims(claims, cfg); err == nil {
+			if _, _, _, err := validateIdentityClaims(claims, cfg); err == nil {
 				t.Fatal("expected token to be rejected")
 			}
 		})

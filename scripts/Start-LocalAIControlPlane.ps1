@@ -5,6 +5,7 @@ param(
     [string]$DatabaseHost = 'localhost',
     [string]$DatabasePort = '5432',
     [string]$DatabaseUser = 'postgres',
+    [string]$RedisHost = 'localhost:6379',
     # Prefer the inherited process setting so a local database password never
     # needs to appear in a command line or PowerShell history. Passing this
     # parameter remains supported for explicit, one-off development setups.
@@ -13,6 +14,11 @@ param(
 	# explicitly isolated local PostgreSQL container (for example a dedicated
 	# integration database on another port); it never changes that container.
 	[string]$DatabaseProbeContainer = '',
+    # Windows hosts may run the disposable container in a WSL Docker Engine
+    # while Docker Desktop is unavailable. This changes only the read-only
+    # probe transport; the API still connects through the loopback port.
+    [switch]$DatabaseProbeInWSL,
+    [string]$WSLDistribution = 'Ubuntu',
     [Alias('LocalStackEndpoint')]
     [string]$AwsEmulatorEndpoint = 'http://localhost:4566',
     # Deliberately opt-in and local-only. The API ignores this setting outside
@@ -22,10 +28,23 @@ param(
     # Strict validation is the default. Use this only when the host clock is
     # known to be skewed relative to Cognito; it is bounded and local-only.
     [ValidateRange(0, 86400)]
-    [int]$JwtClockSkewSeconds = 0
+    [int]$JwtClockSkewSeconds = 0,
+    # Optional, cost-free identity fixture for isolated qualification. The API
+    # accepts these only with ENV=local and loopback URLs; production continues
+    # to derive its issuer and JWKS endpoint from Cognito.
+    [string]$OIDCIssuerURL = '',
+    [string]$OIDCJWKSURL = '',
+    [string]$OIDCAudience = 'local-itbem'
 )
 
 $ErrorActionPreference = 'Stop'
+
+function Test-LoopbackHostName([string]$HostName) {
+    if ($HostName.Trim().ToLowerInvariant() -eq 'localhost') { return $true }
+    $address = $null
+    if (-not [Net.IPAddress]::TryParse($HostName.Trim('[', ']'), [ref]$address)) { return $false }
+    return [Net.IPAddress]::IsLoopback($address)
+}
 
 if ([string]::IsNullOrWhiteSpace($DatabasePassword)) {
     $DatabasePassword = [Environment]::GetEnvironmentVariable('ITBEM_LOCAL_DB_PASSWORD', 'Process')
@@ -38,8 +57,29 @@ if ([string]::IsNullOrWhiteSpace($DatabasePassword)) {
 }
 
 $endpointUri = [Uri]$AwsEmulatorEndpoint
-if ($endpointUri.Scheme -ne 'http' -or $endpointUri.Host -notin @('localhost', '127.0.0.1', '::1')) {
+if ($endpointUri.Scheme -ne 'http' -or -not (Test-LoopbackHostName $endpointUri.Host)) {
     throw 'AwsEmulatorEndpoint must be an HTTP loopback endpoint.'
+}
+
+$hasOIDCIssuer = -not [string]::IsNullOrWhiteSpace($OIDCIssuerURL)
+$hasOIDCJWKS = -not [string]::IsNullOrWhiteSpace($OIDCJWKSURL)
+if ($hasOIDCIssuer -ne $hasOIDCJWKS) {
+    throw 'OIDCIssuerURL and OIDCJWKSURL must be configured together.'
+}
+if ($hasOIDCIssuer) {
+    foreach ($candidate in @($OIDCIssuerURL, $OIDCJWKSURL)) {
+        $candidateUri = [Uri]$candidate
+        if ($candidateUri.Scheme -notin @('http', 'https') -or -not (Test-LoopbackHostName $candidateUri.Host) -or -not [string]::IsNullOrWhiteSpace($candidateUri.UserInfo) -or -not [string]::IsNullOrWhiteSpace($candidateUri.Query) -or -not [string]::IsNullOrWhiteSpace($candidateUri.Fragment)) {
+            throw 'Local OIDC endpoints must be absolute loopback HTTP(S) URLs without credentials, query, or fragment.'
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($OIDCAudience)) {
+        throw 'OIDCAudience is required when local OIDC endpoints are configured.'
+    }
+    $redisUri = [Uri]("tcp://$RedisHost")
+    if (-not (Test-LoopbackHostName $DatabaseHost) -or -not (Test-LoopbackHostName $redisUri.Host) -or $redisUri.Port -lt 1) {
+        throw 'Local OIDC qualification requires loopback PostgreSQL and Valkey endpoints.'
+    }
 }
 
 function Read-EnvironmentFile([string]$Path) {
@@ -63,7 +103,7 @@ function Require-Value([hashtable]$Values, [string]$Name) {
     return $Values[$Name]
 }
 
-function Test-LocalPostgreSQL([string]$ComposeFile, [string]$DatabaseUser, [string]$DatabaseName, [string]$DatabaseProbeContainer) {
+function Test-LocalPostgreSQL([string]$ComposeFile, [string]$DatabaseUser, [string]$DatabaseName, [string]$DatabaseProbeContainer, [bool]$DatabaseProbeInWSL, [string]$WSLDistribution) {
     # Docker's health check only proves that the postmaster process is alive.
     # The control plane needs a real catalog query before it starts, otherwise a
     # corrupted local cluster becomes an opaque "connection" error in the UI.
@@ -74,6 +114,8 @@ function Test-LocalPostgreSQL([string]$ComposeFile, [string]$DatabaseUser, [stri
     try {
 		if ([string]::IsNullOrWhiteSpace($DatabaseProbeContainer)) {
 			$queryOutput = @(& docker compose -f $ComposeFile exec -T postgres psql -U $DatabaseUser -d $DatabaseName -v ON_ERROR_STOP=1 -Atqc 'SELECT 1' 2>&1)
+		} elseif ($DatabaseProbeInWSL) {
+			$queryOutput = @(& wsl.exe -d $WSLDistribution -- docker exec $DatabaseProbeContainer psql -U $DatabaseUser -d $DatabaseName -v ON_ERROR_STOP=1 -Atqc 'SELECT 1' 2>&1)
 		} else {
 			$queryOutput = @(& docker exec $DatabaseProbeContainer psql -U $DatabaseUser -d $DatabaseName -v ON_ERROR_STOP=1 -Atqc 'SELECT 1' 2>&1)
 		}
@@ -156,8 +198,7 @@ $composeFile = Join-Path $repositoryRoot 'docker-compose.yml'
 if (-not (Test-Path -LiteralPath $composeFile -PathType Leaf)) {
     throw "Local Docker Compose file was not found: $composeFile"
 }
-Test-LocalPostgreSQL $composeFile $DatabaseUser $DatabaseName $DatabaseProbeContainer
-$dashboardSettings = Read-EnvironmentFile (Join-Path $workspaceRoot 'dashboard-ts/.env.local')
+Test-LocalPostgreSQL $composeFile $DatabaseUser $DatabaseName $DatabaseProbeContainer $DatabaseProbeInWSL.IsPresent $WSLDistribution
 # The control plane owns remote context synchronization and publication grants,
 # while the local agent owns model execution. Keep their development setup
 # aligned without loading provider credentials into the API process. The three
@@ -187,11 +228,23 @@ if (Test-Path -LiteralPath $agentSettingsPath -PathType Leaf) {
 	$env:AUTOMATION_BUDGET_PROVIDER = $budgetProvider.Trim()
 	$env:AUTOMATION_BUDGET_MODEL = $budgetModel.Trim()
 }
-$cognitoRegion = Require-Value $dashboardSettings 'COGNITO_REGION'
-$userPoolID = Require-Value $dashboardSettings 'COGNITO_USER_POOL_ID'
-$eventiappClientID = Require-Value $dashboardSettings 'COGNITO_EVENTIAPP_CLIENT_ID'
-$itbemClientID = Require-Value $dashboardSettings 'COGNITO_ITBEM_CLIENT_ID'
-$cafettonHouseClientID = Require-Value $dashboardSettings 'COGNITO_CAFETTONHOUSE_CLIENT_ID'
+if ($hasOIDCIssuer) {
+    # These values satisfy the shared Config shape only. The local-only token
+    # middleware uses the validated loopback issuer/JWKS pair instead and no
+    # Cognito call is made for authentication.
+    $cognitoRegion = 'us-east-1'
+    $userPoolID = 'local-qualification'
+    $eventiappClientID = ''
+    $itbemClientID = ''
+    $cafettonHouseClientID = ''
+} else {
+    $dashboardSettings = Read-EnvironmentFile (Join-Path $workspaceRoot 'dashboard-ts/.env.local')
+    $cognitoRegion = Require-Value $dashboardSettings 'COGNITO_REGION'
+    $userPoolID = Require-Value $dashboardSettings 'COGNITO_USER_POOL_ID'
+    $eventiappClientID = Require-Value $dashboardSettings 'COGNITO_EVENTIAPP_CLIENT_ID'
+    $itbemClientID = Require-Value $dashboardSettings 'COGNITO_ITBEM_CLIENT_ID'
+    $cafettonHouseClientID = Require-Value $dashboardSettings 'COGNITO_CAFETTONHOUSE_CLIENT_ID'
+}
 
 # Local emulator only. These disposable credentials never leave loopback.
 $awsCredentialEnvironment = @{}
@@ -250,8 +303,17 @@ $env:PORT = "$Port"
 $env:AWS_REGION = $cognitoRegion
 $env:COGNITO_AWS_REGION = $cognitoRegion
 $env:COGNITO_USER_POOL_ID = $userPoolID
-$env:COGNITO_ALLOWED_CLIENT_IDS = "$eventiappClientID=eventiapp,$itbemClientID=itbem,$cafettonHouseClientID=cafettonhouse"
-$env:COGNITO_TENANT_CLIENT_MAP = $env:COGNITO_ALLOWED_CLIENT_IDS
+if ($hasOIDCIssuer) {
+    $env:OIDC_ISSUER_URL = $OIDCIssuerURL.TrimEnd('/')
+    $env:OIDC_JWKS_URL = $OIDCJWKSURL
+    $env:COGNITO_ALLOWED_CLIENT_IDS = $OIDCAudience.Trim()
+    $env:COGNITO_TENANT_CLIENT_MAP = "$($OIDCAudience.Trim())=itbem"
+} else {
+    Remove-Item -Path Env:OIDC_ISSUER_URL -ErrorAction SilentlyContinue
+    Remove-Item -Path Env:OIDC_JWKS_URL -ErrorAction SilentlyContinue
+    $env:COGNITO_ALLOWED_CLIENT_IDS = "$eventiappClientID=eventiapp,$itbemClientID=itbem,$cafettonHouseClientID=cafettonhouse"
+    $env:COGNITO_TENANT_CLIENT_MAP = $env:COGNITO_ALLOWED_CLIENT_IDS
+}
 $env:TENANT_HOST_MAP = 'localhost=itbem'
 $env:AWS_BUCKET_NAME = $inputBucket
 $env:TENANT_BUCKET_MAP = "itbem=$inputBucket"
@@ -267,7 +329,7 @@ $env:DB_NAME = $DatabaseName
 $env:DB_PORT = $DatabasePort
 $env:DB_TIMEZONE = 'America/Mexico_City'
 $env:DB_LOG_LEVEL = 'warn'
-$env:REDIS_HOST = 'localhost:6379'
+$env:REDIS_HOST = $RedisHost
 $env:REDIS_DB = '0'
 $env:REDIS_TLS = 'false'
 $env:GOOGLE_CLIENT_ID = 'local-not-configured'
