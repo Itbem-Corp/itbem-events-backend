@@ -498,6 +498,14 @@ func (p *httpProviderClient) payload(messages []Message, maxTokens int) (map[str
 	payload := map[string]any{"model": p.config.Model, "messages": messages, "max_completion_tokens": maxTokens, "temperature": 0.2}
 	if p.config.Provider == ProviderMiniMax {
 		payload["reasoning_split"] = true
+		if strings.EqualFold(strings.TrimSpace(p.config.Model), "MiniMax-M3") {
+			// M3 defaults to adaptive thinking, whose private reasoning consumes
+			// max_completion_tokens. Delivery calls require a compact, schema-bound
+			// answer in one turn; the official direct mode avoids exhausting the
+			// entire allowance before content is emitted. Deterministic parsers and
+			// exact-SHA gates remain the authority after inference.
+			payload["thinking"] = map[string]any{"type": "disabled"}
+		}
 	}
 	return payload, map[string]string{"Authorization": "Bearer " + p.config.secret, "Content-Type": "application/json"}
 }

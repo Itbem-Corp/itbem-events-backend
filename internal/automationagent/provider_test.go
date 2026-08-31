@@ -70,7 +70,8 @@ func TestProviderClientUsesMiniMaxContractWithoutLeakingSecrets(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Fatal(err)
 		}
-		if payload["model"] != "MiniMax-M3" || payload["reasoning_split"] != true || payload["thinking"] != nil || payload["max_completion_tokens"] != float64(1) {
+		thinking, _ := payload["thinking"].(map[string]any)
+		if payload["model"] != "MiniMax-M3" || payload["reasoning_split"] != true || thinking["type"] != "disabled" || payload["max_completion_tokens"] != float64(1) {
 			t.Fatal("unexpected MiniMax payload")
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": "response", "model": "MiniMax-M3", "usage": map[string]any{"total_tokens": 2}, "input_sensitive": false, "output_sensitive": false, "base_resp": map[string]any{"status_code": 0}, "choices": []any{map[string]any{"finish_reason": "stop", "message": map[string]any{"content": "ok"}}}})
@@ -203,8 +204,17 @@ func TestProviderAuditRequestMatchesCredentialFreeWirePayload(t *testing.T) {
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload["model"] != "MiniMax-M3" || payload["reasoning_split"] != true || payload["max_completion_tokens"] != float64(miniMaxM3CompletionLimit) {
+	thinking, _ := payload["thinking"].(map[string]any)
+	if payload["model"] != "MiniMax-M3" || payload["reasoning_split"] != true || thinking["type"] != "disabled" || payload["max_completion_tokens"] != float64(miniMaxM3CompletionLimit) {
 		t.Fatalf("audit payload does not match the bounded MiniMax wire contract: %#v", payload)
+	}
+}
+
+func TestMiniMaxLegacyModelDoesNotReceiveUnsupportedThinkingControl(t *testing.T) {
+	client := &httpProviderClient{config: ProviderConfig{Provider: ProviderMiniMax, Model: "MiniMax-M2.7", secret: "test-key"}}
+	payload, _ := client.payload([]Message{{Role: "user", Content: "work"}}, 1)
+	if _, exists := payload["thinking"]; exists {
+		t.Fatalf("M2 model received M3-only thinking control: %#v", payload)
 	}
 }
 
