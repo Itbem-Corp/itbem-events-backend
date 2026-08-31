@@ -155,6 +155,17 @@ func TestDescribeWorkspaceRedactsSensitiveValuesEmbeddedInEligibleFiles(t *testi
 	}
 }
 
+func TestRedactSourceExcerptPreservesFormatVerbsWithoutLeakingCredentials(t *testing.T) {
+	content := "return fmt.Errorf(\"mint repository-scoped Reviewer token: %w\", err)\nAPI_KEY=must-not-leak\n"
+	got, redactions := RedactSourceExcerpt(content)
+	if !strings.Contains(got, `token: %w`) {
+		t.Fatalf("source redaction corrupted a format verb: %q", got)
+	}
+	if strings.Contains(got, "must-not-leak") || redactions != 1 {
+		t.Fatalf("source redaction failed to remove the actual credential: %q (%d redactions)", got, redactions)
+	}
+}
+
 func TestDescribeWorkspacePrioritizesScopedSourceOverPreferredDocuments(t *testing.T) {
 	root := t.TempDir()
 	for path, content := range map[string]string{

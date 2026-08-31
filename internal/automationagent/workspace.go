@@ -534,6 +534,7 @@ var (
 	workspaceGitHubToken         = regexp.MustCompile(`\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{20,}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b`)
 	workspaceAWSAccessKey        = regexp.MustCompile(`\b(?:AKIA|ASIA)[A-Z0-9]{16}\b`)
 	workspaceSlackToken          = regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}\b`)
+	workspaceFormatVerb          = regexp.MustCompile(`^%[A-Za-z]$`)
 	// A workspace harness must never use command arguments as a secret
 	// transport. The runner config is operator-owned, but rejecting common
 	// secret-shaped flags here prevents accidental persistence and makes the
@@ -556,7 +557,18 @@ func redactWorkspaceExcerpt(content string) (string, int) {
 	content = replace(workspacePEMBlock, content, func(_ []string) string { return "<redacted private key>" })
 	content = replace(workspaceSensitiveJSONValue, content, func(parts []string) string { return parts[1] + "<redacted>" + parts[2] })
 	content = replace(workspaceBearerCredential, content, func(parts []string) string { return parts[1] + "<redacted>" })
-	content = replace(workspaceSensitiveAssignment, content, func(parts []string) string { return parts[1] + "<redacted>" })
+	content = workspaceSensitiveAssignment.ReplaceAllStringFunc(content, func(match string) string {
+		parts := workspaceSensitiveAssignment.FindStringSubmatch(match)
+		value := strings.TrimSpace(strings.TrimPrefix(match, parts[1]))
+		if workspaceFormatVerb.MatchString(value) {
+			// A label such as `token: %w` in source code describes an error and
+			// does not carry a credential. Preserving the format verb is important:
+			// replacing it changes program semantics and can fabricate findings.
+			return match
+		}
+		redactions++
+		return parts[1] + "<redacted>"
+	})
 	for _, pattern := range []*regexp.Regexp{workspaceURLCredential, workspaceGitHubToken, workspaceAWSAccessKey, workspaceSlackToken} {
 		content = replace(pattern, content, func(parts []string) string {
 			if len(parts) == 3 { // URL credentials retain a valid structural delimiter.
