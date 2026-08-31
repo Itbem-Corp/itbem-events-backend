@@ -248,6 +248,36 @@ func TestWorkerPersistsConservativeCoverageSignalForCodeReview(t *testing.T) {
 	}
 }
 
+func TestCodeReviewPromptPinsBoundedStringArrayTypes(t *testing.T) {
+	messages, err := buildTaskMessages("code.review", TaskInput{
+		Prompt:   "Review the frozen pull request.",
+		Delivery: json.RawMessage(validCodeReviewInput()),
+	}, func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("unexpected review message count: %d", len(messages))
+	}
+	system := messages[0].Content
+	for _, required := range []string{
+		"review_scope, test_plan, and coverage_gaps are arrays of plain JSON strings only",
+		"each contain at most 12 items",
+		`"review_scope":["authentication flow","regression tests"]`,
+		`"findings":[]`,
+		"any critical, high, or medium finding requires request_changes",
+		"Routine test-plan steps are not coverage gaps",
+		"fully contained in one supplied changed_line_ranges entry",
+	} {
+		if !strings.Contains(system, required) {
+			t.Fatalf("code review schema guidance lost %q: %s", required, system)
+		}
+	}
+	if !strings.Contains(messages[1].Content, `changed_line_ranges=[{"file":"controllers/orders.go","side":"base","start":40,"end":41}`) {
+		t.Fatalf("code review prompt lost the exact changed-line boundary: %s", messages[1].Content)
+	}
+}
+
 func TestWorkerRetainsInvalidDeliveryPlanForAuthorizedInspectionAndLedger(t *testing.T) {
 	input, _ := json.Marshal(TaskInput{Prompt: "Plan the scoped change", Delivery: json.RawMessage(`{"work_item":{"id":"task"}}`)})
 	store, callback := &fakeStore{input: input}, &fakeCallback{}

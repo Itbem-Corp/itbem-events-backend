@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$LocalStackEndpoint = 'http://localhost:4566',
+	[Alias('LocalStackEndpoint')]
+	[string]$AwsEmulatorEndpoint = 'http://localhost:4566',
     [string]$ApiBaseURL = 'http://localhost:8081',
     # Empty means: derive the region from the local queue URL. This keeps the
     # isolated worker aligned with the control plane even when Cognito/local
@@ -22,9 +23,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$endpoint = [Uri]$LocalStackEndpoint
+$endpoint = [Uri]$AwsEmulatorEndpoint
 if ($endpoint.Scheme -ne 'http' -or $endpoint.Host -notin @('localhost', '127.0.0.1', '::1')) {
-    throw 'LocalStackEndpoint must be an HTTP loopback endpoint.'
+    throw 'AwsEmulatorEndpoint must be an HTTP loopback endpoint.'
 }
 
 $backendRoot = Split-Path -Parent $PSScriptRoot
@@ -184,7 +185,7 @@ $env:AWS_SECRET_ACCESS_KEY = 'test'
 $AWSRegion = Resolve-LocalAWSRegion $AWSRegion $backendRoot
 $env:AWS_REGION = $AWSRegion
 $env:AWS_DEFAULT_REGION = $AWSRegion
-$queueLookup = & aws sqs get-queue-url --endpoint-url $LocalStackEndpoint --queue-name 'itbem-ai-local' --query QueueUrl --output text
+$queueLookup = & aws sqs get-queue-url --endpoint-url $AwsEmulatorEndpoint --queue-name 'itbem-ai-local' --query QueueUrl --output text
 $queueURL = ([string]$queueLookup).Trim()
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($queueURL)) {
     throw 'The local ITBEM automation queue is unavailable. Start the local control plane first.'
@@ -205,8 +206,8 @@ if ($queueRegion -and $AWSRegion -ne $queueRegion) {
 }
 
 $env:ITBEM_AI_QUEUE_URL = $queueURL
-$env:ITBEM_AI_SQS_ENDPOINT = $LocalStackEndpoint
-$env:ITBEM_AI_S3_ENDPOINT = $LocalStackEndpoint
+$env:ITBEM_AI_SQS_ENDPOINT = $AwsEmulatorEndpoint
+$env:ITBEM_AI_S3_ENDPOINT = $AwsEmulatorEndpoint
 $env:ITBEM_AI_INPUT_BUCKET = 'itbem-ai-inputs-local'
 $env:ITBEM_AI_OUTPUT_BUCKET = 'itbem-ai-outputs-local'
 $env:ITBEM_API_BASE_URL = $ApiBaseURL.TrimEnd('/')

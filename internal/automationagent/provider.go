@@ -23,8 +23,11 @@ const (
 	MinCompletionTokens       = 1
 	MaxCompletionTokens       = 131072
 	miniMaxM2CompletionLimit  = 2048
-	miniMaxM3CompletionLimit  = 8192
+	miniMaxM3CompletionLimit  = 32768
 	maxProviderResponseSize   = 8 << 20
+	providerRequestMinTimeout = 30 * time.Second
+	providerRequestTimeout    = 10 * time.Minute
+	providerRequestMaxTimeout = 15 * time.Minute
 	providerRetryMinDelay     = 30 * time.Second
 	providerRetryDefaultDelay = 2 * time.Minute
 	providerRetryMaxDelay     = 15 * time.Minute
@@ -72,10 +75,11 @@ type RetryableError struct {
 func (e *RetryableError) Error() string { return e.Message }
 
 type ProviderConfig struct {
-	Provider Provider
-	Model    string
-	Endpoint string
-	secret   string
+	Provider       Provider
+	Model          string
+	Endpoint       string
+	secret         string
+	requestTimeout time.Duration
 }
 
 func (c ProviderConfig) SecretConfigured() bool { return c.secret != "" }
@@ -97,11 +101,16 @@ func LoadProviderConfig(lookup func(string) string) (ProviderConfig, error) {
 	if !ok {
 		return ProviderConfig{}, fmt.Errorf("ITBEM_AI_PROVIDER must be minimax, openai, or anthropic")
 	}
+	requestTimeout, err := configuredProviderRequestTimeout(lookup("ITBEM_AI_PROVIDER_TIMEOUT_SECONDS"))
+	if err != nil {
+		return ProviderConfig{}, err
+	}
 	config := ProviderConfig{
-		Provider: provider,
-		Model:    firstNonEmpty(lookup(value.modelName), value.model),
-		Endpoint: firstNonEmpty(lookup(value.endpointName), value.endpoint),
-		secret:   strings.TrimSpace(lookup(value.secret)),
+		Provider:       provider,
+		Model:          firstNonEmpty(lookup(value.modelName), value.model),
+		Endpoint:       firstNonEmpty(lookup(value.endpointName), value.endpoint),
+		secret:         strings.TrimSpace(lookup(value.secret)),
+		requestTimeout: requestTimeout,
 	}
 	if config.secret == "" {
 		return ProviderConfig{}, fmt.Errorf("%s is required for the local %s provider", value.secret, provider)
@@ -113,6 +122,21 @@ func LoadProviderConfig(lookup func(string) string) (ProviderConfig, error) {
 		return ProviderConfig{}, err
 	}
 	return config, nil
+}
+
+func configuredProviderRequestTimeout(raw string) (time.Duration, error) {
+	if strings.TrimSpace(raw) == "" {
+		return providerRequestTimeout, nil
+	}
+	seconds, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return 0, fmt.Errorf("ITBEM_AI_PROVIDER_TIMEOUT_SECONDS must be an integer")
+	}
+	timeout := time.Duration(seconds) * time.Second
+	if timeout < providerRequestMinTimeout || timeout > providerRequestMaxTimeout {
+		return 0, fmt.Errorf("ITBEM_AI_PROVIDER_TIMEOUT_SECONDS must be between %d and %d", int(providerRequestMinTimeout/time.Second), int(providerRequestMaxTimeout/time.Second))
+	}
+	return timeout, nil
 }
 
 func firstNonEmpty(value, fallback string) string {
@@ -158,7 +182,11 @@ type httpProviderClient struct {
 
 func NewProviderClient(config ProviderConfig, client *http.Client) ProviderClient {
 	if client == nil {
-		client = &http.Client{Timeout: 120 * time.Second}
+		timeout := config.requestTimeout
+		if timeout < providerRequestMinTimeout || timeout > providerRequestMaxTimeout {
+			timeout = providerRequestTimeout
+		}
+		client = &http.Client{Timeout: timeout}
 	}
 	return &httpProviderClient{config: config, client: client}
 }

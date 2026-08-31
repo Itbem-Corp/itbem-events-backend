@@ -16,8 +16,32 @@ func TestProviderConfigDefaultsToMiniMaxM3AndRejectsUnsafeEndpoints(t *testing.T
 		}
 		return ""
 	})
-	if err != nil || config.Provider != ProviderMiniMax || config.Model != "MiniMax-M3" {
+	if err != nil || config.Provider != ProviderMiniMax || config.Model != "MiniMax-M3" || config.requestTimeout != providerRequestTimeout {
 		t.Fatalf("unexpected config: %#v, %v", config, err)
+	}
+	configured, err := LoadProviderConfig(func(name string) string {
+		if name == "MINIMAX_API_KEY" {
+			return "test-key"
+		}
+		if name == "ITBEM_AI_PROVIDER_TIMEOUT_SECONDS" {
+			return "300"
+		}
+		return ""
+	})
+	if err != nil || configured.requestTimeout != 5*time.Minute {
+		t.Fatalf("unexpected configured provider timeout: %#v, %v", configured, err)
+	}
+	_, err = LoadProviderConfig(func(name string) string {
+		if name == "MINIMAX_API_KEY" {
+			return "test-key"
+		}
+		if name == "ITBEM_AI_PROVIDER_TIMEOUT_SECONDS" {
+			return "901"
+		}
+		return ""
+	})
+	if err == nil {
+		t.Fatal("expected excessive provider timeout to be rejected")
 	}
 	_, err = LoadProviderConfig(func(name string) string {
 		if name == "OPENAI_API_KEY" {

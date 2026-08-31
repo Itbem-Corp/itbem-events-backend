@@ -28,15 +28,21 @@ it validates the API, media processors, and durable workers. Use
 
 ### AI control plane local
 
-For the ITBEM-only delivery flow, start LocalStack, Postgres and Valkey first,
+For the ITBEM-only delivery flow, start the loopback AWS emulator, Postgres and Valkey first,
 then run the isolated control plane. It creates only local S3 buckets and a
 local SQS queue, uses `events_ai_local` by default, and reads Cognito *IDs*
 from the dashboard's existing `.env.local` without writing a new environment
 file:
 
 ```powershell
+docker compose -f deploy/staging/aws-emulator.compose.yml up -d --wait
 .\scripts\Start-LocalAIControlPlane.ps1
 ```
+
+The emulator is free, test-only Moto pinned to an immutable image digest and
+binds only to loopback. Production continues to use native AWS S3 and SQS.
+`-AwsEmulatorEndpoint` selects another loopback port when needed; the older
+`-LocalStackEndpoint` name remains a compatibility alias.
 
 For a brand-new isolated database, the first authenticated platform
 administrator can be provisioned without storing an IAM credential or a

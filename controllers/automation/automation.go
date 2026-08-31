@@ -199,7 +199,11 @@ func GitHubPullRequestReviewWebhook(c echo.Context) error {
 		return utils.Error(c, http.StatusServiceUnavailable, "GitHub review unavailable", "")
 	}
 	jobID := uuid.NewV5(uuid.NamespaceURL, "itbem/github-review-job/"+identity)
-	task := &models.AutomationTask{ID: taskID, JobID: jobID, RequestedBy: "github-app-review", CorrelationID: "github-pr:" + identity, Operation: "code.review", EvidenceSubjectDigest: reviewSubject, MaxCompletionTokens: automationagent.CompletionTokensForOperation("code.review"), InputRef: "s3://" + cfg.AutomationInputBucket + "/" + inputKey, Status: "queued"}
+	correlationID, err := githubReviewCorrelationID(repository, event.Number, event.PullRequest.Head.SHA)
+	if err != nil {
+		return utils.Error(c, http.StatusConflict, "GitHub review rejected", "The remote review target is invalid")
+	}
+	task := &models.AutomationTask{ID: taskID, JobID: jobID, RequestedBy: "github-app-review", CorrelationID: correlationID, Operation: "code.review", EvidenceSubjectDigest: reviewSubject, MaxCompletionTokens: automationagent.CompletionTokensForOperation("code.review"), InputRef: "s3://" + cfg.AutomationInputBucket + "/" + inputKey, Status: "queued"}
 	message := automationqueue.Message{SchemaVersion: 1, JobID: jobID.String(), TenantCode: "itbem", CorrelationID: task.CorrelationID, Type: "ai.local.process"}
 	message.Payload.TaskID, message.Payload.Operation, message.Payload.MaxCompletionTokens, message.Payload.InputRef, message.Payload.Attempt = taskID.String(), task.Operation, task.MaxCompletionTokens, task.InputRef, 1
 	created := false
@@ -210,7 +214,7 @@ func GitHubPullRequestReviewWebhook(c echo.Context) error {
 		// operator action. Queued tasks, however, cannot provide useful feedback
 		// after their head SHA is stale, so release their budget before inserting
 		// the immutable review for the new commit.
-		if err := supersedeQueuedGitHubReviews(tx, prIdentity, task.ID, time.Now().UTC()); err != nil {
+		if err := supersedeQueuedGitHubReviews(tx, repository, event.Number, task.ID, time.Now().UTC()); err != nil {
 			return err
 		}
 		result := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(task)
@@ -245,12 +249,18 @@ func githubReviewTaskProjection(task models.AutomationTask) githubReviewTaskView
 	return githubReviewTaskView{ID: task.ID, Status: task.Status, AttemptCount: task.AttemptCount, CompletedAt: task.CompletedAt, CreatedAt: task.CreatedAt}
 }
 
-func supersedeQueuedGitHubReviews(tx *gorm.DB, prIdentity string, replacementID uuid.UUID, now time.Time) error {
-	if tx == nil || strings.TrimSpace(prIdentity) == "" || replacementID == uuid.Nil {
+func supersedeQueuedGitHubReviews(tx *gorm.DB, repository string, pullRequest int, replacementID uuid.UUID, now time.Time) error {
+	prefix, err := githubReviewCorrelationPrefix(repository, pullRequest)
+	if tx == nil || err != nil || replacementID == uuid.Nil {
 		return fmt.Errorf("GitHub review supersession is invalid")
 	}
+	// Keep one rolling-upgrade compatibility selector for review tasks queued
+	// before correlation IDs became bounded. Only queued tasks for the exact
+	// repository/PR are affected; running and terminal historical evidence is
+	// deliberately retained.
+	legacyPrefix := "github-pr:" + strings.ToLower(strings.TrimSpace(repository)) + ":" + strconv.Itoa(pullRequest)
 	result := tx.Model(&models.AutomationTask{}).
-		Where("operation = ? AND requested_by = ? AND status = ? AND correlation_id LIKE ? AND id <> ?", "code.review", "github-app-review", "queued", "github-pr:"+prIdentity+":%", replacementID).
+		Where("operation = ? AND requested_by = ? AND status = ? AND (correlation_id LIKE ? OR correlation_id LIKE ?) AND id <> ?", "code.review", "github-app-review", "queued", prefix+":%", legacyPrefix+":%", replacementID).
 		Updates(map[string]any{
 			"status":                        "cancelled",
 			"completed_at":                  now,
@@ -260,6 +270,30 @@ func supersedeQueuedGitHubReviews(tx *gorm.DB, prIdentity string, replacementID 
 			"error_message":                 "Superseded by a newer pull-request commit before review began",
 		})
 	return result.Error
+}
+
+// githubReviewCorrelationID keeps observability and supersession identifiers
+// inside the shared 64-character persistence boundary even for the longest
+// valid GitHub owner/repository names. The immutable task ID, input and
+// evidence subject still bind the complete repository, PR and 40-character
+// head SHA; this compact label is never release authority.
+func githubReviewCorrelationID(repository string, pullRequest int, headSHA string) (string, error) {
+	prefix, err := githubReviewCorrelationPrefix(repository, pullRequest)
+	head := strings.ToLower(strings.TrimSpace(headSHA))
+	if err != nil || !gitCommitSHA.MatchString(head) {
+		return "", fmt.Errorf("GitHub review correlation is invalid")
+	}
+	return prefix + ":" + head[:20], nil
+}
+
+func githubReviewCorrelationPrefix(repository string, pullRequest int) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(repository))
+	if !githubRepositoryPattern.MatchString(normalized) || pullRequest < 1 {
+		return "", fmt.Errorf("GitHub review correlation is invalid")
+	}
+	subject := normalized + ":" + strconv.Itoa(pullRequest)
+	digest := sha256.Sum256([]byte(subject))
+	return "github-pr:" + fmt.Sprintf("%x", digest[:10]), nil
 }
 
 func mustJSON(value any) json.RawMessage { raw, _ := json.Marshal(value); return raw }
@@ -1044,18 +1078,11 @@ func RetryCodeReview(c echo.Context) error {
 		return utils.Error(c, http.StatusForbidden, "Forbidden", "You cannot retry this automation task")
 	}
 
-	newTaskID, newJobID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
-	retry := &models.AutomationTask{
-		ID:                  newTaskID,
-		JobID:               newJobID,
-		RequestedBy:         original.RequestedBy,
-		DeliveryWorkItemID:  original.DeliveryWorkItemID,
-		CorrelationID:       original.CorrelationID,
-		Operation:           original.Operation,
-		MaxCompletionTokens: original.MaxCompletionTokens,
-		InputRef:            original.InputRef,
-		Status:              "queued",
+	retry, err := newCodeReviewRetryTask(&original)
+	if err != nil {
+		return utils.Error(c, http.StatusConflict, "Automation retry rejected", "The failed review no longer has a valid immutable evidence boundary")
 	}
+	newTaskID, newJobID := retry.ID, retry.JobID
 	message := automationqueue.Message{SchemaVersion: 1, JobID: newJobID.String(), TenantCode: "itbem", CorrelationID: retry.CorrelationID, Type: "ai.local.process"}
 	message.Payload.TaskID, message.Payload.Operation, message.Payload.MaxCompletionTokens, message.Payload.InputRef, message.Payload.Attempt = newTaskID.String(), retry.Operation, retry.MaxCompletionTokens, retry.InputRef, 1
 	if err := configuration.DB.Transaction(func(tx *gorm.DB) error {
@@ -2260,7 +2287,8 @@ func codeReviewPublicationForTask(task *models.AutomationTask, raw json.RawMessa
 	if execution.SchemaVersion != 1 || !githubRepositoryPattern.MatchString(repository) || execution.PullRequest < 1 || !gitCommitSHA.MatchString(strings.ToLower(strings.TrimSpace(execution.HeadSHA))) || !artifactDigestPattern.MatchString(strings.ToLower(strings.TrimSpace(execution.PatchSHA256))) || !artifactDigestPattern.MatchString(strings.ToLower(strings.TrimSpace(execution.SubjectSHA256))) || !artifactDigestPattern.MatchString(strings.ToLower(strings.TrimSpace(execution.PayloadSHA256))) || !strings.EqualFold(execution.SubjectSHA256, task.EvidenceSubjectDigest) || execution.ReviewID < 1 || actor == "" || execution.PublishedAt.IsZero() {
 		return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review publication evidence is invalid")
 	}
-	if task.CorrelationID != "github-pr:"+repository+":"+strconv.Itoa(execution.PullRequest)+":"+strings.ToLower(execution.HeadSHA) || !validGitHubReviewURL(execution.ReviewURL, repository, execution.PullRequest, execution.ReviewID) {
+	expectedCorrelationID, correlationErr := githubReviewCorrelationID(repository, execution.PullRequest, execution.HeadSHA)
+	if correlationErr != nil || task.CorrelationID != expectedCorrelationID || !validGitHubReviewURL(execution.ReviewURL, repository, execution.PullRequest, execution.ReviewID) {
 		return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review publication does not match its queued pull request")
 	}
 	switch event {
@@ -3103,7 +3131,29 @@ func mayCancelTask(c echo.Context, task *models.AutomationTask, requestedBy stri
 }
 
 func retryableCodeReviewTask(task *models.AutomationTask) bool {
-	return task != nil && task.Operation == "code.review" && task.Status == "failed" && strings.TrimSpace(task.InputRef) != ""
+	return task != nil && task.Operation == "code.review" && task.Status == "failed" && strings.TrimSpace(task.InputRef) != "" && artifactDigestPattern.MatchString(strings.ToLower(strings.TrimSpace(task.EvidenceSubjectDigest)))
+}
+
+// newCodeReviewRetryTask preserves the frozen input and its evidence subject.
+// A retry is a new billable execution, not a new review target; dropping the
+// subject digest would make an otherwise successful exact-SHA publication
+// unverifiable at callback time.
+func newCodeReviewRetryTask(original *models.AutomationTask) (*models.AutomationTask, error) {
+	if !retryableCodeReviewTask(original) {
+		return nil, fmt.Errorf("code review retry boundary is invalid")
+	}
+	return &models.AutomationTask{
+		ID:                    uuid.Must(uuid.NewV4()),
+		JobID:                 uuid.Must(uuid.NewV4()),
+		RequestedBy:           original.RequestedBy,
+		DeliveryWorkItemID:    original.DeliveryWorkItemID,
+		CorrelationID:         original.CorrelationID,
+		Operation:             original.Operation,
+		EvidenceSubjectDigest: strings.ToLower(strings.TrimSpace(original.EvidenceSubjectDigest)),
+		MaxCompletionTokens:   original.MaxCompletionTokens,
+		InputRef:              original.InputRef,
+		Status:                "queued",
+	}, nil
 }
 
 // mayRetryAutomationTask is intentionally no broader than cancellation. A

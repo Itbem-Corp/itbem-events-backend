@@ -102,6 +102,8 @@ class RenderDockerEnvTests(unittest.TestCase):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         direct_secret_names = (
             "SQS_AUTOMATION_QUEUE_URL",
+            "SQS_AUTOMATION_QUEUE_LANES_JSON",
+            "SQS_AUTOMATION_ROLE_DEAD_LETTER_QUEUE_URL",
             "AUTOMATION_INPUT_BUCKET",
             "AUTOMATION_OUTPUT_BUCKET",
             "AUTOMATION_CALLBACK_SECRET",
