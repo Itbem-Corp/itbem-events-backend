@@ -135,3 +135,23 @@ func TestSegmentCodeReviewInputPreservesPatchWithoutTerminalNewline(t *testing.T
 		t.Fatalf("patch without terminal newline was altered: %#v / %v", segments, err)
 	}
 }
+
+func TestAnnotatedSanitizedPatchPinsExactChangedLineNumbers(t *testing.T) {
+	patch := "diff --git a/src/a.go b/src/a.go\n--- a/src/a.go\n+++ b/src/a.go\n@@ -8,2 +10,2 @@\n-old\n context\n+API_KEY=must-not-leak\n"
+	input, err := NewCodeReviewInput("github://acme/service", strings.Repeat("a", 40), strings.Repeat("b", 40), patch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	annotated, err := input.AnnotatedSanitizedPatch()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"- [BASE L8] old", "+ [HEAD L11] API_KEY=<redacted>"} {
+		if !strings.Contains(annotated, expected) {
+			t.Fatalf("annotated patch lost exact evidence anchor %q: %s", expected, annotated)
+		}
+	}
+	if strings.Contains(annotated, "must-not-leak") {
+		t.Fatalf("annotated patch leaked a credential: %s", annotated)
+	}
+}

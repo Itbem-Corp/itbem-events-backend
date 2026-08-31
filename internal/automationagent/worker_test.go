@@ -394,6 +394,7 @@ func TestCodeReviewPromptPinsBoundedStringArrayTypes(t *testing.T) {
 		"concrete usable secret value",
 		"intentional fail-closed action, credential removal, validation rejection, sanitization, or least-privilege restriction is not a defect",
 		"one short contiguous substring copied verbatim from a single added or removed patch line",
+		"marker supplies the only valid side and line",
 		"never join lines, insert escapes, normalize whitespace, interpolate text, or reconstruct source",
 		"Routine test-plan steps are not coverage gaps",
 		"fully contained in one supplied changed_line_ranges entry",

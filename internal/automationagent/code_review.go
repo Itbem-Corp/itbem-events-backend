@@ -502,6 +502,45 @@ func (input CodeReviewInput) SanitizedPatch() string {
 	return patch
 }
 
+// AnnotatedSanitizedPatch gives a provider an explicit revision line number
+// for every reviewable addition and deletion without changing the immutable
+// patch used by the validator. Text after the marker is still the exact
+// sanitized changed-line content, so evidence_quote can be copied verbatim.
+func (input CodeReviewInput) AnnotatedSanitizedPatch() (string, error) {
+	patch := input.SanitizedPatch()
+	var output strings.Builder
+	output.Grow(len(patch) + len(input.ChangedLines)*18)
+	oldLine, newLine := 0, 0
+	inHunk := false
+	for _, line := range strings.SplitAfter(patch, "\n") {
+		body := strings.TrimSuffix(line, "\n")
+		ending := strings.TrimPrefix(line, body)
+		switch {
+		case strings.HasPrefix(body, "@@ "):
+			oldStart, newStart, _, _, err := unifiedPatchHunkCounts(body)
+			if err != nil {
+				return "", err
+			}
+			oldLine, newLine, inHunk = oldStart, newStart, true
+			output.WriteString(body)
+		case inHunk && strings.HasPrefix(body, "+") && !strings.HasPrefix(body, "+++ "):
+			fmt.Fprintf(&output, "+ [HEAD L%d] %s", newLine, strings.TrimPrefix(body, "+"))
+			newLine++
+		case inHunk && strings.HasPrefix(body, "-") && !strings.HasPrefix(body, "--- "):
+			fmt.Fprintf(&output, "- [BASE L%d] %s", oldLine, strings.TrimPrefix(body, "-"))
+			oldLine++
+		case inHunk && strings.HasPrefix(body, " "):
+			output.WriteString(body)
+			oldLine++
+			newLine++
+		default:
+			output.WriteString(body)
+		}
+		output.WriteString(ending)
+	}
+	return output.String(), nil
+}
+
 // NormalizeCodeReviewCoverage keeps an approval from overstating what the
 // frozen review evidence proves. A changed production file with no changed
 // test is not necessarily defective, but this reviewer has not inspected the
