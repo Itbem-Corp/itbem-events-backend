@@ -248,6 +248,30 @@ func TestWorkerPersistsConservativeCoverageSignalForCodeReview(t *testing.T) {
 	}
 }
 
+func TestCodeReviewPromptPinsBoundedStringArrayTypes(t *testing.T) {
+	messages, err := buildTaskMessages("code.review", TaskInput{
+		Prompt:   "Review the frozen pull request.",
+		Delivery: json.RawMessage(validCodeReviewInput()),
+	}, func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("unexpected review message count: %d", len(messages))
+	}
+	system := messages[0].Content
+	for _, required := range []string{
+		"review_scope, test_plan, and coverage_gaps are arrays of plain JSON strings only",
+		"each contain at most 12 items",
+		`"review_scope":["authentication flow","regression tests"]`,
+		`"findings":[]`,
+	} {
+		if !strings.Contains(system, required) {
+			t.Fatalf("code review schema guidance lost %q: %s", required, system)
+		}
+	}
+}
+
 func TestWorkerRetainsInvalidDeliveryPlanForAuthorizedInspectionAndLedger(t *testing.T) {
 	input, _ := json.Marshal(TaskInput{Prompt: "Plan the scoped change", Delivery: json.RawMessage(`{"work_item":{"id":"task"}}`)})
 	store, callback := &fakeStore{input: input}, &fakeCallback{}
