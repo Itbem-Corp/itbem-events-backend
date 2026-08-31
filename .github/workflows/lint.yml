@@ -38,6 +38,10 @@ jobs:
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
       - name: Detect Go data races
         run: go test -race ./... -count=1 -timeout 180s
+      - name: Qualify isolated AWS transport and role lanes
+        env:
+          ITBEM_AWS_EMULATOR_PORT: "14567"
+        run: sh scripts/qualify-agent-platform-live-aws.sh
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
