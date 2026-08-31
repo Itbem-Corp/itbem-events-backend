@@ -115,7 +115,7 @@ func ParseCodeReviewInput(raw json.RawMessage) (CodeReviewInput, error) {
 	files := make([]string, 0, len(review.ChangedFiles))
 	for _, file := range review.ChangedFiles {
 		file = strings.Trim(strings.TrimSpace(file), "/")
-		if file == "" || len(file) > 500 || strings.Contains(file, "\\") || strings.HasPrefix(file, ".env") || strings.Contains(file, "../") || path.Clean(file) != file {
+		if !validCodeReviewChangedFile(file) {
 			return CodeReviewInput{}, fmt.Errorf("code review input has an invalid changed file")
 		}
 		if _, duplicate := seen[file]; duplicate {
@@ -156,6 +156,19 @@ func ParseCodeReviewInput(raw json.RawMessage) (CodeReviewInput, error) {
 	}
 	review.ChangedLines = patchRanges
 	return review, nil
+}
+
+func validCodeReviewChangedFile(file string) bool {
+	if file == "" || len(file) > 500 || strings.Contains(file, "\\") || strings.Contains(file, "../") || path.Clean(file) != file {
+		return false
+	}
+	base := strings.ToLower(path.Base(file))
+	template := strings.HasSuffix(base, ".example") || strings.HasSuffix(base, ".sample") || strings.HasSuffix(base, ".template")
+	environmentFile := base == ".env" || strings.HasPrefix(base, ".env.") || strings.HasSuffix(base, ".env")
+	// Configuration templates are code-review material and are sanitized before
+	// provider inference. Mutable environment files remain outside the boundary
+	// regardless of which repository directory contains them.
+	return !environmentFile || template
 }
 
 // CodeReviewPublicationSubjectSHA256 binds the external review side effect to
