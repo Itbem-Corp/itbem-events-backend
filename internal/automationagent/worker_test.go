@@ -267,10 +267,14 @@ func TestCodeReviewPromptPinsBoundedStringArrayTypes(t *testing.T) {
 		`"findings":[]`,
 		"any critical, high, or medium finding requires request_changes",
 		"Routine test-plan steps are not coverage gaps",
+		"fully contained in one supplied changed_line_ranges entry",
 	} {
 		if !strings.Contains(system, required) {
 			t.Fatalf("code review schema guidance lost %q: %s", required, system)
 		}
+	}
+	if !strings.Contains(messages[1].Content, `changed_line_ranges=[{"file":"controllers/orders.go","side":"base","start":40,"end":41}`) {
+		t.Fatalf("code review prompt lost the exact changed-line boundary: %s", messages[1].Content)
 	}
 }
 

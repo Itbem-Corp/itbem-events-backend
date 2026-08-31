@@ -43,7 +43,7 @@ docker run -d \
 
 ready=0
 attempt=0
-while [ "$attempt" -lt 30 ]; do
+while [ "$attempt" -lt 60 ]; do
   if docker exec "$container_name" python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4566/', timeout=2).read()" >/dev/null 2>&1; then
     ready=1
     break

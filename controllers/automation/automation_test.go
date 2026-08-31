@@ -263,7 +263,7 @@ func TestSupersedeQueuedGitHubReviewsTargetsOnlyOlderQueuedHeadsForTheSamePR(t *
 	}
 	mock.ExpectBegin()
 	mock.ExpectExec(`UPDATE "automation_tasks"`).
-		WithArgs(sqlmock.AnyArg(), 0, sqlmock.AnyArg(), "Superseded by a newer pull-request commit before review began", sqlmock.AnyArg(), "cancelled", sqlmock.AnyArg(), "code.review", "github-app-review", "queued", prefix+":%", replacement).
+		WithArgs(sqlmock.AnyArg(), 0, sqlmock.AnyArg(), "Superseded by a newer pull-request commit before review began", sqlmock.AnyArg(), "cancelled", sqlmock.AnyArg(), "code.review", "github-app-review", "queued", prefix+":%", "github-pr:itbem/backend:42:%", replacement).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	if err := gormDB.Transaction(func(tx *gorm.DB) error {

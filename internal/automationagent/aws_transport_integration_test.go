@@ -16,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	"github.com/aws/smithy-go"
 	"github.com/gofrs/uuid"
 )
 
@@ -230,14 +231,40 @@ func requireAWSEmulator(t *testing.T) (RuntimeConfig, AWSRuntime) {
 		t.Fatal(err)
 	}
 	for _, bucket := range []string{config.InputBucket, config.OutputBucket} {
-		if _, err := runtime.S3.HeadBucket(context.Background(), &s3.HeadBucketInput{Bucket: aws.String(bucket)}); err == nil {
+		_, err := runtime.S3.HeadBucket(context.Background(), &s3.HeadBucketInput{Bucket: aws.String(bucket)})
+		if err == nil {
 			continue
+		}
+		if !awsEmulatorBucketMissing(err) {
+			t.Fatalf("inspect AWS emulator bucket %s: %v", bucket, err)
 		}
 		if _, err := runtime.S3.CreateBucket(context.Background(), &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
 			t.Fatalf("create AWS emulator bucket %s: %v", bucket, err)
 		}
 	}
 	return config, runtime
+}
+
+func awsEmulatorBucketMissing(err error) bool {
+	var notFound *s3types.NotFound
+	if errors.As(err, &notFound) {
+		return true
+	}
+	var apiError smithy.APIError
+	if !errors.As(err, &apiError) {
+		return false
+	}
+	code := strings.ToLower(strings.TrimSpace(apiError.ErrorCode()))
+	return code == "notfound" || code == "nosuchbucket"
+}
+
+func TestAWSEmulatorBucketMissingClassification(t *testing.T) {
+	if !awsEmulatorBucketMissing(&smithy.GenericAPIError{Code: "NoSuchBucket"}) {
+		t.Fatal("a confirmed missing bucket must be creatable")
+	}
+	if awsEmulatorBucketMissing(&smithy.GenericAPIError{Code: "AccessDenied"}) || awsEmulatorBucketMissing(errors.New("network unavailable")) {
+		t.Fatal("non-missing bucket failures must remain visible")
+	}
 }
 
 func createAWSEmulatorQueue(t *testing.T, runtime AWSRuntime) string {

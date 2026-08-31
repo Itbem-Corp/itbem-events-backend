@@ -254,8 +254,13 @@ func supersedeQueuedGitHubReviews(tx *gorm.DB, repository string, pullRequest in
 	if tx == nil || err != nil || replacementID == uuid.Nil {
 		return fmt.Errorf("GitHub review supersession is invalid")
 	}
+	// Keep one rolling-upgrade compatibility selector for review tasks queued
+	// before correlation IDs became bounded. Only queued tasks for the exact
+	// repository/PR are affected; running and terminal historical evidence is
+	// deliberately retained.
+	legacyPrefix := "github-pr:" + strings.ToLower(strings.TrimSpace(repository)) + ":" + strconv.Itoa(pullRequest)
 	result := tx.Model(&models.AutomationTask{}).
-		Where("operation = ? AND requested_by = ? AND status = ? AND correlation_id LIKE ? AND id <> ?", "code.review", "github-app-review", "queued", prefix+":%", replacementID).
+		Where("operation = ? AND requested_by = ? AND status = ? AND (correlation_id LIKE ? OR correlation_id LIKE ?) AND id <> ?", "code.review", "github-app-review", "queued", prefix+":%", legacyPrefix+":%", replacementID).
 		Updates(map[string]any{
 			"status":                        "cancelled",
 			"completed_at":                  now,
