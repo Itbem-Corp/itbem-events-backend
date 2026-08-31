@@ -79,6 +79,21 @@ func TestLoadWorkspacesBindsUniqueOperatorOwnedTestKindsByPosition(t *testing.T)
 	}
 }
 
+func TestLoadWorkspacesValidatesReadOnlyFixtureAllowlist(t *testing.T) {
+	root := filepath.ToSlash(t.TempDir())
+	valid := `{"demo":{"path":"` + root + `","read_only_fixture_paths":[".contracts/public-schema"]}}`
+	workspaces, err := LoadWorkspaces(valid)
+	if err != nil || len(workspaces["demo"].Config.ReadOnlyFixturePaths) != 1 {
+		t.Fatalf("valid read-only fixture was rejected: %#v / %v", workspaces, err)
+	}
+	for _, fixture := range []string{"../outside", ".git", "secrets", ".env", "nested/api_token.txt"} {
+		raw := `{"demo":{"path":"` + root + `","read_only_fixture_paths":["` + fixture + `"]}}`
+		if _, err := LoadWorkspaces(raw); err == nil {
+			t.Fatalf("unsafe read-only fixture was accepted: %s", fixture)
+		}
+	}
+}
+
 func TestDescribeWorkspaceExcludesCredentialLikeFilesAndDirectories(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Mkdir(filepath.Join(root, "secrets"), 0700); err != nil {

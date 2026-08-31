@@ -40,7 +40,13 @@ func TestRunOnboardingCapabilityProbesUsesExactSHAOperatorCommandsAndCleansUp(t 
 	if strings.Contains(string(encoded), filepath.Clean(workspace.Root)) {
 		t.Fatal("private probe result exposed the local workspace path")
 	}
+	if !strings.Contains(string(encoded), `"redacted_output"`) {
+		t.Fatal("private probe result omitted bounded diagnostic output")
+	}
 	executionRaw, _ := json.Marshal(execution)
+	if strings.Contains(string(executionRaw), "redacted_output") {
+		t.Fatal("public probe callback exposed private diagnostic output")
+	}
 	decoded, err := DecodeOnboardingProbeExecution(executionRaw)
 	if err != nil || decoded.TaskID != taskID {
 		t.Fatalf("valid callback projection rejected: %#v / %v", decoded, err)
@@ -129,6 +135,13 @@ func testOnboardingProbeWorkspace(t *testing.T, mutate bool) (Workspace, string,
 	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("probe fixture\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(seed, ".gitignore"), []byte(".fixtures/\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fixtureTest := "package probe\nimport (\"os\"; \"testing\")\nfunc TestFixture(t *testing.T){ value, err := os.ReadFile(\".fixtures/policy.txt\"); if err != nil || string(value) != \"approved\\n\" { t.Fatalf(\"fixture unavailable: %q / %v\", value, err) } }\n"
+	if err := os.WriteFile(filepath.Join(seed, "fixture_test.go"), []byte(fixtureTest), 0600); err != nil {
+		t.Fatal(err)
+	}
 	if mutate {
 		if err := os.MkdirAll(filepath.Join(seed, "cmd", "mutate"), 0700); err != nil {
 			t.Fatal(err)
@@ -156,11 +169,18 @@ func testOnboardingProbeWorkspace(t *testing.T, mutate bool) (Workspace, string,
 	if rewritten, err := runLocal(context.Background(), checkout, commandTimeout, "", "git", "config", "url."+fileURL+".insteadOf", repositoryURL); err != nil || rewritten.ExitCode != 0 {
 		t.Fatalf("fixture URL rewrite failed: %#v / %v", rewritten, err)
 	}
+	fixture := filepath.Join(checkout, ".fixtures", "policy.txt")
+	if err := os.MkdirAll(filepath.Dir(fixture), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture, []byte("approved\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	head, err := runLocal(context.Background(), checkout, commandTimeout, "", "git", "rev-parse", "HEAD")
 	if err != nil || head.ExitCode != 0 {
 		t.Fatal("fixture HEAD unavailable")
 	}
-	command := []string{"go", "version"}
+	command := []string{"go", "test", "./..."}
 	if mutate {
 		command = []string{"go", "run", "./cmd/mutate"}
 	}
@@ -168,6 +188,7 @@ func testOnboardingProbeWorkspace(t *testing.T, mutate bool) (Workspace, string,
 		Path: checkout, RepositoryURL: repositoryURL, BaseBranch: "trunk",
 		Capabilities:       []string{WorkspaceCapabilityReadRepository, WorkspaceCapabilityFetchRemote, WorkspaceCapabilityCreateWorktree},
 		ValidationCommands: [][]string{command}, ValidationCommandKinds: []string{"unit"},
+		ReadOnlyFixturePaths: []string{".fixtures"},
 	}}
 	raw, _ := json.Marshal(config)
 	lookup := func(key string) string {

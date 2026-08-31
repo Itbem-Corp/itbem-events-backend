@@ -24,6 +24,7 @@ const (
 	maxWorkspaceExcerptChars = 180000
 	maxWorkspaceExcerptBytes = 24000
 	maxWorkspaceExcerpts     = 24
+	maxReadOnlyFixturePaths  = 16
 )
 
 // sensitiveWorkspaceKey matches common secret-bearing configuration keys with
@@ -49,8 +50,14 @@ type WorkspaceConfig struct {
 	ValidationCommandKinds []string   `json:"validation_command_kinds"`
 	QACommands             [][]string `json:"qa_commands"`
 	QACommandKinds         []string   `json:"qa_command_kinds"`
-	QAArtifactPatterns     []string   `json:"qa_artifact_patterns"`
-	QAScreenshotCommand    []string   `json:"qa_screenshot_command"`
+	// ReadOnlyFixturePaths names operator-owned, repository-relative content
+	// that is intentionally outside Git but required by isolated validation
+	// worktrees (for example a pinned local contract checkout). The paths are
+	// copied without Git metadata, links, credentials or special files. A task
+	// can never add to or override this allowlist.
+	ReadOnlyFixturePaths []string `json:"read_only_fixture_paths"`
+	QAArtifactPatterns   []string `json:"qa_artifact_patterns"`
+	QAScreenshotCommand  []string `json:"qa_screenshot_command"`
 	// QASemanticCommand is an operator-owned, opt-in browser QA layer (for
 	// example the pinned Stagehand runner). It receives only the reviewed
 	// preview URL and a private evidence output path; a task or model response
@@ -170,6 +177,9 @@ func loadWorkspaces(raw string, requireDirectory bool) (map[string]Workspace, er
 		if err := validateCommandKinds(config.ValidationCommands, config.ValidationCommandKinds, config.QACommands, config.QACommandKinds); err != nil {
 			return nil, fmt.Errorf("workspace %s: %w", id, err)
 		}
+		if err := validateReadOnlyFixturePaths(config.ReadOnlyFixturePaths); err != nil {
+			return nil, fmt.Errorf("workspace %s: %w", id, err)
+		}
 		if err := validateArtifactPatterns(config.QAArtifactPatterns); err != nil {
 			return nil, fmt.Errorf("workspace %s: %w", id, err)
 		}
@@ -182,6 +192,38 @@ func loadWorkspaces(raw string, requireDirectory bool) (map[string]Workspace, er
 		result[id] = Workspace{ID: id, Root: root, Config: config}
 	}
 	return result, nil
+}
+
+func validateReadOnlyFixturePaths(paths []string) error {
+	if len(paths) > maxReadOnlyFixturePaths {
+		return fmt.Errorf("read_only_fixture_paths may contain at most %d entries", maxReadOnlyFixturePaths)
+	}
+	seen := make(map[string]struct{}, len(paths))
+	for index, configured := range paths {
+		configured = strings.TrimSpace(configured)
+		if configured == "" || filepath.IsAbs(configured) || filepath.VolumeName(configured) != "" || strings.ContainsAny(configured, "\x00\r\n") {
+			return fmt.Errorf("read_only_fixture_paths[%d] is invalid", index)
+		}
+		clean := filepath.Clean(configured)
+		if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("read_only_fixture_paths[%d] must remain inside the workspace", index)
+		}
+		for _, segment := range strings.FieldsFunc(filepath.ToSlash(clean), func(r rune) bool { return r == '/' }) {
+			if segment == ".git" || excludedDirectory(segment) {
+				return fmt.Errorf("read_only_fixture_paths[%d] targets an excluded directory", index)
+			}
+		}
+		if !safeContextFile(clean) {
+			return fmt.Errorf("read_only_fixture_paths[%d] may contain credentials", index)
+		}
+		key := strings.ToLower(filepath.ToSlash(clean))
+		if _, duplicate := seen[key]; duplicate {
+			return fmt.Errorf("read_only_fixture_paths[%d] is duplicated", index)
+		}
+		seen[key] = struct{}{}
+		paths[index] = clean
+	}
+	return nil
 }
 
 var gitBranchName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,126}$`)
