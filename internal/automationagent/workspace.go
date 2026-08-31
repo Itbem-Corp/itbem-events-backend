@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -263,7 +264,10 @@ func validateCommandList(name string, commands [][]string) error {
 	if len(commands) > 6 {
 		return fmt.Errorf("%s may contain at most six command arrays", name)
 	}
-	allowed := map[string]bool{"npm": true, "npx": true, "go": true, "python": true, "pytest": true, "cargo": true}
+	allowed := map[string]bool{
+		"npm": true, "npx": true, "go": true, "python": true, "pytest": true, "cargo": true,
+		"gitleaks": true, "govulncheck": true, "osv-scanner": true, "cargo-audit": true,
+	}
 	for _, command := range commands {
 		if len(command) == 0 || !allowed[command[0]] {
 			return fmt.Errorf("%s must use approved non-empty command arrays", name)
@@ -967,22 +971,48 @@ func DiagnoseWorkspaces(lookup func(string) string) ([]WorkspaceDiagnostic, erro
 		workspace := workspaces[id]
 		state := ReadWorkspaceGitState(workspace)
 		harness := workspace.Harness()
+		harnessExecutablesReady := workspaceHarnessExecutablesReady(workspace.Config)
 		screenshotMode := "default_responsive"
 		if harness.ScreenshotMode == "configured_command" {
 			screenshotMode = "configured_command"
 		}
 		diagnostic := WorkspaceDiagnostic{
-			ID: id, Ready: state.Available, Capabilities: append([]string(nil), workspace.Config.Capabilities...),
+			ID: id, Ready: state.Available && harnessExecutablesReady, Capabilities: append([]string(nil), workspace.Config.Capabilities...),
 			ValidationCommandCount: len(workspace.Config.ValidationCommands), NamedValidationCommandCount: len(workspace.Config.ValidationCommandKinds),
 			QACommandCount: len(workspace.Config.QACommands), NamedQACommandCount: len(workspace.Config.QACommandKinds),
 			ScreenshotMode: screenshotMode, SemanticQAMode: harness.SemanticQAMode, Git: state,
 		}
 		if !state.Available {
 			diagnostic.Issue = "configured directory is not a readable Git worktree"
+		} else if !harnessExecutablesReady {
+			// Keep the diagnostic useful without publishing a local executable or
+			// absolute path through doctor output or recurring heartbeats.
+			diagnostic.Issue = "configured workspace harness executable is unavailable"
 		}
 		diagnostics = append(diagnostics, diagnostic)
 	}
 	return diagnostics, nil
+}
+
+func workspaceHarnessExecutablesReady(config WorkspaceConfig) bool {
+	commands := make([][]string, 0, len(config.ValidationCommands)+len(config.QACommands)+2)
+	commands = append(commands, config.ValidationCommands...)
+	commands = append(commands, config.QACommands...)
+	if len(config.QAScreenshotCommand) > 0 {
+		commands = append(commands, config.QAScreenshotCommand)
+	}
+	if len(config.QASemanticCommand) > 0 {
+		commands = append(commands, config.QASemanticCommand)
+	}
+	for _, command := range commands {
+		if len(command) == 0 {
+			return false
+		}
+		if _, err := exec.LookPath(command[0]); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func DeliveryWorkspaceContext(delivery json.RawMessage, lookup func(string) string) ([]WorkspaceContext, error) {

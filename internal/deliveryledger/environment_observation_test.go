@@ -28,7 +28,7 @@ func TestEnvironmentObservationEventCanonicalProjection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if event.EventType != EventTypeEnvironmentObserved || event.SubjectDigest != strings.Repeat("a", 64) || !strings.Contains(event.DedupeKey, "environment-observation-v1") || strings.Contains(strings.ToLower(event.PayloadJSON), `"value"`) {
+	if event.EventType != EventTypeEnvironmentObserved || event.SubjectDigest != strings.Repeat("a", 64) || !strings.Contains(event.DedupeKey, "environment-observation-v1") || strings.Contains(strings.ToLower(event.PayloadJSON), `"value"`) { // gitleaks:allow -- event type/dedupe fixture, not a credential
 		t.Fatalf("unsafe environment event: %#v", event)
 	}
 	event.ID, event.Sequence = uuid.Must(uuid.NewV4()), 7

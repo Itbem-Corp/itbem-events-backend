@@ -116,7 +116,7 @@ func TestDescribeWorkspaceRedactsSensitiveValuesEmbeddedInEligibleFiles(t *testi
 		"AWS_SECRET_ACCESS_KEY=aws-value-must-not-leak",
 		`{"client_secret":"also-not-safe"}`,
 		"Authorization: Bearer never-send-this",
-		"github token: ghp_123456789012345678901234567890123456",
+		"github token: ghp_123456789012345678901234567890123456", // gitleaks:allow -- synthetic redaction fixture
 		"postgres://agent:database-password@localhost/delivery",
 	}, "\n")
 	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte(content), 0600); err != nil {
@@ -130,7 +130,7 @@ func TestDescribeWorkspaceRedactsSensitiveValuesEmbeddedInEligibleFiles(t *testi
 		t.Fatalf("expected redacted eligible context, got %#v", context)
 	}
 	got := context.Excerpts[0].Content
-	for _, secret := range []string{"do-not-send-this-value", "aws-value-must-not-leak", "also-not-safe", "never-send-this", "ghp_123456789012345678901234567890123456", "database-password"} {
+	for _, secret := range []string{"do-not-send-this-value", "aws-value-must-not-leak", "also-not-safe", "never-send-this", "ghp_123456789012345678901234567890123456", "database-password"} { // gitleaks:allow -- synthetic assertion fixture
 		if strings.Contains(got, secret) {
 			t.Fatalf("embedded secret leaked to agent context: %q", secret)
 		}
@@ -528,6 +528,16 @@ func TestDiagnoseWorkspacesReportsReadinessWithoutSourceOrPathDisclosure(t *test
 	}
 }
 
+func TestWorkspaceHarnessExecutablesReadyFailsClosedWithoutPublishingCommandNames(t *testing.T) {
+	if !workspaceHarnessExecutablesReady(WorkspaceConfig{}) {
+		t.Fatal("an empty optional harness should remain ready")
+	}
+	t.Setenv("PATH", t.TempDir())
+	if workspaceHarnessExecutablesReady(WorkspaceConfig{ValidationCommands: [][]string{{"go", "test", "./..."}}}) {
+		t.Fatal("a configured but unavailable executable must fail doctor readiness")
+	}
+}
+
 func TestWorkspaceReadinessSnapshotIsSafeAndRepresentsQAAndPublicationCapabilities(t *testing.T) {
 	root := t.TempDir()
 	for _, command := range [][]string{{"git", "init"}, {"git", "config", "user.email", "test@example.invalid"}, {"git", "config", "user.name", "ITBEM Test"}} {
@@ -547,7 +557,7 @@ func TestWorkspaceReadinessSnapshotIsSafeAndRepresentsQAAndPublicationCapabiliti
 	}
 	readiness, err := WorkspaceReadinessSnapshot(func(key string) string {
 		if key == "ITBEM_AI_WORKSPACES_JSON" {
-			return `{"dashboard":{"path":"` + filepath.ToSlash(root) + `","capabilities":["repository:read","worktree:create","patch:apply","commit:stage","branch:publish","pull_request:create"],"validation_commands":[["go","test","./..."]],"validation_command_kinds":["unit"],"qa_commands":[["go","test","./..."]],"qa_command_kinds":["integration"],"qa_semantic_command":["node","runner.mjs","--url","{preview_url}","--output","{artifact_path}","--plan","{qa_plan_path}"]}}`
+			return `{"dashboard":{"path":"` + filepath.ToSlash(root) + `","capabilities":["repository:read","worktree:create","patch:apply","commit:stage","branch:publish","pull_request:create"],"validation_commands":[["go","test","./..."]],"validation_command_kinds":["unit"],"qa_commands":[["go","test","./..."]],"qa_command_kinds":["integration"],"qa_semantic_command":["go","run","./cmd/semantic-qa","--url","{preview_url}","--output","{artifact_path}","--plan","{qa_plan_path}"]}}`
 		}
 		return ""
 	})
