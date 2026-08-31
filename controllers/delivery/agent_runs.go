@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"events-stocks/configuration"
 	"events-stocks/internal/automationagent"
+	"events-stocks/internal/projectvault"
 	"events-stocks/internal/releasegate"
 	"events-stocks/internal/releasegatecontrol"
 	"events-stocks/models"
@@ -144,12 +145,30 @@ type deliveryAgentPublication struct {
 }
 
 type deliveryAgentContext struct {
-	Kind       string         `json:"kind"`
-	Name       string         `json:"name"`
-	Reference  string         `json:"reference"`
-	Revision   string         `json:"revision"`
-	SnapshotAt string         `json:"snapshot_at,omitempty"`
-	Metadata   map[string]any `json:"metadata,omitempty"`
+	Kind       string              `json:"kind"`
+	Name       string              `json:"name"`
+	Reference  string              `json:"reference"`
+	Revision   string              `json:"revision"`
+	SnapshotAt string              `json:"snapshot_at,omitempty"`
+	Metadata   map[string]any      `json:"metadata,omitempty"`
+	Vault      *deliveryAgentVault `json:"vault,omitempty"`
+}
+
+type deliveryAgentVault struct {
+	SchemaVersion       int                       `json:"schema_version"`
+	RepositoryReference string                    `json:"repository_reference"`
+	Revision            string                    `json:"revision"`
+	ContentSHA256       string                    `json:"content_sha256"`
+	Entries             []deliveryAgentVaultEntry `json:"entries"`
+	EntriesTruncated    bool                      `json:"entries_truncated,omitempty"`
+}
+
+type deliveryAgentVaultEntry struct {
+	Key        string                    `json:"key"`
+	Kind       string                    `json:"kind"`
+	Lifecycle  string                    `json:"lifecycle"`
+	Value      map[string]any            `json:"value"`
+	Provenance []projectvault.Provenance `json:"provenance"`
 }
 
 var (
@@ -259,6 +278,7 @@ func StartAgentRun(c echo.Context) error {
 	var item models.DeliveryWorkItem
 	var project models.DeliveryProject
 	var snapshots []models.DeliveryContextSnapshot
+	var vaultRevisions []models.DeliveryProjectVaultRevision
 	var changeSets []models.DeliveryChangeSet
 	var messages []models.DeliveryMessage
 	var evidence []models.DeliveryEvidence
@@ -277,6 +297,9 @@ func StartAgentRun(c echo.Context) error {
 			return err
 		}
 		if err := tx.Where("work_item_id = ?", item.ID).Find(&snapshots).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("project_id = ?", item.ProjectID).Order("version DESC, published_at DESC, id DESC").Find(&vaultRevisions).Error; err != nil {
 			return err
 		}
 		if err := tx.Where("work_item_id = ?", item.ID).Order("created_at DESC").Find(&changeSets).Error; err != nil {
@@ -338,6 +361,9 @@ func StartAgentRun(c echo.Context) error {
 	input, err := buildDeliveryAgentInput(item, project, snapshots, changeSets, evidence, gates, messages, strings.TrimSpace(request.Instructions), phase, publicationGrant)
 	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Agent run rejected", err.Error())
+	}
+	if err := attachExactProjectVaults(&input, snapshots, vaultRevisions); err != nil {
+		return utils.Error(c, http.StatusConflict, "Vault-first agent run rejected", err.Error())
 	}
 	evidenceSubjectDigest := ""
 	if phase == "qa" || phase == "release_gate" {
@@ -679,6 +705,100 @@ func buildDeliveryAgentInput(item models.DeliveryWorkItem, project models.Delive
 	}
 	input.Delivery.RepositoryTopology = topology
 	return input, nil
+}
+
+const maxDeliveryAgentVaultEntries = 80
+
+// attachExactProjectVaults is the Vault-first boundary for every agent phase.
+// A local workspace is resolved through its operator-observed GitHub identity,
+// then bound to the approved Vault at the same immutable SHA. The model gets a
+// bounded current-state projection; history and database/operator identities
+// remain private. Missing, stale or digest-invalid Vault data fails closed.
+func attachExactProjectVaults(input *deliveryAgentInput, snapshots []models.DeliveryContextSnapshot, revisions []models.DeliveryProjectVaultRevision) error {
+	if input == nil || len(input.Delivery.ContextSources) != len(snapshots) {
+		return fmt.Errorf("frozen context cannot be bound to project Vaults")
+	}
+	index := make(map[string]models.DeliveryProjectVaultRevision, len(revisions))
+	for _, revision := range revisions {
+		key := strings.ToLower(strings.TrimSpace(revision.RepositoryReference)) + "\x00" + strings.ToLower(strings.TrimSpace(revision.Revision))
+		if _, exists := index[key]; !exists {
+			index[key] = revision
+		}
+	}
+	for position, snapshot := range snapshots {
+		if !strings.EqualFold(strings.TrimSpace(snapshot.Kind), "repository") {
+			continue
+		}
+		reference, err := vaultRepositoryReference(snapshot)
+		if err != nil {
+			return err
+		}
+		key := strings.ToLower(reference) + "\x00" + strings.ToLower(strings.TrimSpace(snapshot.Revision))
+		stored, exists := index[key]
+		if !exists {
+			return fmt.Errorf("repository %s has no approved Vault at frozen SHA %s", snapshot.Reference, snapshot.Revision)
+		}
+		var manifest projectvault.Manifest
+		if stored.SchemaVersion != projectvault.SchemaVersion || json.Unmarshal([]byte(stored.ManifestJSON), &manifest) != nil || manifest.SchemaVersion != projectvault.SchemaVersion {
+			return fmt.Errorf("repository %s has an invalid approved Vault schema", snapshot.Reference)
+		}
+		digest, digestErr := projectvault.ManifestSHA256(manifest)
+		if digestErr != nil || !strings.EqualFold(digest, stored.ContentSHA256) || !strings.EqualFold(manifest.Repository.Reference, reference) || !strings.EqualFold(manifest.Repository.Revision, snapshot.Revision) {
+			return fmt.Errorf("repository %s approved Vault does not match its frozen checkpoint", snapshot.Reference)
+		}
+		projected := deliveryAgentVault{
+			SchemaVersion: projectvault.SchemaVersion, RepositoryReference: manifest.Repository.Reference,
+			Revision: manifest.Repository.Revision, ContentSHA256: strings.ToLower(stored.ContentSHA256), Entries: []deliveryAgentVaultEntry{},
+		}
+		entries := manifest.Entries
+		if len(entries) > maxDeliveryAgentVaultEntries {
+			entries, projected.EntriesTruncated = entries[:maxDeliveryAgentVaultEntries], true
+		}
+		for _, entry := range entries {
+			safeValue, safe := sanitizeDeliveryContextMetadataValue(entry.Value, 0)
+			value, isMap := safeValue.(map[string]any)
+			if !safe || !isMap {
+				return fmt.Errorf("repository %s approved Vault contains an unsafe entry projection", snapshot.Reference)
+			}
+			provenance := entry.Provenance
+			if len(provenance) > 8 {
+				provenance = provenance[:8]
+			}
+			projected.Entries = append(projected.Entries, deliveryAgentVaultEntry{
+				Key: entry.Key, Kind: entry.Kind, Lifecycle: entry.Lifecycle, Value: value, Provenance: append([]projectvault.Provenance(nil), provenance...),
+			})
+		}
+		input.Delivery.ContextSources[position].Vault = &projected
+	}
+	return nil
+}
+
+func vaultRepositoryReference(snapshot models.DeliveryContextSnapshot) (string, error) {
+	reference := strings.TrimSpace(snapshot.Reference)
+	if strings.HasPrefix(strings.ToLower(reference), "github://") {
+		if !isDeliveryRepositoryReference(reference) {
+			return "", fmt.Errorf("frozen GitHub repository reference is invalid")
+		}
+		return reference, nil
+	}
+	if !strings.HasPrefix(strings.ToLower(reference), "workspace://") {
+		return "", fmt.Errorf("repository context must use workspace:// or github://")
+	}
+	metadata := map[string]any{}
+	if json.Unmarshal([]byte(snapshot.MetadataJSON), &metadata) != nil {
+		return "", fmt.Errorf("workspace %s metadata cannot resolve its approved Vault", reference)
+	}
+	githubRepository, _ := metadata["github_repository"].(string)
+	githubRepository = strings.Trim(strings.TrimSpace(githubRepository), "/")
+	if strings.HasPrefix(strings.ToLower(githubRepository), "github://") {
+		reference = githubRepository
+	} else {
+		reference = "github://" + githubRepository
+	}
+	if !isDeliveryRepositoryReference(reference) {
+		return "", fmt.Errorf("workspace %s is not linked to an operator-observed GitHub repository", snapshot.Reference)
+	}
+	return reference, nil
 }
 
 // sanitizedDeliveryContextMetadata returns the exact metadata projection that

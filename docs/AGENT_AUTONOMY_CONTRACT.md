@@ -48,6 +48,21 @@ SHA, rama, cambios locales y origen; no puede hacer `fetch`, `pull`, `add`,
 para que el revisor decida si el SHA congelado sigue representando el contexto
 correcto.
 
+## Vault-first
+
+Ninguna fase de agente se admite con contexto de repositorio sin un Vault
+aprobado para el mismo repositorio y SHA congelado. Un `github://` se resuelve
+directamente; un `workspace://` se enlaza exclusivamente mediante el origen
+GitHub observado por el operador. El control plane vuelve a calcular el digest
+del manifiesto antes de incluirlo y falla cerrado si falta, está obsoleto o no
+coincide.
+
+El modelo recibe sólo una proyección acotada del estado vigente del Vault:
+entradas, procedencia, ciclo de vida y digest. El historial, identidades de
+aprobación y datos operativos permanecen privados; claves con apariencia de
+credencial se eliminan también dentro de valores anidados. El Vault es contexto
+verificado, nunca autoridad para ampliar el scope ni saltar gates humanos.
+
 ## Credenciales y publicación
 
 La publicación debe usar un GitHub App o token de instalación de corta vida,
