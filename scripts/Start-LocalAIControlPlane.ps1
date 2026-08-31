@@ -34,7 +34,11 @@ param(
     # to derive its issuer and JWKS endpoint from Cognito.
     [string]$OIDCIssuerURL = '',
     [string]$OIDCJWKSURL = '',
-    [string]$OIDCAudience = 'local-itbem'
+    [string]$OIDCAudience = 'local-itbem',
+    # Opt in to the same five-lane topology used by the Linux systemd
+    # deployment. The legacy combined queue remains the default so an existing
+    # single-worker local setup is never silently stranded.
+    [switch]$RoleLanes
 )
 
 $ErrorActionPreference = 'Stop'
@@ -192,6 +196,28 @@ function Ensure-LocalQueue([string]$QueueName) {
     return $queueURL
 }
 
+function Get-LocalQueueArn([string]$QueueURL) {
+    $queueArn = ((@(& aws sqs get-queue-attributes --endpoint-url $AwsEmulatorEndpoint --queue-url $QueueURL --attribute-names QueueArn --query Attributes.QueueArn --output text) -join [Environment]::NewLine)).Trim()
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($queueArn)) {
+        throw 'Could not resolve a local ITBEM automation queue ARN.'
+    }
+    return $queueArn
+}
+
+function Set-LocalQueueRedrive([string]$QueueURL, [string]$DeadLetterQueueArn) {
+    $redrivePolicy = @{ deadLetterTargetArn = $DeadLetterQueueArn; maxReceiveCount = '5' } | ConvertTo-Json -Compress
+    $redriveRequest = @{ QueueUrl = $QueueURL; Attributes = @{ VisibilityTimeout = '120'; MessageRetentionPeriod = '1209600'; RedrivePolicy = $redrivePolicy } } | ConvertTo-Json -Depth 4 -Compress
+    $redriveRequestFile = [System.IO.Path]::GetTempFileName()
+    try {
+        [System.IO.File]::WriteAllText($redriveRequestFile, $redriveRequest, (New-Object System.Text.UTF8Encoding($false)))
+        & aws sqs set-queue-attributes --endpoint-url $AwsEmulatorEndpoint --cli-input-json "file://$redriveRequestFile" | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'Could not configure a local automation queue dead-letter policy.' }
+    }
+    finally {
+        Remove-Item -LiteralPath $redriveRequestFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $workspaceRoot = Split-Path -Parent $repositoryRoot
 $composeFile = Join-Path $repositoryRoot 'docker-compose.yml'
@@ -262,21 +288,22 @@ Ensure-LocalBucket $outputBucket
 Ensure-LocalBucketCors $inputBucket
 Ensure-LocalBucketCors $outputBucket
 $automationDLQURL = Ensure-LocalQueue 'itbem-ai-local-dlq'
-$automationDLQArn = ((@(& aws sqs get-queue-attributes --endpoint-url $AwsEmulatorEndpoint --queue-url $automationDLQURL --attribute-names QueueArn --query Attributes.QueueArn --output text) -join [Environment]::NewLine)).Trim()
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($automationDLQArn)) {
-    throw 'Could not resolve the local ITBEM automation dead-letter queue ARN.'
-}
+$automationDLQArn = Get-LocalQueueArn $automationDLQURL
 $automationQueueURL = Ensure-LocalQueue 'itbem-ai-local'
-$redrivePolicy = @{ deadLetterTargetArn = $automationDLQArn; maxReceiveCount = '5' } | ConvertTo-Json -Compress
-$redriveRequest = @{ QueueUrl = $automationQueueURL; Attributes = @{ VisibilityTimeout = '120'; MessageRetentionPeriod = '1209600'; RedrivePolicy = $redrivePolicy } } | ConvertTo-Json -Depth 4 -Compress
-$redriveRequestFile = Join-Path ([System.IO.Path]::GetTempPath()) 'itbem-ai-local-redrive.json'
-try {
-    [System.IO.File]::WriteAllText($redriveRequestFile, $redriveRequest, (New-Object System.Text.UTF8Encoding($false)))
-    & aws sqs set-queue-attributes --endpoint-url $AwsEmulatorEndpoint --cli-input-json "file://$redriveRequestFile" | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'Could not configure the local automation queue dead-letter policy.' }
-}
-finally {
-    Remove-Item -LiteralPath $redriveRequestFile -Force -ErrorAction SilentlyContinue
+Set-LocalQueueRedrive $automationQueueURL $automationDLQArn
+
+$automationRoleDLQURL = ''
+$automationRoleLaneQueuesJSON = ''
+if ($RoleLanes) {
+    $automationRoleDLQURL = Ensure-LocalQueue 'itbem-ai-local-role-dlq'
+    $automationRoleDLQArn = Get-LocalQueueArn $automationRoleDLQURL
+    $automationRoleLaneQueues = [ordered]@{}
+    foreach ($lane in @('orchestration', 'engineering', 'review', 'qa', 'release')) {
+        $laneQueueURL = Ensure-LocalQueue "itbem-ai-local-$lane"
+        Set-LocalQueueRedrive $laneQueueURL $automationRoleDLQArn
+        $automationRoleLaneQueues[$lane] = $laneQueueURL
+    }
+    $automationRoleLaneQueuesJSON = $automationRoleLaneQueues | ConvertTo-Json -Compress
 }
 
 # The local emulator requires disposable test credentials, but Cognito must continue
@@ -337,6 +364,13 @@ $env:GOOGLE_CLIENT_SECRET = 'local-not-configured'
 $env:CORS_ALLOW_ORIGINS = 'http://dashboard.itbem.localhost:3000,http://dashboard.itbem.localhost:3001'
 $env:SQS_AUTOMATION_QUEUE_URL = $automationQueueURL
 $env:SQS_AUTOMATION_DEAD_LETTER_QUEUE_URL = $automationDLQURL
+if ($RoleLanes) {
+    $env:SQS_AUTOMATION_QUEUE_LANES_JSON = $automationRoleLaneQueuesJSON
+    $env:SQS_AUTOMATION_ROLE_DEAD_LETTER_QUEUE_URL = $automationRoleDLQURL
+} else {
+    Remove-Item -Path Env:SQS_AUTOMATION_QUEUE_LANES_JSON -ErrorAction SilentlyContinue
+    Remove-Item -Path Env:SQS_AUTOMATION_ROLE_DEAD_LETTER_QUEUE_URL -ErrorAction SilentlyContinue
+}
 $env:AUTOMATION_INPUT_BUCKET = $inputBucket
 $env:AUTOMATION_OUTPUT_BUCKET = $outputBucket
 $env:SQS_ENDPOINT = $AwsEmulatorEndpoint

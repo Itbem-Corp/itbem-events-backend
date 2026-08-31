@@ -114,7 +114,10 @@ signed identity fixture:
    `-RedisHost`; this path does not read Cognito IDs from the dashboard. When
    the disposable database runs in WSL, pass its exact container name with
    `-DatabaseProbeContainer` and use `-DatabaseProbeInWSL`; the probe remains
-   a read-only `SELECT 1`.
+   a read-only `SELECT 1`. Add `-RoleLanes` when qualifying the team topology;
+   this creates five distinct input queues plus a shared role DLQ and switches
+   the API routing map atomically. Omitting the switch deliberately preserves
+   the legacy combined queue for migration compatibility.
 5. Read the token into the dashboard test process as `E2E_ID_TOKEN`, set
    `PLAYWRIGHT_BASE_URL` and `E2E_BACKEND_URL` to the isolated loopback
    services, and run the authenticated single-repository and heterogeneous
@@ -127,6 +130,28 @@ Vault, a task, a GitHub secret, an artifact, a screenshot, or logs. Both
 dashboard and backend reject non-loopback fixture endpoints, and the backend
 rejects the override for any non-local environment. A pass records only the
 fixture type, exact code SHA, commands, timestamps and redacted outcomes.
+
+For an explicit local team run, start one worker process per queue with the
+matching immutable pair. The launcher rejects partial or crossed pairs before
+starting the Go runtime:
+
+```powershell
+./scripts/Start-LocalAIAgent.ps1 -Role orchestrator -Lane orchestration
+./scripts/Start-LocalAIAgent.ps1 -Role principal_engineer -Lane engineering
+./scripts/Start-LocalAIAgent.ps1 -Role reviewer -Lane review
+./scripts/Start-LocalAIAgent.ps1 -Role qa -Lane qa
+./scripts/Start-LocalAIAgent.ps1 -Role release_manager -Lane release
+```
+
+Use separate processes and OS identities for sustained operation. The release
+pair is providerless; the launcher must not require or load a model credential
+for it. These PowerShell commands are a disposable local qualification path,
+not a substitute for the isolated Linux systemd identities.
+
+Each explicit lane owns a separate session-local worker lock. All five role
+workers can therefore run concurrently, while a second consumer for the same
+lane fails closed. The migration-compatible combined worker has its own lock
+and must not consume the same workload alongside explicit role workers.
 
 ## Dashboard qualification
 
