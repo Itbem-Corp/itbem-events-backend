@@ -17,8 +17,9 @@ func TestDeliveryPlanResultKeyAcceptsOnlyExactTaskRun(t *testing.T) {
 	}
 	legacy := task
 	legacy.OutputRef = "s3://private-results/automation/" + taskID.String() + "/result.json"
+	legacy.RunID = ""
 	if _, ok := deliveryPlanResultKey(cfg, legacy); !ok {
-		t.Fatal("legacy task-scoped compatibility pointer was rejected")
+		t.Fatal("legacy task-scoped compatibility pointer without a run id was rejected")
 	}
 	for _, invalid := range []string{
 		"s3://another-bucket/automation/" + taskID.String() + "/runs/" + runID.String() + "/result.json",
