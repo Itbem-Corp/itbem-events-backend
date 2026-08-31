@@ -112,6 +112,13 @@ una revisión automática nueva.
 
 ## Controles que siguen siendo obligatorios
 
+La identidad que publica el último cambio revisable debe ser distinta de la
+persona que lo aprueba. En repositorios con
+`require_last_push_approval`, Engineer publica como su identidad técnica y la
+revisión humana se registra después sobre ese head exacto. Un commit vacío no
+se usa para cambiar esta procedencia: GitHub puede conservar como autoridad el
+último push que realmente modificó el diff.
+
 1. Plan aprobado por una persona.
 2. Implementación y revisión de código registrada.
 3. Grant temporal, con repositorio, SHA, rama, capacidades, motivo y caducidad.
