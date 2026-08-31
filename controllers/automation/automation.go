@@ -1052,7 +1052,10 @@ func automationCancellationTransition(task models.AutomationTask, now time.Time,
 	case "queued":
 		return settle("Queued automation task cancelled")
 	case "running":
-		if task.LeaseExpiresAt != nil && !task.LeaseExpiresAt.After(now) {
+		// A running task without a renewable lease has no live execution
+		// authority. Settle it like an expired lease so it cannot retain a stale
+		// budget reservation or block an operator retry indefinitely.
+		if task.LeaseExpiresAt == nil || !task.LeaseExpiresAt.After(now) {
 			return settle("Expired automation task cancelled")
 		}
 		updates["status"] = "cancel_requested"

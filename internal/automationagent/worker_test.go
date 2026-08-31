@@ -266,6 +266,8 @@ func TestCodeReviewPromptPinsBoundedStringArrayTypes(t *testing.T) {
 		`"review_scope":["authentication flow","regression tests"]`,
 		`"findings":[]`,
 		"any critical, high, or medium finding requires request_changes",
+		"critical requires confidence >= 0.90, high requires confidence >= 0.80, and medium requires confidence >= 0.65",
+		"do not inflate confidence",
 		"Routine test-plan steps are not coverage gaps",
 		"fully contained in one supplied changed_line_ranges entry",
 	} {

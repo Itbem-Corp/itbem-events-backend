@@ -776,6 +776,17 @@ func TestLiveRunningTaskCancellationStillWaitsForWorkerAccounting(t *testing.T) 
 	}
 }
 
+func TestRunningTaskWithoutLeaseCancellationSettlesAsAbandoned(t *testing.T) {
+	now := time.Now().UTC()
+	updates, statusCode, message, err := automationCancellationTransition(models.AutomationTask{Status: "running", BudgetReservationMicros: 99}, now, "missing lease")
+	if err != nil || statusCode != http.StatusOK || message != "Expired automation task cancelled" {
+		t.Fatalf("lease-less cancellation did not settle: updates=%#v status=%d message=%q err=%v", updates, statusCode, message, err)
+	}
+	if updates["status"] != "cancelled" || updates["budget_reservation_micros"] != int64(0) || updates["lease_expires_at"] != nil || updates["budget_reservation_expires_at"] != nil {
+		t.Fatalf("lease-less cancellation retained live authority or budget: %#v", updates)
+	}
+}
+
 func TestCanonicalTraceEntriesKeepKindsAndPrivateReferencesOutOfTheResponse(t *testing.T) {
 	finishedAt := time.Now().UTC()
 	taskID := uuid.Must(uuid.NewV4())
