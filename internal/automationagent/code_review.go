@@ -14,6 +14,8 @@ import (
 const (
 	maxCodeReviewChangedFiles = 300
 	maxCodeReviewPatchBytes   = 512 << 10
+	maxCodeReviewContextBytes = 192 << 10
+	maxCodeReviewExcerpts     = 64
 )
 
 // CodeReviewInput is an immutable review boundary. The untrusted prompt may
@@ -26,8 +28,22 @@ type CodeReviewInput struct {
 	Remote        *CodeReviewRemoteTarget      `json:"remote,omitempty"`
 	ChangedFiles  []string                     `json:"changed_files"`
 	ChangedLines  []CodeReviewChangedLineRange `json:"changed_line_ranges"`
+	Context       []CodeReviewContextExcerpt   `json:"source_context,omitempty"`
+	ContextSHA256 string                       `json:"source_context_sha256,omitempty"`
 	Patch         string                       `json:"patch"`
 	PatchSHA256   string                       `json:"patch_sha256"`
+}
+
+// CodeReviewContextExcerpt is bounded surrounding source read from the exact
+// base or head revision through the GitHub App. Findings still have authority
+// only on ChangedLines; context exists solely to understand helpers and nearby
+// invariants instead of guessing from a diff fragment.
+type CodeReviewContextExcerpt struct {
+	File    string `json:"file"`
+	Side    string `json:"side"`
+	Start   int    `json:"start"`
+	End     int    `json:"end"`
+	Content string `json:"content"`
 }
 
 // CodeReviewRemoteTarget is admitted only by the signed GitHub webhook. It
@@ -86,6 +102,23 @@ func BindCodeReviewRemoteTarget(input CodeReviewInput, pullRequestNumber int, in
 	return ParseCodeReviewInput(encoded)
 }
 
+// BindCodeReviewContext seals trusted, exact-revision surrounding source into
+// the immutable review input. The digest becomes part of the publication
+// subject, so a relay cannot mix a verdict with context from another revision.
+func BindCodeReviewContext(input CodeReviewInput, excerpts []CodeReviewContextExcerpt) (CodeReviewInput, error) {
+	input.Context = append([]CodeReviewContextExcerpt(nil), excerpts...)
+	digest, err := codeReviewContextSHA256(input.Context)
+	if err != nil {
+		return CodeReviewInput{}, err
+	}
+	input.ContextSHA256 = digest
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		return CodeReviewInput{}, err
+	}
+	return ParseCodeReviewInput(encoded)
+}
+
 func ParseCodeReviewInput(raw json.RawMessage) (CodeReviewInput, error) {
 	var review CodeReviewInput
 	if len(raw) == 0 || json.Unmarshal(raw, &review) != nil {
@@ -95,6 +128,7 @@ func ParseCodeReviewInput(raw json.RawMessage) (CodeReviewInput, error) {
 	review.BaseSHA = strings.ToLower(strings.TrimSpace(review.BaseSHA))
 	review.HeadSHA = strings.ToLower(strings.TrimSpace(review.HeadSHA))
 	review.PatchSHA256 = strings.ToLower(strings.TrimSpace(review.PatchSHA256))
+	review.ContextSHA256 = strings.ToLower(strings.TrimSpace(review.ContextSHA256))
 	if !validReviewRepositoryRef(review.RepositoryRef) || !validReviewSHA(review.BaseSHA) || !validReviewSHA(review.HeadSHA) || review.BaseSHA == review.HeadSHA {
 		return CodeReviewInput{}, fmt.Errorf("code review input requires an immutable repository and distinct base/head revisions")
 	}
@@ -155,7 +189,49 @@ func ParseCodeReviewInput(raw json.RawMessage) (CodeReviewInput, error) {
 		return CodeReviewInput{}, fmt.Errorf("code review changed line ranges do not match the frozen patch")
 	}
 	review.ChangedLines = patchRanges
+	if err := validateCodeReviewContext(&review, seen); err != nil {
+		return CodeReviewInput{}, err
+	}
 	return review, nil
+}
+
+func validateCodeReviewContext(review *CodeReviewInput, changed map[string]struct{}) error {
+	if len(review.Context) == 0 {
+		if review.ContextSHA256 != "" {
+			return fmt.Errorf("code review source context digest has no excerpts")
+		}
+		return nil
+	}
+	if len(review.Context) > maxCodeReviewExcerpts || !validReviewDigest(review.ContextSHA256) {
+		return fmt.Errorf("code review source context is not bounded")
+	}
+	total := 0
+	for index := range review.Context {
+		excerpt := &review.Context[index]
+		excerpt.File = strings.Trim(strings.TrimSpace(excerpt.File), "/")
+		excerpt.Side = strings.ToLower(strings.TrimSpace(excerpt.Side))
+		if _, ok := changed[excerpt.File]; !ok || (excerpt.Side != "head" && excerpt.Side != "base") || excerpt.Start < 1 || excerpt.End < excerpt.Start || excerpt.End > 10_000_000 || strings.TrimSpace(excerpt.Content) == "" {
+			return fmt.Errorf("code review source context excerpt is invalid")
+		}
+		total += len(excerpt.Content)
+		if total > maxCodeReviewContextBytes {
+			return fmt.Errorf("code review source context is not bounded")
+		}
+	}
+	digest, err := codeReviewContextSHA256(review.Context)
+	if err != nil || !strings.EqualFold(digest, review.ContextSHA256) {
+		return fmt.Errorf("code review source context does not match its SHA-256")
+	}
+	return nil
+}
+
+func codeReviewContextSHA256(excerpts []CodeReviewContextExcerpt) (string, error) {
+	encoded, err := json.Marshal(excerpts)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
 }
 
 func validCodeReviewChangedFile(file string) bool {
@@ -184,7 +260,8 @@ func CodeReviewPublicationSubjectSHA256(review CodeReviewInput) (string, error) 
 		InstallationID int64  `json:"installation_id"`
 		HeadSHA        string `json:"head_sha"`
 		PatchSHA256    string `json:"patch_sha256"`
-	}{review.RepositoryRef, review.Remote.PullRequestNumber, review.Remote.InstallationID, review.HeadSHA, review.PatchSHA256})
+		ContextSHA256  string `json:"source_context_sha256,omitempty"`
+	}{review.RepositoryRef, review.Remote.PullRequestNumber, review.Remote.InstallationID, review.HeadSHA, review.PatchSHA256, review.ContextSHA256})
 	if err != nil {
 		return "", err
 	}

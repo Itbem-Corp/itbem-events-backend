@@ -273,6 +273,8 @@ func TestCodeReviewPromptPinsBoundedStringArrayTypes(t *testing.T) {
 		"do not inflate confidence",
 		"Report each root cause once",
 		"findings must not repeat or overlap the same file, side, and source location",
+		"inspect its exact-revision source_context excerpt",
+		"state an actionable coverage gap instead of guessing from the helper name",
 		"environment-variable names, configuration keys, redacted markers, documented placeholders, and obviously synthetic test sentinels as identifiers rather than leaked credentials",
 		"concrete usable secret value",
 		"intentional fail-closed action, credential removal, validation rejection, sanitization, or least-privilege restriction is not a defect",

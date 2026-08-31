@@ -182,6 +182,14 @@ func GitHubPullRequestReviewWebhook(c echo.Context) error {
 	if err != nil {
 		return utils.Error(c, http.StatusConflict, "GitHub review rejected", "The pull request diff is not reviewable within the configured safety limits")
 	}
+	sourceContext, err := automationagent.ReadGitHubCodeReviewContext(c.Request().Context(), appConfig, installation.Token, review)
+	if err != nil {
+		return utils.Error(c, http.StatusConflict, "GitHub review rejected", "Exact-revision surrounding source context could not be frozen")
+	}
+	review, err = automationagent.BindCodeReviewContext(review, sourceContext)
+	if err != nil {
+		return utils.Error(c, http.StatusConflict, "GitHub review rejected", "Exact-revision surrounding source context is invalid")
+	}
 	review, err = automationagent.BindCodeReviewRemoteTarget(review, event.Number, event.Installation.ID)
 	if err != nil {
 		return utils.Error(c, http.StatusConflict, "GitHub review rejected", "The remote review target is invalid")
