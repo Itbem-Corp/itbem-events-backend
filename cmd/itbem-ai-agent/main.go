@@ -23,6 +23,7 @@ import (
 
 func main() {
 	smoke := flag.Bool("provider-smoke", false, "make one explicit non-sensitive provider request")
+	authProbe := flag.Bool("provider-auth-probe", false, "verify provider authentication without creating a completion")
 	doctor := flag.Bool("doctor", false, "validate the local workspace registry without calling a provider")
 	syncWorkspaces := flag.Bool("sync-workspaces", false, "clone or fast-forward operator-managed workspace base checkouts")
 	flag.Parse()
@@ -41,6 +42,25 @@ func main() {
 		}
 		_ = json.NewEncoder(os.Stdout).Encode(report)
 		if !ready {
+			os.Exit(1)
+		}
+		return
+	}
+	if *authProbe {
+		if config, runtimeErr := automationagent.LoadRuntimeConfig(os.Getenv); runtimeErr == nil && providerNotRequired(config) {
+			_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"ready": true, "status": "not_required", "network_checks_made": false, "provider_billable": false})
+			return
+		}
+		config, err := automationagent.LoadProviderConfig(os.Getenv)
+		if err != nil {
+			fail(err)
+		}
+		report, err := automationagent.ProbeProviderAuth(context.Background(), config, nil)
+		if err != nil {
+			fail(err)
+		}
+		_ = json.NewEncoder(os.Stdout).Encode(report)
+		if !report.Ready {
 			os.Exit(1)
 		}
 		return
@@ -121,7 +141,7 @@ func doctorReport(lookup func(string) string) (map[string]any, bool, error) {
 		provider = map[string]any{"ready": true, "status": "not_required", "message": "This deterministic release worker has no model-provider credential."}
 	} else if config, providerErr := automationagent.LoadProviderConfig(lookup); providerErr == nil {
 		providerReady = true
-		provider = map[string]any{"ready": true, "status": "configured", "provider": config.Provider, "model": config.Model}
+		provider = map[string]any{"ready": true, "status": "configured_unverified", "provider": config.Provider, "model": config.Model, "message": "Credential presence is valid, but authentication requires --provider-auth-probe before service activation."}
 	}
 	publication := map[string]any{"ready": true, "status": "configured"}
 	githubAppReady := true

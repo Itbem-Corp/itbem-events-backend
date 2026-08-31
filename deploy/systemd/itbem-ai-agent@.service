@@ -19,6 +19,7 @@ EnvironmentFile=/etc/itbem-ai-agent/roles/%i.env
 ExecCondition=/usr/bin/test ! -e /etc/itbem-ai-agent/disabled/all
 ExecCondition=/usr/bin/test ! -e /etc/itbem-ai-agent/disabled/%i
 ExecStartPre=/opt/itbem-ai-agent/current/itbem-ai-agent --doctor
+ExecStartPre=/opt/itbem-ai-agent/current/itbem-ai-agent --provider-auth-probe
 ExecStart=/opt/itbem-ai-agent/current/itbem-ai-agent
 Restart=on-failure
 RestartSec=10s

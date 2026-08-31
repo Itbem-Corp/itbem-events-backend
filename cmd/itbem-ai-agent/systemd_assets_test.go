@@ -33,6 +33,7 @@ func TestSystemdUnitFailsClosedAndRunsUnprivileged(t *testing.T) {
 		"ExecCondition=/usr/bin/test ! -e /etc/itbem-ai-agent/disabled/all",
 		"ExecCondition=/usr/bin/test ! -e /etc/itbem-ai-agent/disabled/%i",
 		"ExecStartPre=/opt/itbem-ai-agent/current/itbem-ai-agent --doctor",
+		"ExecStartPre=/opt/itbem-ai-agent/current/itbem-ai-agent --provider-auth-probe",
 		"NoNewPrivileges=yes", "ProtectSystem=strict", "ProtectHome=yes",
 		"CapabilityBoundingSet=", "Restart=on-failure",
 		"ReadWritePaths=/var/lib/itbem-ai-agent/%i /srv/itbem-agent-workspaces/%i",

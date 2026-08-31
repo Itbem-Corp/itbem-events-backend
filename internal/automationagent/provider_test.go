@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -83,6 +84,73 @@ func TestProviderClientUsesMiniMaxContractWithoutLeakingSecrets(t *testing.T) {
 	metadata, _ := completion.Usage["_itbem_provider"].(map[string]any)
 	if metadata["finish_reason"] != "stop" || metadata["input_sensitive"] != false || metadata["output_sensitive"] != false || metadata["status_code"] != int64(0) {
 		t.Fatalf("provider outcome metadata was not retained safely: %#v", completion.Usage)
+	}
+}
+
+func TestProviderAuthProbeUsesReadOnlyMiniMaxEndpointAndNeverLeaksSecret(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/token_plan/remains" || r.Body == nil {
+			t.Fatalf("unexpected auth probe request: %s %s", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("x-api-key") != "private-test-key" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"base_resp": map[string]any{"status_code": 2049}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"base_resp": map[string]any{"status_code": 0}, "remains": "must-not-be-reported"})
+	}))
+	defer server.Close()
+	config := ProviderConfig{Provider: ProviderMiniMax, Model: "MiniMax-M3", Endpoint: server.URL + "/v1/chat/completions", secret: "private-test-key"}
+	report, err := ProbeProviderAuth(context.Background(), config, server.Client())
+	if err != nil || !report.Ready || report.Status != "authenticated" || report.Billable || !report.NetworkChecksMade || requests != 2 {
+		t.Fatalf("unexpected provider probe: %#v / %v / requests=%d", report, err, requests)
+	}
+	raw, _ := json.Marshal(report)
+	if strings.Contains(string(raw), config.secret) || strings.Contains(string(raw), "must-not-be-reported") {
+		t.Fatalf("provider auth evidence leaked credential or quota data: %s", raw)
+	}
+}
+
+func TestProviderAuthProbeFailsClosedOnMiniMaxCredentialRejection(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"base_resp": map[string]any{"status_code": 2049}, "status_msg": "must-not-be-reported"})
+	}))
+	defer server.Close()
+	config := ProviderConfig{Provider: ProviderMiniMax, Model: "MiniMax-M3", Endpoint: server.URL + "/v1/chat/completions", secret: "rejected-private-key"}
+	report, err := ProbeProviderAuth(context.Background(), config, server.Client())
+	if err != nil || report.Ready || report.Status != "rejected" || report.Billable {
+		t.Fatalf("rejected credential did not fail closed: %#v / %v", report, err)
+	}
+	raw, _ := json.Marshal(report)
+	if strings.Contains(string(raw), config.secret) || strings.Contains(string(raw), "must-not-be-reported") {
+		t.Fatalf("rejected auth evidence leaked provider data: %s", raw)
+	}
+}
+
+func TestProviderAuthProbeUsesReadOnlyMetadataForOpenAIAndAnthropic(t *testing.T) {
+	for _, sample := range []struct {
+		provider Provider
+		header   string
+		value    string
+		endpoint string
+	}{
+		{ProviderOpenAI, "Authorization", "Bearer provider-key", "/v1/chat/completions"},
+		{ProviderAnthropic, "x-api-key", "provider-key", "/v1/messages"},
+	} {
+		t.Run(string(sample.provider), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/v1/models" || r.Header.Get(sample.header) != sample.value {
+					t.Fatalf("unexpected metadata probe: %s %s", r.Method, r.URL.Path)
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
+			report, err := ProbeProviderAuth(context.Background(), ProviderConfig{Provider: sample.provider, Endpoint: server.URL + sample.endpoint, secret: "provider-key"}, server.Client())
+			if err != nil || !report.Ready || report.Status != "authenticated" || report.Billable {
+				t.Fatalf("unexpected metadata probe result: %#v / %v", report, err)
+			}
+		})
 	}
 }
 

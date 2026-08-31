@@ -176,6 +176,14 @@ The UI renders backend state; agent prose cannot synthesize a terminal status.
 Use one onboarded test project whose configuration is not embedded in platform
 code. Freeze and record every repository branch and SHA before execution.
 
+Before activating any long-lived role worker, run `--doctor` and then
+`--provider-auth-probe`. The latter uses only a read-only provider metadata or
+quota endpoint, never creates a completion, and emits no credential, balance or
+quota value. A `configured_unverified`, `rejected`, `region_mismatch`,
+`unreachable` or `inconclusive` provider state blocks worker activation. For a
+MiniMax region mismatch, apply the reported regional completion endpoint to the
+host secret configuration and repeat both checks.
+
 1. Approve the proposed Vault and effective policy diff.
 2. Execute one single-repository task and one heterogeneous multi-repository
    task through the role lanes. Verify separate Engineer, Reviewer, QA and

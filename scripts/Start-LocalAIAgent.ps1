@@ -271,6 +271,10 @@ try {
         if ($LASTEXITCODE -ne 0) {
             throw 'Local agent readiness check failed. Fix the reported configuration before starting service mode.'
         }
+        go run ./cmd/itbem-ai-agent --provider-auth-probe
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Provider authentication failed. Fix the credential or configured regional endpoint before starting service mode.'
+        }
 
         $consecutiveFailures = 0
         while ($true) {
