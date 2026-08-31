@@ -33,6 +33,25 @@ mandatory scenarios against named tests rather than documentation claims:
 The script also executes the full Go regression suite, `go vet` and the
 security preflight. Any failure blocks qualification.
 
+### Operator-owned repository scanners
+
+The QA lane must map a real, locally installed scanner command to every
+reserved security identity. For the secret floor, this deployment qualifies
+the pinned open-source `gitleaks` v8.30.1 binary with the repository-scoped
+command below:
+
+```sh
+gitleaks dir --redact=100 --no-banner --no-color --timeout 300 .
+```
+
+Register that command as `security:secrets`; never map a test identity before
+the command passes in every exact reviewed worktree. A known synthetic fixture
+may use a same-line `gitleaks:allow` annotation only after a reviewer verifies
+that the value is inert and explains the fixture inline. Do not suppress an
+entire path, rule or repository, and never persist an unredacted report. The
+non-consuming doctor fails closed when any configured validation, QA,
+screenshot or semantic-QA executable is unavailable on the host.
+
 ## Live AWS transport qualification without production access
 
 Before using a physical worker host or AWS resources, exercise the real AWS SDK
