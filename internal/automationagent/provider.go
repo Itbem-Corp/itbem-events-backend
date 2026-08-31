@@ -288,10 +288,7 @@ func ProbeProviderAuth(ctx context.Context, config ProviderConfig, client *http.
 func providerMetadataEndpoint(configured *url.URL, completionSuffix string) string {
 	probe := *configured
 	probe.RawQuery, probe.Fragment = "", ""
-	path := strings.TrimRight(probe.Path, "/")
-	if strings.HasSuffix(path, completionSuffix) {
-		path = strings.TrimSuffix(path, completionSuffix)
-	}
+	path := strings.TrimSuffix(strings.TrimRight(probe.Path, "/"), completionSuffix)
 	probe.Path = strings.TrimRight(path, "/") + "/models"
 	return probe.String()
 }
