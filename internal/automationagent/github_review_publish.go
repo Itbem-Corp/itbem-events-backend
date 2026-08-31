@@ -104,11 +104,22 @@ func PublishGitHubCodeReview(ctx context.Context, boundary CodeReviewInput, revi
 	if err != nil {
 		return GitHubCodeReviewPublication{}, err
 	}
+	repositoryName := strings.ToLower(repository.Owner + "/" + repository.Name)
+	// Resolve the installation for the exact repository immediately before
+	// minting the narrowed token. This both rejects a stale webhook installation
+	// after an App reinstall and mirrors GitHub's current repository selection
+	// before requesting the least-privilege token.
+	resolvedInstallationID, err := readGitHubRepositoryInstallationID(ctx, config, client, time.Now().UTC(), repositoryName, true)
+	if err != nil {
+		return GitHubCodeReviewPublication{}, fmt.Errorf("resolve Reviewer repository installation: %w", err)
+	}
+	if resolvedInstallationID != boundary.Remote.InstallationID {
+		return GitHubCodeReviewPublication{}, fmt.Errorf("reviewer GitHub App installation changed after the frozen webhook")
+	}
 	token, err := mintGitHubInstallationToken(ctx, config, client, time.Now().UTC(), true, repository.Name)
 	if err != nil {
-		return GitHubCodeReviewPublication{}, fmt.Errorf("mint repository-scoped Reviewer token")
+		return GitHubCodeReviewPublication{}, fmt.Errorf("mint repository-scoped Reviewer token: %w", err)
 	}
-	repositoryName := strings.ToLower(repository.Owner + "/" + repository.Name)
 	state, err := ReadGitHubPullRequestState(ctx, config, token.Token, repositoryName, boundary.Remote.PullRequestNumber)
 	if err != nil {
 		return GitHubCodeReviewPublication{}, err
