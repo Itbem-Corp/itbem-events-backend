@@ -9,8 +9,8 @@ import (
 )
 
 const (
-	codeReviewSegmentMaxPatchBytes = 32 << 10
-	codeReviewSegmentMaxFiles      = 3
+	codeReviewSegmentMaxPatchBytes = 40 << 10
+	codeReviewSegmentMaxFiles      = 4
 	codeReviewSegmentMaxContext    = 32 << 10
 	codeReviewSegmentMaxExcerpts   = 12
 	maxCodeReviewSegments          = 16

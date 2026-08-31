@@ -19,10 +19,13 @@ import (
 )
 
 const (
-	maxInputBytes                         = 10 << 20
-	maxErrorMessageLen                    = 1024
-	deliveryPlanCompletionLimit           = 8192
-	codeReviewCompletionLimit             = miniMaxM3CompletionLimit
+	maxInputBytes               = 10 << 20
+	maxErrorMessageLen          = 1024
+	deliveryPlanCompletionLimit = 8192
+	// This is one aggregate task budget, not a per-call model allowance. Large
+	// reviews split it across bounded 8k segments so reasoning-capable models
+	// can finish every strict JSON verdict without any unbounded request.
+	codeReviewCompletionLimit             = 65536
 	deliveryImplementationCompletionLimit = miniMaxM3CompletionLimit
 )
 

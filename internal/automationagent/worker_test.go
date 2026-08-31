@@ -363,6 +363,27 @@ func TestCodeReviewCompletionBudgetIsSizeWeightedAndGloballyBounded(t *testing.T
 	}
 }
 
+func TestCodeReviewAggregateBudgetSupportsManyReasoningSegments(t *testing.T) {
+	calls := make([]codeReviewProviderCall, 9)
+	for index := range calls {
+		calls[index].Messages = []Message{{Role: "user", Content: strings.Repeat("x", 1000+index*100)}}
+	}
+	allocations, err := allocateCodeReviewCompletionTokens(calls, codeReviewCompletionLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := 0
+	for _, allocation := range allocations {
+		total += allocation
+		if allocation < codeReviewSegmentCompletionFloor || allocation > codeReviewSegmentCompletionLimit {
+			t.Fatalf("reasoning segment escaped bounded allowance: %#v", allocations)
+		}
+	}
+	if total != codeReviewCompletionLimit {
+		t.Fatalf("aggregate review budget was not fully and exactly allocated: got %d want %d (%#v)", total, codeReviewCompletionLimit, allocations)
+	}
+}
+
 func TestCodeReviewPromptPinsBoundedStringArrayTypes(t *testing.T) {
 	messages, err := buildTaskMessages("code.review", TaskInput{
 		Prompt:   "Review the frozen pull request.",
