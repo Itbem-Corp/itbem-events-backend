@@ -416,11 +416,11 @@ func PromoteLatestAgentPlan(c echo.Context) error {
 	if cfg == nil || strings.TrimSpace(cfg.AutomationOutputBucket) == "" {
 		return utils.Error(c, http.StatusServiceUnavailable, "Delivery plan unavailable", "Private automation output storage is not configured")
 	}
-	expected := "s3://" + strings.TrimSpace(cfg.AutomationOutputBucket) + "/automation/" + task.ID.String() + "/result.json"
-	if task.OutputRef != expected {
+	resultKey, validResult := deliveryPlanResultKey(cfg, task)
+	if !validResult {
 		return conflict(c, "Delivery plan unavailable", "agent output reference is not valid for this task")
 	}
-	body, err := awsrepository.GetS3Object(c.Request().Context(), "automation/"+task.ID.String()+"/result.json", cfg.AutomationOutputBucket)
+	body, err := awsrepository.GetS3Object(c.Request().Context(), resultKey, cfg.AutomationOutputBucket)
 	if err != nil {
 		return utils.Error(c, http.StatusServiceUnavailable, "Delivery plan unavailable", "Could not read the private agent result")
 	}
@@ -490,6 +490,27 @@ func PromoteLatestAgentPlan(c echo.Context) error {
 	}
 	_ = actor // actor is deliberately resolved for authorization/audit context.
 	return created(c, "Agent plan promoted for human review", plan)
+}
+
+func deliveryPlanResultKey(cfg *models.Config, task models.AutomationTask) (string, bool) {
+	if cfg == nil || task.ID == uuid.Nil || strings.TrimSpace(cfg.AutomationOutputBucket) == "" {
+		return "", false
+	}
+	prefix := "s3://" + strings.TrimSpace(cfg.AutomationOutputBucket) + "/"
+	if !strings.HasPrefix(task.OutputRef, prefix) {
+		return "", false
+	}
+	key := strings.TrimPrefix(task.OutputRef, prefix)
+	legacy := "automation/" + task.ID.String() + "/result.json"
+	if key == legacy {
+		return key, true
+	}
+	runID, err := uuid.FromString(strings.TrimSpace(task.RunID))
+	if err != nil || runID == uuid.Nil {
+		return "", false
+	}
+	expected := "automation/" + task.ID.String() + "/runs/" + runID.String() + "/result.json"
+	return key, key == expected
 }
 
 func ListChangeSets(c echo.Context) error {

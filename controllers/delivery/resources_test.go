@@ -1,6 +1,36 @@
 package delivery
 
-import "testing"
+import (
+	"testing"
+
+	"events-stocks/models"
+	"github.com/gofrs/uuid"
+)
+
+func TestDeliveryPlanResultKeyAcceptsOnlyExactTaskRun(t *testing.T) {
+	taskID, runID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
+	cfg := &models.Config{AutomationOutputBucket: "private-results"}
+	task := models.AutomationTask{ID: taskID, RunID: runID.String(), OutputRef: "s3://private-results/automation/" + taskID.String() + "/runs/" + runID.String() + "/result.json"}
+	key, ok := deliveryPlanResultKey(cfg, task)
+	if !ok || key != "automation/"+taskID.String()+"/runs/"+runID.String()+"/result.json" {
+		t.Fatalf("exact immutable run result rejected: %q / %v", key, ok)
+	}
+	legacy := task
+	legacy.OutputRef = "s3://private-results/automation/" + taskID.String() + "/result.json"
+	if _, ok := deliveryPlanResultKey(cfg, legacy); !ok {
+		t.Fatal("legacy task-scoped compatibility pointer was rejected")
+	}
+	for _, invalid := range []string{
+		"s3://another-bucket/automation/" + taskID.String() + "/runs/" + runID.String() + "/result.json",
+		"s3://private-results/automation/" + taskID.String() + "/runs/" + uuid.Must(uuid.NewV4()).String() + "/result.json",
+		"s3://private-results/automation/" + uuid.Must(uuid.NewV4()).String() + "/runs/" + runID.String() + "/result.json",
+	} {
+		task.OutputRef = invalid
+		if _, ok := deliveryPlanResultKey(cfg, task); ok {
+			t.Fatalf("unbound plan result was accepted: %s", invalid)
+		}
+	}
+}
 
 func TestChangeSetMetadataCannotClaimAgentOrGitHubAppProvenance(t *testing.T) {
 	if containsReservedChangeSetProvenance(map[string]any{"external_ticket": "OPS-42"}) {
