@@ -19,8 +19,10 @@ import (
 )
 
 const (
-	maxInputBytes      = 10 << 20
-	maxErrorMessageLen = 1024
+	maxInputBytes                         = 10 << 20
+	maxErrorMessageLen                    = 1024
+	codeReviewCompletionLimit             = 16384
+	deliveryImplementationCompletionLimit = 8192
 )
 
 type TaskMessage struct {
@@ -838,16 +840,20 @@ func providerConfigured(provider Provider) bool {
 // A delivery request is split into bounded work items before planning. Keep
 // each plan call at the ordinary 4k completion ceiling so an overbroad task
 // cannot turn into one expensive, truncation-prone response. Implementation
-// retains the provider's larger allowance because it may need to return a
-// multi-file change manifest. QA and delivery summaries stay tighter, while
+// retains a bounded 8k allowance for multi-file manifests. Exact-SHA review is
+// allowed 16k because reasoning models account their private reasoning inside
+// max_completion_tokens; real large patches otherwise exhaust 4k before they
+// emit the structured verdict. QA and delivery summaries stay tighter, while
 // publication is deterministic and never calls a model. The provider client
 // independently clamps unsupported model limits.
 func CompletionTokensForOperation(operation string) int {
 	switch strings.TrimSpace(operation) {
 	case "delivery.plan", "delivery.qa", "delivery.summary":
 		return DefaultCompletionTokens
+	case "code.review":
+		return codeReviewCompletionLimit
 	case "delivery.implementation":
-		return miniMaxM3CompletionLimit
+		return deliveryImplementationCompletionLimit
 	case "delivery.onboarding_probe", "delivery.publish", "delivery.release_gate":
 		return 0
 	}

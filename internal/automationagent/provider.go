@@ -23,7 +23,7 @@ const (
 	MinCompletionTokens       = 1
 	MaxCompletionTokens       = 131072
 	miniMaxM2CompletionLimit  = 2048
-	miniMaxM3CompletionLimit  = 8192
+	miniMaxM3CompletionLimit  = 32768
 	maxProviderResponseSize   = 8 << 20
 	providerRetryMinDelay     = 30 * time.Second
 	providerRetryDefaultDelay = 2 * time.Minute

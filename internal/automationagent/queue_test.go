@@ -42,8 +42,11 @@ func TestCompletionTokensForOperationKeepsPlansBoundedAndExpandsImplementation(t
 	if got := CompletionTokensForOperation("delivery.plan"); got != DefaultCompletionTokens {
 		t.Fatalf("delivery plan budget = %d, want %d", got, DefaultCompletionTokens)
 	}
-	if got := CompletionTokensForOperation("delivery.implementation"); got != miniMaxM3CompletionLimit {
-		t.Fatalf("delivery implementation budget = %d, want %d", got, miniMaxM3CompletionLimit)
+	if got := CompletionTokensForOperation("code.review"); got != codeReviewCompletionLimit {
+		t.Fatalf("code review budget = %d, want %d", got, codeReviewCompletionLimit)
+	}
+	if got := CompletionTokensForOperation("delivery.implementation"); got != deliveryImplementationCompletionLimit {
+		t.Fatalf("delivery implementation budget = %d, want %d", got, deliveryImplementationCompletionLimit)
 	}
 	if got := CompletionTokensForOperation("delivery.qa"); got != DefaultCompletionTokens {
 		t.Fatalf("QA operation budget = %d, want %d", got, DefaultCompletionTokens)
@@ -65,6 +68,12 @@ func TestBoundedCompletionTokensNeverLetsQueuePayloadRaiseOperationLimit(t *test
 	}
 	if got := messageCompletionTokens("delivery.plan", 1024); got != 1024 {
 		t.Fatalf("queue payload did not retain stricter limit: %d", got)
+	}
+	if got := messageCompletionTokens("code.review", miniMaxM3CompletionLimit); got != codeReviewCompletionLimit {
+		t.Fatalf("queue payload raised code review limit to %d", got)
+	}
+	if got := messageCompletionTokens("code.review", 8192); got != 8192 {
+		t.Fatalf("queue payload did not retain stricter code review limit: %d", got)
 	}
 	if got := messageCompletionTokens("ai.chat", 0); got != DefaultCompletionTokens {
 		t.Fatalf("zero queue payload should retain default: %d", got)
