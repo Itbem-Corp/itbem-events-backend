@@ -341,6 +341,28 @@ func TestWorkerFailsWholeReviewWhenAnySegmentEscapesItsBoundary(t *testing.T) {
 	}
 }
 
+func TestCodeReviewCompletionBudgetIsSizeWeightedAndGloballyBounded(t *testing.T) {
+	calls := []codeReviewProviderCall{
+		{Messages: []Message{{Role: "user", Content: strings.Repeat("a", 100)}}},
+		{Messages: []Message{{Role: "user", Content: strings.Repeat("b", 1000)}}},
+		{Messages: []Message{{Role: "user", Content: strings.Repeat("c", 200)}}},
+	}
+	allocations, err := allocateCodeReviewCompletionTokens(calls, 12_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := 0
+	for _, allocation := range allocations {
+		total += allocation
+		if allocation < codeReviewSegmentCompletionFloor || allocation > codeReviewSegmentCompletionLimit {
+			t.Fatalf("segment allocation escaped its bounds: %#v", allocations)
+		}
+	}
+	if total != 12_000 || allocations[1] <= allocations[0] || allocations[1] <= allocations[2] {
+		t.Fatalf("completion budget was not size weighted under one global cap: %#v", allocations)
+	}
+}
+
 func TestCodeReviewPromptPinsBoundedStringArrayTypes(t *testing.T) {
 	messages, err := buildTaskMessages("code.review", TaskInput{
 		Prompt:   "Review the frozen pull request.",

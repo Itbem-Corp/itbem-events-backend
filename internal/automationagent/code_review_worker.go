@@ -12,6 +12,7 @@ import (
 )
 
 const codeReviewSegmentCompletionLimit = 8192
+const codeReviewSegmentCompletionFloor = 2048
 
 type codeReviewProviderCall struct {
 	Index       int
@@ -28,10 +29,6 @@ func (w *Worker) processSegmentedCodeReview(ctx context.Context, message TaskMes
 	}
 	needsCoverageGap := reviewNeedsCoverageGap(boundary)
 	totalCompletionTokens := messageCompletionTokens(message.Payload.Operation, message.Payload.MaxCompletionTokens)
-	maxTokens := min(totalCompletionTokens/len(segments), codeReviewSegmentCompletionLimit)
-	if maxTokens < MinCompletionTokens {
-		return w.fail(ctx, message.Payload.TaskID, runID, fmt.Errorf("code review completion budget cannot cover every segment"))
-	}
 	calls := make([]codeReviewProviderCall, 0, len(segments))
 	for index, segment := range segments {
 		delivery, err := json.Marshal(segment)
@@ -45,7 +42,14 @@ func (w *Worker) processSegmentedCodeReview(ctx context.Context, message TaskMes
 		if err != nil {
 			return w.fail(ctx, message.Payload.TaskID, runID, err)
 		}
-		calls = append(calls, codeReviewProviderCall{Index: index + 1, Boundary: segment, Messages: messages, MaxTokens: maxTokens, PatchDigest: segment.PatchSHA256})
+		calls = append(calls, codeReviewProviderCall{Index: index + 1, Boundary: segment, Messages: messages, PatchDigest: segment.PatchSHA256})
+	}
+	allocations, err := allocateCodeReviewCompletionTokens(calls, totalCompletionTokens)
+	if err != nil {
+		return w.fail(ctx, message.Payload.TaskID, runID, err)
+	}
+	for index := range calls {
+		calls[index].MaxTokens = allocations[index]
 	}
 	requestRef, err := w.storeCodeReviewExecutionRequest(ctx, message.Payload.TaskID, runID, calls, boundary)
 	if err != nil {
@@ -130,6 +134,51 @@ func (w *Worker) processSegmentedCodeReview(ctx context.Context, message TaskMes
 	}
 	_, err = w.callback.Update(ctx, message.Payload.TaskID, TaskUpdate{Status: "completed", RunID: runID, RequestRef: requestRef, OutputRef: outputRef, Provider: completion.Provider, Model: completion.Model, Usage: completion.Usage, ResponseID: completion.ResponseID, Execution: execution})
 	return err
+}
+
+func allocateCodeReviewCompletionTokens(calls []codeReviewProviderCall, total int) ([]int, error) {
+	if len(calls) == 0 || total < len(calls)*MinCompletionTokens {
+		return nil, fmt.Errorf("code review completion budget cannot cover every segment")
+	}
+	floor := min(codeReviewSegmentCompletionFloor, total/len(calls))
+	allocations := make([]int, len(calls))
+	sizes := make([]int, len(calls))
+	totalSize := 0
+	for index, call := range calls {
+		allocations[index] = floor
+		for _, message := range call.Messages {
+			sizes[index] += len(message.Content)
+		}
+		if sizes[index] < 1 {
+			sizes[index] = 1
+		}
+		totalSize += sizes[index]
+	}
+	remaining := total - floor*len(calls)
+	for index := range calls {
+		share := remaining * sizes[index] / totalSize
+		share = min(share, codeReviewSegmentCompletionLimit-allocations[index])
+		allocations[index] += share
+	}
+	used := 0
+	for _, allocation := range allocations {
+		used += allocation
+	}
+	for index := 0; used < total; index = (index + 1) % len(allocations) {
+		if allocations[index] >= codeReviewSegmentCompletionLimit {
+			allCapped := true
+			for _, allocation := range allocations {
+				allCapped = allCapped && allocation >= codeReviewSegmentCompletionLimit
+			}
+			if allCapped {
+				break
+			}
+			continue
+		}
+		allocations[index]++
+		used++
+	}
+	return allocations, nil
 }
 
 func (w *Worker) storeCodeReviewExecutionRequest(ctx context.Context, taskID, runID string, calls []codeReviewProviderCall, boundary CodeReviewInput) (string, error) {
