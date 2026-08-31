@@ -261,8 +261,11 @@ func TestCodeReviewPromptPinsBoundedStringArrayTypes(t *testing.T) {
 	}
 	system := messages[0].Content
 	for _, required := range []string{
+		"summary is one concise string of at most 800 characters",
 		"review_scope, test_plan, and coverage_gaps are arrays of plain JSON strings only",
 		"each contain at most 12 items",
+		"findings contains at most 12 objects",
+		"line_start and line_end as positive JSON integers, never null or omitted",
 		`"review_scope":["authentication flow","regression tests"]`,
 		`"findings":[]`,
 		"any critical, high, or medium finding requires request_changes",
