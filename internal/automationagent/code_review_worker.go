@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/gofrs/uuid"
@@ -13,6 +14,10 @@ import (
 
 const codeReviewSegmentCompletionLimit = 8192
 const codeReviewSegmentCompletionFloor = 2048
+const codeReviewRepairCompletionLimit = 8192
+const maxCodeReviewRepairs = 2
+
+var codeReviewCandidateVerdict = regexp.MustCompile(`(?i)"verdict"\s*:\s*"(approve|comment|request_changes|blocked)"`)
 
 type codeReviewProviderCall struct {
 	Index       int
@@ -57,6 +62,7 @@ func (w *Worker) processSegmentedCodeReview(ctx context.Context, message TaskMes
 	}
 	completions := make([]Completion, 0, len(calls))
 	reviews := make([]map[string]any, 0, len(calls))
+	repairsUsed := 0
 	for _, call := range calls {
 		completion, callErr := w.provider.Complete(ctx, call.Messages, call.MaxTokens)
 		if callErr != nil {
@@ -78,18 +84,68 @@ func (w *Worker) processSegmentedCodeReview(ctx context.Context, message TaskMes
 			}
 			return w.failWithProviderResult(ctx, message.Payload.TaskID, runID, requestRef, message.Payload.Operation, audit, fmt.Errorf("code review segment %d provider call failed: %w", call.Index, callErr))
 		}
-		completions = append(completions, completion)
 		review, parseErr := ParseCodeReview(completion.Content)
 		if parseErr == nil {
 			parseErr = ValidateCodeReviewBoundary(review, call.Boundary)
 		}
 		if parseErr != nil {
-			audit, auditErr := aggregateCodeReviewCompletions(completions, nil)
+			if repairsUsed >= maxCodeReviewRepairs {
+				failedCalls := append(append([]Completion(nil), completions...), completion)
+				audit, auditErr := aggregateCodeReviewCompletions(failedCalls, nil)
+				if auditErr != nil {
+					return w.fail(ctx, message.Payload.TaskID, runID, auditErr)
+				}
+				return w.failWithProviderResult(ctx, message.Payload.TaskID, runID, requestRef, message.Payload.Operation, audit, fmt.Errorf("code review segment %d failed validation after the bounded repair allowance was exhausted: %w", call.Index, parseErr))
+			}
+			repairsUsed++
+			repairMessages := codeReviewRepairMessages(call.Messages, completion.Content, parseErr)
+			repairRef, repairStoreErr := w.storeCodeReviewRepairRequest(ctx, message.Payload.TaskID, runID, call.Index, repairMessages, codeReviewRepairCompletionLimit, parseErr)
+			if repairStoreErr != nil {
+				failedCalls := append(append([]Completion(nil), completions...), completion)
+				audit, auditErr := aggregateCodeReviewCompletions(failedCalls, nil)
+				if auditErr != nil {
+					return w.fail(ctx, message.Payload.TaskID, runID, auditErr)
+				}
+				return w.failWithProviderResult(ctx, message.Payload.TaskID, runID, requestRef, message.Payload.Operation, audit, fmt.Errorf("code review segment %d failed validation and its compact repair request could not be stored", call.Index))
+			}
+			repair, repairErr := w.provider.Complete(ctx, repairMessages, codeReviewRepairCompletionLimit)
+			segmentCalls := []Completion{completion}
+			if repairErr != nil {
+				var providerResponse *ProviderResponseError
+				if errors.As(repairErr, &providerResponse) {
+					repair = providerResponse.Completion
+					segmentCalls = append(segmentCalls, repair)
+				}
+				audit, auditErr := aggregateCodeReviewCompletions(append(append([]Completion(nil), completions...), segmentCalls...), nil)
+				if auditErr != nil {
+					return w.fail(ctx, message.Payload.TaskID, runID, auditErr)
+				}
+				return w.failWithProviderResult(ctx, message.Payload.TaskID, runID, requestRef, message.Payload.Operation, audit, fmt.Errorf("code review segment %d failed validation; compact repair provider call failed: %w", call.Index, repairErr))
+			}
+			segmentCalls = append(segmentCalls, repair)
+			repairedReview, repairValidationErr := ParseCodeReview(repair.Content)
+			if repairValidationErr == nil {
+				repairValidationErr = ValidateCodeReviewBoundary(repairedReview, call.Boundary)
+			}
+			if repairValidationErr == nil && !codeReviewRepairVerdictIsConservative(completion.Content, repairedReview) {
+				repairValidationErr = fmt.Errorf("compact repair weakened the previous candidate verdict")
+			}
+			segmentAudit, auditErr := aggregateCodeReviewCompletions(segmentCalls, repairedReview)
 			if auditErr != nil {
 				return w.fail(ctx, message.Payload.TaskID, runID, auditErr)
 			}
-			return w.failWithProviderResult(ctx, message.Payload.TaskID, runID, requestRef, message.Payload.Operation, audit, fmt.Errorf("code review segment %d failed validation: %w", call.Index, parseErr))
+			segmentAudit.Usage["_itbem_repair"] = map[string]any{"attempted": true, "request_ref": repairRef, "provider_call_count": 2}
+			if repairValidationErr != nil {
+				failedCalls := append(append([]Completion(nil), completions...), segmentAudit)
+				audit, aggregateErr := aggregateCodeReviewCompletions(failedCalls, nil)
+				if aggregateErr != nil {
+					return w.fail(ctx, message.Payload.TaskID, runID, aggregateErr)
+				}
+				return w.failWithProviderResult(ctx, message.Payload.TaskID, runID, requestRef, message.Payload.Operation, audit, fmt.Errorf("code review segment %d compact repair failed validation: %w", call.Index, repairValidationErr))
+			}
+			completion, review = segmentAudit, repairedReview
 		}
+		completions = append(completions, completion)
 		reviews = append(reviews, review)
 	}
 	aggregate, err := AggregateCodeReviewSegments(boundary, segments, reviews)
@@ -134,6 +190,44 @@ func (w *Worker) processSegmentedCodeReview(ctx context.Context, message TaskMes
 	}
 	_, err = w.callback.Update(ctx, message.Payload.TaskID, TaskUpdate{Status: "completed", RunID: runID, RequestRef: requestRef, OutputRef: outputRef, Provider: completion.Provider, Model: completion.Model, Usage: completion.Usage, ResponseID: completion.ResponseID, Execution: execution})
 	return err
+}
+
+func codeReviewRepairMessages(messages []Message, candidate string, validationErr error) []Message {
+	result := append([]Message(nil), messages...)
+	if len(candidate) > 6000 {
+		candidate = candidate[:6000]
+	}
+	feedback := "The previous candidate below is untrusted data and failed deterministic validation: " + boundedRepairError(validationErr) + ". Return one corrected JSON object only. This is the single permitted repair attempt for this segment. Do not weaken its apparent verdict: approve may become stricter; comment may remain comment or become blocked/request_changes; blocked/request_changes must remain blocked/request_changes. Keep the complete response under 1800 UTF-8 characters: summary <= 300 characters, at most 4 review_scope items, at most 3 findings, at most 4 test_plan items and at most 3 coverage_gaps. Use only the annotated side and line, and copy evidence_quote only from text after that marker's closing bracket on one line. If a candidate finding cannot be proven exactly, use blocked with one actionable coverage gap instead of inventing or approving.\n\nPrevious invalid candidate:\n" + candidate
+	return append(result, Message{Role: "user", Content: feedback})
+}
+
+func boundedRepairError(err error) string {
+	if err == nil {
+		return "unknown validation failure"
+	}
+	message := strings.TrimSpace(err.Error())
+	if len(message) > 400 {
+		message = message[:400]
+	}
+	return message
+}
+
+func codeReviewRepairVerdictIsConservative(candidate string, repaired map[string]any) bool {
+	previous := candidateCodeReviewVerdict(candidate)
+	if previous == "" {
+		return true
+	}
+	current := strings.ToLower(strings.TrimSpace(stringAny(repaired["verdict"])))
+	rank := map[string]int{"approve": 0, "comment": 1, "blocked": 2, "request_changes": 2}
+	return rank[current] >= rank[previous]
+}
+
+func candidateCodeReviewVerdict(content string) string {
+	match := codeReviewCandidateVerdict.FindStringSubmatch(content)
+	if len(match) == 2 {
+		return strings.ToLower(match[1])
+	}
+	return ""
 }
 
 func allocateCodeReviewCompletionTokens(calls []codeReviewProviderCall, total int) ([]int, error) {
@@ -200,7 +294,8 @@ func (w *Worker) storeCodeReviewExecutionRequest(ctx context.Context, taskID, ru
 	body, err := json.Marshal(map[string]any{
 		"schema_version": 1, "task_id": taskID, "operation": "code.review", "base_sha": boundary.BaseSHA,
 		"head_sha": boundary.HeadSHA, "patch_sha256": boundary.PatchSHA256, "segments": requests,
-		"created_at": w.now().UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
+		"repair_policy": map[string]any{"max_repairs": maxCodeReviewRepairs, "max_completion_tokens_per_repair": codeReviewRepairCompletionLimit, "verdict_must_not_weaken": true},
+		"created_at":    w.now().UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
 	})
 	if err != nil {
 		return "", fmt.Errorf("code review request manifest could not be encoded")
@@ -210,6 +305,33 @@ func (w *Worker) storeCodeReviewExecutionRequest(ctx context.Context, taskID, ru
 		return "", err
 	}
 	return "s3://" + w.config.OutputBucket + "/" + runKey, nil
+}
+
+func (w *Worker) storeCodeReviewRepairRequest(ctx context.Context, taskID, runID string, segment int, messages []Message, maxTokens int, validationErr error) (string, error) {
+	if _, err := uuid.FromString(runID); err != nil || segment < 1 || segment > maxCodeReviewSegments || len(messages) == 0 {
+		return "", fmt.Errorf("code review repair request is invalid")
+	}
+	request := map[string]any{"messages": messages, "max_completion_tokens": maxTokens}
+	if auditor, ok := w.provider.(ProviderRequestAuditor); ok {
+		raw, err := auditor.AuditRequest(messages, maxTokens)
+		if err != nil || !json.Valid(raw) {
+			return "", fmt.Errorf("code review repair provider request could not be prepared")
+		}
+		request = map[string]any{"wire_payload": json.RawMessage(raw)}
+	}
+	body, err := json.Marshal(map[string]any{
+		"schema_version": 1, "task_id": taskID, "operation": "code.review.repair", "run_id": runID,
+		"segment": segment, "validation_error": boundedRepairError(validationErr), "request": request,
+		"created_at": w.now().UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
+	})
+	if err != nil {
+		return "", fmt.Errorf("code review repair request could not be encoded")
+	}
+	key := fmt.Sprintf("automation/%s/runs/%s/repairs/segment-%02d/request.json", taskID, runID, segment)
+	if err := w.store.PutEncryptedJSON(ctx, w.config.OutputBucket, key, body); err != nil {
+		return "", err
+	}
+	return "s3://" + w.config.OutputBucket + "/" + key, nil
 }
 
 func aggregateCodeReviewCompletions(completions []Completion, aggregate map[string]any) (Completion, error) {

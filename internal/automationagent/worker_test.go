@@ -341,6 +341,63 @@ func TestWorkerFailsWholeReviewWhenAnySegmentEscapesItsBoundary(t *testing.T) {
 	}
 }
 
+func TestWorkerRepairsOneTruncatedReviewSegmentAndAccountsBothCalls(t *testing.T) {
+	input, _ := json.Marshal(TaskInput{Prompt: "Review the frozen pull request.", Delivery: json.RawMessage(validCodeReviewInput())})
+	truncated := `{"summary":"Checked the change.","verdict":"approve"`
+	repaired := `{"summary":"The exact changed line is consistent.","verdict":"approve","review_scope":["handler"],"findings":[],"test_plan":["Run the handler tests"],"coverage_gaps":[]}`
+	provider := &sequenceProvider{completions: []Completion{
+		{Provider: ProviderMiniMax, Model: "MiniMax-M2.7", ResponseID: "truncated", Content: truncated, Usage: map[string]any{"total_tokens": float64(20)}},
+		{Provider: ProviderMiniMax, Model: "MiniMax-M2.7", ResponseID: "repaired", Content: repaired, Usage: map[string]any{"total_tokens": float64(10)}},
+	}}
+	store, callback := &fakeStore{input: input}, &fakeCallback{}
+	worker, _ := NewWorker(WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"}, store, callback, provider)
+	message := validMessage()
+	message.Payload.Operation = "code.review"
+	if err := worker.Process(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	if provider.calls != 2 || provider.maxTokens[1] != codeReviewRepairCompletionLimit {
+		t.Fatalf("truncated segment did not receive one bounded repair: calls=%d max=%#v", provider.calls, provider.maxTokens)
+	}
+	if len(callback.updates) != 2 || callback.updates[1].Status != "completed" || callback.updates[1].Usage["total_tokens"] != float64(30) {
+		t.Fatalf("repair calls were not fully accounted: %#v", callback.updates)
+	}
+	repairKey := "itbem-ai-outputs-local/automation/task/runs/" + callback.updates[1].RunID + "/repairs/segment-01/request.json"
+	if !strings.Contains(string(store.writes[repairKey]), `"verdict_must_not_weaken"`) && !strings.Contains(string(store.writes[repairKey]), "single permitted repair") {
+		t.Fatalf("repair request was not durably stored before inference: %s", store.writes[repairKey])
+	}
+	resultKey := "itbem-ai-outputs-local/automation/task/runs/" + callback.updates[1].RunID + "/result.json"
+	if !strings.Contains(string(store.writes[resultKey]), repairKey[len("itbem-ai-outputs-local/"):]) || !strings.Contains(string(store.writes[resultKey]), `"provider_call_count":2`) {
+		t.Fatalf("repair audit was not retained in the private result: %s", store.writes[resultKey])
+	}
+}
+
+func TestWorkerRejectsCompactRepairThatWeakensCandidateVerdict(t *testing.T) {
+	input, _ := json.Marshal(TaskInput{Prompt: "Review the frozen pull request.", Delivery: json.RawMessage(validCodeReviewInput())})
+	truncatedRequestChanges := `{"summary":"Issue suspected.","verdict":"request_changes","review_scope":["handler"],"findings":[`
+	unsafeApproval := `{"summary":"Looks fine.","verdict":"approve","review_scope":["handler"],"findings":[],"test_plan":["Run tests"],"coverage_gaps":[]}`
+	provider := &sequenceProvider{completions: []Completion{
+		{Provider: ProviderMiniMax, Model: "MiniMax-M2.7", ResponseID: "strict", Content: truncatedRequestChanges, Usage: map[string]any{"total_tokens": float64(20)}},
+		{Provider: ProviderMiniMax, Model: "MiniMax-M2.7", ResponseID: "weakened", Content: unsafeApproval, Usage: map[string]any{"total_tokens": float64(10)}},
+	}}
+	store, callback := &fakeStore{input: input}, &fakeCallback{}
+	worker, _ := NewWorker(WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"}, store, callback, provider)
+	message := validMessage()
+	message.Payload.Operation = "code.review"
+	if err := worker.Process(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	if len(callback.updates) != 2 || callback.updates[1].Status != "failed" || callback.updates[1].Usage["total_tokens"] != float64(30) || !strings.Contains(callback.updates[1].ErrorMessage, "weakened") {
+		t.Fatalf("weakened repair escaped the fail-closed gate: %#v", callback.updates)
+	}
+}
+
+func TestCandidateCodeReviewVerdictFindsWhitespaceInTruncatedJSON(t *testing.T) {
+	if got := candidateCodeReviewVerdict("{\n  \"verdict\" : \"REQUEST_CHANGES\",\n  \"findings\": ["); got != "request_changes" {
+		t.Fatalf("truncated candidate verdict = %q", got)
+	}
+}
+
 func TestCodeReviewCompletionBudgetIsSizeWeightedAndGloballyBounded(t *testing.T) {
 	calls := []codeReviewProviderCall{
 		{Messages: []Message{{Role: "user", Content: strings.Repeat("a", 100)}}},
