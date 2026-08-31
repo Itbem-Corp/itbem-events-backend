@@ -268,6 +268,10 @@ func TestCodeReviewPromptPinsBoundedStringArrayTypes(t *testing.T) {
 		"any critical, high, or medium finding requires request_changes",
 		"critical requires confidence >= 0.90, high requires confidence >= 0.80, and medium requires confidence >= 0.65",
 		"do not inflate confidence",
+		"Report each root cause once",
+		"findings must not repeat or overlap the same file, side, and source location",
+		"environment-variable names, configuration keys, redacted markers, documented placeholders, and obviously synthetic test sentinels as identifiers rather than leaked credentials",
+		"concrete usable secret value",
 		"Routine test-plan steps are not coverage gaps",
 		"fully contained in one supplied changed_line_ranges entry",
 	} {
