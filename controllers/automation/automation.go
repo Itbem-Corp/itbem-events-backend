@@ -1009,24 +1009,11 @@ func Cancel(c echo.Context) error {
 		return utils.Error(c, http.StatusForbidden, "Forbidden", "You cannot cancel this automation task")
 	}
 	now := time.Now().UTC()
-	message := "Cancellation requested by an authorized operator: " + reason
-	updates := map[string]any{"error_message": message}
-	statusCode := http.StatusAccepted
-	responseMessage := "Automation cancellation requested"
-	switch task.Status {
-	case "queued":
-		updates["status"] = "cancelled"
-		updates["completed_at"] = now
-		updates["lease_expires_at"] = nil
-		updates["budget_reservation_micros"] = 0
-		updates["budget_reservation_expires_at"] = nil
-		statusCode = http.StatusOK
-		responseMessage = "Queued automation task cancelled"
-	case "running":
-		updates["status"] = "cancel_requested"
-	case "cancel_requested":
-		return utils.Success(c, http.StatusAccepted, "Automation cancellation already requested", task)
-	default:
+	updates, statusCode, responseMessage, transitionErr := automationCancellationTransition(task, now, reason)
+	if transitionErr != nil {
+		if task.Status == "cancel_requested" {
+			return utils.Success(c, http.StatusAccepted, "Automation cancellation already requested", task)
+		}
 		return utils.Error(c, http.StatusConflict, "Automation cancellation rejected", "Only queued or running tasks can be cancelled")
 	}
 	result := configuration.DB.Model(&models.AutomationTask{}).Where("id = ? AND status = ?", task.ID, task.Status).Updates(updates)
@@ -1045,6 +1032,36 @@ func Cancel(c echo.Context) error {
 		}
 	}
 	return utils.Success(c, statusCode, responseMessage, task)
+}
+
+// automationCancellationTransition settles an abandoned execution immediately
+// once its renewable lease has expired. There is no live worker left to
+// acknowledge cancel_requested in that state; retaining it forever would block
+// a safe operator retry and keep a stale budget reservation active.
+func automationCancellationTransition(task models.AutomationTask, now time.Time, reason string) (map[string]any, int, string, error) {
+	updates := map[string]any{"error_message": "Cancellation requested by an authorized operator: " + reason}
+	settle := func(message string) (map[string]any, int, string, error) {
+		updates["status"] = "cancelled"
+		updates["completed_at"] = now
+		updates["lease_expires_at"] = nil
+		updates["budget_reservation_micros"] = int64(0)
+		updates["budget_reservation_expires_at"] = nil
+		return updates, http.StatusOK, message, nil
+	}
+	switch task.Status {
+	case "queued":
+		return settle("Queued automation task cancelled")
+	case "running":
+		if task.LeaseExpiresAt != nil && !task.LeaseExpiresAt.After(now) {
+			return settle("Expired automation task cancelled")
+		}
+		updates["status"] = "cancel_requested"
+		return updates, http.StatusAccepted, "Automation cancellation requested", nil
+	case "cancel_requested":
+		return nil, 0, "", fmt.Errorf("automation cancellation already requested")
+	default:
+		return nil, 0, "", fmt.Errorf("automation task is not cancellable")
+	}
 }
 
 // RetryCodeReview creates a fresh, explicitly authorized execution for the

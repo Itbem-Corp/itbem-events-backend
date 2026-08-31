@@ -754,6 +754,28 @@ func TestCancellationRequestedTaskRetainsItsBudgetAdmissionHold(t *testing.T) {
 	}
 }
 
+func TestExpiredRunningTaskCancellationSettlesAndReleasesItsReservation(t *testing.T) {
+	now := time.Now().UTC()
+	expired := now.Add(-time.Second)
+	task := models.AutomationTask{Status: "running", LeaseExpiresAt: &expired, BudgetReservationMicros: 99}
+	updates, statusCode, message, err := automationCancellationTransition(task, now, "worker interrupted")
+	if err != nil || statusCode != http.StatusOK || message != "Expired automation task cancelled" {
+		t.Fatalf("expired cancellation did not settle: updates=%#v status=%d message=%q err=%v", updates, statusCode, message, err)
+	}
+	if updates["status"] != "cancelled" || updates["budget_reservation_micros"] != int64(0) || updates["lease_expires_at"] != nil || updates["budget_reservation_expires_at"] != nil {
+		t.Fatalf("expired cancellation retained live authority or budget: %#v", updates)
+	}
+}
+
+func TestLiveRunningTaskCancellationStillWaitsForWorkerAccounting(t *testing.T) {
+	now := time.Now().UTC()
+	active := now.Add(time.Minute)
+	updates, statusCode, message, err := automationCancellationTransition(models.AutomationTask{Status: "running", LeaseExpiresAt: &active}, now, "operator request")
+	if err != nil || statusCode != http.StatusAccepted || message != "Automation cancellation requested" || updates["status"] != "cancel_requested" {
+		t.Fatalf("live cancellation bypassed worker settlement: updates=%#v status=%d message=%q err=%v", updates, statusCode, message, err)
+	}
+}
+
 func TestCanonicalTraceEntriesKeepKindsAndPrivateReferencesOutOfTheResponse(t *testing.T) {
 	finishedAt := time.Now().UTC()
 	taskID := uuid.Must(uuid.NewV4())
