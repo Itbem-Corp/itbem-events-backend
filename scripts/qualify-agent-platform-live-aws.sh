@@ -6,7 +6,7 @@ repository_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 compose_file="$repository_root/deploy/staging/aws-emulator.compose.yml"
 emulator_port=${ITBEM_AWS_EMULATOR_PORT:-14566}
 container_name="itbem-agent-qualification-$$"
-emulator_image=$(awk '$1 == "image:" { print $2; exit }' "$compose_file")
+emulator_image=$(awk '$1 == "image:" { print $2; exit }' "$compose_file" | tr -d '\r')
 
 case "$emulator_port" in
   ''|*[!0-9]*)
@@ -64,3 +64,5 @@ AWS_REGION=us-east-1 \
 ITBEM_AWS_EMULATOR_E2E=1 \
 ITBEM_AWS_EMULATOR_ENDPOINT="http://127.0.0.1:$emulator_port" \
 go test ./internal/automationagent -run '^TestAWSEmulator' -count=1
+
+printf '\nLive AWS-emulator transport and isolated role-lane qualification passed.\n'

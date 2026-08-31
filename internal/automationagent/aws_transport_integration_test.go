@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"events-stocks/internal/agentwork"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -208,6 +209,133 @@ func TestAWSEmulatorRedeliveryReusesPersistedResult(t *testing.T) {
 	}
 }
 
+func TestAWSEmulatorRoleLaneIsolation(t *testing.T) {
+	config, runtime := requireAWSEmulator(t)
+	_, revision, lookup := testOnboardingProbeWorkspace(t, false)
+	t.Setenv("ITBEM_AI_WORKSPACES_JSON", lookup("ITBEM_AI_WORKSPACES_JSON"))
+	probeDelivery, err := BuildOnboardingProbeDelivery("workspace://service", "github://acme/service", "trunk", revision, []string{"unit"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var callbackMu sync.Mutex
+	callbacks := map[string][]TaskUpdate{}
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPut || request.Header.Get("X-Automation-Secret") != "integration-callback-secret" {
+			response.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		var update TaskUpdate
+		if json.NewDecoder(request.Body).Decode(&update) != nil {
+			response.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		taskID := strings.TrimPrefix(request.URL.Path, "/api/internal/automation/tasks/")
+		callbackMu.Lock()
+		callbacks[taskID] = append(callbacks[taskID], update)
+		callbackMu.Unlock()
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	callback, err := NewHTTPCallback(server.URL, "integration-callback-secret", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type laneFixture struct {
+		role       agentwork.Role
+		lane       agentwork.Lane
+		operation  string
+		input      TaskInput
+		completion string
+		terminal   string
+	}
+	fixtures := []laneFixture{
+		{role: agentwork.RoleOrchestrator, lane: agentwork.LaneOrchestration, operation: agentwork.OperationDocumentAnalyze, input: TaskInput{Prompt: "Summarize the bounded fixture."}, completion: "The bounded fixture is valid.", terminal: "completed"},
+		{role: agentwork.RolePrincipalEngineer, lane: agentwork.LaneEngineering, operation: agentwork.OperationProductIdeate, input: TaskInput{Prompt: "Compare two bounded directions."}, completion: validProductBrief, terminal: "completed"},
+		{role: agentwork.RoleReviewer, lane: agentwork.LaneReview, operation: agentwork.OperationCodeReview, input: TaskInput{Prompt: "Review only the frozen patch.", Delivery: validCodeReviewInput()}, completion: validCodeReview(), terminal: "completed"},
+		{role: agentwork.RoleQA, lane: agentwork.LaneQA, operation: agentwork.OperationDeliveryOnboardingProbe, input: TaskInput{Delivery: probeDelivery}, terminal: "completed"},
+		{role: agentwork.RoleReleaseManager, lane: agentwork.LaneRelease, operation: agentwork.OperationDeliveryReleaseGate, input: TaskInput{Delivery: json.RawMessage(`{"project":{"id":"fixture"}}`)}, terminal: "failed"},
+	}
+
+	queues := make(map[agentwork.Lane]*AWSQueue, len(fixtures))
+	workers := make(map[agentwork.Lane]*Worker, len(fixtures))
+	providers := make(map[agentwork.Lane]*countingProvider, len(fixtures))
+	for _, fixture := range fixtures {
+		queueURL := createAWSEmulatorQueue(t, runtime)
+		queue, queueErr := NewAWSQueue(runtime.SQS, queueURL)
+		if queueErr != nil {
+			t.Fatal(queueErr)
+		}
+		provider := &countingProvider{completion: emulatorCompletion(fixture.completion, "lane-"+string(fixture.lane)), err: errors.New("provider must not be called by a deterministic lane")}
+		if fixture.completion != "" {
+			provider.err = nil
+		}
+		workerConfig := config.WorkerConfig
+		workerConfig.Role, workerConfig.Lane = fixture.role, fixture.lane
+		worker, workerErr := NewWorker(workerConfig, NewAWSObjectStore(runtime.S3), callback, provider)
+		if workerErr != nil {
+			t.Fatal(workerErr)
+		}
+		queues[fixture.lane], workers[fixture.lane], providers[fixture.lane] = queue, worker, provider
+	}
+
+	for index, fixture := range fixtures {
+		taskID := uuid.Must(uuid.NewV4()).String()
+		inputKey := putAWSEmulatorLaneTask(t, runtime, config, queues[fixture.lane].queueURL, taskID, fixture.operation, fixture.input)
+		cleanupAWSEmulatorObjects(t, runtime, config, taskID, inputKey)
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		messages, receiveErr := queues[fixture.lane].Receive(ctx, 1)
+		if receiveErr != nil || len(messages) != 1 {
+			cancel()
+			t.Fatalf("receive %s lane message: %#v / %v", fixture.lane, messages, receiveErr)
+		}
+		decoded, decodeErr := DecodeTaskMessage(messages[0].Body)
+		if decodeErr != nil {
+			cancel()
+			t.Fatal(decodeErr)
+		}
+		wrongLane := fixtures[(index+1)%len(fixtures)].lane
+		if processErr := workers[wrongLane].Process(ctx, decoded); processErr == nil || !strings.Contains(processErr.Error(), "outside this worker role") {
+			cancel()
+			t.Fatalf("%s task crossed into %s: %v", fixture.lane, wrongLane, processErr)
+		}
+		callbackMu.Lock()
+		wrongUpdates := len(callbacks[taskID])
+		callbackMu.Unlock()
+		if wrongUpdates != 0 {
+			cancel()
+			t.Fatalf("wrong-role %s worker emitted a callback for %s", wrongLane, fixture.lane)
+		}
+		if processErr := ProcessQueueMessage(ctx, workers[fixture.lane], queues[fixture.lane], messages[0]); processErr != nil {
+			cancel()
+			t.Fatalf("process %s lane: %v", fixture.lane, processErr)
+		}
+		cancel()
+		callbackMu.Lock()
+		updates := append([]TaskUpdate(nil), callbacks[taskID]...)
+		callbackMu.Unlock()
+		if len(updates) != 2 || updates[0].Status != "running" || updates[1].Status != fixture.terminal {
+			t.Fatalf("unexpected %s lane callbacks: %#v", fixture.lane, updates)
+		}
+		if fixture.completion == "" && providers[fixture.lane].callCount() != 0 {
+			t.Fatalf("deterministic %s lane invoked the model provider", fixture.lane)
+		}
+		if fixture.completion != "" && providers[fixture.lane].callCount() != 1 {
+			t.Fatalf("%s lane made %d provider calls; expected exactly one", fixture.lane, providers[fixture.lane].callCount())
+		}
+	}
+
+	for _, fixture := range fixtures {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		remaining, receiveErr := runtime.SQS.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{QueueUrl: aws.String(queues[fixture.lane].queueURL), MaxNumberOfMessages: 1, WaitTimeSeconds: 0})
+		cancel()
+		if receiveErr != nil || len(remaining.Messages) != 0 {
+			t.Fatalf("%s lane retained terminal work: %#v / %v", fixture.lane, remaining.Messages, receiveErr)
+		}
+	}
+}
+
 func requireAWSEmulator(t *testing.T) (RuntimeConfig, AWSRuntime) {
 	t.Helper()
 	if testing.Short() || (os.Getenv("ITBEM_AWS_EMULATOR_E2E") != "1" && os.Getenv("ITBEM_LOCALSTACK_E2E") != "1") {
@@ -302,6 +430,29 @@ func putAWSEmulatorTask(t *testing.T, runtime AWSRuntime, config RuntimeConfig, 
 		t.Fatal(err)
 	}
 	return inputKey, outputKey
+}
+
+func putAWSEmulatorLaneTask(t *testing.T, runtime AWSRuntime, config RuntimeConfig, queueURL, taskID, operation string, input TaskInput) string {
+	t.Helper()
+	inputKey := "automation/inputs/" + taskID + "/input.json"
+	encodedInput, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.S3.PutObject(context.Background(), &s3.PutObjectInput{Bucket: aws.String(config.InputBucket), Key: aws.String(inputKey), Body: strings.NewReader(string(encodedInput)), ContentType: aws.String("application/json"), ServerSideEncryption: s3types.ServerSideEncryptionAes256}); err != nil {
+		t.Fatal(err)
+	}
+	message := validMessage()
+	message.JobID, message.Payload.Operation, message.Payload.TaskID = "lane-"+taskID, operation, taskID
+	message.Payload.InputRef = "s3://" + config.InputBucket + "/" + inputKey
+	encodedMessage, err := json.Marshal(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.SQS.SendMessage(context.Background(), &sqs.SendMessageInput{QueueUrl: aws.String(queueURL), MessageBody: aws.String(string(encodedMessage))}); err != nil {
+		t.Fatal(err)
+	}
+	return inputKey
 }
 
 func cleanupAWSEmulatorObjects(t *testing.T, runtime AWSRuntime, config RuntimeConfig, taskID, inputKey string) {
