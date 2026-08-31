@@ -272,6 +272,9 @@ func TestCodeReviewPromptPinsBoundedStringArrayTypes(t *testing.T) {
 		"findings must not repeat or overlap the same file, side, and source location",
 		"environment-variable names, configuration keys, redacted markers, documented placeholders, and obviously synthetic test sentinels as identifiers rather than leaked credentials",
 		"concrete usable secret value",
+		"intentional fail-closed action, credential removal, validation rejection, sanitization, or least-privilege restriction is not a defect",
+		"one short contiguous substring copied verbatim from a single added or removed patch line",
+		"never join lines, insert escapes, normalize whitespace, interpolate text, or reconstruct source",
 		"Routine test-plan steps are not coverage gaps",
 		"fully contained in one supplied changed_line_ranges entry",
 	} {
