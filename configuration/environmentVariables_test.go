@@ -1,6 +1,7 @@
 package configuration
 
 import (
+	"events-stocks/models"
 	"reflect"
 	"testing"
 )
@@ -24,6 +25,18 @@ func TestSetConfigFieldSupportsTypedOptionalConfiguration(t *testing.T) {
 	got := value.Interface().(config)
 	if got.Text != "value" || got.Reserve != 123 || !got.Enabled {
 		t.Fatalf("unexpected typed configuration: %#v", got)
+	}
+}
+
+func TestOIDCConfigurationUsesDocumentedEnvironmentNames(t *testing.T) {
+	typ := reflect.TypeOf(models.Config{})
+	issuerField, _ := typ.FieldByName("OIDCIssuerURL")
+	jwksField, _ := typ.FieldByName("OIDCJWKSURL")
+	if got := configFieldEnvVar(issuerField); got != "OIDC_ISSUER_URL" {
+		t.Fatalf("OIDC issuer environment mapping changed: %q", got)
+	}
+	if got := configFieldEnvVar(jwksField); got != "OIDC_JWKS_URL" {
+		t.Fatalf("OIDC JWKS environment mapping changed: %q", got)
 	}
 }
 

@@ -26,6 +26,12 @@ type Config struct {
 	// Map format: "client-id=eventiapp,other-client-id=itbem".
 	CognitoAllowedClientIds string `required:"false"`
 	CognitoTenantClientMap  string `required:"false"`
+	// OIDCIssuerURL and OIDCJWKSURL permit a disposable, signed identity
+	// provider during isolated local qualification. They are accepted only
+	// when ENV=local and both URLs resolve to loopback. Deployed environments
+	// always derive the issuer and JWKS endpoint from the Cognito user pool.
+	OIDCIssuerURL string `required:"false" env:"OIDC_ISSUER_URL"`
+	OIDCJWKSURL   string `required:"false" env:"OIDC_JWKS_URL"`
 	// TenantHostMap binds branded API hosts to the Cognito tenant audience.
 	// Use explicit product bindings in deployed environments, for example
 	// "api.eventiapp.com.mx=eventiapp,api.itbem.com.mx=itbem". A wildcard is

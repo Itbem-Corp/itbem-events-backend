@@ -1,0 +1,62 @@
+# Disposable, no-cost authenticated qualification dependencies. Production
+# remains on managed AWS/PostgreSQL/Valkey and never uses this topology.
+services:
+  postgres:
+    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    restart: "no"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: events_ai_qualification
+    ports:
+      - "127.0.0.1:${ITBEM_QUALIFICATION_POSTGRES_PORT:-15432}:5432"
+    tmpfs:
+      - /var/lib/postgresql/data:size=512m
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d events_ai_qualification"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  valkey:
+    image: valkey/valkey:8-alpine@sha256:e0eb7c480958d32bdc4357a74bdd70653ae15f2f9b4c93c4a5a9fad1dc471c84
+    restart: "no"
+    read_only: true
+    ports:
+      - "127.0.0.1:${ITBEM_QUALIFICATION_VALKEY_PORT:-16379}:6379"
+    tmpfs:
+      - /data:size=128m
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  aws-emulator:
+    image: ghcr.io/getmoto/motoserver:5.2.2@sha256:0349ef6ecb9cd041293026accda0ea71bfa09925dffae3d76d120d15ecc76971
+    restart: "no"
+    read_only: true
+    environment:
+      MOTO_PORT: "4566"
+    ports:
+      - "127.0.0.1:${ITBEM_QUALIFICATION_AWS_PORT:-14568}:4566"
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:4566/', timeout=2).read()
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s

@@ -81,6 +81,42 @@ This check uses only disposable `test` credentials. It must never receive a
 production AWS profile, provider API key, GitHub token, repository checkout or
 secret value.
 
+## Cost-free authenticated local staging
+
+The destructive dashboard flow must never target production. Qualify it with
+the API, PostgreSQL, Valkey and Moto bound to loopback plus the disposable
+signed identity fixture:
+
+1. Start `deploy/staging/control-plane.compose.yml` with a unique Compose
+   project name. Its digest-pinned PostgreSQL, Valkey and Moto services use
+   tmpfs only and bind the alternate loopback ports `15432`, `16379` and
+   `14568`; `docker compose down` removes the containers and their data.
+2. Create a private temporary directory outside every repository.
+3. Set `ENV=local` only in the issuer process and start
+   `go run ./cmd/itbem-local-oidc --listen 127.0.0.1:<port> --token-file
+   <private-file> --ready-file <metadata-file>`. Do not print or source the
+   token file.
+4. Read the non-secret issuer and JWKS URLs from the metadata file. Start
+   `scripts/Start-LocalAIControlPlane.ps1` with `-OIDCIssuerURL`,
+   `-OIDCJWKSURL`, and the same audience. Use a fresh database name and an
+   alternate loopback API port. Pass the isolated Valkey address through
+   `-RedisHost`; this path does not read Cognito IDs from the dashboard. When
+   the disposable database runs in WSL, pass its exact container name with
+   `-DatabaseProbeContainer` and use `-DatabaseProbeInWSL`; the probe remains
+   a read-only `SELECT 1`.
+5. Read the token into the dashboard test process as `E2E_ID_TOKEN`, set
+   `PLAYWRIGHT_BASE_URL` and `E2E_BACKEND_URL` to the isolated loopback
+   services, and run the authenticated single-repository and heterogeneous
+   multi-repository Playwright projects.
+6. Stop the issuer gracefully, stop the isolated services and remove the
+   temporary directory. Verify the token and metadata files no longer exist.
+
+The fixture token is process-only secret material: never persist it in `.env`,
+Vault, a task, a GitHub secret, an artifact, a screenshot, or logs. Both
+dashboard and backend reject non-loopback fixture endpoints, and the backend
+rejects the override for any non-local environment. A pass records only the
+fixture type, exact code SHA, commands, timestamps and redacted outcomes.
+
 ## Dashboard qualification
 
 Run these commands at the exact dashboard PR SHA:

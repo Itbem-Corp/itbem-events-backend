@@ -39,6 +39,31 @@ docker compose -f deploy/staging/aws-emulator.compose.yml up -d --wait
 .\scripts\Start-LocalAIControlPlane.ps1
 ```
 
+For authenticated destructive E2E without calling Cognito or production, run
+the disposable loopback issuer in a separate process and pass its ready-file
+endpoints to the control plane. It creates a short-lived signed ID token in a
+private temporary file, never exposes a token endpoint, and removes its files
+on graceful shutdown:
+
+```powershell
+$fixture = Join-Path ([IO.Path]::GetTempPath()) 'itbem-local-oidc'
+New-Item -ItemType Directory -Force -Path $fixture | Out-Null
+$env:ENV = 'local'
+go run ./cmd/itbem-local-oidc --listen 127.0.0.1:19090 `
+  --token-file (Join-Path $fixture 'id-token') `
+  --ready-file (Join-Path $fixture 'ready.json')
+```
+
+In another terminal, read only the non-secret issuer/JWKS metadata from the
+ready file and start `Start-LocalAIControlPlane.ps1` with `-OIDCIssuerURL`,
+`-OIDCJWKSURL`, and the fixture audience. This path uses local placeholder
+Cognito IDs and does not read the dashboard environment file. Alternate
+isolated PostgreSQL and Valkey ports can be selected with `-DatabasePort` and
+`-RedisHost`. The dashboard test process reads the token file into
+`E2E_ID_TOKEN`; the token must not be copied to `.env`, logs, Vault, CI
+artifacts, shell history, or production configuration. See
+`docs/agent-platform/QUALIFICATION.md` for the exact lifecycle.
+
 The emulator is free, test-only Moto pinned to an immutable image digest and
 binds only to loopback. Production continues to use native AWS S3 and SQS.
 `-AwsEmulatorEndpoint` selects another loopback port when needed; the older
@@ -53,9 +78,10 @@ password in the repository. Pass their already-known Cognito email explicitly:
 ```
 
 This allow-list is honored only when `ENV=local`, only after the API has
-validated a Cognito ID token, and only for the selected email. It is ignored in
-deployed environments. Do not use it as a production role-management path;
-use the global administrator module instead.
+validated a signed Cognito token or the loopback-only qualification token, and
+only for the selected email. It is ignored in deployed environments. Do not
+use it as a production role-management path; use the global administrator
+module instead.
 
 The command deliberately does not configure a model-provider key. Start the
 local agent separately with its selected provider credentials in its own
