@@ -94,7 +94,7 @@ y no puede sobrescribir la respuesta ya ligada a un cargo del ledger.
 En ambientes desplegados el navegador entrega el input mediante una URL S3
 firmada de corta vida. `ENV=local` admite además un fallback autenticado y
 acotado a 256 KB cuando el navegador no puede alcanzar el endpoint aislado de
-LocalStack. Ese fallback escribe directamente y cifrado en el bucket privado;
+un emulador AWS. Ese fallback escribe directamente y cifrado en el bucket privado;
 no conserva el cuerpo en la base de datos, logs ni mensajes SQS. No existe en
 staging ni producción y no debe convertirse en un canal genérico de prompts.
 

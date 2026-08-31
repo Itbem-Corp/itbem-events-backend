@@ -33,6 +33,35 @@ mandatory scenarios against named tests rather than documentation claims:
 The script also executes the full Go regression suite, `go vet` and the
 security preflight. Any failure blocks qualification.
 
+## Live AWS transport qualification without production access
+
+Before using a physical worker host or AWS resources, exercise the real AWS SDK
+S3/SQS adapters against the pinned, free Moto emulator:
+
+```sh
+sh scripts/qualify-agent-platform-live-aws.sh
+```
+
+This temporary staging fixture binds only to loopback, has no Docker socket,
+drops Linux capabilities, uses a read-only image filesystem, and is removed
+when the command exits. The script needs only the Docker CLI and reads the
+image pinned by version and digest from
+`deploy/staging/aws-emulator.compose.yml`; it is test infrastructure only and
+does not replace S3 or SQS in production.
+
+The live suite creates isolated queues and fake encrypted objects, then proves
+both the normal transport and an actual SQS redelivery after a failed terminal
+callback. The second delivery must reuse the persisted provider result, bind a
+new lease to the original run, emit exactly one accepted terminal effect, make
+no second provider call, and delete the message only after success. The older
+`ITBEM_LOCALSTACK_E2E` and `ITBEM_LOCALSTACK_ENDPOINT` variables remain accepted
+as compatibility aliases; new automation should use
+`ITBEM_AWS_EMULATOR_E2E` and `ITBEM_AWS_EMULATOR_ENDPOINT`.
+
+This check uses only disposable `test` credentials. It must never receive a
+production AWS profile, provider API key, GitHub token, repository checkout or
+secret value.
+
 ## Dashboard qualification
 
 Run these commands at the exact dashboard PR SHA:

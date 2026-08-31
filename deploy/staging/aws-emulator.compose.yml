@@ -1,0 +1,29 @@
+name: itbem-agent-qualification
+
+services:
+  aws-emulator:
+    # Test-only S3/SQS emulator. Production remains native AWS. Pin both the
+    # release and immutable digest so a qualification rerun cannot drift.
+    image: ghcr.io/getmoto/motoserver:5.2.2@sha256:0349ef6ecb9cd041293026accda0ea71bfa09925dffae3d76d120d15ecc76971
+    restart: "no"
+    environment:
+      MOTO_PORT: "4566"
+    ports:
+      - "127.0.0.1:${ITBEM_AWS_EMULATOR_PORT:-4566}:4566"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:4566/', timeout=2).read()
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 3s

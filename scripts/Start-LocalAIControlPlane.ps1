@@ -13,7 +13,8 @@ param(
 	# explicitly isolated local PostgreSQL container (for example a dedicated
 	# integration database on another port); it never changes that container.
 	[string]$DatabaseProbeContainer = '',
-    [string]$LocalStackEndpoint = 'http://localhost:4566',
+    [Alias('LocalStackEndpoint')]
+    [string]$AwsEmulatorEndpoint = 'http://localhost:4566',
     # Deliberately opt-in and local-only. The API ignores this setting outside
     # ENV=local, and authentication still comes from Cognito before a role is
     # granted. Prefer passing it from an ignored local environment file.
@@ -36,9 +37,9 @@ if ([string]::IsNullOrWhiteSpace($DatabasePassword)) {
     $DatabasePassword = 'postgres'
 }
 
-$endpointUri = [Uri]$LocalStackEndpoint
+$endpointUri = [Uri]$AwsEmulatorEndpoint
 if ($endpointUri.Scheme -ne 'http' -or $endpointUri.Host -notin @('localhost', '127.0.0.1', '::1')) {
-    throw 'LocalStackEndpoint must be an HTTP loopback endpoint.'
+    throw 'AwsEmulatorEndpoint must be an HTTP loopback endpoint.'
 }
 
 function Read-EnvironmentFile([string]$Path) {
@@ -103,27 +104,27 @@ function Ensure-LocalBucket([string]$Bucket) {
     $previousErrorAction = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        & aws s3api head-bucket --endpoint-url $LocalStackEndpoint --bucket $Bucket 2>$null
+        & aws s3api head-bucket --endpoint-url $AwsEmulatorEndpoint --bucket $Bucket 2>$null
         $headExitCode = $LASTEXITCODE
     }
     finally {
         $ErrorActionPreference = $previousErrorAction
     }
     if ($headExitCode -ne 0) {
-        & aws s3api create-bucket --endpoint-url $LocalStackEndpoint --bucket $Bucket | Out-Null
+        & aws s3api create-bucket --endpoint-url $AwsEmulatorEndpoint --bucket $Bucket | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "Could not create local bucket $Bucket" }
     }
 }
 
 function Ensure-LocalBucketCors([string]$Bucket) {
-    # The dashboard reads short-lived private URLs directly from LocalStack in
+    # The dashboard reads short-lived private URLs directly from the emulator in
     # local development. Mirror the browser contract deliberately instead of
     # disabling CORS or widening it to arbitrary origins.
     $corsConfiguration = Join-Path $PSScriptRoot 'localstack-bucket-cors.json'
     if (-not (Test-Path -LiteralPath $corsConfiguration -PathType Leaf)) {
         throw "Local CORS policy was not found: $corsConfiguration"
     }
-    & aws s3api put-bucket-cors --endpoint-url $LocalStackEndpoint --bucket $Bucket --cors-configuration "file://$corsConfiguration" | Out-Null
+    & aws s3api put-bucket-cors --endpoint-url $AwsEmulatorEndpoint --bucket $Bucket --cors-configuration "file://$corsConfiguration" | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "Could not configure local browser access for bucket $Bucket" }
 }
 
@@ -133,7 +134,7 @@ function Ensure-LocalQueue([string]$QueueName) {
     $previousErrorAction = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $queueURL = ((@(& aws sqs get-queue-url --endpoint-url $LocalStackEndpoint --queue-name $QueueName --query QueueUrl --output text 2>$null) -join [Environment]::NewLine)).Trim()
+        $queueURL = ((@(& aws sqs get-queue-url --endpoint-url $AwsEmulatorEndpoint --queue-name $QueueName --query QueueUrl --output text 2>$null) -join [Environment]::NewLine)).Trim()
         $queueExitCode = $LASTEXITCODE
     }
     finally {
@@ -142,7 +143,7 @@ function Ensure-LocalQueue([string]$QueueName) {
     if ($queueExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($queueURL)) {
         return $queueURL
     }
-    $queueURL = ((@(& aws sqs create-queue --endpoint-url $LocalStackEndpoint --queue-name $QueueName --query QueueUrl --output text) -join [Environment]::NewLine)).Trim()
+    $queueURL = ((@(& aws sqs create-queue --endpoint-url $AwsEmulatorEndpoint --queue-name $QueueName --query QueueUrl --output text) -join [Environment]::NewLine)).Trim()
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($queueURL)) {
         throw "Could not create or resolve local queue $QueueName"
     }
@@ -192,7 +193,7 @@ $eventiappClientID = Require-Value $dashboardSettings 'COGNITO_EVENTIAPP_CLIENT_
 $itbemClientID = Require-Value $dashboardSettings 'COGNITO_ITBEM_CLIENT_ID'
 $cafettonHouseClientID = Require-Value $dashboardSettings 'COGNITO_CAFETTONHOUSE_CLIENT_ID'
 
-# LocalStack only. These disposable credentials never leave the local endpoint.
+# Local emulator only. These disposable credentials never leave loopback.
 $awsCredentialEnvironment = @{}
 foreach ($name in @('AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN', 'AWS_REGION', 'AWS_DEFAULT_REGION')) {
     $awsCredentialEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
@@ -208,7 +209,7 @@ Ensure-LocalBucket $outputBucket
 Ensure-LocalBucketCors $inputBucket
 Ensure-LocalBucketCors $outputBucket
 $automationDLQURL = Ensure-LocalQueue 'itbem-ai-local-dlq'
-$automationDLQArn = ((@(& aws sqs get-queue-attributes --endpoint-url $LocalStackEndpoint --queue-url $automationDLQURL --attribute-names QueueArn --query Attributes.QueueArn --output text) -join [Environment]::NewLine)).Trim()
+$automationDLQArn = ((@(& aws sqs get-queue-attributes --endpoint-url $AwsEmulatorEndpoint --queue-url $automationDLQURL --attribute-names QueueArn --query Attributes.QueueArn --output text) -join [Environment]::NewLine)).Trim()
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($automationDLQArn)) {
     throw 'Could not resolve the local ITBEM automation dead-letter queue ARN.'
 }
@@ -218,14 +219,14 @@ $redriveRequest = @{ QueueUrl = $automationQueueURL; Attributes = @{ VisibilityT
 $redriveRequestFile = Join-Path ([System.IO.Path]::GetTempPath()) 'itbem-ai-local-redrive.json'
 try {
     [System.IO.File]::WriteAllText($redriveRequestFile, $redriveRequest, (New-Object System.Text.UTF8Encoding($false)))
-    & aws sqs set-queue-attributes --endpoint-url $LocalStackEndpoint --cli-input-json "file://$redriveRequestFile" | Out-Null
+    & aws sqs set-queue-attributes --endpoint-url $AwsEmulatorEndpoint --cli-input-json "file://$redriveRequestFile" | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Could not configure the local automation queue dead-letter policy.' }
 }
 finally {
     Remove-Item -LiteralPath $redriveRequestFile -Force -ErrorAction SilentlyContinue
 }
 
-# LocalStack requires disposable test credentials, but Cognito must continue
+# The local emulator requires disposable test credentials, but Cognito must continue
 # using the caller's normal AWS credential chain. Restore it before the API
 # process starts so user synchronization and invitation management are real.
 foreach ($name in $awsCredentialEnvironment.Keys) {
@@ -255,7 +256,7 @@ $env:TENANT_HOST_MAP = 'localhost=itbem'
 $env:AWS_BUCKET_NAME = $inputBucket
 $env:TENANT_BUCKET_MAP = "itbem=$inputBucket"
 $env:S3_REGION = 'us-east-1'
-$env:S3_ENDPOINT = $LocalStackEndpoint
+$env:S3_ENDPOINT = $AwsEmulatorEndpoint
 $env:S3_USE_PATH_STYLE = 'true'
 $env:S3_CLIENT_ID = 'test'
 $env:S3_CLIENT_SECRET = 'test'
@@ -276,7 +277,7 @@ $env:SQS_AUTOMATION_QUEUE_URL = $automationQueueURL
 $env:SQS_AUTOMATION_DEAD_LETTER_QUEUE_URL = $automationDLQURL
 $env:AUTOMATION_INPUT_BUCKET = $inputBucket
 $env:AUTOMATION_OUTPUT_BUCKET = $outputBucket
-$env:SQS_ENDPOINT = $LocalStackEndpoint
+$env:SQS_ENDPOINT = $AwsEmulatorEndpoint
 $env:AUTOMATION_CALLBACK_SECRET = 'local-automation-callback-secret'
 
 Write-Host "Starting isolated AI control plane on port $Port (database: $DatabaseName)."
