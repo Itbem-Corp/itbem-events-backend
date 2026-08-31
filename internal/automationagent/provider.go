@@ -84,7 +84,7 @@ type ProviderConfig struct {
 	requestTimeout time.Duration
 }
 
-// ProviderAuthProbe is credential-free evidence about one read-only provider
+// ProviderAuthProbe is credential-redacted evidence about one read-only provider
 // authentication check. It deliberately excludes response bodies, account
 // balances, quota values, request headers and credential material.
 type ProviderAuthProbe struct {

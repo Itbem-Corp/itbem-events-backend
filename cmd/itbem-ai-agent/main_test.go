@@ -39,7 +39,7 @@ func TestDoctorReportFailsClosedWithoutExecutionDependenciesAndNeverLeaksValues(
 		t.Fatalf("missing workspace/runtime configuration must fail closed: %#v", report)
 	}
 	provider, ok := report["provider"].(map[string]any)
-	if !ok || provider["ready"] != true {
+	if !ok || provider["ready"] != true || provider["status"] != "configured_unverified" {
 		t.Fatalf("a configured provider should be reported without exposing its key: %#v", report)
 	}
 	raw, err := json.Marshal(report)
