@@ -188,6 +188,16 @@ $provider = $provider.Trim().ToLowerInvariant()
 $providerRequired = -not ($Role -eq 'release_manager' -and $Lane -eq 'release')
 $secretName = @{ minimax = 'MINIMAX_API_KEY'; openai = 'OPENAI_API_KEY'; anthropic = 'ANTHROPIC_API_KEY' }[$provider]
 if ($providerRequired -and -not $secretName) { throw 'ITBEM_AI_PROVIDER must be minimax, openai, or anthropic.' }
+if (-not $providerRequired) {
+    # The deterministic release lane has no reason to hold model credentials.
+    # The local file is shared across lanes, so explicitly erase every
+    # supported provider key after import and do not reload one from the User
+    # environment below.
+    foreach ($modelSecret in @('MINIMAX_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY')) {
+        [Environment]::SetEnvironmentVariable($modelSecret, $null, 'Process')
+    }
+    $secretName = $null
+}
 
 foreach ($name in @($secretName, 'ITBEM_AI_WORKSPACES_JSON', 'ITBEM_AI_CONCURRENCY') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) {
     if (-not [Environment]::GetEnvironmentVariable($name, 'Process')) {
@@ -271,9 +281,11 @@ try {
         if ($LASTEXITCODE -ne 0) {
             throw 'Local agent readiness check failed. Fix the reported configuration before starting service mode.'
         }
-        go run ./cmd/itbem-ai-agent --provider-auth-probe
-        if ($LASTEXITCODE -ne 0) {
-            throw 'Provider authentication failed. Fix the credential or configured regional endpoint before starting service mode.'
+        if ($providerRequired) {
+            go run ./cmd/itbem-ai-agent --provider-auth-probe
+            if ($LASTEXITCODE -ne 0) {
+                throw 'Provider authentication failed. Fix the credential or configured regional endpoint before starting service mode.'
+            }
         }
 
         $consecutiveFailures = 0
