@@ -19,10 +19,13 @@ import (
 )
 
 const (
-	DefaultCompletionTokens   = 4096
-	MinCompletionTokens       = 1
-	MaxCompletionTokens       = 131072
-	miniMaxM2CompletionLimit  = 2048
+	DefaultCompletionTokens = 4096
+	MinCompletionTokens     = 1
+	MaxCompletionTokens     = 131072
+	// Current M2.x endpoints accept max_completion_tokens above their 10,240
+	// default. Keep the worker's explicit ceiling aligned with M3 so reasoning
+	// plus a bounded structured result can complete for large frozen patches.
+	miniMaxM2CompletionLimit  = 32768
 	miniMaxM3CompletionLimit  = 32768
 	maxProviderResponseSize   = 8 << 20
 	providerRequestMinTimeout = 30 * time.Second

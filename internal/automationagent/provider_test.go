@@ -222,6 +222,9 @@ func TestMiniMaxCompletionTokensAreBoundedByModel(t *testing.T) {
 	if value, err := boundedCompletionTokens(ProviderMiniMax, "MiniMax-M2.7", 100000); err != nil || value != miniMaxM2CompletionLimit {
 		t.Fatalf("unexpected MiniMax M2 token bound: %d / %v", value, err)
 	}
+	if miniMaxM2CompletionLimit != 32768 {
+		t.Fatalf("MiniMax M2 reasoning ceiling must leave room for a structured result: %d", miniMaxM2CompletionLimit)
+	}
 	if value, err := boundedCompletionTokens(ProviderMiniMax, "MiniMax-M3", 100000); err != nil || value != miniMaxM3CompletionLimit {
 		t.Fatalf("unexpected MiniMax M3 token bound: %d / %v", value, err)
 	}
