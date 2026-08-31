@@ -21,7 +21,7 @@ import (
 const (
 	maxInputBytes                         = 10 << 20
 	maxErrorMessageLen                    = 1024
-	codeReviewCompletionLimit             = 16384
+	codeReviewCompletionLimit             = miniMaxM3CompletionLimit
 	deliveryImplementationCompletionLimit = 8192
 )
 
@@ -841,11 +841,11 @@ func providerConfigured(provider Provider) bool {
 // each plan call at the ordinary 4k completion ceiling so an overbroad task
 // cannot turn into one expensive, truncation-prone response. Implementation
 // retains a bounded 8k allowance for multi-file manifests. Exact-SHA review is
-// allowed 16k because reasoning models account their private reasoning inside
-// max_completion_tokens; real large patches otherwise exhaust 4k before they
-// emit the structured verdict. QA and delivery summaries stay tighter, while
-// publication is deterministic and never calls a model. The provider client
-// independently clamps unsupported model limits.
+// allowed the bounded M3 ceiling because reasoning models account their private
+// reasoning inside max_completion_tokens; real large patches otherwise exhaust
+// smaller limits before they emit the structured verdict. QA and delivery
+// summaries stay tighter. Publication is deterministic and never calls a model.
+// The provider client independently clamps unsupported model limits.
 func CompletionTokensForOperation(operation string) int {
 	switch strings.TrimSpace(operation) {
 	case "delivery.plan", "delivery.qa", "delivery.summary":

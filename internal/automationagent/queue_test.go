@@ -69,7 +69,7 @@ func TestBoundedCompletionTokensNeverLetsQueuePayloadRaiseOperationLimit(t *test
 	if got := messageCompletionTokens("delivery.plan", 1024); got != 1024 {
 		t.Fatalf("queue payload did not retain stricter limit: %d", got)
 	}
-	if got := messageCompletionTokens("code.review", miniMaxM3CompletionLimit); got != codeReviewCompletionLimit {
+	if got := messageCompletionTokens("code.review", miniMaxM3CompletionLimit+1); got != codeReviewCompletionLimit {
 		t.Fatalf("queue payload raised code review limit to %d", got)
 	}
 	if got := messageCompletionTokens("code.review", 8192); got != 8192 {
