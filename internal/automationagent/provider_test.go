@@ -112,6 +112,17 @@ func TestProviderAuthProbeUsesReadOnlyMiniMaxEndpointAndNeverLeaksSecret(t *test
 	}
 }
 
+func TestMiniMaxAuthRegionsSeparateInferenceAndTokenPlanHosts(t *testing.T) {
+	configured, regions := miniMaxAuthRegions("api.minimax.io", "https://api.minimax.io")
+	if configured != "global" || len(regions) != 2 || regions[0].base != "https://api.minimax.io" || regions[0].probeBase != "https://www.minimax.io" {
+		t.Fatalf("unexpected global MiniMax endpoints: configured=%q regions=%#v", configured, regions)
+	}
+	configured, regions = miniMaxAuthRegions("api.minimaxi.com", "https://api.minimaxi.com")
+	if configured != "cn" || len(regions) != 2 || regions[0].base != "https://api.minimaxi.com" || regions[0].probeBase != "https://www.minimaxi.com" {
+		t.Fatalf("unexpected CN MiniMax endpoints: configured=%q regions=%#v", configured, regions)
+	}
+}
+
 func TestProviderAuthProbeFailsClosedOnMiniMaxCredentialRejection(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"base_resp": map[string]any{"status_code": 2049}, "status_msg": "must-not-be-reported"})

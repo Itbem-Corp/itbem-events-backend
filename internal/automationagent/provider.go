@@ -213,6 +213,29 @@ type providerProbeAttempt struct {
 	unreachable  bool
 }
 
+type miniMaxRegionEndpoints struct {
+	name      string
+	base      string
+	probeBase string
+}
+
+func miniMaxAuthRegions(host, baseURL string) (string, []miniMaxRegionEndpoints) {
+	switch strings.ToLower(host) {
+	case "api.minimax.io":
+		return "global", []miniMaxRegionEndpoints{
+			{name: "global", base: "https://api.minimax.io", probeBase: "https://www.minimax.io"},
+			{name: "cn", base: "https://api.minimaxi.com", probeBase: "https://www.minimaxi.com"},
+		}
+	case "api.minimaxi.com":
+		return "cn", []miniMaxRegionEndpoints{
+			{name: "cn", base: "https://api.minimaxi.com", probeBase: "https://www.minimaxi.com"},
+			{name: "global", base: "https://api.minimax.io", probeBase: "https://www.minimax.io"},
+		}
+	default:
+		return "custom", []miniMaxRegionEndpoints{{name: "custom", base: baseURL, probeBase: baseURL}}
+	}
+}
+
 // ProbeProviderAuth verifies that the configured credential is accepted by a
 // provider's read-only metadata/quota endpoint. It never sends a prompt or
 // creates a completion. MiniMax keys are checked using the same regional,
@@ -235,25 +258,11 @@ func ProbeProviderAuth(ctx context.Context, config ProviderConfig, client *http.
 
 	switch config.Provider {
 	case ProviderMiniMax:
-		regions := []struct {
-			name string
-			base string
-		}{}
-		configuredRegion := "custom"
-		switch strings.ToLower(endpoint.Hostname()) {
-		case "api.minimax.io":
-			configuredRegion = "global"
-			regions = append(regions, struct{ name, base string }{"global", "https://api.minimax.io"}, struct{ name, base string }{"cn", "https://api.minimaxi.com"})
-		case "api.minimaxi.com":
-			configuredRegion = "cn"
-			regions = append(regions, struct{ name, base string }{"cn", "https://api.minimaxi.com"}, struct{ name, base string }{"global", "https://api.minimax.io"})
-		default:
-			regions = append(regions, struct{ name, base string }{"custom", baseURL})
-		}
+		configuredRegion, regions := miniMaxAuthRegions(endpoint.Hostname(), baseURL)
 		result.ConfiguredRegion = configuredRegion
 		sawUnauthorized, sawUnreachable := false, false
 		for _, region := range regions {
-			attempt := probeMiniMaxAuth(ctx, client, region.base, config.secret)
+			attempt := probeMiniMaxAuth(ctx, client, region.probeBase, config.secret)
 			sawUnauthorized = sawUnauthorized || attempt.unauthorized
 			sawUnreachable = sawUnreachable || attempt.unreachable
 			if !attempt.authorized {
