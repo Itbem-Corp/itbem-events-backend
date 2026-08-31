@@ -527,7 +527,7 @@ type WorkspaceExcerpt struct {
 
 var (
 	workspaceSensitiveJSONValue  = regexp.MustCompile(`(?im)("` + sensitiveWorkspaceKey + `"\s*:\s*")[^"\r\n]*(")`)
-	workspaceSensitiveAssignment = regexp.MustCompile(`(?im)(\b` + sensitiveWorkspaceKey + `\b\s*[:=]\s*)["']?[^\s"'\r\n]+`)
+	workspaceSensitiveAssignment = regexp.MustCompile(`(?im)(\b` + sensitiveWorkspaceKey + `\b\s*[:=]\s*)(?:"([^"\r\n]*)"|'([^'\r\n]*)'|([^\s"'\r\n]+))`)
 	workspaceBearerCredential    = regexp.MustCompile(`(?im)(\bauthorization\s*:\s*bearer\s+)[^\s\r\n]+`)
 	workspaceURLCredential       = regexp.MustCompile(`(?i)(\b[a-z][a-z0-9+.-]*://[^\s:@/]+:)[^\s@/]+(@)`)
 	workspacePEMBlock            = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`)
@@ -557,9 +557,37 @@ func redactWorkspaceExcerpt(content string) (string, int) {
 	content = replace(workspacePEMBlock, content, func(_ []string) string { return "<redacted private key>" })
 	content = replace(workspaceSensitiveJSONValue, content, func(parts []string) string { return parts[1] + "<redacted>" + parts[2] })
 	content = replace(workspaceBearerCredential, content, func(parts []string) string { return parts[1] + "<redacted>" })
+	assignmentSource := content
+	assignmentOffset := 0
 	content = workspaceSensitiveAssignment.ReplaceAllStringFunc(content, func(match string) string {
 		parts := workspaceSensitiveAssignment.FindStringSubmatch(match)
-		value := strings.TrimSpace(strings.TrimPrefix(match, parts[1]))
+		relativeStart := strings.Index(assignmentSource[assignmentOffset:], match)
+		matchStart := assignmentOffset + relativeStart
+		assignmentOffset = matchStart + len(match)
+		valueStart := matchStart + len(parts[1])
+		if relativeStart >= 0 && valueStart < len(assignmentSource) {
+			quote := sourceQuoteAt(assignmentSource, matchStart)
+			if quote != 0 && assignmentSource[valueStart] == quote {
+				// The assignment-shaped token ends at the surrounding source
+				// literal's closing quote, so it names a key but carries no value.
+				return match
+			}
+		}
+		value := ""
+		quote := ""
+		switch {
+		case parts[2] != "":
+			value, quote = parts[2], `"`
+		case parts[3] != "":
+			value, quote = parts[3], `'`
+		case parts[4] != "":
+			value = parts[4]
+		default:
+			// Empty quoted assignments and source-code string literals such as
+			// `"API_KEY ="` carry no credential. Preserving them byte-for-byte
+			// prevents redaction from fabricating review evidence.
+			return match
+		}
 		if workspaceFormatVerb.MatchString(value) {
 			// A label such as `token: %w` in source code describes an error and
 			// does not carry a credential. Preserving the format verb is important:
@@ -567,7 +595,7 @@ func redactWorkspaceExcerpt(content string) (string, int) {
 			return match
 		}
 		redactions++
-		return parts[1] + "<redacted>"
+		return parts[1] + quote + "<redacted>" + quote
 	})
 	for _, pattern := range []*regexp.Regexp{workspaceURLCredential, workspaceGitHubToken, workspaceAWSAccessKey, workspaceSlackToken} {
 		content = replace(pattern, content, func(parts []string) string {
@@ -578,6 +606,33 @@ func redactWorkspaceExcerpt(content string) (string, int) {
 		})
 	}
 	return content, redactions
+}
+
+func sourceQuoteAt(content string, position int) byte {
+	lineStart := strings.LastIndex(content[:position], "\n") + 1
+	var quote byte
+	escaped := false
+	for index := lineStart; index < position; index++ {
+		character := content[index]
+		if quote != 0 {
+			if quote != '`' && escaped {
+				escaped = false
+				continue
+			}
+			if quote != '`' && character == '\\' {
+				escaped = true
+				continue
+			}
+			if character == quote {
+				quote = 0
+			}
+			continue
+		}
+		if character == '"' || character == '\'' || character == '`' {
+			quote = character
+		}
+	}
+	return quote
 }
 
 // RedactSourceExcerpt is the common final redaction boundary for source text

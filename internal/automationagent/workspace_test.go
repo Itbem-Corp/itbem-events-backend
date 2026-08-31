@@ -166,6 +166,27 @@ func TestRedactSourceExcerptPreservesFormatVerbsWithoutLeakingCredentials(t *tes
 	}
 }
 
+func TestRedactSourceExcerptPreservesEmptyAssignmentsAndSourceLiterals(t *testing.T) {
+	content := "API_KEY=\"\"\n" +
+		`for _, prohibited := range []string{"$env:MINIMAX_API_KEY =", "$env:OPENAI_API_KEY ="} {` + "\n" +
+		"OPENAI_API_KEY=\"must-not-leak\"\n" +
+		"ANTHROPIC_API_KEY='also-must-not-leak'\n"
+	got, redactions := RedactSourceExcerpt(content)
+	for _, preserved := range []string{`API_KEY=""`, `"$env:MINIMAX_API_KEY ="`, `"$env:OPENAI_API_KEY ="`} {
+		if !strings.Contains(got, preserved) {
+			t.Fatalf("source redaction corrupted a valueless assignment or source literal %q: %q", preserved, got)
+		}
+	}
+	for _, secret := range []string{"must-not-leak", "also-must-not-leak"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("source redaction leaked quoted credential %q: %q", secret, got)
+		}
+	}
+	if redactions != 2 {
+		t.Fatalf("expected exactly two quoted credential redactions, got %d: %q", redactions, got)
+	}
+}
+
 func TestDescribeWorkspacePrioritizesScopedSourceOverPreferredDocuments(t *testing.T) {
 	root := t.TempDir()
 	for path, content := range map[string]string{
