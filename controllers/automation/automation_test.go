@@ -180,9 +180,13 @@ func TestGitHubReviewWebhookAdmissionIsExplicitAndSignatureBound(t *testing.T) {
 func TestCodeReviewPublicationForTaskRequiresExactIndependentGitHubEvidence(t *testing.T) {
 	taskID := uuid.Must(uuid.NewV4())
 	subject := strings.Repeat("a", 64)
+	correlationID, err := githubReviewCorrelationID("itbem/backend", 42, strings.Repeat("b", 40))
+	if err != nil {
+		t.Fatal(err)
+	}
 	task := &models.AutomationTask{
 		ID: taskID, RequestedBy: "github-app-review", Operation: "code.review", EvidenceSubjectDigest: subject,
-		CorrelationID: "github-pr:itbem/backend:42:" + strings.Repeat("b", 40),
+		CorrelationID: correlationID,
 	}
 	execution := automationagent.GitHubCodeReviewPublication{
 		SchemaVersion: 1, Repository: "itbem/backend", PullRequest: 42, HeadSHA: strings.Repeat("b", 40),
@@ -253,21 +257,50 @@ func TestSupersedeQueuedGitHubReviewsTargetsOnlyOlderQueuedHeadsForTheSamePR(t *
 		t.Fatal(err)
 	}
 	replacement := uuid.Must(uuid.NewV4())
+	prefix, err := githubReviewCorrelationPrefix("itbem/backend", 42)
+	if err != nil {
+		t.Fatal(err)
+	}
 	mock.ExpectBegin()
 	mock.ExpectExec(`UPDATE "automation_tasks"`).
-		WithArgs(sqlmock.AnyArg(), 0, sqlmock.AnyArg(), "Superseded by a newer pull-request commit before review began", sqlmock.AnyArg(), "cancelled", sqlmock.AnyArg(), "code.review", "github-app-review", "queued", "github-pr:itbem/backend:42:%", replacement).
+		WithArgs(sqlmock.AnyArg(), 0, sqlmock.AnyArg(), "Superseded by a newer pull-request commit before review began", sqlmock.AnyArg(), "cancelled", sqlmock.AnyArg(), "code.review", "github-app-review", "queued", prefix+":%", replacement).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	if err := gormDB.Transaction(func(tx *gorm.DB) error {
-		return supersedeQueuedGitHubReviews(tx, "itbem/backend:42", replacement, time.Now().UTC())
+		return supersedeQueuedGitHubReviews(tx, "itbem/backend", 42, replacement, time.Now().UTC())
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
-	if err := supersedeQueuedGitHubReviews(nil, "itbem/backend:42", replacement, time.Now().UTC()); err == nil {
+	if err := supersedeQueuedGitHubReviews(nil, "itbem/backend", 42, replacement, time.Now().UTC()); err == nil {
 		t.Fatal("supersession must reject an absent transaction")
+	}
+}
+
+func TestGitHubReviewCorrelationIsBoundedStableAndHeadSpecific(t *testing.T) {
+	repository := strings.Repeat("a", 100) + "/" + strings.Repeat("b", 100)
+	first, err := githubReviewCorrelationID(repository, 123456789, strings.Repeat("c", 40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := githubReviewCorrelationID(repository, 123456789, strings.Repeat("d", 40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix, err := githubReviewCorrelationPrefix(repository, 123456789)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) > 64 || first == second || !strings.HasPrefix(first, prefix+":") || !strings.HasPrefix(second, prefix+":") {
+		t.Fatalf("review correlation lost its bounded PR/head identity: %q / %q", first, second)
+	}
+	if _, err := githubReviewCorrelationID("invalid", 1, strings.Repeat("c", 40)); err == nil {
+		t.Fatal("invalid repository correlation was accepted")
+	}
+	if _, err := githubReviewCorrelationID("itbem/backend", 1, "short"); err == nil {
+		t.Fatal("invalid head correlation was accepted")
 	}
 }
 
