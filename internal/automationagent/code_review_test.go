@@ -64,6 +64,29 @@ func TestNewCodeReviewInputDerivesManifestFromFrozenPatch(t *testing.T) {
 	}
 }
 
+func TestBindCodeReviewRemoteTargetSealsExactGitHubSubject(t *testing.T) {
+	input, err := ParseCodeReviewInput(validCodeReviewInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err = BindCodeReviewRemoteTarget(input, 42, 67890)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := CodeReviewPublicationSubjectSHA256(input)
+	if err != nil || len(digest) != 64 {
+		t.Fatalf("remote review subject was not sealed: %q / %v", digest, err)
+	}
+	input.HeadSHA = strings.Repeat("c", 40)
+	changed, err := CodeReviewPublicationSubjectSHA256(input)
+	if err != nil || changed == digest {
+		t.Fatal("remote review subject did not change with the exact head SHA")
+	}
+	if _, err := BindCodeReviewRemoteTarget(input, 0, 67890); err == nil {
+		t.Fatal("invalid pull request target was accepted")
+	}
+}
+
 func TestNewCodeReviewInputRetainsDeletedFilesAsBaseSideReviewScope(t *testing.T) {
 	patch := "diff --git a/controllers/legacy_auth.go b/controllers/legacy_auth.go\ndeleted file mode 100644\nindex abc..0000000\n--- a/controllers/legacy_auth.go\n+++ /dev/null\n@@ -7,2 +0,0 @@\n-requireOwner(user, order)\n-return forbidden\n"
 	input, err := NewCodeReviewInput("github://itbem/example", strings.Repeat("a", 40), strings.Repeat("b", 40), patch)

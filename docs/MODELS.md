@@ -125,6 +125,11 @@ Event     Event          `gorm:"foreignKey:EventID" json:"event,omitempty"`
   human-reviewed static onboarding proposal pinned to one GitHub default-branch
   SHA. It stores structured proposal/capability JSON, never credentials or raw
   repository prose, and is unique by project/repository/revision.
+- **DeliveryRepositoryCapabilityProbe**
+  (`models/DeliveryRepositoryCapabilityProbe.go`): Append-only QA/release
+  attestation for one onboarding, automation task, capability and exact Git
+  SHA. It stores only `ready|blocked`, role, bounded reason and evidence/subject
+  digests; update/delete hooks reject history rewriting.
 - **DeliveryProjectVaultRevision** (`models/DeliveryProjectVault.go`): Immutable,
   repository-scoped curated Vault manifest with monotonic version, source SHA,
   content digest, provenance and onboarding identity. Application hooks and a
@@ -141,12 +146,19 @@ Event     Event          `gorm:"foreignKey:EventID" json:"event,omitempty"`
 - **DeliveryMessage**: Human or agent message tied to the work item and the
   active phase, preserving change requests in context.
 - **AutomationTask**: Existing local-agent queue record. It may link to a
-  `DeliveryWorkItem`; standalone legacy automation tasks remain valid. A
+  `DeliveryWorkItem` or repository onboarding checkpoint; standalone legacy
+  automation tasks remain valid. A
   completed delivery task is recorded as immutable private report evidence
   before its plan, code, or QA review can be opened. Evidence-producing tasks
   carry an optional `EvidenceSubjectDigest` fixed at enqueue time; QA uses it
   to bind observations to the exact multi-repository release matrix without
   granting the task merge or release authority.
+- **AutomationCodeReviewPublication**
+  (`models/AutomationCodeReviewPublication.go`): Append-only public proof that
+  the isolated Reviewer App published one validated GitHub review for an exact
+  repository, PR, head SHA and patch digest. It stores actor, event, review URL
+  and deterministic subject/payload digests; findings and model prose stay in
+  private evidence. Update/delete hooks reject history rewriting.
 - **DeliveryEvent** QA observation (`delivery.qa.observed.v2`): Append-only,
   sequence-bearing result for one exact QA task and matrix digest. It stores
   only repository execution order plus operator-owned test identities and

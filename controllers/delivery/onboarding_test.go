@@ -2,11 +2,36 @@ package delivery
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
+	"time"
 
 	"events-stocks/internal/projectvault"
 	"events-stocks/models"
+	"github.com/gofrs/uuid"
 )
+
+func TestCapabilityProbeTaskViewNeverExposesPrivateTaskMetadata(t *testing.T) {
+	now := time.Now().UTC()
+	task := models.AutomationTask{
+		ID: uuid.Must(uuid.NewV4()), Status: "failed", AttemptCount: 2, CompletedAt: &now, CreatedAt: now,
+		InputRef: "s3://private-input/secret.json", OutputRef: "s3://private-output/evidence.json",
+		RunID: "qa-host-private", LeaseExpiresAt: &now, ErrorMessage: "internal path and command failure",
+	}
+	encoded, err := json.Marshal(capabilityProbeTaskView(task))
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := string(encoded)
+	for _, forbidden := range []string{"s3://", "private", "lease", "error_message", "input_ref", "output_ref"} {
+		if strings.Contains(value, forbidden) {
+			t.Fatalf("safe capability probe task projection leaked %q: %s", forbidden, value)
+		}
+	}
+	if !strings.Contains(value, `"status":"failed"`) || !strings.Contains(value, `"attempt_count":2`) {
+		t.Fatalf("safe projection omitted public task state: %s", value)
+	}
+}
 
 func TestValidateStoredOnboardingProposalPinsDigestAndCheckpoint(t *testing.T) {
 	proposal, err := projectvault.Build(projectvault.Input{

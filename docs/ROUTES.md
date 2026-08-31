@@ -55,7 +55,9 @@
 - `POST /api/automation/projects/:id/context` → `delivery.CreateContext`
 - `GET /api/automation/projects/:id/repository-onboardings` → `delivery.ListRepositoryOnboardings`
 - `POST /api/automation/projects/:id/repository-onboardings/inspect` → `delivery.InspectRepositoryOnboarding` — bounded static GitHub inspection pinned to the actual default-branch SHA; creates a reviewable proposal and executes no repository code.
-- `POST /api/automation/projects/:id/repository-onboardings/:onboardingID/approve` → `delivery.ApproveRepositoryOnboarding` — explicit human/SHA gate; atomically publishes repository context and an immutable Vault revision.
+- `POST /api/automation/projects/:id/repository-onboardings/:onboardingID/probes` → `delivery.ProbeRepositoryOnboarding` — queues a deterministic QA-lane dry-run at the inspected SHA using only operator-registered command identities.
+- `GET /api/automation/projects/:id/repository-onboardings/:onboardingID/probes` → `delivery.ListRepositoryCapabilityProbes` — append-only, value-free capability evidence history.
+- `POST /api/automation/projects/:id/repository-onboardings/:onboardingID/approve` → `delivery.ApproveRepositoryOnboarding` — explicit human SHA + proposal-digest gate; rejects active probes and atomically publishes repository context plus an immutable Vault revision.
 - `GET /api/automation/projects/:id/vault/revisions` → `delivery.ListProjectVaultRevisions` — append-only curated Vault history.
 - `POST /api/automation/projects/:id/work-items` → `delivery.CreateWorkItem`
 - `GET /api/automation/work-items/:id` → `delivery.GetWorkItem`

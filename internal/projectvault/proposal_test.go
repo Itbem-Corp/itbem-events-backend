@@ -3,6 +3,7 @@ package projectvault
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -28,9 +29,13 @@ func TestCanonicalGitHubReference(t *testing.T) {
 
 func TestBuildCreatesDeterministicEvidenceBasedProposal(t *testing.T) {
 	input := Input{
-		Repository:         Repository{Reference: "https://github.com/acme/platform", DefaultBranch: "trunk", Revision: testSHA},
-		Files:              []string{"package.json", "pnpm-lock.yaml", ".github/workflows/ci.yml", "CODEOWNERS", "docs/ARCHITECTURE.md", "../secret", "package.json"},
-		InventoryFileCount: 6,
+		Repository: Repository{Reference: "https://github.com/acme/platform", DefaultBranch: "trunk", Revision: testSHA},
+		Files: []string{
+			"package.json", "pnpm-lock.yaml", ".github/workflows/ci.yml", "CODEOWNERS", "docs/ARCHITECTURE.md",
+			"api/openapi.yaml", "db/migrations/001_create.sql", ".env.example", "src/service.test.ts", "docs/runbooks/release.md",
+			".env.production", "secrets/key.txt", "../secret", "package.json",
+		},
+		InventoryFileCount: 12,
 		Excerpts:           []Excerpt{{Path: "package.json", Content: `{"scripts":{"test":"vitest","test:e2e":"playwright test","build":"vite build","bad;name":"ignored"}}`}},
 	}
 	first, err := Build(input)
@@ -43,6 +48,9 @@ func TestBuildCreatesDeterministicEvidenceBasedProposal(t *testing.T) {
 	}
 	if first.VaultSHA256 != second.VaultSHA256 || first.Readiness != "partially_ready" || first.Repository.DefaultBranch != "trunk" {
 		t.Fatalf("proposal is not deterministic/current: %#v / %#v", first, second)
+	}
+	if len(first.VaultDiff.Added) != len(first.Vault.Entries) || len(first.VaultDiff.Modified) != 0 || len(first.VaultDiff.Removed) != 0 {
+		t.Fatalf("initial Vault diff = %#v", first.VaultDiff)
 	}
 	if len(first.Stacks) != 1 || first.Stacks[0].Name != "node" {
 		t.Fatalf("stack detection = %#v", first.Stacks)
@@ -69,6 +77,66 @@ func TestBuildCreatesDeterministicEvidenceBasedProposal(t *testing.T) {
 		if string(encoded) == "" || contains(string(encoded), "../secret") {
 			t.Fatalf("unsafe path entered vault: %s", encoded)
 		}
+	}
+	entries := map[string]VaultEntry{}
+	for _, entry := range first.Vault.Entries {
+		entries[entry.Key] = entry
+	}
+	wantMarkers := []string{
+		"repository.api_contracts", "repository.data_schemas", "repository.dependencies",
+		"repository.environment_declarations", "repository.tests", "repository.runbooks_and_decisions",
+	}
+	for _, key := range wantMarkers {
+		if _, exists := entries[key]; !exists {
+			t.Fatalf("missing generic Vault marker %q: %#v", key, first.Vault.Entries)
+		}
+	}
+	encodedVault, _ := json.Marshal(first.Vault)
+	if contains(string(encodedVault), ".env.production") || contains(string(encodedVault), "secrets/key.txt") {
+		t.Fatalf("secret-bearing inventory entered Vault: %s", encodedVault)
+	}
+}
+
+func TestBuildEnvironmentTemplatesAreNameOnlyEvidence(t *testing.T) {
+	proposal, err := Build(Input{
+		Repository: Repository{Reference: "github://acme/service", DefaultBranch: "main", Revision: testSHA},
+		Files: []string{
+			".env.example", "deploy/app.env.sample", "terraform/prod.tfvars.template",
+			".env", ".env.local", ".env.production", "secrets/.env.example", "credentials/env.sample",
+		},
+		EnvironmentDeclarations: []EnvironmentDeclaration{
+			{Path: ".env.example", Names: []string{"API_URL", "API_KEY", "API_KEY", "INVALID-NAME"}},
+			{Path: ".env.production", Names: []string{"MUST_NOT_APPEAR"}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundVariables := false
+	foundDeclarations := false
+	for _, entry := range proposal.Vault.Entries {
+		if entry.Key == "repository.environment_variables" {
+			encoded, _ := json.Marshal(entry)
+			if !contains(string(encoded), "API_KEY") || !contains(string(encoded), "API_URL") || contains(string(encoded), "INVALID-NAME") || contains(string(encoded), "MUST_NOT_APPEAR") {
+				t.Fatalf("unsafe environment variable projection: %s", encoded)
+			}
+			foundVariables = true
+		}
+		if entry.Key != "repository.environment_declarations" {
+			continue
+		}
+		paths, ok := entry.Value["paths"].([]string)
+		want := []string{".env.example", "deploy/app.env.sample", "terraform/prod.tfvars.template"}
+		if !ok || !reflect.DeepEqual(paths, want) {
+			t.Fatalf("environment declaration paths = %#v, want %#v", entry.Value["paths"], want)
+		}
+		foundDeclarations = true
+	}
+	if !foundVariables {
+		t.Fatal("environment variable marker missing")
+	}
+	if !foundDeclarations {
+		t.Fatal("environment declaration marker missing")
 	}
 }
 
@@ -121,6 +189,46 @@ func TestBuildTreatsRepositoryTextAsData(t *testing.T) {
 	}
 }
 
+func TestApplyCapabilityProbesRequiresExactSHAAndSealedSandboxEvidence(t *testing.T) {
+	proposal, err := Build(Input{Repository: Repository{Reference: "github://acme/service", DefaultBranch: "main", Revision: testSHA}, Files: []string{"package.json"}, Excerpts: []Excerpt{{Path: "package.json", Content: `{"scripts":{"test":"vitest"}}`}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := strings.Repeat("a", 64)
+	probe := CapabilityProbe{Name: "unit", State: "ready", Reason: "allow-listed unit command exited zero", Revision: testSHA, EvidenceSHA256: digest, ExecutorRole: "qa"}
+	probe.SubjectSHA256, err = CapabilityProbeSubjectSHA256(proposal.Repository, probe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := ApplyCapabilityProbes(proposal, []CapabilityProbe{probe})
+	if err != nil || updated.Readiness != "partially_ready" {
+		t.Fatalf("valid probe rejected: %#v / %v", updated, err)
+	}
+	for _, capability := range updated.Capabilities {
+		if capability.Name == "unit" && (capability.State != "ready" || len(capability.Evidence) != 1 || capability.Evidence[0].Path != "sha256:"+digest) {
+			t.Fatalf("unit probe projection = %#v", capability)
+		}
+	}
+	invalid := []CapabilityProbe{
+		{Name: "unit", State: "ready", Reason: "stale", Revision: strings.Repeat("b", 40), EvidenceSHA256: digest, SubjectSHA256: probe.SubjectSHA256, ExecutorRole: "qa"},
+		{Name: "source", State: "ready", Reason: "invented", Revision: testSHA, EvidenceSHA256: digest, SubjectSHA256: probe.SubjectSHA256, ExecutorRole: "qa"},
+		{Name: "release", State: "ready", Reason: "agent says so", Revision: testSHA, EvidenceSHA256: "not-a-digest", SubjectSHA256: probe.SubjectSHA256, ExecutorRole: "engineer"},
+		{Name: "unit", State: "ready", Reason: "replayed", Revision: testSHA, EvidenceSHA256: digest, SubjectSHA256: strings.Repeat("b", 64), ExecutorRole: "qa"},
+		{Name: "unit", State: "blocked", Reason: "verdict flipped", Revision: testSHA, EvidenceSHA256: digest, SubjectSHA256: probe.SubjectSHA256, ExecutorRole: "qa"},
+	}
+	for _, probe := range invalid {
+		if _, err := ApplyCapabilityProbes(proposal, []CapabilityProbe{probe}); err == nil {
+			t.Fatalf("unsafe capability probe accepted: %#v", probe)
+		}
+	}
+	blockedProbe := CapabilityProbe{Name: "integration", State: "blocked", Reason: "sandbox dependency unavailable", Revision: testSHA, EvidenceSHA256: digest, ExecutorRole: "orchestrator"}
+	blockedProbe.SubjectSHA256, _ = CapabilityProbeSubjectSHA256(proposal.Repository, blockedProbe)
+	blocked, err := ApplyCapabilityProbes(proposal, []CapabilityProbe{blockedProbe})
+	if err != nil || blocked.Readiness != "blocked" {
+		t.Fatalf("blocked probe did not fail readiness closed: %#v / %v", blocked, err)
+	}
+}
+
 func TestBuildRejectsMutableOrMalformedIdentity(t *testing.T) {
 	for _, repository := range []Repository{
 		{Reference: "github://acme/service", DefaultBranch: "main", Revision: "main"},
@@ -130,6 +238,65 @@ func TestBuildRejectsMutableOrMalformedIdentity(t *testing.T) {
 		if _, err := Build(Input{Repository: repository, Files: []string{"go.mod"}}); err == nil {
 			t.Fatalf("invalid repository accepted: %#v", repository)
 		}
+	}
+}
+
+func TestReconcilePreservesChangedRemovedAndUnchangedVaultHistory(t *testing.T) {
+	nextSHA := "89abcdef0123456789abcdef0123456789abcdef"
+	previous, err := Build(Input{
+		Repository: Repository{Reference: "github://acme/service", DefaultBranch: "main", Revision: testSHA},
+		Files:      []string{"go.mod", "CODEOWNERS", "docs/architecture.md"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := Build(Input{
+		Repository: Repository{Reference: "github://acme/service", DefaultBranch: "main", Revision: nextSHA},
+		Files:      []string{"package.json", "package-lock.json", "CODEOWNERS"},
+		Excerpts:   []Excerpt{{Path: "package.json", Content: `{"scripts":{"test":"vitest"}}`}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciled, err := Reconcile(current, previous.Vault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repeated, err := Reconcile(current, previous.Vault)
+	if err != nil || repeated.VaultSHA256 != reconciled.VaultSHA256 {
+		t.Fatalf("vault reconciliation is not deterministic: %v / %s / %s", err, reconciled.VaultSHA256, repeated.VaultSHA256)
+	}
+	entries := map[string]VaultEntry{}
+	for _, entry := range reconciled.Vault.Entries {
+		entries[entry.Key] = entry
+	}
+	stack := entries["repository.stacks"]
+	if stack.Lifecycle != "active" || stack.ValidFromSHA != nextSHA || stack.ValidThroughSHA != nextSHA || len(stack.History) != 1 || stack.History[0].Kind != "architecture" || stack.History[0].Lifecycle != "deprecated" || stack.History[0].ValidFromSHA != testSHA || stack.History[0].ValidThroughSHA != testSHA || stack.History[0].TransitionSHA != nextSHA {
+		t.Fatalf("changed stack history = %#v", stack)
+	}
+	documentation := entries["repository.documentation"]
+	if documentation.Lifecycle != "removed" || documentation.LifecycleSHA != nextSHA || documentation.ValidFromSHA != testSHA || documentation.ValidThroughSHA != testSHA {
+		t.Fatalf("removed documentation history = %#v", documentation)
+	}
+	ownership := entries["repository.ownership"]
+	if ownership.Lifecycle != "active" || ownership.ValidFromSHA != testSHA || ownership.ValidThroughSHA != nextSHA || len(ownership.History) != 0 {
+		t.Fatalf("unchanged ownership history = %#v", ownership)
+	}
+	if digest, _ := ManifestSHA256(reconciled.Vault); digest != reconciled.VaultSHA256 {
+		t.Fatalf("reconciled Vault digest mismatch: %s != %s", digest, reconciled.VaultSHA256)
+	}
+}
+
+func TestReconcileRejectsCrossRepositoryOrMutableHistory(t *testing.T) {
+	previous, _ := Build(Input{Repository: Repository{Reference: "github://acme/service", DefaultBranch: "main", Revision: testSHA}, Files: []string{"go.mod"}})
+	current, _ := Build(Input{Repository: Repository{Reference: "github://other/service", DefaultBranch: "main", Revision: "89abcdef0123456789abcdef0123456789abcdef"}, Files: []string{"go.mod"}})
+	if _, err := Reconcile(current, previous.Vault); err == nil {
+		t.Fatal("cross-repository Vault history was accepted")
+	}
+	current.Repository.Reference, current.Vault.Repository.Reference = previous.Repository.Reference, previous.Repository.Reference
+	previous.Vault.Entries = append(previous.Vault.Entries, previous.Vault.Entries[0])
+	if _, err := Reconcile(current, previous.Vault); err == nil {
+		t.Fatal("ambiguous previous Vault history was accepted")
 	}
 }
 

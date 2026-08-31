@@ -42,3 +42,32 @@ func TestLoadRuntimeConfigRejectsPartialOrCrossRoleIdentity(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadRuntimeConfigValidatesQueueTransport(t *testing.T) {
+	for name, queueURL := range map[string]string{
+		"placeholder":        "QUEUE_URL_FROM_STACK_OUTPUT",
+		"insecure remote":    "http://sqs.example/queue",
+		"missing queue path": "https://sqs.example/",
+		"embedded identity":  "https://operator@sqs.example/queue",
+		"query mutation":     "https://sqs.example/queue?override=true",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if config, err := LoadRuntimeConfig(runtimeTestEnvironment(map[string]string{"ITBEM_AI_QUEUE_URL": queueURL})); err == nil {
+				t.Fatalf("unsafe queue transport accepted: %#v", config)
+			}
+		})
+	}
+	if _, err := LoadRuntimeConfig(runtimeTestEnvironment(map[string]string{"ITBEM_AI_QUEUE_URL": "http://127.0.0.1:4566/000000000000/local-queue"})); err != nil {
+		t.Fatalf("loopback development queue rejected: %v", err)
+	}
+}
+
+func TestLoadRuntimeConfigAcceptsProductAgnosticBuckets(t *testing.T) {
+	config, err := LoadRuntimeConfig(runtimeTestEnvironment(map[string]string{
+		"ITBEM_AI_INPUT_BUCKET":  "acme-control-inputs-prod",
+		"ITBEM_AI_OUTPUT_BUCKET": "acme-control-evidence-prod",
+	}))
+	if err != nil || config.InputBucket != "acme-control-inputs-prod" || config.OutputBucket != "acme-control-evidence-prod" {
+		t.Fatalf("generic runtime storage = %#v, %v", config, err)
+	}
+}

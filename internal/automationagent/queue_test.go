@@ -54,6 +54,9 @@ func TestCompletionTokensForOperationKeepsPlansBoundedAndExpandsImplementation(t
 	if got := CompletionTokensForOperation("delivery.release_gate"); got != 0 {
 		t.Fatalf("release Gatekeeper completion tokens = %d, want 0", got)
 	}
+	if got := CompletionTokensForOperation("delivery.onboarding_probe"); got != 0 {
+		t.Fatalf("onboarding probe completion tokens = %d, want 0", got)
+	}
 }
 
 func TestBoundedCompletionTokensNeverLetsQueuePayloadRaiseOperationLimit(t *testing.T) {

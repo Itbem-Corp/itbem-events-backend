@@ -64,6 +64,8 @@ const (
 	maxGitHubRepositoryExcerpts     = 8
 	maxGitHubRepositoryExcerptBytes = 3 << 10
 	maxGitHubRepositoryContextBytes = 16 << 10
+	maxGitHubEnvironmentTemplates   = 8
+	maxGitHubEnvironmentBytes       = 16 << 10
 )
 
 const maxGitHubPullRequestPatchBytes = 512 << 10
@@ -72,10 +74,11 @@ const maxGitHubInstallationIDs = 16
 // GitHubPullRequestState is the small mutable PR checkpoint used solely to
 // reject obsolete webhook deliveries. It carries no source or account data.
 type GitHubPullRequestState struct {
-	HeadSHA string
-	Open    bool
-	Draft   bool
-	Merged  bool
+	HeadSHA     string
+	AuthorActor string
+	Open        bool
+	Draft       bool
+	Merged      bool
 }
 
 // ReadGitHubPullRequestState confirms the mutable PR state immediately before
@@ -109,11 +112,14 @@ func ReadGitHubPullRequestState(ctx context.Context, config GitHubAppConfig, tok
 		Head   struct {
 			SHA string `json:"sha"`
 		} `json:"head"`
+		User struct {
+			Login string `json:"login"`
+		} `json:"user"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 32<<10)).Decode(&payload); err != nil || !validGitHubCommitSHA(strings.ToLower(strings.TrimSpace(payload.Head.SHA))) {
 		return GitHubPullRequestState{}, fmt.Errorf("GitHub pull request state is invalid")
 	}
-	return GitHubPullRequestState{HeadSHA: strings.ToLower(strings.TrimSpace(payload.Head.SHA)), Open: strings.EqualFold(strings.TrimSpace(payload.State), "open"), Draft: payload.Draft, Merged: payload.Merged}, nil
+	return GitHubPullRequestState{HeadSHA: strings.ToLower(strings.TrimSpace(payload.Head.SHA)), AuthorActor: strings.ToLower(strings.TrimSpace(payload.User.Login)), Open: strings.EqualFold(strings.TrimSpace(payload.State), "open"), Draft: payload.Draft, Merged: payload.Merged}, nil
 }
 
 // ReadGitHubPullRequestPatch downloads the immutable compare diff between the
@@ -179,10 +185,23 @@ type GitHubRepositorySourceContext struct {
 	ContextTruncated bool                      `json:"context_truncated"`
 }
 
+type GitHubEnvironmentDeclaration struct {
+	Path  string   `json:"path"`
+	Names []string `json:"names"`
+}
+
 // ReadGitHubRepositorySnapshot resolves the current default-branch commit for
 // an explicitly registered github://owner/repository source. It is read-only:
 // no clone, fetch, branch, PR or repository setting is modified.
 func ReadGitHubRepositorySnapshot(ctx context.Context, config GitHubAppConfig, token, reference string) (GitHubRepositorySnapshot, error) {
+	return ReadGitHubRepositorySnapshotAtRevision(ctx, config, token, reference, "")
+}
+
+// ReadGitHubRepositorySnapshotAtRevision freezes either the default branch or
+// one explicitly supplied full commit SHA. The latter is used to reconcile a
+// Vault against an immutable pull-request head without following a mutable
+// branch name. GitHub must resolve the commit inside the authorized repository.
+func ReadGitHubRepositorySnapshotAtRevision(ctx context.Context, config GitHubAppConfig, token, reference, expectedRevision string) (GitHubRepositorySnapshot, error) {
 	repository, err := parseGitHubRepositoryReference(reference)
 	if err != nil {
 		return GitHubRepositorySnapshot{}, err
@@ -210,7 +229,13 @@ func ReadGitHubRepositorySnapshot(ctx context.Context, config GitHubAppConfig, t
 	if err := json.NewDecoder(response.Body).Decode(&metadata); err != nil || strings.TrimSpace(metadata.DefaultBranch) == "" {
 		return GitHubRepositorySnapshot{}, fmt.Errorf("GitHub repository metadata is invalid")
 	}
-	commitURL := baseURL + "/commits/" + url.PathEscape(metadata.DefaultBranch)
+	commitReference := strings.ToLower(strings.TrimSpace(expectedRevision))
+	if commitReference == "" {
+		commitReference = strings.TrimSpace(metadata.DefaultBranch)
+	} else if !validGitHubCommitSHA(commitReference) {
+		return GitHubRepositorySnapshot{}, fmt.Errorf("GitHub repository revision must be a full commit SHA")
+	}
+	commitURL := baseURL + "/commits/" + url.PathEscape(commitReference)
 	request, err = githubAppRequest(ctx, http.MethodGet, commitURL, token, nil)
 	if err != nil {
 		return GitHubRepositorySnapshot{}, err
@@ -229,7 +254,11 @@ func ReadGitHubRepositorySnapshot(ctx context.Context, config GitHubAppConfig, t
 	if err := json.NewDecoder(response.Body).Decode(&commit); err != nil || !validGitHubCommitSHA(commit.SHA) {
 		return GitHubRepositorySnapshot{}, fmt.Errorf("GitHub default branch revision is invalid")
 	}
-	return GitHubRepositorySnapshot{Reference: "github://" + repository.Owner + "/" + repository.Name, Revision: strings.ToLower(commit.SHA), DefaultBranch: strings.TrimSpace(metadata.DefaultBranch)}, nil
+	resolvedRevision := strings.ToLower(strings.TrimSpace(commit.SHA))
+	if expectedRevision != "" && resolvedRevision != strings.ToLower(strings.TrimSpace(expectedRevision)) {
+		return GitHubRepositorySnapshot{}, fmt.Errorf("GitHub repository revision did not resolve to the expected commit")
+	}
+	return GitHubRepositorySnapshot{Reference: "github://" + repository.Owner + "/" + repository.Name, Revision: resolvedRevision, DefaultBranch: strings.TrimSpace(metadata.DefaultBranch)}, nil
 }
 
 // ReadGitHubRepositoryMap reads the Git tree for one already-frozen GitHub
@@ -278,7 +307,7 @@ func ReadGitHubRepositoryMap(ctx context.Context, config GitHubAppConfig, token 
 			continue
 		}
 		path := strings.Trim(strings.TrimSpace(entry.Path), "/")
-		if path == "" || len(path) > 240 || strings.Contains(path, "../") || !safeGitHubRepositoryMapPath(path) {
+		if path == "" || len(path) > 240 || strings.Contains(path, "../") || !safeGitHubRepositoryInventoryPath(path) {
 			continue
 		}
 		fileCount++
@@ -355,6 +384,91 @@ func ReadGitHubRepositorySourceContext(ctx context.Context, config GitHubAppConf
 	return result, nil
 }
 
+// ReadGitHubRepositoryEnvironmentDeclarations reads only allow-listed template
+// files at the exact inspected SHA and returns variable names. Values are
+// discarded during parsing and can never enter model context, persistence or
+// the Vault. Real .env files are not eligible.
+func ReadGitHubRepositoryEnvironmentDeclarations(ctx context.Context, config GitHubAppConfig, token string, snapshot GitHubRepositorySnapshot, inventory GitHubRepositoryMap) ([]GitHubEnvironmentDeclaration, error) {
+	repository, err := parseGitHubRepositoryReference(snapshot.Reference)
+	if err != nil {
+		return nil, err
+	}
+	revision := strings.ToLower(strings.TrimSpace(snapshot.Revision))
+	if !validGitHubCommitSHA(revision) || strings.TrimSpace(token) == "" || !strings.EqualFold(revision, strings.TrimSpace(inventory.Revision)) {
+		return nil, fmt.Errorf("GitHub environment declarations require the matching frozen revision and installation token")
+	}
+	paths := make([]string, 0, maxGitHubEnvironmentTemplates)
+	for _, file := range inventory.Files {
+		if safeGitHubRepositoryInventoryPath(file) && isGitHubEnvironmentDeclarationPath(file) {
+			paths = append(paths, file)
+			if len(paths) == maxGitHubEnvironmentTemplates {
+				break
+			}
+		}
+	}
+	client := &http.Client{Timeout: 20 * time.Second}
+	baseURL := strings.TrimRight(config.APIBaseURL, "/") + "/repos/" + url.PathEscape(repository.Owner) + "/" + url.PathEscape(repository.Name) + "/contents/"
+	result := make([]GitHubEnvironmentDeclaration, 0, len(paths))
+	for _, sourcePath := range paths {
+		request, requestErr := githubAppRequest(ctx, http.MethodGet, baseURL+escapeGitHubRepositoryContentPath(sourcePath)+"?ref="+url.QueryEscape(revision), token, nil)
+		if requestErr != nil {
+			return nil, requestErr
+		}
+		response, requestErr := client.Do(request)
+		if requestErr != nil {
+			return nil, fmt.Errorf("read GitHub environment declaration")
+		}
+		var payload struct {
+			Type     string `json:"type"`
+			Encoding string `json:"encoding"`
+			Content  string `json:"content"`
+			Size     int    `json:"size"`
+		}
+		decodeErr := json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&payload)
+		status := response.StatusCode
+		response.Body.Close()
+		if status != http.StatusOK || decodeErr != nil || payload.Type != "file" || !strings.EqualFold(payload.Encoding, "base64") || payload.Size < 0 || payload.Size > maxGitHubEnvironmentBytes {
+			continue
+		}
+		decoded, decodeErr := base64.StdEncoding.DecodeString(strings.ReplaceAll(payload.Content, "\n", ""))
+		if decodeErr != nil || len(decoded) > maxGitHubEnvironmentBytes || !validText(decoded) {
+			continue
+		}
+		names := parseEnvironmentVariableNames(string(decoded))
+		if len(names) > 0 {
+			result = append(result, GitHubEnvironmentDeclaration{Path: sourcePath, Names: names})
+		}
+	}
+	return result, nil
+}
+
+var environmentVariableNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
+
+func parseEnvironmentVariableNames(content string) []string {
+	seen := map[string]struct{}{}
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		if strings.HasPrefix(line, "export ") {
+			line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+		}
+		name, _, found := strings.Cut(line, "=")
+		name = strings.TrimSpace(name)
+		if !found || !environmentVariableNamePattern.MatchString(name) {
+			continue
+		}
+		seen[name] = struct{}{}
+		if len(seen) == 64 {
+			break
+		}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 func selectedGitHubRepositoryContextPaths(files []string) []string {
 	candidates := make([]string, 0, len(files))
 	for _, file := range files {
@@ -415,6 +529,38 @@ func safeGitHubRepositoryMapPath(value string) bool {
 		}
 	}
 	return true
+}
+
+// safeGitHubRepositoryInventoryPath permits only the names of conventional
+// environment declaration templates in addition to normal safe source paths.
+// ReadGitHubRepositorySourceContext still calls safeGitHubRepositoryMapPath,
+// so template contents can never enter model context or the Vault proposal.
+func safeGitHubRepositoryInventoryPath(value string) bool {
+	if safeGitHubRepositoryMapPath(value) {
+		return true
+	}
+	lower := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), `\`, "/"))
+	allowed := isGitHubEnvironmentDeclarationPath(lower)
+	if !allowed {
+		return false
+	}
+	for _, segment := range strings.Split(lower, "/") {
+		if excludedDirectory(segment) {
+			return false
+		}
+	}
+	return true
+}
+
+func isGitHubEnvironmentDeclarationPath(value string) bool {
+	lower := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), `\`, "/"))
+	base := lower[strings.LastIndex(lower, "/")+1:]
+	for _, suffix := range []string{".example", ".sample", ".template", ".dist"} {
+		if base == ".env"+suffix || base == "env"+suffix || strings.HasSuffix(base, ".env"+suffix) || strings.HasSuffix(base, ".tfvars"+suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func parseGitHubRepositoryReference(value string) (githubRepository, error) {

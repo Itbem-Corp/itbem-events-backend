@@ -13,6 +13,7 @@ import (
 	"events-stocks/internal/automationagent"
 	"events-stocks/internal/deliveryledger"
 	"events-stocks/internal/environmentevidence"
+	"events-stocks/internal/projectvault"
 	"events-stocks/internal/qaevidence"
 	"events-stocks/internal/releasegate"
 	"events-stocks/internal/releasegatecontrol"
@@ -53,16 +54,17 @@ var workerWorkspaceIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,
 const maxGitHubReviewWebhookBytes = 1 << 20
 
 var allowedOperations = map[string]struct{}{
-	"ai.chat":                 {},
-	"document.analyze":        {},
-	"code.review":             {},
-	"product.ideate":          {},
-	"delivery.plan":           {},
-	"delivery.implementation": {},
-	"delivery.publish":        {},
-	"delivery.release_gate":   {},
-	"delivery.qa":             {},
-	"delivery.summary":        {},
+	"ai.chat":                   {},
+	"document.analyze":          {},
+	"code.review":               {},
+	"product.ideate":            {},
+	"delivery.plan":             {},
+	"delivery.implementation":   {},
+	"delivery.onboarding_probe": {},
+	"delivery.publish":          {},
+	"delivery.release_gate":     {},
+	"delivery.qa":               {},
+	"delivery.summary":          {},
 }
 
 type githubPullRequestWebhook struct {
@@ -83,6 +85,32 @@ type githubPullRequestWebhook struct {
 			SHA string `json:"sha"`
 		} `json:"head"`
 	} `json:"pull_request"`
+}
+
+type githubReviewTaskView struct {
+	ID           uuid.UUID  `json:"id"`
+	Status       string     `json:"status"`
+	AttemptCount int        `json:"attempt_count"`
+	CompletedAt  *time.Time `json:"completed_at,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+}
+
+// automationTaskListView is the only task shape exposed by the broad polling
+// endpoint. Object keys, prompts, outputs, errors, requesters, leases,
+// provider response IDs and evidence digests remain behind task-scoped reads.
+type automationTaskListView struct {
+	ID                 uuid.UUID  `json:"id"`
+	DeliveryWorkItemID *uuid.UUID `json:"delivery_work_item_id,omitempty"`
+	Operation          string     `json:"operation"`
+	Status             string     `json:"status"`
+	Provider           string     `json:"provider,omitempty"`
+	Model              string     `json:"model,omitempty"`
+	AttemptCount       int        `json:"attempt_count"`
+	ResultAvailable    bool       `json:"result_available"`
+	HasError           bool       `json:"has_error"`
+	CompletedAt        *time.Time `json:"completed_at,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
 }
 
 // GitHubPullRequestReviewWebhook converts an explicitly permitted, signed PR
@@ -123,7 +151,7 @@ func GitHubPullRequestReviewWebhook(c echo.Context) error {
 	}
 	var existing models.AutomationTask
 	if err := configuration.DB.First(&existing, taskID).Error; err == nil {
-		return utils.Success(c, http.StatusAccepted, "GitHub review already queued", existing)
+		return utils.Success(c, http.StatusAccepted, "GitHub review already queued", githubReviewTaskProjection(existing))
 	} else if err != gorm.ErrRecordNotFound {
 		return utils.Error(c, http.StatusServiceUnavailable, "GitHub review unavailable", "")
 	}
@@ -154,6 +182,14 @@ func GitHubPullRequestReviewWebhook(c echo.Context) error {
 	if err != nil {
 		return utils.Error(c, http.StatusConflict, "GitHub review rejected", "The pull request diff is not reviewable within the configured safety limits")
 	}
+	review, err = automationagent.BindCodeReviewRemoteTarget(review, event.Number, event.Installation.ID)
+	if err != nil {
+		return utils.Error(c, http.StatusConflict, "GitHub review rejected", "The remote review target is invalid")
+	}
+	reviewSubject, err := automationagent.CodeReviewPublicationSubjectSHA256(review)
+	if err != nil {
+		return utils.Error(c, http.StatusConflict, "GitHub review rejected", "The remote review subject could not be sealed")
+	}
 	input, err := json.Marshal(automationagent.TaskInput{Prompt: "Review this immutable pull request diff. Report only reproducible issues grounded in the supplied patch.", Delivery: mustJSON(review)})
 	if err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "GitHub review failed", "")
@@ -163,7 +199,7 @@ func GitHubPullRequestReviewWebhook(c echo.Context) error {
 		return utils.Error(c, http.StatusServiceUnavailable, "GitHub review unavailable", "")
 	}
 	jobID := uuid.NewV5(uuid.NamespaceURL, "itbem/github-review-job/"+identity)
-	task := &models.AutomationTask{ID: taskID, JobID: jobID, RequestedBy: "github-app-review", CorrelationID: "github-pr:" + identity, Operation: "code.review", MaxCompletionTokens: automationagent.CompletionTokensForOperation("code.review"), InputRef: "s3://" + cfg.AutomationInputBucket + "/" + inputKey, Status: "queued"}
+	task := &models.AutomationTask{ID: taskID, JobID: jobID, RequestedBy: "github-app-review", CorrelationID: "github-pr:" + identity, Operation: "code.review", EvidenceSubjectDigest: reviewSubject, MaxCompletionTokens: automationagent.CompletionTokensForOperation("code.review"), InputRef: "s3://" + cfg.AutomationInputBucket + "/" + inputKey, Status: "queued"}
 	message := automationqueue.Message{SchemaVersion: 1, JobID: jobID.String(), TenantCode: "itbem", CorrelationID: task.CorrelationID, Type: "ai.local.process"}
 	message.Payload.TaskID, message.Payload.Operation, message.Payload.MaxCompletionTokens, message.Payload.InputRef, message.Payload.Attempt = taskID.String(), task.Operation, task.MaxCompletionTokens, task.InputRef, 1
 	created := false
@@ -198,11 +234,15 @@ func GitHubPullRequestReviewWebhook(c echo.Context) error {
 	}
 	if !created {
 		if err := configuration.DB.First(&existing, taskID).Error; err == nil {
-			return utils.Success(c, http.StatusAccepted, "GitHub review already queued", existing)
+			return utils.Success(c, http.StatusAccepted, "GitHub review already queued", githubReviewTaskProjection(existing))
 		}
 		return utils.Error(c, http.StatusConflict, "GitHub review already queued", "")
 	}
-	return utils.Success(c, http.StatusAccepted, "GitHub pull request review queued", task)
+	return utils.Success(c, http.StatusAccepted, "GitHub pull request review queued", githubReviewTaskProjection(*task))
+}
+
+func githubReviewTaskProjection(task models.AutomationTask) githubReviewTaskView {
+	return githubReviewTaskView{ID: task.ID, Status: task.Status, AttemptCount: task.AttemptCount, CompletedAt: task.CompletedAt, CreatedAt: task.CreatedAt}
 }
 
 func supersedeQueuedGitHubReviews(tx *gorm.DB, prIdentity string, replacementID uuid.UUID, now time.Time) error {
@@ -870,7 +910,7 @@ func List(c echo.Context) error {
 	if configuration.DB == nil {
 		return utils.Error(c, http.StatusServiceUnavailable, "Automation unavailable", "Database is unavailable")
 	}
-	var tasks []models.AutomationTask
+	var tasks []automationTaskListView
 	requestedBy, _ := c.Get("cognito_sub").(string)
 	if strings.TrimSpace(requestedBy) == "" {
 		return utils.Error(c, http.StatusUnauthorized, "Unauthorized", "")
@@ -880,15 +920,20 @@ func List(c echo.Context) error {
 	// manually submitted automation. Non-administrators remain strictly scoped
 	// to their own generic tasks; Delivery task reads continue through project
 	// membership checks in their dedicated surfaces.
-	query := configuration.DB
+	query := configuration.DB.Table("automation_tasks AS task").Select(`
+		task.id, task.delivery_work_item_id, task.operation, task.status, task.provider, task.model,
+		task.attempt_count, task.completed_at, task.created_at, task.updated_at,
+		CASE WHEN task.output_ref <> '' THEN TRUE ELSE FALSE END AS result_available,
+		CASE WHEN task.error_message <> '' THEN TRUE ELSE FALSE END AS has_error
+	`)
 	user, err := authz.CurrentUser(c)
 	if err != nil {
 		return authz.Respond(c, err)
 	}
 	if !user.IsPlatformAdmin() {
-		query = query.Where("requested_by = ?", requestedBy)
+		query = query.Where("task.requested_by = ?", requestedBy)
 	}
-	if err := query.Order("created_at DESC").Limit(100).Find(&tasks).Error; err != nil {
+	if err := query.Order("task.created_at DESC").Limit(100).Scan(&tasks).Error; err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Automation tasks unavailable", "")
 	}
 	return utils.Success(c, http.StatusOK, "Automation tasks", tasks)
@@ -2026,15 +2071,21 @@ func Complete(c echo.Context) error {
 		if task.Operation == "delivery.release_gate" {
 			limit = 256 * 1024
 		}
-		if request.Status != "completed" || (task.Operation != "delivery.implementation" && task.Operation != "delivery.publish" && task.Operation != "delivery.release_gate" && task.Operation != "delivery.qa") || len(request.Execution) > limit || !json.Valid(request.Execution) {
-			return utils.Error(c, http.StatusBadRequest, "Invalid automation execution", "only a bounded completed delivery implementation, publication, QA, or release Gatekeeper run may register execution metadata")
+		if request.Status != "completed" || (task.Operation != "code.review" && task.Operation != "delivery.implementation" && task.Operation != "delivery.onboarding_probe" && task.Operation != "delivery.publish" && task.Operation != "delivery.release_gate" && task.Operation != "delivery.qa") || len(request.Execution) > limit || !json.Valid(request.Execution) {
+			return utils.Error(c, http.StatusBadRequest, "Invalid automation execution", "only a bounded completed review or delivery execution may register execution metadata")
 		}
 	}
-	if request.Deterministic && (request.Status != "completed" || (task.Operation != "delivery.publish" && task.Operation != "delivery.release_gate")) {
-		return utils.Error(c, http.StatusBadRequest, "Invalid automation result", "only delivery publication or release Gatekeeper may be deterministic")
+	if request.Deterministic && (request.Status != "completed" || (task.Operation != "delivery.onboarding_probe" && task.Operation != "delivery.publish" && task.Operation != "delivery.release_gate")) {
+		return utils.Error(c, http.StatusBadRequest, "Invalid automation result", "only onboarding probes, delivery publication, or release Gatekeeper may be deterministic")
 	}
 	if task.Operation == "delivery.release_gate" && request.Status == "completed" && (!request.Deterministic || len(request.Execution) == 0) {
 		return utils.Error(c, http.StatusBadRequest, "Invalid automation result", "release Gatekeeper completion requires deterministic execution evidence")
+	}
+	if task.Operation == "delivery.onboarding_probe" && request.Status == "completed" && (!request.Deterministic || len(request.Execution) == 0) {
+		return utils.Error(c, http.StatusBadRequest, "Invalid automation result", "onboarding probe completion requires deterministic execution evidence")
+	}
+	if task.Operation == "code.review" && task.RequestedBy == "github-app-review" && request.Status == "completed" && len(request.Execution) == 0 {
+		return utils.Error(c, http.StatusBadRequest, "Invalid automation result", "remote code review completion requires exact GitHub publication evidence")
 	}
 	toolExecutionRows, toolExecutionErr := buildToolExecutionLedger(cfg, &task, ledgerRunID, request.Status, request.ToolExecutions, request.Artifacts, time.Now().UTC())
 	if toolExecutionErr != nil {
@@ -2134,6 +2185,16 @@ func Complete(c echo.Context) error {
 			}
 		}
 		if !cancellationRequested && request.Status == "completed" && len(request.Execution) > 0 {
+			if task.Operation == "code.review" {
+				if err := persistCodeReviewPublication(tx, &task, request.Execution, completedAt); err != nil {
+					return err
+				}
+			}
+			if task.Operation == "delivery.onboarding_probe" {
+				if err := persistOnboardingCapabilityProbes(tx, &task, request.Execution, completedAt); err != nil {
+					return err
+				}
+			}
 			if task.Operation == "delivery.implementation" {
 				if err := persistImplementationChangeSet(tx, &task, request.Execution, completedAt); err != nil {
 					return err
@@ -2164,6 +2225,150 @@ func Complete(c echo.Context) error {
 		return utils.Error(c, http.StatusConflict, "Automation result ignored", "Task is not awaiting a result")
 	}
 	return c.NoContent(http.StatusNoContent)
+}
+
+func persistCodeReviewPublication(tx *gorm.DB, task *models.AutomationTask, raw json.RawMessage, completedAt time.Time) error {
+	publication, err := codeReviewPublicationForTask(task, raw)
+	if err != nil {
+		return err
+	}
+	publication.AutomationTaskID, publication.PublishedAt = task.ID, publication.PublishedAt.UTC()
+	if publication.PublishedAt.After(completedAt.Add(time.Minute)) {
+		return fmt.Errorf("code review publication time is invalid")
+	}
+	return tx.Create(&publication).Error
+}
+
+func codeReviewPublicationForTask(task *models.AutomationTask, raw json.RawMessage) (models.AutomationCodeReviewPublication, error) {
+	if task == nil || task.ID == uuid.Nil || task.Operation != "code.review" || task.RequestedBy != "github-app-review" || !artifactDigestPattern.MatchString(strings.ToLower(strings.TrimSpace(task.EvidenceSubjectDigest))) {
+		return models.AutomationCodeReviewPublication{}, fmt.Errorf("only an exact webhook review task may publish GitHub review evidence")
+	}
+	var execution automationagent.GitHubCodeReviewPublication
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&execution); err != nil {
+		return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review publication evidence is invalid")
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review publication evidence is invalid")
+	}
+	repository := strings.ToLower(strings.TrimSpace(execution.Repository))
+	verdict := strings.ToLower(strings.TrimSpace(execution.Verdict))
+	event := strings.ToUpper(strings.TrimSpace(execution.Event))
+	actor := strings.ToLower(strings.TrimSpace(execution.ReviewerActor))
+	author := strings.ToLower(strings.TrimSpace(execution.AuthorActor))
+	if execution.SchemaVersion != 1 || !githubRepositoryPattern.MatchString(repository) || execution.PullRequest < 1 || !gitCommitSHA.MatchString(strings.ToLower(strings.TrimSpace(execution.HeadSHA))) || !artifactDigestPattern.MatchString(strings.ToLower(strings.TrimSpace(execution.PatchSHA256))) || !artifactDigestPattern.MatchString(strings.ToLower(strings.TrimSpace(execution.SubjectSHA256))) || !artifactDigestPattern.MatchString(strings.ToLower(strings.TrimSpace(execution.PayloadSHA256))) || !strings.EqualFold(execution.SubjectSHA256, task.EvidenceSubjectDigest) || execution.ReviewID < 1 || actor == "" || execution.PublishedAt.IsZero() {
+		return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review publication evidence is invalid")
+	}
+	if task.CorrelationID != "github-pr:"+repository+":"+strconv.Itoa(execution.PullRequest)+":"+strings.ToLower(execution.HeadSHA) || !validGitHubReviewURL(execution.ReviewURL, repository, execution.PullRequest, execution.ReviewID) {
+		return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review publication does not match its queued pull request")
+	}
+	switch event {
+	case "APPROVE":
+		if verdict != "approve" || author == "" || strings.EqualFold(actor, author) {
+			return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review approval is not independent")
+		}
+	case "REQUEST_CHANGES":
+		if verdict != "request_changes" {
+			return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review event contradicts its verdict")
+		}
+	case "COMMENT":
+		if verdict != "comment" && verdict != "blocked" && (verdict != "approve" || author == "" || !strings.EqualFold(actor, author)) {
+			return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review comment contradicts its verdict")
+		}
+	default:
+		return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review event is invalid")
+	}
+	return models.AutomationCodeReviewPublication{
+		Repository: repository, PullRequest: execution.PullRequest, HeadSHA: strings.ToLower(execution.HeadSHA), PatchSHA256: strings.ToLower(execution.PatchSHA256),
+		SubjectSHA256: strings.ToLower(execution.SubjectSHA256), PayloadSHA256: strings.ToLower(execution.PayloadSHA256), Verdict: verdict, Event: event,
+		ReviewID: execution.ReviewID, ReviewURL: strings.TrimSpace(execution.ReviewURL), ReviewerActor: actor, AuthorActor: author, PublishedAt: execution.PublishedAt,
+	}, nil
+}
+
+func validGitHubReviewURL(value, repository string, pullRequest int, reviewID int64) bool {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || parsed.Scheme != "https" || !strings.EqualFold(parsed.Hostname(), "github.com") || parsed.User != nil || parsed.RawQuery != "" || pullRequest < 1 || reviewID < 1 {
+		return false
+	}
+	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	if len(parts) != 4 || !strings.EqualFold(parts[0]+"/"+parts[1], repository) || parts[2] != "pull" || parts[3] != strconv.Itoa(pullRequest) {
+		return false
+	}
+	return parsed.Fragment == "pullrequestreview-"+strconv.FormatInt(reviewID, 10)
+}
+
+func persistOnboardingCapabilityProbes(tx *gorm.DB, task *models.AutomationTask, raw json.RawMessage, completedAt time.Time) error {
+	if tx == nil || completedAt.IsZero() {
+		return fmt.Errorf("only a bounded onboarding task may append capability probes")
+	}
+	execution, queuedSubject, err := onboardingCapabilityProbeForTask(task, raw)
+	if err != nil {
+		return err
+	}
+	var onboarding models.DeliveryRepositoryOnboarding
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", *task.DeliveryOnboardingID).First(&onboarding).Error; err != nil {
+		return err
+	}
+	if onboarding.Status != "proposed" || !strings.EqualFold(onboarding.ProposalSHA256, queuedSubject) || onboarding.RepositoryReference != execution.RepositoryReference || onboarding.DefaultBranch != execution.DefaultBranch || !strings.EqualFold(onboarding.Revision, execution.Revision) {
+		return fmt.Errorf("onboarding capability probe subject is stale or mismatched")
+	}
+	proposal, err := projectvault.ValidateStoredProposal(
+		onboarding.ProposalJSON, onboarding.RepositoryReference, onboarding.DefaultBranch,
+		onboarding.Revision, onboarding.Readiness, onboarding.ProposalSHA256, onboarding.VaultSHA256,
+	)
+	if err != nil {
+		return err
+	}
+	updated, err := projectvault.ApplyCapabilityProbes(proposal, execution.Probes)
+	if err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(updated)
+	if err != nil {
+		return err
+	}
+	proposalDigest, err := projectvault.ProposalSHA256(updated)
+	if err != nil {
+		return err
+	}
+	for _, probe := range execution.Probes {
+		row := models.DeliveryRepositoryCapabilityProbe{
+			ProjectID: onboarding.ProjectID, OnboardingID: onboarding.ID, AutomationTaskID: task.ID,
+			RepositoryReference: execution.RepositoryReference, Revision: execution.Revision,
+			Capability: probe.Name, State: probe.State, ExecutorRole: execution.ExecutorRole,
+			EvidenceSHA256: strings.ToLower(probe.EvidenceSHA256), SubjectSHA256: strings.ToLower(probe.SubjectSHA256),
+			Reason: probe.Reason, ObservedAt: completedAt.UTC(),
+		}
+		if err := tx.Create(&row).Error; err != nil {
+			return err
+		}
+	}
+	result := tx.Model(&models.DeliveryRepositoryOnboarding{}).
+		Where("id = ? AND status = ? AND proposal_sha256 = ?", onboarding.ID, "proposed", onboarding.ProposalSHA256).
+		Updates(map[string]any{"proposal_json": string(encoded), "proposal_sha256": proposalDigest, "readiness": updated.Readiness})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return fmt.Errorf("onboarding capability probe lost its proposal checkpoint")
+	}
+	return nil
+}
+
+func onboardingCapabilityProbeForTask(task *models.AutomationTask, raw json.RawMessage) (automationagent.OnboardingProbeExecution, string, error) {
+	if task == nil || task.ID == uuid.Nil || task.Operation != "delivery.onboarding_probe" || task.DeliveryOnboardingID == nil || *task.DeliveryOnboardingID == uuid.Nil {
+		return automationagent.OnboardingProbeExecution{}, "", fmt.Errorf("only a bounded onboarding task may append capability probes")
+	}
+	execution, err := automationagent.DecodeOnboardingProbeExecution(raw)
+	if err != nil || execution.TaskID != task.ID.String() {
+		return automationagent.OnboardingProbeExecution{}, "", fmt.Errorf("onboarding capability probes do not match their automation task")
+	}
+	queuedSubject := strings.ToLower(strings.TrimSpace(task.EvidenceSubjectDigest))
+	if !artifactDigestPattern.MatchString(queuedSubject) {
+		return automationagent.OnboardingProbeExecution{}, "", fmt.Errorf("onboarding capability probe task has no exact proposal subject")
+	}
+	return execution, queuedSubject, nil
 }
 
 func persistReleaseGateEvaluation(tx *gorm.DB, task *models.AutomationTask, raw json.RawMessage, completedAt time.Time) error {

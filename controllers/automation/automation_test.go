@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"events-stocks/internal/automationagent"
 	"events-stocks/internal/environmentevidence"
+	"events-stocks/internal/projectvault"
 	"events-stocks/internal/qaevidence"
 	"events-stocks/internal/releasegate"
 	"events-stocks/models"
@@ -27,6 +29,38 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
+
+func TestOnboardingCapabilityProbeForTaskBindsTaskAndProposalSubject(t *testing.T) {
+	taskID, onboardingID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
+	revision, evidenceDigest := strings.Repeat("a", 40), strings.Repeat("b", 64)
+	probe := projectvault.CapabilityProbe{Name: "unit", State: "ready", Reason: "operator-owned capability command exited zero at the exact repository SHA", Revision: revision, EvidenceSHA256: evidenceDigest, ExecutorRole: "qa"}
+	probe.SubjectSHA256, _ = projectvault.CapabilityProbeSubjectSHA256(projectvault.Repository{Reference: "github://acme/service", Revision: revision}, probe)
+	execution := automationagent.OnboardingProbeExecution{SchemaVersion: 1, TaskID: taskID.String(), RepositoryReference: "github://acme/service", DefaultBranch: "main", Revision: revision, WorkspaceReference: "workspace://service", ExecutorRole: "qa", Probes: []projectvault.CapabilityProbe{probe}}
+	raw, _ := json.Marshal(execution)
+	task := models.AutomationTask{ID: taskID, Operation: "delivery.onboarding_probe", DeliveryOnboardingID: &onboardingID, EvidenceSubjectDigest: strings.Repeat("c", 64)}
+	actual, subject, err := onboardingCapabilityProbeForTask(&task, raw)
+	if err != nil || actual.TaskID != taskID.String() || subject != task.EvidenceSubjectDigest {
+		t.Fatalf("exact onboarding probe task rejected: %#v / %q / %v", actual, subject, err)
+	}
+	for _, mutate := range []func(*models.AutomationTask, *automationagent.OnboardingProbeExecution){
+		func(task *models.AutomationTask, _ *automationagent.OnboardingProbeExecution) {
+			task.Operation = "delivery.qa"
+		},
+		func(task *models.AutomationTask, _ *automationagent.OnboardingProbeExecution) {
+			task.EvidenceSubjectDigest = "invalid"
+		},
+		func(_ *models.AutomationTask, execution *automationagent.OnboardingProbeExecution) {
+			execution.TaskID = uuid.Must(uuid.NewV4()).String()
+		},
+	} {
+		candidateTask, candidateExecution := task, execution
+		mutate(&candidateTask, &candidateExecution)
+		candidateRaw, _ := json.Marshal(candidateExecution)
+		if _, _, err := onboardingCapabilityProbeForTask(&candidateTask, candidateRaw); err == nil {
+			t.Fatal("onboarding probe outside its queued subject was accepted")
+		}
+	}
+}
 
 func TestReleaseGateCandidateForTaskRequiresAuthenticatedRequester(t *testing.T) {
 	workItemID := uuid.Must(uuid.NewV4())
@@ -140,6 +174,71 @@ func TestGitHubReviewWebhookAdmissionIsExplicitAndSignatureBound(t *testing.T) {
 		// decoder sees the appended second JSON value rather than ignoring it.
 	} else {
 		t.Fatal("concatenated GitHub webhook JSON must remain detectable")
+	}
+}
+
+func TestCodeReviewPublicationForTaskRequiresExactIndependentGitHubEvidence(t *testing.T) {
+	taskID := uuid.Must(uuid.NewV4())
+	subject := strings.Repeat("a", 64)
+	task := &models.AutomationTask{
+		ID: taskID, RequestedBy: "github-app-review", Operation: "code.review", EvidenceSubjectDigest: subject,
+		CorrelationID: "github-pr:itbem/backend:42:" + strings.Repeat("b", 40),
+	}
+	execution := automationagent.GitHubCodeReviewPublication{
+		SchemaVersion: 1, Repository: "itbem/backend", PullRequest: 42, HeadSHA: strings.Repeat("b", 40),
+		PatchSHA256: strings.Repeat("c", 64), SubjectSHA256: subject, PayloadSHA256: strings.Repeat("d", 64),
+		Verdict: "approve", Event: "APPROVE", ReviewID: 77,
+		ReviewURL:     "https://github.com/itbem/backend/pull/42#pullrequestreview-77",
+		ReviewerActor: "reviewer-bot[bot]", AuthorActor: "engineer-bot[bot]", PublishedAt: time.Now().UTC(),
+	}
+	raw, _ := json.Marshal(execution)
+	publication, err := codeReviewPublicationForTask(task, raw)
+	if err != nil || publication.AutomationTaskID != uuid.Nil || publication.ReviewerActor != "reviewer-bot[bot]" {
+		t.Fatalf("valid review publication rejected: %#v / %v", publication, err)
+	}
+	for name, mutate := range map[string]func(*models.AutomationTask, *automationagent.GitHubCodeReviewPublication){
+		"stale subject": func(_ *models.AutomationTask, value *automationagent.GitHubCodeReviewPublication) {
+			value.SubjectSHA256 = strings.Repeat("e", 64)
+		},
+		"self approval": func(_ *models.AutomationTask, value *automationagent.GitHubCodeReviewPublication) {
+			value.AuthorActor = value.ReviewerActor
+		},
+		"wrong PR": func(_ *models.AutomationTask, value *automationagent.GitHubCodeReviewPublication) {
+			value.PullRequest = 43
+		},
+		"wrong operation": func(value *models.AutomationTask, _ *automationagent.GitHubCodeReviewPublication) {
+			value.Operation = "delivery.qa"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidateTask, candidateExecution := *task, execution
+			mutate(&candidateTask, &candidateExecution)
+			candidateRaw, _ := json.Marshal(candidateExecution)
+			if _, err := codeReviewPublicationForTask(&candidateTask, candidateRaw); err == nil {
+				t.Fatal("invalid GitHub review publication evidence was accepted")
+			}
+		})
+	}
+}
+
+func TestAutomationTaskListViewNeverSerializesPrivateTaskFields(t *testing.T) {
+	view := automationTaskListView{
+		ID: uuid.Must(uuid.NewV4()), Operation: "code.review", Status: "completed", Provider: "minimax", Model: "MiniMax-M3",
+		AttemptCount: 1, ResultAvailable: true, HasError: false, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	raw, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"input_ref", "output_ref", "error_message", "requested_by", "correlation_id", "provider_response_id", "evidence_subject_digest", "budget_reservation"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("broad task list leaked %q: %s", forbidden, raw)
+		}
+	}
+	for _, required := range []string{`"result_available":true`, `"attempt_count":1`} {
+		if !strings.Contains(string(raw), required) {
+			t.Fatalf("safe task state lost %q: %s", required, raw)
+		}
 	}
 }
 
@@ -779,7 +878,7 @@ func TestExecutionResultReferenceMatchesOnlyItsOriginalRun(t *testing.T) {
 func TestDeliveryOperationsRemainExplicitlyAllowlisted(t *testing.T) {
 	for _, operation := range []string{
 		"ai.chat", "document.analyze", "code.review", "product.ideate",
-		"delivery.plan", "delivery.implementation", "delivery.publish", "delivery.qa", "delivery.summary",
+		"delivery.plan", "delivery.implementation", "delivery.onboarding_probe", "delivery.publish", "delivery.qa", "delivery.summary",
 	} {
 		if _, allowed := allowedOperations[operation]; !allowed {
 			t.Fatalf("expected operation to be enabled: %s", operation)
@@ -796,7 +895,7 @@ func TestGenericTaskOperationsCannotBypassDeliveryGates(t *testing.T) {
 			t.Fatalf("generic operation %s should remain available", operation)
 		}
 	}
-	for _, operation := range []string{"delivery.plan", "delivery.implementation", "delivery.publish", "delivery.qa", "delivery.summary", "shell.execute"} {
+	for _, operation := range []string{"delivery.plan", "delivery.implementation", "delivery.onboarding_probe", "delivery.publish", "delivery.qa", "delivery.summary", "shell.execute"} {
 		if genericTaskOperationAllowed(operation) {
 			t.Fatalf("operation %s must not be started through the generic task endpoint", operation)
 		}

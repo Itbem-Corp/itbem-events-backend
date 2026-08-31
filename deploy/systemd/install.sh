@@ -49,6 +49,6 @@ done
 systemctl daemon-reload
 
 echo "Installed reviewed binary revision $revision."
-echo "Fill root-only common/role environment files, scoped AWS credentials and the release GitHub App PEM."
+echo "Fill root-only common/role environment files, scoped AWS credentials and the separate review/release GitHub App PEMs."
 echo "Place a separate managed checkout registry under each private /srv/itbem-agent-workspaces/<lane> root."
 echo "Run each --doctor through systemctl before enabling any lane; this installer starts no service."

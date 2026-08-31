@@ -63,7 +63,9 @@ itbem-events-backend/
 | DesignTemplate | `models/DesignTemplate.go` |
 | DeliveryProject / work-item workflow | `models/DeliveryWorkflow.go` |
 | DeliveryRepositoryOnboarding / DeliveryProjectVaultRevision | `models/DeliveryProjectVault.go` |
+| Append-only repository capability probe evidence | `models/DeliveryRepositoryCapabilityProbe.go`, `internal/automationagent/onboarding_probe.go`, `controllers/delivery/onboarding.go`, `controllers/automation/automation.go` |
 | AutomationTask | `models/AutomationTask.go` |
+| Exact-SHA idempotent GitHub review publication | `models/AutomationCodeReviewPublication.go`, `internal/automationagent/github_review_publish.go`, `controllers/automation/automation.go` |
 | AutomationAgentHeartbeat | `models/AutomationAgentHeartbeat.go` |
 | Named exact-matrix QA evidence / per-repository gate resolver | `internal/qaevidence/`, `internal/deliveryledger/qa_observation.go`, `internal/releasegatecontrol/evidence.go` |
 | Exact-matrix local security evidence / immutable resolver | `internal/securityevidence/`, `internal/qaevidence/`, `internal/deliveryledger/security_observation.go`, `controllers/automation/automation.go`, `internal/releasegatecontrol/evidence.go` |

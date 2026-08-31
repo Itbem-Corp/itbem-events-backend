@@ -12,7 +12,7 @@ run() {
 }
 
 run "generic onboarding, monorepo discovery and prompt-injection boundary" \
-  go test ./internal/projectvault -run 'Test(BuildCreatesDeterministicEvidenceBasedProposal|BuildProposesCommandsPerMonorepoModule|BuildTreatsRepositoryTextAsData)$' -count=1
+  go test ./internal/projectvault -run 'Test(BuildCreatesDeterministicEvidenceBasedProposal|BuildEnvironmentTemplatesAreNameOnlyEvidence|BuildProposesCommandsPerMonorepoModule|BuildTreatsRepositoryTextAsData|ApplyCapabilityProbesRequiresExactSHAAndSealedSandboxEvidence|ReconcilePreservesChangedRemovedAndUnchangedVaultHistory|ReconcileRejectsCrossRepositoryOrMutableHistory)$' -count=1
 
 run "single-repository worktree and exact reviewed diff" \
   go test ./internal/automationagent -run 'TestRunImplementationUsesIsolatedWorktree$' -count=1
@@ -36,7 +36,10 @@ run "safe restart/redelivery and durable queue leases" \
   go test ./internal/automationagent -run 'Test(WorkerRecoveryReusesOriginalInferenceRunWithoutCreatingNewCostIdentity|WorkerReusesPersistedResultInsteadOfReexecutingProvider|LongRunningQueueMessageRenewsItsVisibilityLease|ProcessQueueMessageRetainsRetryableWork)$' -count=1
 
 run "Linux role isolation and non-consuming doctor" \
-  go test ./cmd/itbem-ai-agent -run 'Test(SystemdUnitFailsClosedAndRunsUnprivileged|SystemdDoctorIsReadOnlyAndCannotConsumeQueueWork|SystemdRoleFilesBindExactLaneAndSeparateReleaseSecrets|SystemdInstallerStagesButNeverActivatesServices|DoctorReleaseReadinessRequiresGitHubAppConfiguration)$' -count=1
+  go test ./cmd/itbem-ai-agent -run 'Test(SystemdUnitFailsClosedAndRunsUnprivileged|SystemdDoctorIsReadOnlyAndCannotConsumeQueueWork|SystemdRoleFilesBindExactLaneAndSeparatePublicationSecrets|SystemdInstallerStagesButNeverActivatesServices|DoctorPublicationReadinessRequiresRoleSpecificGitHubAppConfiguration)$' -count=1
+
+run "exact-SHA idempotent GitHub review relay and independent identity" \
+  go test ./internal/automationagent ./controllers/automation -run 'Test(PublishGitHubCodeReviewIsExactSHAAndRetrySafe|PublishGitHubCodeReviewNeverSelfApproves|CodeReviewPublicationForTaskRequiresExactIndependentGitHubEvidence)$' -count=1
 
 run "complete backend regression suite" go test ./... -count=1
 run "static analysis" go vet ./...

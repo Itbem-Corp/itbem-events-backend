@@ -353,6 +353,32 @@ func TestReadGitHubRepositorySnapshotUsesOnlyRegisteredReference(t *testing.T) {
 	}
 }
 
+func TestReadGitHubRepositorySnapshotCanFreezeAnExactAuthorizedCommit(t *testing.T) {
+	revision := strings.Repeat("b", 40)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer ephemeral-installation-token" {
+			t.Fatal("installation token must only be sent as an authorization header")
+		}
+		switch request.URL.Path {
+		case "/repos/Itbem-Corp/repo":
+			_ = json.NewEncoder(response).Encode(map[string]string{"default_branch": "trunk"})
+		case "/repos/Itbem-Corp/repo/commits/" + revision:
+			_ = json.NewEncoder(response).Encode(map[string]string{"sha": revision})
+		default:
+			t.Fatalf("unexpected remote read: %s", request.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	snapshot, err := ReadGitHubRepositorySnapshotAtRevision(context.Background(), GitHubAppConfig{APIBaseURL: server.URL}, "ephemeral-installation-token", "github://Itbem-Corp/repo", revision)
+	if err != nil || snapshot.Revision != revision || snapshot.DefaultBranch != "trunk" {
+		t.Fatalf("unexpected exact remote snapshot: %#v / %v", snapshot, err)
+	}
+	if _, err := ReadGitHubRepositorySnapshotAtRevision(context.Background(), GitHubAppConfig{APIBaseURL: server.URL}, "ephemeral-installation-token", "github://Itbem-Corp/repo", "main"); err == nil {
+		t.Fatal("mutable branch name was accepted as an exact Vault checkpoint")
+	}
+}
+
 func TestReadGitHubRepositoryMapOnlyReturnsSafeFileInventory(t *testing.T) {
 	revision := strings.Repeat("b", 40)
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -365,6 +391,7 @@ func TestReadGitHubRepositoryMapOnlyReturnsSafeFileInventory(t *testing.T) {
 		_ = json.NewEncoder(response).Encode(map[string]any{"tree": []map[string]string{
 			{"path": "README.md", "type": "blob"},
 			{"path": "cmd/api/main.go", "type": "blob"},
+			{"path": ".env.example", "type": "blob"},
 			{"path": ".env.production", "type": "blob"},
 			{"path": "node_modules/ignored.js", "type": "blob"},
 			{"path": "secrets/key.txt", "type": "blob"},
@@ -377,7 +404,7 @@ func TestReadGitHubRepositoryMapOnlyReturnsSafeFileInventory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read repository map: %v", err)
 	}
-	if result.Revision != revision || result.FileCount != 2 || result.InventoryTruncated || strings.Join(result.Files, ",") != "README.md,cmd/api/main.go" {
+	if result.Revision != revision || result.FileCount != 3 || result.InventoryTruncated || strings.Join(result.Files, ",") != ".env.example,README.md,cmd/api/main.go" {
 		t.Fatalf("unexpected safe repository map: %#v", result)
 	}
 }
@@ -406,16 +433,37 @@ func TestReadGitHubRepositorySourceContextUsesOnlySelectedRedactedFrozenFiles(t 
 	}))
 	defer server.Close()
 
-	source, err := ReadGitHubRepositorySourceContext(context.Background(), GitHubAppConfig{APIBaseURL: server.URL}, "ephemeral-installation-token", GitHubRepositorySnapshot{Reference: "github://Itbem-Corp/repo", Revision: revision}, GitHubRepositoryMap{Revision: revision, Files: []string{"README.md", "package.json", "src/main.ts", "docs/architecture.md", ".env", "secrets/key.txt"}})
+	source, err := ReadGitHubRepositorySourceContext(context.Background(), GitHubAppConfig{APIBaseURL: server.URL}, "ephemeral-installation-token", GitHubRepositorySnapshot{Reference: "github://Itbem-Corp/repo", Revision: revision}, GitHubRepositoryMap{Revision: revision, Files: []string{"README.md", "package.json", "src/main.ts", "docs/architecture.md", ".env", ".env.example", "secrets/key.txt"}})
 	if err != nil {
 		t.Fatalf("read bounded remote source context: %v", err)
 	}
 	encoded, marshalErr := json.Marshal(source)
-	if marshalErr != nil || len(source.Excerpts) != 4 || !seen["README.md"] || source.RedactedValues == 0 || strings.Contains(string(encoded), "must-not-reach-a-model") {
+	if marshalErr != nil || len(source.Excerpts) != 4 || !seen["README.md"] || seen[".env.example"] || source.RedactedValues == 0 || strings.Contains(string(encoded), "must-not-reach-a-model") {
 		t.Fatalf("remote context must contain selected redacted source only: %#v / %#v / %v", source, seen, marshalErr)
 	}
 	if _, err := ReadGitHubRepositorySourceContext(context.Background(), GitHubAppConfig{APIBaseURL: server.URL}, "ephemeral-installation-token", GitHubRepositorySnapshot{Reference: "github://Itbem-Corp/repo", Revision: revision}, GitHubRepositoryMap{Revision: strings.Repeat("d", 40)}); err == nil {
 		t.Fatal("remote source context must reject an inventory from another revision")
+	}
+}
+
+func TestReadGitHubEnvironmentDeclarationsReturnsNamesWithoutValues(t *testing.T) {
+	revision := strings.Repeat("e", 40)
+	body := "# names only\nAPI_URL=https://example.invalid\nexport API_KEY=must-never-persist\nINVALID-NAME=value\nAPI_KEY=duplicate\n"
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer ephemeral-installation-token" || request.Method != http.MethodGet || request.URL.Query().Get("ref") != revision || !strings.HasSuffix(request.URL.Path, "/contents/.env.example") {
+			t.Fatalf("unexpected environment declaration request: %s %s", request.Method, request.URL.String())
+		}
+		_ = json.NewEncoder(response).Encode(map[string]any{"type": "file", "encoding": "base64", "size": len(body), "content": base64.StdEncoding.EncodeToString([]byte(body))})
+	}))
+	defer server.Close()
+
+	declarations, err := ReadGitHubRepositoryEnvironmentDeclarations(context.Background(), GitHubAppConfig{APIBaseURL: server.URL}, "ephemeral-installation-token", GitHubRepositorySnapshot{Reference: "github://Itbem-Corp/repo", Revision: revision}, GitHubRepositoryMap{Revision: revision, Files: []string{".env.example", ".env.production"}})
+	if err != nil || len(declarations) != 1 || declarations[0].Path != ".env.example" || strings.Join(declarations[0].Names, ",") != "API_KEY,API_URL" {
+		t.Fatalf("unexpected environment declarations: %#v / %v", declarations, err)
+	}
+	encoded, _ := json.Marshal(declarations)
+	if strings.Contains(string(encoded), "must-never-persist") || strings.Contains(string(encoded), "example.invalid") {
+		t.Fatalf("environment values escaped name-only projection: %s", encoded)
 	}
 }
 

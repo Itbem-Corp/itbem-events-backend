@@ -89,7 +89,8 @@ Vault reconciliation becomes a required gate before merge.
 | Gatekeeper | Evaluate structured policy and current evidence deterministically | Invoke a model to waive a failed/missing gate |
 
 Worker identities, system users, credentials, queues and workspaces are isolated
-per role. GitHub App installation tokens are minted just in time. Production
+per role. Reviewer and Release use distinct GitHub Apps and PEMs; their
+repository-scoped installation tokens are minted just in time. Production
 deployments use GitHub Actions OIDC and protected environments rather than a
 permanent local production credential.
 
@@ -122,6 +123,7 @@ a healthy deployment.
 | Cross-repo partial validation | Change-set ID, dependency DAG and immutable SHA matrix; invalidate composite evidence when any ref advances |
 | Duplicate queue delivery | At-least-once consumers with lease, idempotency key and external-effect deduplication |
 | Agent self-approval | Separate identities and Gatekeeper checks for actor independence |
+| Duplicate or conflicting remote review | Exact repository/PR/head/patch subject digest, deterministic payload digest, idempotency marker and fail-closed conflict detection |
 | Credential exfiltration | Per-role least privilege, short-lived tokens, redaction, outbound policy, no secrets in prompts/Vault/evidence |
 | Malicious build/test | Static onboarding first; command execution only after human approval, allow-list and sandbox isolation |
 | Lost/reordered realtime state | Append-only event ledger, transactional outbox, aggregate sequence, resumable snapshots/SSE |

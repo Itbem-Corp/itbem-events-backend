@@ -70,6 +70,11 @@ go run ./cmd/api
 | `AUTOMATION_CALLBACK_SECRET` | no | Dedicated 32+ byte secret used only by the local agent to report task lifecycle and MiniMax usage. Never reuse media or EventiApp secrets. |
 | `GITHUB_REVIEW_WEBHOOK_SECRET` | no | Independent webhook secret for automatic pull-request reviews. The ingress is disabled unless this and `GITHUB_REVIEW_REPOSITORIES` are both present. Do not reuse the GitHub App private key or worker callback secret. |
 | `GITHUB_REVIEW_REPOSITORIES` | no | Comma-separated explicit `owner/repository` allow-list for automatic PR review, for example `itbem/backend,itbem/dashboard`. An installed GitHub App never enables all repositories by itself. |
+| `ITBEM_GITHUB_APP_ID` | publication roles | Numeric GitHub App ID. In isolated workers the Review and Release service files contain different App IDs; never share an identity between roles. |
+| `ITBEM_GITHUB_INSTALLATION_IDS` | publication roles | Explicit comma-separated installation allow-list. A task-supplied installation outside it fails closed. |
+| `ITBEM_GITHUB_APP_PRIVATE_KEY` | local only | Inline PEM accepted for local development. Never store it in a repository, Vault, prompt, task or production environment file. |
+| `ITBEM_GITHUB_APP_PRIVATE_KEY_FILE` | Linux publication roles | Root-managed path to the role-specific PEM. Review and Release use separate files readable only by their Unix groups. |
+| `ITBEM_GITHUB_API_BASE_URL` | no | GitHub API origin, default `https://api.github.com`; overrides exist for tests/GitHub Enterprise only. |
 | `SNS_WORKER_TOPIC_ARN` | no | EventiApp producer topic. SNS routes each workload lane to the shared Rust worker without exposing another app's topic. Production deployments require it. |
 | `EVENT_PREVIEW_SECRET` | deployed | Dedicated HMAC secret for signed dashboard preview URLs. It never falls back to another credential. Production/staging require at least 32 bytes. Generate with `openssl rand -hex 32`. |
 | `EVENT_ACCESS_SECRET` | deployed | Dedicated HMAC secret for password-gate access proofs (`X-Event-Access-Token`). It never falls back to another credential. Production/staging require at least 32 bytes. Generate with `openssl rand -hex 32`. |

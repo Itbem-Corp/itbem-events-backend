@@ -63,6 +63,9 @@ func LoadRuntimeConfig(lookup func(string) string) (RuntimeConfig, error) {
 	if _, err := NewWorker(config.WorkerConfig, discardStore{}, discardCallback{}, discardProvider{}); err != nil {
 		return RuntimeConfig{}, err
 	}
+	if err := validateQueueURL(config.QueueURL); err != nil {
+		return RuntimeConfig{}, err
+	}
 	if err := validateAPIBaseURL(config.APIBaseURL); err != nil {
 		return RuntimeConfig{}, err
 	}
@@ -73,6 +76,17 @@ func LoadRuntimeConfig(lookup func(string) string) (RuntimeConfig, error) {
 		return RuntimeConfig{}, fmt.Errorf("ITBEM_AI_S3_ENDPOINT: %w", err)
 	}
 	return config, nil
+}
+
+func validateQueueURL(raw string) error {
+	endpoint, err := url.Parse(raw)
+	if err != nil || endpoint.Hostname() == "" || strings.Trim(endpoint.Path, "/") == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
+		return fmt.Errorf("ITBEM_AI_QUEUE_URL must be an absolute queue URL")
+	}
+	if endpoint.Scheme == "https" || (endpoint.Scheme == "http" && isLoopbackHost(endpoint.Hostname())) {
+		return nil
+	}
+	return fmt.Errorf("ITBEM_AI_QUEUE_URL must use HTTPS or loopback HTTP")
 }
 
 func validateAPIBaseURL(raw string) error {

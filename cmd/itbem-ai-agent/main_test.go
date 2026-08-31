@@ -70,16 +70,23 @@ func TestDoctorReviewIngressNeverLeaksConfigurationAndReportsIncompleteSetup(t *
 	}
 }
 
-func TestDoctorReleaseReadinessRequiresGitHubAppConfiguration(t *testing.T) {
+func TestDoctorPublicationReadinessRequiresRoleSpecificGitHubAppConfiguration(t *testing.T) {
 	release := automationagent.RuntimeConfig{WorkerConfig: automationagent.WorkerConfig{Role: agentwork.RoleReleaseManager, Lane: agentwork.LaneRelease}}
 	reviewer := automationagent.RuntimeConfig{WorkerConfig: automationagent.WorkerConfig{Role: agentwork.RoleReviewer, Lane: agentwork.LaneReview}}
+	engineer := automationagent.RuntimeConfig{WorkerConfig: automationagent.WorkerConfig{Role: agentwork.RolePrincipalEngineer, Lane: agentwork.LaneEngineering}}
 	if doctorExecutionReady(true, true, true, false, release) {
 		t.Fatal("release doctor passed without publication identity")
 	}
 	if !doctorExecutionReady(true, true, true, true, release) {
 		t.Fatal("release doctor rejected a complete deterministic runtime")
 	}
-	if !doctorExecutionReady(true, true, true, false, reviewer) {
-		t.Fatal("non-release doctor made optional publication identity mandatory")
+	if doctorExecutionReady(true, true, true, false, reviewer) {
+		t.Fatal("review doctor passed without its independent publication identity")
+	}
+	if !doctorExecutionReady(true, true, true, true, reviewer) {
+		t.Fatal("review doctor rejected a complete independent publication identity")
+	}
+	if !doctorExecutionReady(true, true, true, false, engineer) {
+		t.Fatal("non-publishing engineer doctor made publication identity mandatory")
 	}
 }

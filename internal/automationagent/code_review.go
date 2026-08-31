@@ -23,10 +23,19 @@ type CodeReviewInput struct {
 	RepositoryRef string                       `json:"repository_ref"`
 	BaseSHA       string                       `json:"base_sha"`
 	HeadSHA       string                       `json:"head_sha"`
+	Remote        *CodeReviewRemoteTarget      `json:"remote,omitempty"`
 	ChangedFiles  []string                     `json:"changed_files"`
 	ChangedLines  []CodeReviewChangedLineRange `json:"changed_line_ranges"`
 	Patch         string                       `json:"patch"`
 	PatchSHA256   string                       `json:"patch_sha256"`
+}
+
+// CodeReviewRemoteTarget is admitted only by the signed GitHub webhook. It
+// contains no credential: the Review lane must independently resolve the
+// allow-listed installation and mint its own repository-scoped token.
+type CodeReviewRemoteTarget struct {
+	PullRequestNumber int   `json:"pull_request_number"`
+	InstallationID    int64 `json:"installation_id"`
 }
 
 // CodeReviewChangedLineRange is derived from the PR patch by the trusted
@@ -65,6 +74,18 @@ func NewCodeReviewInput(repositoryRef, baseSHA, headSHA, patch string) (CodeRevi
 	return ParseCodeReviewInput(encoded)
 }
 
+// BindCodeReviewRemoteTarget turns an immutable advisory input into a remote
+// review candidate without letting a webhook supply files, line ranges or a
+// patch. Parsing the complete object again keeps one validation boundary.
+func BindCodeReviewRemoteTarget(input CodeReviewInput, pullRequestNumber int, installationID int64) (CodeReviewInput, error) {
+	input.Remote = &CodeReviewRemoteTarget{PullRequestNumber: pullRequestNumber, InstallationID: installationID}
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		return CodeReviewInput{}, err
+	}
+	return ParseCodeReviewInput(encoded)
+}
+
 func ParseCodeReviewInput(raw json.RawMessage) (CodeReviewInput, error) {
 	var review CodeReviewInput
 	if len(raw) == 0 || json.Unmarshal(raw, &review) != nil {
@@ -76,6 +97,9 @@ func ParseCodeReviewInput(raw json.RawMessage) (CodeReviewInput, error) {
 	review.PatchSHA256 = strings.ToLower(strings.TrimSpace(review.PatchSHA256))
 	if !validReviewRepositoryRef(review.RepositoryRef) || !validReviewSHA(review.BaseSHA) || !validReviewSHA(review.HeadSHA) || review.BaseSHA == review.HeadSHA {
 		return CodeReviewInput{}, fmt.Errorf("code review input requires an immutable repository and distinct base/head revisions")
+	}
+	if review.Remote != nil && (review.Remote.PullRequestNumber < 1 || review.Remote.InstallationID < 1) {
+		return CodeReviewInput{}, fmt.Errorf("remote code review target is invalid")
 	}
 	if len(review.ChangedFiles) == 0 || len(review.ChangedFiles) > maxCodeReviewChangedFiles {
 		return CodeReviewInput{}, fmt.Errorf("code review input requires a bounded changed_files list")
@@ -132,6 +156,27 @@ func ParseCodeReviewInput(raw json.RawMessage) (CodeReviewInput, error) {
 	}
 	review.ChangedLines = patchRanges
 	return review, nil
+}
+
+// CodeReviewPublicationSubjectSHA256 binds the external review side effect to
+// the repository, PR, exact head and frozen patch. A model verdict is not part
+// of the subject; the published payload digest separately binds the verdict.
+func CodeReviewPublicationSubjectSHA256(review CodeReviewInput) (string, error) {
+	if review.Remote == nil {
+		return "", fmt.Errorf("remote code review target is required")
+	}
+	encoded, err := json.Marshal(struct {
+		RepositoryRef  string `json:"repository_ref"`
+		PullRequest    int    `json:"pull_request"`
+		InstallationID int64  `json:"installation_id"`
+		HeadSHA        string `json:"head_sha"`
+		PatchSHA256    string `json:"patch_sha256"`
+	}{review.RepositoryRef, review.Remote.PullRequestNumber, review.Remote.InstallationID, review.HeadSHA, review.PatchSHA256})
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
 }
 
 func patchChangedFiles(patch string) ([]string, error) {
