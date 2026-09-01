@@ -71,3 +71,21 @@ func TestLoadRuntimeConfigAcceptsProductAgnosticBuckets(t *testing.T) {
 		t.Fatalf("generic runtime storage = %#v, %v", config, err)
 	}
 }
+
+func TestLoadRuntimeConfigSelectsHTTPSGatewayWithoutAWSIdentity(t *testing.T) {
+	config, err := LoadRuntimeConfig(runtimeTestEnvironment(map[string]string{
+		"ITBEM_AI_TRANSPORT":         "gateway",
+		"ITBEM_AI_GATEWAY_TOKEN":     "lane-bound-token",
+		"ITBEM_AI_QUEUE_URL":         "",
+		"AWS_REGION":                 "",
+		"AUTOMATION_CALLBACK_SECRET": "",
+		"ITBEM_AI_ROLE":              "reviewer",
+		"ITBEM_AI_QUEUE_LANE":        "review",
+	}))
+	if err != nil {
+		t.Fatalf("gateway runtime rejected: %v", err)
+	}
+	if config.Transport != "gateway" || config.CallbackSecret != "lane-bound-token" || config.QueueURL != "" || config.AWSRegion != "" {
+		t.Fatalf("unexpected gateway runtime: %#v", config)
+	}
+}

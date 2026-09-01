@@ -1926,7 +1926,7 @@ func validWorkerProvider(role, lane, provider, model string) bool {
 // worker. It is callback-secret authenticated and stores no host, queue or
 // credential information.
 func AgentHeartbeat(c echo.Context) error {
-	if !validCallbackSecret(c.Request().Header.Get("X-Automation-Secret")) {
+	if !validWorkerCallbackCredential(c) {
 		return utils.Error(c, http.StatusUnauthorized, "Unauthorized", "")
 	}
 	if configuration.DB == nil {
@@ -1946,6 +1946,11 @@ func AgentHeartbeat(c echo.Context) error {
 	role, lane, err := normalizeWorkerRoleLane(request.Role, request.Lane)
 	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid agent heartbeat", "")
+	}
+	if roleHeader, laneHeader := strings.TrimSpace(c.Request().Header.Get("X-Agent-Role")), strings.TrimSpace(c.Request().Header.Get("X-Agent-Lane")); roleHeader != "" || laneHeader != "" {
+		if roleHeader != role || laneHeader != lane {
+			return utils.Error(c, http.StatusForbidden, "Worker identity does not match heartbeat", "")
+		}
 	}
 	if !validWorkerProvider(role, lane, request.Provider, request.Model) {
 		return utils.Error(c, http.StatusBadRequest, "Invalid agent heartbeat", "")
@@ -2054,7 +2059,7 @@ type callbackArtifact struct {
 }
 
 func Complete(c echo.Context) error {
-	if !validCallbackSecret(c.Request().Header.Get("X-Automation-Secret")) {
+	if !validWorkerCallbackCredential(c) {
 		return utils.Error(c, http.StatusUnauthorized, "Unauthorized", "")
 	}
 	id, err := uuid.FromString(c.Param("id"))
@@ -2082,6 +2087,12 @@ func Complete(c echo.Context) error {
 			return utils.Error(c, http.StatusNotFound, "Automation task not found", "")
 		}
 		return utils.Error(c, http.StatusInternalServerError, "Automation result failed", "")
+	}
+	if roleHeader, laneHeader := strings.TrimSpace(c.Request().Header.Get("X-Agent-Role")), strings.TrimSpace(c.Request().Header.Get("X-Agent-Lane")); roleHeader != "" || laneHeader != "" {
+		assignment, ok := agentwork.AssignmentForOperation(task.Operation)
+		if !ok || roleHeader != string(assignment.Role) || laneHeader != string(assignment.Lane) {
+			return utils.Error(c, http.StatusForbidden, "Worker identity does not own this task", "")
+		}
 	}
 	request.RunID = strings.TrimSpace(request.RunID)
 	request.RecoveryRunID = strings.TrimSpace(request.RecoveryRunID)
@@ -3382,6 +3393,28 @@ func validCallbackSecret(provided string) bool {
 	for _, name := range []string{"AUTOMATION_CALLBACK_SECRET", "AUTOMATION_CALLBACK_SECRET_PREVIOUS"} {
 		if expected := os.Getenv(name); expected != "" {
 			valid |= subtle.ConstantTimeCompare([]byte(provided), []byte(expected))
+		}
+	}
+	return valid == 1
+}
+
+// validWorkerCallbackCredential accepts the root callback secret only for the
+// retained direct-AWS migration transport. Physical gateway workers receive a
+// derived role/lane token, so compromise of one host identity cannot operate
+// another queue lane or recover the server-owned root secret.
+func validWorkerCallbackCredential(c echo.Context) bool {
+	provided := strings.TrimSpace(c.Request().Header.Get("X-Automation-Secret"))
+	if validCallbackSecret(provided) {
+		return true
+	}
+	identity := gatewayIdentity{Role: agentwork.Role(strings.TrimSpace(c.Request().Header.Get("X-Agent-Role"))), Lane: agentwork.Lane(strings.TrimSpace(c.Request().Header.Get("X-Agent-Lane")))}
+	if provided == "" || !agentwork.IsKnownRoleLane(identity.Role, identity.Lane) {
+		return false
+	}
+	valid := 0
+	for _, name := range []string{"AUTOMATION_CALLBACK_SECRET", "AUTOMATION_CALLBACK_SECRET_PREVIOUS"} {
+		if root := strings.TrimSpace(os.Getenv(name)); root != "" {
+			valid |= subtle.ConstantTimeCompare([]byte(provided), []byte(deriveGatewayToken(root, identity)))
 		}
 	}
 	return valid == 1

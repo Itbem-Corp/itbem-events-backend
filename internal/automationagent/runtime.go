@@ -16,6 +16,8 @@ const (
 
 type RuntimeConfig struct {
 	WorkerConfig
+	Transport      string
+	GatewayToken   string
 	QueueURL       string
 	AWSRegion      string
 	APIBaseURL     string
@@ -40,6 +42,8 @@ func LoadRuntimeConfig(lookup func(string) string) (RuntimeConfig, error) {
 			InputBucket: value("ITBEM_AI_INPUT_BUCKET"), OutputBucket: value("ITBEM_AI_OUTPUT_BUCKET"),
 			Role: agentwork.Role(value("ITBEM_AI_ROLE")), Lane: agentwork.Lane(value("ITBEM_AI_QUEUE_LANE")),
 		},
+		Transport:      strings.ToLower(value("ITBEM_AI_TRANSPORT")),
+		GatewayToken:   value("ITBEM_AI_GATEWAY_TOKEN"),
 		QueueURL:       value("ITBEM_AI_QUEUE_URL"),
 		AWSRegion:      value("AWS_REGION"),
 		APIBaseURL:     strings.TrimRight(value("ITBEM_API_BASE_URL"), "/"),
@@ -48,23 +52,48 @@ func LoadRuntimeConfig(lookup func(string) string) (RuntimeConfig, error) {
 		SQSEndpoint:    value("ITBEM_AI_SQS_ENDPOINT"),
 		S3Endpoint:     value("ITBEM_AI_S3_ENDPOINT"),
 	}
+	if config.Transport == "" {
+		// Preserve the explicit local AWS emulator contract while making a
+		// queue-less physical-host configuration select the HTTPS gateway.
+		if config.QueueURL != "" {
+			config.Transport = "aws"
+		} else {
+			config.Transport = "gateway"
+		}
+	}
 	for name, value := range map[string]string{
-		"ITBEM_AI_QUEUE_URL":         config.QueueURL,
-		"AWS_REGION":                 config.AWSRegion,
-		"ITBEM_API_BASE_URL":         config.APIBaseURL,
-		"AUTOMATION_CALLBACK_SECRET": config.CallbackSecret,
-		"ITBEM_AI_INPUT_BUCKET":      config.InputBucket,
-		"ITBEM_AI_OUTPUT_BUCKET":     config.OutputBucket,
+		"ITBEM_API_BASE_URL":     config.APIBaseURL,
+		"ITBEM_AI_INPUT_BUCKET":  config.InputBucket,
+		"ITBEM_AI_OUTPUT_BUCKET": config.OutputBucket,
 	} {
 		if value == "" {
 			return RuntimeConfig{}, fmt.Errorf("%s is required", name)
 		}
 	}
+	switch config.Transport {
+	case "gateway":
+		if config.GatewayToken == "" {
+			return RuntimeConfig{}, fmt.Errorf("ITBEM_AI_GATEWAY_TOKEN is required")
+		}
+		// The lane token is also used for lifecycle callbacks; the backend binds
+		// it to the role/lane headers and never exposes its root signing secret.
+		config.CallbackSecret = config.GatewayToken
+	case "aws":
+		for name, value := range map[string]string{"ITBEM_AI_QUEUE_URL": config.QueueURL, "AWS_REGION": config.AWSRegion, "AUTOMATION_CALLBACK_SECRET": config.CallbackSecret} {
+			if value == "" {
+				return RuntimeConfig{}, fmt.Errorf("%s is required for aws transport", name)
+			}
+		}
+	default:
+		return RuntimeConfig{}, fmt.Errorf("ITBEM_AI_TRANSPORT must be gateway or aws")
+	}
 	if _, err := NewWorker(config.WorkerConfig, discardStore{}, discardCallback{}, discardProvider{}); err != nil {
 		return RuntimeConfig{}, err
 	}
-	if err := validateQueueURL(config.QueueURL); err != nil {
-		return RuntimeConfig{}, err
+	if config.Transport == "aws" {
+		if err := validateQueueURL(config.QueueURL); err != nil {
+			return RuntimeConfig{}, err
+		}
 	}
 	if err := validateAPIBaseURL(config.APIBaseURL); err != nil {
 		return RuntimeConfig{}, err

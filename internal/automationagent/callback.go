@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"events-stocks/internal/agentwork"
 )
 
 const retryReservationHeader = "X-ITBEM-Automation-Retry-Reservation"
@@ -16,6 +18,12 @@ type HTTPCallback struct {
 	baseURL string
 	secret  string
 	client  *http.Client
+	role    string
+	lane    string
+}
+
+func (c *HTTPCallback) BindIdentity(role agentwork.Role, lane agentwork.Lane) {
+	c.role, c.lane = string(role), string(lane)
 }
 
 // AgentHeartbeat is intentionally metadata-only. Worker liveness must not
@@ -60,6 +68,10 @@ func (c *HTTPCallback) Update(ctx context.Context, taskID string, update TaskUpd
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Automation-Secret", c.secret)
+	if c.role != "" && c.lane != "" {
+		req.Header.Set("X-Agent-Role", c.role)
+		req.Header.Set("X-Agent-Lane", c.lane)
+	}
 	response, err := c.client.Do(req)
 	if err != nil {
 		return false, fmt.Errorf("automation callback request failed")
@@ -88,6 +100,10 @@ func (c *HTTPCallback) Heartbeat(ctx context.Context, heartbeat AgentHeartbeat) 
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Automation-Secret", c.secret)
+	if c.role != "" && c.lane != "" {
+		req.Header.Set("X-Agent-Role", c.role)
+		req.Header.Set("X-Agent-Lane", c.lane)
+	}
 	response, err := c.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("automation heartbeat request failed")

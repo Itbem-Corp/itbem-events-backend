@@ -7,17 +7,17 @@ systemd services. The installer never enables or starts a service.
 
 - Deploy only a backend commit with all required checks green and an
   independent review of that exact SHA.
-- Deploy the additive queue stack from infrastructure PR #51 and record its
-  exact outputs.
+- Confirm the backend owns the configured role-lane SQS queues and private
+  input/output buckets. The physical host does not receive those AWS outputs.
 - Build the binary from the exact reviewed backend commit and verify its
   SHA-256 before copying it to the Linux host.
 - Provision outbound-only network access. No worker needs an inbound port.
-- On a host outside AWS, configure IAM Roles Anywhere independently per lane
-  with the reviewed `aws_signing_helper` and a self-managed CA. Its
-  `credential_process` returns renewable temporary sessions to the Go SDK;
-  never install IAM access keys. AWS Roles Anywhere has no additional service
-  charge, while AWS Private CA does, so this runbook does not require Private
-  CA. An EC2 deployment must use per-lane instance/task roles instead.
+- Configure five distinct gateway tokens derived by the backend deployment
+  from `AUTOMATION_CALLBACK_SECRET`, one for each exact role/lane. The Linux
+  host talks only to `ITBEM_API_BASE_URL` over HTTPS: it receives sealed task
+  leases while SQS receipt handles, AWS credentials and S3 authority remain in
+  the backend. Never install AWS profiles, IAM keys, certificates or the root
+  callback secret on this host.
 - Use two distinct GitHub Apps. Keep the Reviewer App PEM and explicit
   installation allow-list only in the review secret file; it needs metadata
   and contents read plus pull-request read/write solely to publish reviews.
@@ -57,25 +57,18 @@ base into its lane root and move the registry from `common.env` into every role
 file before preflight. The tightened unit intentionally makes an old shared
 path unreadable/unwritable so migration mistakes fail closed.
 
-Install one AWS shared config per lane under
-`/etc/itbem-ai-agent/secrets/<lane>/aws-config`, mode `0640`, owned by
-`root:itbem-agent-<lane>`, based on `roles-anywhere-aws-config.example`.
-Install that lane's X.509 certificate and private key beside it, or use the
-helper's PKCS#11/TPM options so the key is non-exportable. Verify the helper's
-published SHA-256 before installation. The common environment disables EC2
-metadata and points the long-term shared-credentials path at `/dev/null`, so a
-missing/expired certificate fails closed instead of falling back to a machine
-or developer identity. See the official
-[credential helper guide](https://docs.aws.amazon.com/rolesanywhere/latest/userguide/credential-helper.html).
-The infrastructure profile intentionally rejects a caller-supplied role
-session name, so the helper configuration must not include
-`--role-session-name`. Copy each exact queue URL, input bucket, output bucket,
-profile ARN, role ARN and trust-anchor ARN from the reviewed stack outputs.
-Every checked-in `REPLACE_WITH_*_STACK_OUTPUT` value is deliberately invalid;
-the worker doctor must fail until an operator replaces all of them.
+Each `ITBEM_AI_GATEWAY_TOKEN` is HMAC-SHA256 over
+`itbem-agent-gateway:v1:<role>:<lane>` using the backend root callback secret,
+encoded as unpadded base64url. Derive it inside the protected backend secret
+boundary and install only the resulting lane token in that lane's mode-0600
+environment file. A token is accepted only with its matching role/lane
+headers. Leases are AES-GCM sealed, expire, bind the exact input reference and
+restrict writes to `automation/<task-id>/`; receipt handles never cross in
+plaintext. Rotate the root with the existing current/previous overlap, then
+replace every lane token and remove the previous root after all workers have
+restarted.
 
-Each temporary IAM role must be limited to that lane's queue plus task-input
-read and task-output write. Release may additionally
+Release may additionally
 resolve the exact configured GitHub App installation for the approved
 repository and mint a short-lived token restricted to that repository.
 Installations outside the allow-list, PATs and SSH credentials are never
@@ -98,13 +91,14 @@ done
 ```
 
 The doctor unit runs only the local, non-billable `--doctor` command and cannot
-poll SQS or mutate a workspace. Review and Release each fail unless their own
+lease work or mutate a workspace. Before every worker start, the service then
+runs `--runtime-auth-probe`, which authenticates to the backend gateway and
+verifies queue/storage readiness without receiving, deleting or changing a
+message. It requires no AWS identity. Review and Release each fail unless their own
 GitHub App identity is complete; other lanes remain locally useful without
-publication authority. Do not enable the worker units or configure
-backend lane routing until all five preflights, queue IAM checks and heartbeat
-identities are verified. Then start the role units, switch the backend with the
-complete lane map in one deployment, and observe one canary per lane. The
-combined worker remains running only long enough to drain its retained queue.
+publication authority. Do not enable the worker units until all five gateway,
+provider, workspace and GitHub identity preflights pass. Then start one role
+unit at a time and observe one canary per lane before enabling the next.
 
 ## Kill switch and recovery
 

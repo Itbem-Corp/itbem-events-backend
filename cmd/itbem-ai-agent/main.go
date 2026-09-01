@@ -24,6 +24,7 @@ import (
 func main() {
 	smoke := flag.Bool("provider-smoke", false, "make one explicit non-sensitive provider request")
 	authProbe := flag.Bool("provider-auth-probe", false, "verify provider authentication without creating a completion")
+	runtimeAuthProbe := flag.Bool("runtime-auth-probe", false, "verify the configured runtime transport without consuming work")
 	doctor := flag.Bool("doctor", false, "validate the local workspace registry without calling a provider")
 	syncWorkspaces := flag.Bool("sync-workspaces", false, "clone or fast-forward operator-managed workspace base checkouts")
 	flag.Parse()
@@ -62,6 +63,36 @@ func main() {
 		_ = json.NewEncoder(os.Stdout).Encode(report)
 		if !report.Ready {
 			os.Exit(1)
+		}
+		return
+	}
+	if *runtimeAuthProbe {
+		config, err := automationagent.LoadRuntimeConfig(os.Getenv)
+		if err != nil {
+			fail(err)
+		}
+		if config.Transport == "gateway" {
+			gateway, gatewayErr := automationagent.NewHTTPGateway(config.APIBaseURL, config.GatewayToken, config.Role, config.Lane, nil)
+			if gatewayErr != nil {
+				fail(gatewayErr)
+			}
+			if gatewayErr = gateway.Probe(context.Background()); gatewayErr != nil {
+				fail(gatewayErr)
+			}
+			_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"ready": true, "transport": "gateway", "aws_credentials_required": false, "network_checks_made": true})
+		} else {
+			runtime, runtimeErr := automationagent.NewAWSRuntime(context.Background(), config)
+			if runtimeErr != nil {
+				fail(fmt.Errorf("AWS runtime authentication probe could not initialize"))
+			}
+			report, probeErr := automationagent.ProbeRuntimeAuth(context.Background(), config, runtime.SQS)
+			if probeErr != nil {
+				fail(probeErr)
+			}
+			_ = json.NewEncoder(os.Stdout).Encode(report)
+			if !report.Ready {
+				os.Exit(1)
+			}
 		}
 		return
 	}
@@ -240,19 +271,31 @@ func run() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	runtime, err := automationagent.NewAWSRuntime(ctx, runtimeConfig)
-	if err != nil {
-		fail(err)
-	}
 	callback, err := automationagent.NewHTTPCallback(runtimeConfig.APIBaseURL, runtimeConfig.CallbackSecret, nil)
 	if err != nil {
 		fail(err)
 	}
-	worker, err := automationagent.NewWorker(runtimeConfig.WorkerConfig, automationagent.NewAWSObjectStore(runtime.S3), callback, provider)
-	if err != nil {
-		fail(err)
+	callback.BindIdentity(runtimeConfig.Role, runtimeConfig.Lane)
+	var store automationagent.ObjectStore
+	var queue automationagent.Queue
+	if runtimeConfig.Transport == "gateway" {
+		gateway, gatewayErr := automationagent.NewHTTPGateway(runtimeConfig.APIBaseURL, runtimeConfig.GatewayToken, runtimeConfig.Role, runtimeConfig.Lane, nil)
+		if gatewayErr != nil {
+			fail(gatewayErr)
+		}
+		store, queue = gateway, gateway
+	} else {
+		runtime, runtimeErr := automationagent.NewAWSRuntime(ctx, runtimeConfig)
+		if runtimeErr != nil {
+			fail(runtimeErr)
+		}
+		awsQueue, queueErr := automationagent.NewAWSQueue(runtime.SQS, runtimeConfig.QueueURL)
+		if queueErr != nil {
+			fail(queueErr)
+		}
+		store, queue = automationagent.NewAWSObjectStore(runtime.S3), awsQueue
 	}
-	queue, err := automationagent.NewAWSQueue(runtime.SQS, runtimeConfig.QueueURL)
+	worker, err := automationagent.NewWorker(runtimeConfig.WorkerConfig, store, callback, provider)
 	if err != nil {
 		fail(err)
 	}
@@ -263,8 +306,7 @@ func run() {
 		"concurrency", runtimeConfig.Concurrency,
 		"role", runtimeConfig.Role,
 		"lane", runtimeConfig.Lane,
-		"queue_url", runtimeConfig.QueueURL,
-		"sqs_endpoint", runtimeConfig.SQSEndpoint,
+		"transport", runtimeConfig.Transport,
 	)
 	workerID := uuid.Must(uuid.NewV4()).String()
 	startedAt := time.Now().UTC()

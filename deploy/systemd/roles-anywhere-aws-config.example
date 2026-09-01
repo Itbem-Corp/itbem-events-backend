@@ -1,6 +1,0 @@
-# Copy one instance into /etc/itbem-ai-agent/secrets/<lane>/aws-config,
-# replace every placeholder and keep it mode 0640 root:itbem-agent-<lane>.
-# The helper returns temporary credentials in memory. Never add access keys.
-[profile itbem-agent-LANE]
-region = REGION
-credential_process = /usr/local/bin/aws_signing_helper credential-process --certificate /etc/itbem-ai-agent/secrets/LANE/client.crt --private-key /etc/itbem-ai-agent/secrets/LANE/client.key --trust-anchor-arn arn:aws:rolesanywhere:REGION:ACCOUNT:trust-anchor/TRUST_ANCHOR_ID --profile-arn arn:aws:rolesanywhere:REGION:ACCOUNT:profile/PROFILE_ID --role-arn arn:aws:iam::ACCOUNT:role/ROLE_NAME

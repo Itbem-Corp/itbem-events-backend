@@ -20,6 +20,7 @@ import (
 
 const publishTimeout = 5 * time.Second
 const healthTimeout = 2 * time.Second
+const leaseTimeout = 25 * time.Second
 
 // Health is a deliberately small queue projection. Approximate SQS counters
 // are useful for service operation but must never be represented as exact
@@ -54,6 +55,15 @@ type Message struct {
 		InputRef            string `json:"input_ref"`
 		Attempt             int    `json:"attempt"`
 	} `json:"payload"`
+}
+
+// LeasedMessage is the smallest control-plane projection required by the
+// HTTPS execution gateway. ReceiptHandle must never be logged or returned to
+// an execution host directly; the controller seals it into an authenticated
+// lease token before crossing the trust boundary.
+type LeasedMessage struct {
+	Body          string
+	ReceiptHandle string
 }
 
 var (
@@ -170,6 +180,81 @@ func (target queueTargets) queueURLForOperation(operation string) (string, error
 		return "", fmt.Errorf("ITBEM automation queue is unavailable")
 	}
 	return target.legacyURL, nil
+}
+
+func (target queueTargets) queueURLForLane(lane agentwork.Lane) (string, error) {
+	if len(target.laneURLs) != len(orderedLanes()) {
+		return "", fmt.Errorf("role-lane automation queues are unavailable")
+	}
+	if queueURL := strings.TrimSpace(target.laneURLs[lane]); queueURL != "" {
+		return queueURL, nil
+	}
+	return "", fmt.Errorf("automation queue lane %s is unavailable", lane)
+}
+
+// ReceiveLane leases work on behalf of an outbound-only execution host. AWS
+// credentials remain in the API process; callers receive an opaque gateway
+// lease instead of this raw receipt handle.
+func ReceiveLane(ctx context.Context, lane agentwork.Lane, limit int) ([]LeasedMessage, error) {
+	if client == nil || limit < 1 || limit > 10 {
+		return nil, fmt.Errorf("automation queue lease request is invalid")
+	}
+	queueURL, err := targets.queueURLForLane(lane)
+	if err != nil {
+		return nil, err
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, leaseTimeout)
+	defer cancel()
+	response, err := client.ReceiveMessage(requestCtx, &sqs.ReceiveMessageInput{QueueUrl: aws.String(queueURL), MaxNumberOfMessages: int32(limit), WaitTimeSeconds: 20, VisibilityTimeout: 900})
+	if err != nil {
+		return nil, fmt.Errorf("lease automation message: %w", err)
+	}
+	result := make([]LeasedMessage, 0, len(response.Messages))
+	for _, raw := range response.Messages {
+		if raw.Body == nil || raw.ReceiptHandle == nil {
+			continue
+		}
+		var message Message
+		if err := json.Unmarshal([]byte(*raw.Body), &message); err != nil || Validate(message) != nil {
+			continue
+		}
+		assignment, ok := agentwork.AssignmentForOperation(message.Payload.Operation)
+		if !ok || assignment.Lane != lane {
+			continue
+		}
+		result = append(result, LeasedMessage{Body: *raw.Body, ReceiptHandle: *raw.ReceiptHandle})
+	}
+	return result, nil
+}
+
+func ChangeLaneVisibility(ctx context.Context, lane agentwork.Lane, receiptHandle string, seconds int32) error {
+	if client == nil || strings.TrimSpace(receiptHandle) == "" || seconds < 1 || seconds > 43_200 {
+		return fmt.Errorf("automation queue visibility request is invalid")
+	}
+	queueURL, err := targets.queueURLForLane(lane)
+	if err != nil {
+		return err
+	}
+	_, err = client.ChangeMessageVisibility(ctx, &sqs.ChangeMessageVisibilityInput{QueueUrl: aws.String(queueURL), ReceiptHandle: aws.String(receiptHandle), VisibilityTimeout: seconds})
+	if err != nil {
+		return fmt.Errorf("change automation message visibility: %w", err)
+	}
+	return nil
+}
+
+func DeleteLaneMessage(ctx context.Context, lane agentwork.Lane, receiptHandle string) error {
+	if client == nil || strings.TrimSpace(receiptHandle) == "" {
+		return fmt.Errorf("automation queue acknowledgement is invalid")
+	}
+	queueURL, err := targets.queueURLForLane(lane)
+	if err != nil {
+		return err
+	}
+	_, err = client.DeleteMessage(ctx, &sqs.DeleteMessageInput{QueueUrl: aws.String(queueURL), ReceiptHandle: aws.String(receiptHandle)})
+	if err != nil {
+		return fmt.Errorf("acknowledge automation message: %w", err)
+	}
+	return nil
 }
 
 // QueueHealth obtains best-effort approximate queue depth with a short,

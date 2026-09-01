@@ -451,10 +451,12 @@ if !ok || cfg == nil {
   The Linux execution plane uses one hardened systemd template instance and
   unprivileged Unix account plus a private `0700` workspace root per lane.
   Cross-lane checkout reuse is prohibited. A separate read-only oneshot doctor
-  validates configuration without polling SQS; the Release doctor also requires
-  its GitHub App identity. On-premises lanes obtain scoped temporary AWS
-  sessions through separate IAM Roles Anywhere credential-process profiles;
-  static IAM access keys and metadata fallback are disabled. Global/per-lane filesystem kill switches prevent
+  validates configuration without leasing work; the Release doctor also requires
+  its GitHub App identity. On-premises lanes use distinct HMAC-derived gateway
+  tokens over outbound HTTPS. The backend retains SQS/S3 authority and returns
+  AES-GCM-sealed, expiring, task-bound leases; no AWS identity, receipt handle
+  or root callback secret is installed on the physical host. Static IAM access
+  keys and metadata fallback are disabled. Global/per-lane filesystem kill switches prevent
   restart, and installation never implies activation.
 
 - Merge and release policy is evaluated by `internal/releasegate` as a pure,
