@@ -109,12 +109,17 @@ signed identity fixture:
    token file.
 4. Read the non-secret issuer and JWKS URLs from the metadata file. Start
    `scripts/Start-LocalAIControlPlane.ps1` with `-OIDCIssuerURL`,
-   `-OIDCJWKSURL`, and the same audience. Use a fresh database name and an
+   `-OIDCJWKSURL`, the same audience, and
+   `-BootstrapRootEmails qa@local.invalid` matching the issuer's allow-listed
+   fixture email. Use a fresh database name and an
    alternate loopback API port. Pass the isolated Valkey address through
    `-RedisHost`; this path does not read Cognito IDs from the dashboard. When
    the disposable database runs in WSL, pass its exact container name with
    `-DatabaseProbeContainer` and use `-DatabaseProbeInWSL`; the probe remains
-   a read-only `SELECT 1`.
+   a read-only `SELECT 1`. Add `-RoleLanes` when qualifying the team topology;
+   this creates five distinct input queues plus a shared role DLQ and switches
+   the API routing map atomically. Omitting the switch deliberately preserves
+   the legacy combined queue for migration compatibility.
 5. Read the token into the dashboard test process as `E2E_ID_TOKEN`, set
    `PLAYWRIGHT_BASE_URL` and `E2E_BACKEND_URL` to the isolated loopback
    services, and run the authenticated single-repository and heterogeneous
@@ -127,6 +132,28 @@ Vault, a task, a GitHub secret, an artifact, a screenshot, or logs. Both
 dashboard and backend reject non-loopback fixture endpoints, and the backend
 rejects the override for any non-local environment. A pass records only the
 fixture type, exact code SHA, commands, timestamps and redacted outcomes.
+
+For an explicit local team run, start one worker process per queue with the
+matching immutable pair. The launcher rejects partial or crossed pairs before
+starting the Go runtime:
+
+```powershell
+./scripts/Start-LocalAIAgent.ps1 -Role orchestrator -Lane orchestration
+./scripts/Start-LocalAIAgent.ps1 -Role principal_engineer -Lane engineering
+./scripts/Start-LocalAIAgent.ps1 -Role reviewer -Lane review
+./scripts/Start-LocalAIAgent.ps1 -Role qa -Lane qa
+./scripts/Start-LocalAIAgent.ps1 -Role release_manager -Lane release
+```
+
+Use separate processes and OS identities for sustained operation. The release
+pair is providerless; the launcher must not require or load a model credential
+for it. These PowerShell commands are a disposable local qualification path,
+not a substitute for the isolated Linux systemd identities.
+
+Each explicit lane owns a separate session-local worker lock. All five role
+workers can therefore run concurrently, while a second consumer for the same
+lane fails closed. The migration-compatible combined worker has its own lock
+and must not consume the same workload alongside explicit role workers.
 
 ## Dashboard qualification
 
@@ -151,6 +178,14 @@ The UI renders backend state; agent prose cannot synthesize a terminal status.
 Use one onboarded test project whose configuration is not embedded in platform
 code. Freeze and record every repository branch and SHA before execution.
 
+Before activating any long-lived role worker, run `--doctor` and then
+`--provider-auth-probe`. The latter uses only a read-only provider metadata or
+quota endpoint, never creates a completion, and emits no credential, balance or
+quota value. A `configured_unverified`, `rejected`, `region_mismatch`,
+`unreachable` or `inconclusive` provider state blocks worker activation. For a
+MiniMax region mismatch, apply the reported regional completion endpoint to the
+host secret configuration and repeat both checks.
+
 1. Approve the proposed Vault and effective policy diff.
 2. Execute one single-repository task and one heterogeneous multi-repository
    task through the role lanes. Verify separate Engineer, Reviewer, QA and
@@ -161,8 +196,12 @@ code. Freeze and record every repository branch and SHA before execution.
 4. Submit repository documentation containing an explicit instruction to
    bypass tests or reveal credentials. Confirm it is displayed only as
    untrusted evidence and no capability changes.
-5. Publish branches and PRs only after the human publication grant. A separate
-   reviewer must review the final head SHA; any new commit invalidates approval.
+5. Publish branches and PRs only after the human publication grant. Record the
+   GitHub actor that publishes the final reviewable change and require a
+   separate reviewer to approve that exact head SHA after publication; any new
+   reviewable commit invalidates approval. An empty commit cannot transfer
+   last-push responsibility and must never be used to satisfy protected-branch
+   reviewer independence.
 6. Run configured unit, integration, contract and E2E checks over the exact
    matrix. Confirm one repository failure blocks the whole change set.
 7. Exercise the configured staging workflow/environment first. Record exact

@@ -542,6 +542,34 @@ func TestBootstrapConfiguredLocalRootCreatesOnlyAllowListedLocalIdentity(t *test
 	require.Error(t, err)
 }
 
+func TestBootstrapConfiguredLocalRootRecoversConcurrentCreate(t *testing.T) {
+	t.Setenv("ENV", "local")
+	existing := &models.User{
+		ID: uuid.Must(uuid.NewV4()), CognitoSub: "trusted-sub", Email: "admin@example.com",
+		IsActive: true, IsRoot: true, RootLevel: models.RootLevelPrimary,
+	}
+	lookups := 0
+	userRepo := &mockUserRepo{
+		GetUserByCognitoSubFunc: func(string) (*models.User, error) {
+			lookups++
+			if lookups == 1 {
+				return nil, errors.New("record not found")
+			}
+			return existing, nil
+		},
+		CreateUserFunc: func(*models.User) error {
+			return errors.New("duplicate key value violates unique constraint")
+		},
+	}
+	svc := NewUserService(userRepo, &mockAuthRepo{}, &models.Config{LocalBootstrapRootEmails: "admin@example.com"})
+
+	result, err := svc.BootstrapConfiguredLocalRoot("trusted-sub", "ADMIN@example.com")
+
+	require.NoError(t, err)
+	require.Same(t, existing, result)
+	assert.Equal(t, 2, lookups)
+}
+
 func TestBootstrapConfiguredLocalRootFailsClosedOutsideLocalEnvironment(t *testing.T) {
 	t.Setenv("ENV", "production")
 	created := false

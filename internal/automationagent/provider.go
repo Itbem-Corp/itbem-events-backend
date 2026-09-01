@@ -19,10 +19,13 @@ import (
 )
 
 const (
-	DefaultCompletionTokens   = 4096
-	MinCompletionTokens       = 1
-	MaxCompletionTokens       = 131072
-	miniMaxM2CompletionLimit  = 2048
+	DefaultCompletionTokens = 4096
+	MinCompletionTokens     = 1
+	MaxCompletionTokens     = 131072
+	// Current M2.x endpoints accept max_completion_tokens above their 10,240
+	// default. Keep the worker's explicit ceiling aligned with M3 so reasoning
+	// plus a bounded structured result can complete for large frozen patches.
+	miniMaxM2CompletionLimit  = 32768
 	miniMaxM3CompletionLimit  = 32768
 	maxProviderResponseSize   = 8 << 20
 	providerRequestMinTimeout = 30 * time.Second
@@ -31,6 +34,8 @@ const (
 	providerRetryMinDelay     = 30 * time.Second
 	providerRetryDefaultDelay = 2 * time.Minute
 	providerRetryMaxDelay     = 15 * time.Minute
+	providerAuthProbeTimeout  = 8 * time.Second
+	maxProviderProbeBodySize  = 64 << 10
 )
 
 type Provider string
@@ -80,6 +85,20 @@ type ProviderConfig struct {
 	Endpoint       string
 	secret         string
 	requestTimeout time.Duration
+}
+
+// ProviderAuthProbe is credential-redacted evidence about one read-only provider
+// authentication check. It deliberately excludes response bodies, account
+// balances, quota values, request headers and credential material.
+type ProviderAuthProbe struct {
+	Ready               bool     `json:"ready"`
+	Status              string   `json:"status"`
+	Provider            Provider `json:"provider"`
+	ConfiguredRegion    string   `json:"configured_region,omitempty"`
+	DetectedRegion      string   `json:"detected_region,omitempty"`
+	RecommendedEndpoint string   `json:"recommended_endpoint,omitempty"`
+	NetworkChecksMade   bool     `json:"network_checks_made"`
+	Billable            bool     `json:"billable"`
 }
 
 func (c ProviderConfig) SecretConfigured() bool { return c.secret != "" }
@@ -189,6 +208,170 @@ func NewProviderClient(config ProviderConfig, client *http.Client) ProviderClien
 		client = &http.Client{Timeout: timeout}
 	}
 	return &httpProviderClient{config: config, client: client}
+}
+
+type providerProbeAttempt struct {
+	authorized   bool
+	unauthorized bool
+	unreachable  bool
+}
+
+type miniMaxRegionEndpoints struct {
+	name      string
+	base      string
+	probeBase string
+}
+
+func miniMaxAuthRegions(host, baseURL string) (string, []miniMaxRegionEndpoints) {
+	switch strings.ToLower(host) {
+	case "api.minimax.io":
+		return "global", []miniMaxRegionEndpoints{
+			{name: "global", base: "https://api.minimax.io", probeBase: "https://www.minimax.io"},
+			{name: "cn", base: "https://api.minimaxi.com", probeBase: "https://www.minimaxi.com"},
+		}
+	case "api.minimaxi.com":
+		return "cn", []miniMaxRegionEndpoints{
+			{name: "cn", base: "https://api.minimaxi.com", probeBase: "https://www.minimaxi.com"},
+			{name: "global", base: "https://api.minimax.io", probeBase: "https://www.minimax.io"},
+		}
+	default:
+		return "custom", []miniMaxRegionEndpoints{{name: "custom", base: baseURL, probeBase: baseURL}}
+	}
+}
+
+// ProbeProviderAuth verifies that the configured credential is accepted by a
+// provider's read-only metadata/quota endpoint. It never sends a prompt or
+// creates a completion. MiniMax keys are checked using the same regional,
+// dual-header contract as the official CLI so a valid CN key is not mistaken
+// for an invalid Global key.
+func ProbeProviderAuth(ctx context.Context, config ProviderConfig, client *http.Client) (ProviderAuthProbe, error) {
+	result := ProviderAuthProbe{Provider: config.Provider, Status: "inconclusive", NetworkChecksMade: true, Billable: false}
+	if !config.SecretConfigured() {
+		result.Status = "not_configured"
+		return result, nil
+	}
+	if client == nil {
+		client = &http.Client{Timeout: providerAuthProbeTimeout}
+	}
+	endpoint, err := url.Parse(config.Endpoint)
+	if err != nil || endpoint.Hostname() == "" {
+		return result, fmt.Errorf("provider authentication probe requires a valid configured endpoint")
+	}
+	baseURL := endpoint.Scheme + "://" + endpoint.Host
+
+	switch config.Provider {
+	case ProviderMiniMax:
+		configuredRegion, regions := miniMaxAuthRegions(endpoint.Hostname(), baseURL)
+		result.ConfiguredRegion = configuredRegion
+		sawUnauthorized, sawUnreachable := false, false
+		for _, region := range regions {
+			attempt := probeMiniMaxAuth(ctx, client, region.probeBase, config.secret)
+			sawUnauthorized = sawUnauthorized || attempt.unauthorized
+			sawUnreachable = sawUnreachable || attempt.unreachable
+			if !attempt.authorized {
+				continue
+			}
+			result.DetectedRegion = region.name
+			if region.name == configuredRegion || region.name == "custom" {
+				result.Ready, result.Status = true, "authenticated"
+				return result, nil
+			}
+			result.Status = "region_mismatch"
+			result.RecommendedEndpoint = region.base + "/v1/chat/completions"
+			return result, nil
+		}
+		if sawUnauthorized {
+			result.Status = "rejected"
+		} else if sawUnreachable {
+			result.Status = "unreachable"
+		}
+		return result, nil
+	case ProviderOpenAI:
+		attempt := probeSimpleProviderAuth(ctx, client, providerMetadataEndpoint(endpoint, "/chat/completions"), "Authorization", "Bearer "+config.secret, "")
+		return finishSimpleProviderProbe(result, attempt), nil
+	case ProviderAnthropic:
+		attempt := probeSimpleProviderAuth(ctx, client, providerMetadataEndpoint(endpoint, "/messages"), "x-api-key", config.secret, "2023-06-01")
+		return finishSimpleProviderProbe(result, attempt), nil
+	default:
+		return result, fmt.Errorf("provider authentication probe is unsupported")
+	}
+}
+
+func providerMetadataEndpoint(configured *url.URL, completionSuffix string) string {
+	probe := *configured
+	probe.RawQuery, probe.Fragment = "", ""
+	path := strings.TrimSuffix(strings.TrimRight(probe.Path, "/"), completionSuffix)
+	probe.Path = strings.TrimRight(path, "/") + "/models"
+	return probe.String()
+}
+
+func finishSimpleProviderProbe(result ProviderAuthProbe, attempt providerProbeAttempt) ProviderAuthProbe {
+	switch {
+	case attempt.authorized:
+		result.Ready, result.Status = true, "authenticated"
+	case attempt.unauthorized:
+		result.Status = "rejected"
+	case attempt.unreachable:
+		result.Status = "unreachable"
+	}
+	return result
+}
+
+func probeMiniMaxAuth(ctx context.Context, client *http.Client, baseURL, secret string) providerProbeAttempt {
+	path := "/v1/token_plan/remains"
+	if strings.HasPrefix(secret, "sk-api-") {
+		path = "/account/query_balance"
+	}
+	combined := providerProbeAttempt{}
+	for _, auth := range []struct{ name, value string }{{"Authorization", "Bearer " + secret}, {"x-api-key", secret}} {
+		attempt := probeSimpleProviderAuth(ctx, client, baseURL+path, auth.name, auth.value, "")
+		combined.unauthorized = combined.unauthorized || attempt.unauthorized
+		combined.unreachable = combined.unreachable || attempt.unreachable
+		if attempt.authorized {
+			return attempt
+		}
+		if !attempt.unauthorized && !attempt.unreachable {
+			combined.unauthorized = false
+		}
+	}
+	return combined
+}
+
+func probeSimpleProviderAuth(ctx context.Context, client *http.Client, endpoint, header, value, anthropicVersion string) providerProbeAttempt {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return providerProbeAttempt{}
+	}
+	req.Header.Set(header, value)
+	req.Header.Set("Accept", "application/json")
+	if anthropicVersion != "" {
+		req.Header.Set("anthropic-version", anthropicVersion)
+	}
+	response, err := client.Do(req)
+	if err != nil {
+		return providerProbeAttempt{unreachable: true}
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+		return providerProbeAttempt{unauthorized: true}
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxProviderProbeBodySize))
+		return providerProbeAttempt{}
+	}
+	if strings.Contains(endpoint, "minimax") || strings.Contains(endpoint, "minimaxi") || strings.Contains(endpoint, "/token_plan/") || strings.Contains(endpoint, "/account/query_balance") {
+		var payload struct {
+			BaseResponse struct {
+				StatusCode int `json:"status_code"`
+			} `json:"base_resp"`
+		}
+		if err := json.NewDecoder(io.LimitReader(response.Body, maxProviderProbeBodySize)).Decode(&payload); err != nil || payload.BaseResponse.StatusCode != 0 {
+			return providerProbeAttempt{unauthorized: payload.BaseResponse.StatusCode == 1004 || payload.BaseResponse.StatusCode == 2049}
+		}
+		return providerProbeAttempt{authorized: true}
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxProviderProbeBodySize))
+	return providerProbeAttempt{authorized: true}
 }
 
 func boundedCompletionTokens(provider Provider, model string, value int) (int, error) {
@@ -318,6 +501,14 @@ func (p *httpProviderClient) payload(messages []Message, maxTokens int) (map[str
 	payload := map[string]any{"model": p.config.Model, "messages": messages, "max_completion_tokens": maxTokens, "temperature": 0.2}
 	if p.config.Provider == ProviderMiniMax {
 		payload["reasoning_split"] = true
+		if strings.EqualFold(strings.TrimSpace(p.config.Model), "MiniMax-M3") {
+			// M3 defaults to adaptive thinking, whose private reasoning consumes
+			// max_completion_tokens. Delivery calls require a compact, schema-bound
+			// answer in one turn; the official direct mode avoids exhausting the
+			// entire allowance before content is emitted. Deterministic parsers and
+			// exact-SHA gates remain the authority after inference.
+			payload["thinking"] = map[string]any{"type": "disabled"}
+		}
 	}
 	return payload, map[string]string{"Authorization": "Bearer " + p.config.secret, "Content-Type": "application/json"}
 }

@@ -62,6 +62,7 @@ type onboardingPrivateEvidence struct {
 	Command             []string `json:"command,omitempty"`
 	CommandSHA256       string   `json:"command_sha256,omitempty"`
 	ExitCode            int      `json:"exit_code"`
+	RedactedOutput      string   `json:"redacted_output,omitempty"`
 	OutputSHA256        string   `json:"output_sha256,omitempty"`
 	RedactedValues      int      `json:"redacted_values,omitempty"`
 	ExecutionError      bool     `json:"execution_error,omitempty"`
@@ -195,6 +196,7 @@ func RunOnboardingCapabilityProbes(ctx context.Context, taskID string, delivery 
 				item.ExitCode = completed.ExitCode
 				redactedOutput, redactedValues := RedactSourceExcerpt(completed.Output)
 				item.RedactedValues = redactedValues
+				item.RedactedOutput = redactedOutput
 				item.OutputSHA256, err = canonicalSHA256(redactedOutput)
 				if err != nil {
 					return nil, execution, err
@@ -312,6 +314,10 @@ func prepareOnboardingProbeWorktree(ctx context.Context, workspace Workspace, ta
 	created, createErr := runLocal(ctx, workspace.Root, 90*time.Second, "", "git", "worktree", "add", "--detach", directory, revision)
 	if createErr != nil || created.ExitCode != 0 {
 		return "", fmt.Errorf("onboarding probe exact-SHA worktree could not be created")
+	}
+	if err := copyReadOnlyWorkspaceFixtures(workspace, directory); err != nil {
+		_ = removeOnboardingProbeWorktree(context.Background(), workspace, taskID, directory)
+		return "", err
 	}
 	if err := verifyOnboardingProbeWorktree(ctx, directory, revision); err != nil {
 		_ = removeOnboardingProbeWorktree(context.Background(), workspace, taskID, directory)

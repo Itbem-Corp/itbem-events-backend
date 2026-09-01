@@ -21,6 +21,8 @@ func TestPublishGitHubCodeReviewIsExactSHAAndRetrySafe(t *testing.T) {
 		switch {
 		case request.Method == http.MethodGet && request.URL.Path == "/app":
 			_ = json.NewEncoder(response).Encode(map[string]string{"slug": "bema-review-bot"})
+		case request.Method == http.MethodGet && request.URL.Path == "/repos/itbem/example/installation":
+			_ = json.NewEncoder(response).Encode(map[string]int64{"id": 67890})
 		case request.Method == http.MethodPost && request.URL.Path == "/app/installations/67890/access_tokens":
 			var scope map[string][]string
 			_ = json.NewDecoder(request.Body).Decode(&scope)
@@ -108,6 +110,8 @@ func TestPublishGitHubCodeReviewNeverSelfApproves(t *testing.T) {
 		switch {
 		case request.Method == http.MethodGet && request.URL.Path == "/app":
 			_ = json.NewEncoder(response).Encode(map[string]string{"slug": "bema-review-bot"})
+		case request.Method == http.MethodGet && request.URL.Path == "/repos/itbem/example/installation":
+			_ = json.NewEncoder(response).Encode(map[string]int64{"id": 67890})
 		case request.Method == http.MethodPost && request.URL.Path == "/app/installations/67890/access_tokens":
 			response.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(response).Encode(map[string]any{"token": "review-token", "expires_at": now.Add(time.Hour)})

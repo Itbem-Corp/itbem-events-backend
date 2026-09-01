@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -69,7 +70,8 @@ func TestProviderClientUsesMiniMaxContractWithoutLeakingSecrets(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Fatal(err)
 		}
-		if payload["model"] != "MiniMax-M3" || payload["reasoning_split"] != true || payload["thinking"] != nil || payload["max_completion_tokens"] != float64(1) {
+		thinking, _ := payload["thinking"].(map[string]any)
+		if payload["model"] != "MiniMax-M3" || payload["reasoning_split"] != true || thinking["type"] != "disabled" || payload["max_completion_tokens"] != float64(1) {
 			t.Fatal("unexpected MiniMax payload")
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": "response", "model": "MiniMax-M3", "usage": map[string]any{"total_tokens": 2}, "input_sensitive": false, "output_sensitive": false, "base_resp": map[string]any{"status_code": 0}, "choices": []any{map[string]any{"finish_reason": "stop", "message": map[string]any{"content": "ok"}}}})
@@ -83,6 +85,84 @@ func TestProviderClientUsesMiniMaxContractWithoutLeakingSecrets(t *testing.T) {
 	metadata, _ := completion.Usage["_itbem_provider"].(map[string]any)
 	if metadata["finish_reason"] != "stop" || metadata["input_sensitive"] != false || metadata["output_sensitive"] != false || metadata["status_code"] != int64(0) {
 		t.Fatalf("provider outcome metadata was not retained safely: %#v", completion.Usage)
+	}
+}
+
+func TestProviderAuthProbeUsesReadOnlyMiniMaxEndpointAndNeverLeaksSecret(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/token_plan/remains" || r.Body == nil {
+			t.Fatalf("unexpected auth probe request: %s %s", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("x-api-key") != "private-test-key" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"base_resp": map[string]any{"status_code": 2049}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"base_resp": map[string]any{"status_code": 0}, "remains": "must-not-be-reported"})
+	}))
+	defer server.Close()
+	config := ProviderConfig{Provider: ProviderMiniMax, Model: "MiniMax-M3", Endpoint: server.URL + "/v1/chat/completions", secret: "private-test-key"}
+	report, err := ProbeProviderAuth(context.Background(), config, server.Client())
+	if err != nil || !report.Ready || report.Status != "authenticated" || report.Billable || !report.NetworkChecksMade || requests != 2 {
+		t.Fatalf("unexpected provider probe: %#v / %v / requests=%d", report, err, requests)
+	}
+	raw, _ := json.Marshal(report)
+	if strings.Contains(string(raw), config.secret) || strings.Contains(string(raw), "must-not-be-reported") {
+		t.Fatalf("provider auth evidence leaked credential or quota data: %s", raw)
+	}
+}
+
+func TestMiniMaxAuthRegionsSeparateInferenceAndTokenPlanHosts(t *testing.T) {
+	configured, regions := miniMaxAuthRegions("api.minimax.io", "https://api.minimax.io")
+	if configured != "global" || len(regions) != 2 || regions[0].base != "https://api.minimax.io" || regions[0].probeBase != "https://www.minimax.io" {
+		t.Fatalf("unexpected global MiniMax endpoints: configured=%q regions=%#v", configured, regions)
+	}
+	configured, regions = miniMaxAuthRegions("api.minimaxi.com", "https://api.minimaxi.com")
+	if configured != "cn" || len(regions) != 2 || regions[0].base != "https://api.minimaxi.com" || regions[0].probeBase != "https://www.minimaxi.com" {
+		t.Fatalf("unexpected CN MiniMax endpoints: configured=%q regions=%#v", configured, regions)
+	}
+}
+
+func TestProviderAuthProbeFailsClosedOnMiniMaxCredentialRejection(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"base_resp": map[string]any{"status_code": 2049}, "status_msg": "must-not-be-reported"})
+	}))
+	defer server.Close()
+	config := ProviderConfig{Provider: ProviderMiniMax, Model: "MiniMax-M3", Endpoint: server.URL + "/v1/chat/completions", secret: "rejected-private-key"}
+	report, err := ProbeProviderAuth(context.Background(), config, server.Client())
+	if err != nil || report.Ready || report.Status != "rejected" || report.Billable {
+		t.Fatalf("rejected credential did not fail closed: %#v / %v", report, err)
+	}
+	raw, _ := json.Marshal(report)
+	if strings.Contains(string(raw), config.secret) || strings.Contains(string(raw), "must-not-be-reported") {
+		t.Fatalf("rejected auth evidence leaked provider data: %s", raw)
+	}
+}
+
+func TestProviderAuthProbeUsesReadOnlyMetadataForOpenAIAndAnthropic(t *testing.T) {
+	for _, sample := range []struct {
+		provider Provider
+		header   string
+		value    string
+		endpoint string
+	}{
+		{ProviderOpenAI, "Authorization", "Bearer provider-key", "/v1/chat/completions"},
+		{ProviderAnthropic, "x-api-key", "provider-key", "/v1/messages"},
+	} {
+		t.Run(string(sample.provider), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/v1/models" || r.Header.Get(sample.header) != sample.value {
+					t.Fatalf("unexpected metadata probe: %s %s", r.Method, r.URL.Path)
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
+			report, err := ProbeProviderAuth(context.Background(), ProviderConfig{Provider: sample.provider, Endpoint: server.URL + sample.endpoint, secret: "provider-key"}, server.Client())
+			if err != nil || !report.Ready || report.Status != "authenticated" || report.Billable {
+				t.Fatalf("unexpected metadata probe result: %#v / %v", report, err)
+			}
+		})
 	}
 }
 
@@ -124,14 +204,26 @@ func TestProviderAuditRequestMatchesCredentialFreeWirePayload(t *testing.T) {
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload["model"] != "MiniMax-M3" || payload["reasoning_split"] != true || payload["max_completion_tokens"] != float64(miniMaxM3CompletionLimit) {
+	thinking, _ := payload["thinking"].(map[string]any)
+	if payload["model"] != "MiniMax-M3" || payload["reasoning_split"] != true || thinking["type"] != "disabled" || payload["max_completion_tokens"] != float64(miniMaxM3CompletionLimit) {
 		t.Fatalf("audit payload does not match the bounded MiniMax wire contract: %#v", payload)
+	}
+}
+
+func TestMiniMaxLegacyModelDoesNotReceiveUnsupportedThinkingControl(t *testing.T) {
+	client := &httpProviderClient{config: ProviderConfig{Provider: ProviderMiniMax, Model: "MiniMax-M2.7", secret: "test-key"}}
+	payload, _ := client.payload([]Message{{Role: "user", Content: "work"}}, 1)
+	if _, exists := payload["thinking"]; exists {
+		t.Fatalf("M2 model received M3-only thinking control: %#v", payload)
 	}
 }
 
 func TestMiniMaxCompletionTokensAreBoundedByModel(t *testing.T) {
 	if value, err := boundedCompletionTokens(ProviderMiniMax, "MiniMax-M2.7", 100000); err != nil || value != miniMaxM2CompletionLimit {
 		t.Fatalf("unexpected MiniMax M2 token bound: %d / %v", value, err)
+	}
+	if miniMaxM2CompletionLimit != 32768 {
+		t.Fatalf("MiniMax M2 reasoning ceiling must leave room for a structured result: %d", miniMaxM2CompletionLimit)
 	}
 	if value, err := boundedCompletionTokens(ProviderMiniMax, "MiniMax-M3", 100000); err != nil || value != miniMaxM3CompletionLimit {
 		t.Fatalf("unexpected MiniMax M3 token bound: %d / %v", value, err)

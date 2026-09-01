@@ -18,9 +18,11 @@ import (
 )
 
 const (
-	maxPatchBytes    = 600000
-	maxCommandOutput = 12000
-	commandTimeout   = 10 * time.Minute
+	maxPatchBytes           = 600000
+	maxCommandOutput        = 12000
+	maxReadOnlyFixtureFiles = 5000
+	maxReadOnlyFixtureBytes = 64 << 20
+	commandTimeout          = 10 * time.Minute
 )
 
 var (
@@ -573,7 +575,7 @@ func isolatedWorktree(ctx context.Context, workspace Workspace, taskID string) (
 	branch := "itbem-agent/" + taskID
 	directory := filepath.Join(workspace.Root, ".itbem-agent-worktrees", taskID)
 	if info, statErr := os.Stat(directory); statErr == nil && info.IsDir() {
-		if err := copyPinnedContractFixture(workspace.Root, directory); err != nil {
+		if err := copyReadOnlyWorkspaceFixtures(workspace, directory); err != nil {
 			return "", "", err
 		}
 		return directory, branch, nil
@@ -588,76 +590,100 @@ func isolatedWorktree(ctx context.Context, workspace Workspace, taskID string) (
 	if created.ExitCode != 0 {
 		return "", "", fmt.Errorf("could not create isolated local worktree: %s", created.Output)
 	}
-	if err := copyPinnedContractFixture(workspace.Root, directory); err != nil {
+	if err := copyReadOnlyWorkspaceFixtures(workspace, directory); err != nil {
 		return "", "", err
 	}
 	return directory, branch, nil
 }
 
-// copyPinnedContractFixture makes the repository's explicitly versioned
-// product contract available in an isolated worktree. The contract is kept
-// outside the Git worktree in this workspace, but backend unit tests resolve
-// it through a relative path. Copying only this known, read-only fixture keeps
-// tests representative without exposing arbitrary parent files or secrets.
-func copyPinnedContractFixture(workspaceRoot, worktreeRoot string) error {
-	source := filepath.Join(workspaceRoot, ".contracts", "itbem-product-contract")
-	info, err := os.Stat(source)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
+// copyReadOnlyWorkspaceFixtures projects only operator-approved, bounded
+// repository-relative fixtures into an isolated worktree. It intentionally
+// excludes Git metadata, credential-like paths, links and special files.
+func copyReadOnlyWorkspaceFixtures(workspace Workspace, worktreeRoot string) error {
+	if err := validateReadOnlyFixturePaths(workspace.Config.ReadOnlyFixturePaths); err != nil {
+		return err
 	}
-	if err != nil {
-		return fmt.Errorf("inspect pinned contract fixture: %w", err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("pinned contract fixture is not a directory")
-	}
-	destination := filepath.Join(worktreeRoot, ".contracts", "itbem-product-contract")
-	// The contract source may itself be a Git worktree. Its `.git` metadata
-	// must never be copied into the task worktree: only the pinned files are
-	// required by tests, and nested metadata makes `git diff --check` unsafe.
-	if err := os.Remove(filepath.Join(destination, ".git")); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("remove nested contract metadata: %w", err)
-	}
-	return filepath.WalkDir(source, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
+	files, bytesCopied := 0, int64(0)
+	for _, relativeRoot := range workspace.Config.ReadOnlyFixturePaths {
+		source := filepath.Join(workspace.Root, relativeRoot)
+		destination := filepath.Join(worktreeRoot, relativeRoot)
+		info, err := os.Lstat(source)
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("configured read-only fixture %q does not exist", filepath.ToSlash(relativeRoot))
 		}
-		relative, err := filepath.Rel(source, path)
-		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-			return fmt.Errorf("invalid pinned contract path")
+		if err != nil {
+			return fmt.Errorf("inspect read-only fixture %q: %w", filepath.ToSlash(relativeRoot), err)
 		}
-		target := filepath.Join(destination, relative)
-		if entry.Name() == ".git" {
-			if entry.IsDir() {
-				return filepath.SkipDir
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("read-only fixture %q must not be a symlink", filepath.ToSlash(relativeRoot))
+		}
+		if err := os.RemoveAll(destination); err != nil {
+			return fmt.Errorf("refresh read-only fixture %q: %w", filepath.ToSlash(relativeRoot), err)
+		}
+		err = filepath.WalkDir(source, func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
 			}
-			return nil
-		}
-		if entry.Type()&os.ModeSymlink != 0 {
-			return fmt.Errorf("pinned contract fixture must not contain symlinks")
-		}
-		if entry.IsDir() {
-			return os.MkdirAll(target, 0700)
-		}
-		if !entry.Type().IsRegular() {
-			return fmt.Errorf("pinned contract fixture contains an unsupported file")
-		}
-		input, err := os.Open(path)
+			relative, relErr := filepath.Rel(source, path)
+			if relErr != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+				return fmt.Errorf("invalid read-only fixture path")
+			}
+			if entry.Name() == ".git" {
+				if entry.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if entry.Type()&os.ModeSymlink != 0 {
+				return fmt.Errorf("read-only fixtures must not contain symlinks")
+			}
+			projectedRelative := filepath.Join(relativeRoot, relative)
+			if !safeContextFile(projectedRelative) {
+				return fmt.Errorf("read-only fixture contains a credential-like path")
+			}
+			target := filepath.Join(destination, relative)
+			if entry.IsDir() {
+				return os.MkdirAll(target, 0700)
+			}
+			if !entry.Type().IsRegular() {
+				return fmt.Errorf("read-only fixture contains an unsupported file")
+			}
+			files++
+			entryInfo, infoErr := entry.Info()
+			if infoErr != nil {
+				return infoErr
+			}
+			bytesCopied += entryInfo.Size()
+			if files > maxReadOnlyFixtureFiles || bytesCopied > maxReadOnlyFixtureBytes {
+				return fmt.Errorf("read-only fixtures exceed the safe copy budget")
+			}
+			if err := os.MkdirAll(filepath.Dir(target), 0700); err != nil {
+				return err
+			}
+			input, openErr := os.Open(path)
+			if openErr != nil {
+				return openErr
+			}
+			output, createErr := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+			if createErr != nil {
+				_ = input.Close()
+				return createErr
+			}
+			_, copyErr := io.Copy(output, input)
+			inputCloseErr, outputCloseErr := input.Close(), output.Close()
+			if copyErr != nil {
+				return copyErr
+			}
+			if inputCloseErr != nil {
+				return inputCloseErr
+			}
+			return outputCloseErr
+		})
 		if err != nil {
-			return err
+			return fmt.Errorf("copy read-only fixture %q: %w", filepath.ToSlash(relativeRoot), err)
 		}
-		defer input.Close()
-		output, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
-		if err != nil {
-			return err
-		}
-		_, copyErr := io.Copy(output, input)
-		closeErr := output.Close()
-		if copyErr != nil {
-			return copyErr
-		}
-		return closeErr
-	})
+	}
+	return nil
 }
 
 type commandResult struct {

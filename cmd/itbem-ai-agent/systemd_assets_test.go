@@ -17,6 +17,15 @@ func systemdAsset(t *testing.T, parts ...string) string {
 	return string(body)
 }
 
+func localScriptAsset(t *testing.T, name string) string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("..", "..", "scripts", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
+}
+
 func TestSystemdUnitFailsClosedAndRunsUnprivileged(t *testing.T) {
 	unit := systemdAsset(t, "itbem-ai-agent@.service")
 	for _, required := range []string{
@@ -24,6 +33,7 @@ func TestSystemdUnitFailsClosedAndRunsUnprivileged(t *testing.T) {
 		"ExecCondition=/usr/bin/test ! -e /etc/itbem-ai-agent/disabled/all",
 		"ExecCondition=/usr/bin/test ! -e /etc/itbem-ai-agent/disabled/%i",
 		"ExecStartPre=/opt/itbem-ai-agent/current/itbem-ai-agent --doctor",
+		"ExecStartPre=/opt/itbem-ai-agent/current/itbem-ai-agent --provider-auth-probe",
 		"NoNewPrivileges=yes", "ProtectSystem=strict", "ProtectHome=yes",
 		"CapabilityBoundingSet=", "Restart=on-failure",
 		"ReadWritePaths=/var/lib/itbem-ai-agent/%i /srv/itbem-agent-workspaces/%i",
@@ -133,6 +143,48 @@ func TestSystemdInstallerStagesButNeverActivatesServices(t *testing.T) {
 	for _, prohibited := range []string{"systemctl start", "systemctl enable", "enable --now", "chmod 777", "install -d -m 0770", "usermod -a -G itbem-agent-workspaces"} {
 		if strings.Contains(installer, prohibited) {
 			t.Fatalf("installer unexpectedly activates or weakens a service: %q", prohibited)
+		}
+	}
+}
+
+func TestLocalLaunchersSupportExplicitRoleLanesWithoutBreakingCombinedMode(t *testing.T) {
+	controlPlane := localScriptAsset(t, "Start-LocalAIControlPlane.ps1")
+	for _, required := range []string{
+		"[switch]$RoleLanes", "itbem-ai-local-role-dlq",
+		"@('orchestration', 'engineering', 'review', 'qa', 'release')",
+		"SQS_AUTOMATION_QUEUE_LANES_JSON", "SQS_AUTOMATION_ROLE_DEAD_LETTER_QUEUE_URL",
+		"Set-LocalQueueRedrive $laneQueueURL $automationRoleDLQArn",
+	} {
+		if !strings.Contains(controlPlane, required) {
+			t.Fatalf("local control plane lost role-lane contract %q", required)
+		}
+	}
+	if !strings.Contains(controlPlane, "if ($RoleLanes)") || !strings.Contains(controlPlane, "SQS_AUTOMATION_QUEUE_URL = $automationQueueURL") {
+		t.Fatal("local control plane no longer keeps the combined queue as an explicit migration path")
+	}
+
+	worker := localScriptAsset(t, "Start-LocalAIAgent.ps1")
+	for _, required := range []string{
+		"orchestrator = 'orchestration'", "principal_engineer = 'engineering'", "reviewer = 'review'", "qa = 'qa'", "release_manager = 'release'",
+		"$env:ITBEM_AI_ROLE = $Role", "$env:ITBEM_AI_QUEUE_LANE = $Lane",
+		"Role and Lane must form one exact supported worker assignment.",
+		"itbem-ai-local-$Lane", "$providerRequired = -not ($Role -eq 'release_manager' -and $Lane -eq 'release')",
+		"SetEnvironmentVariable($modelSecret, $null, 'Process')", "if ($providerRequired)",
+		"ITBEM.LocalAIAgent.Worker.$lockLane", "Enter-LocalAgentWorkerLock $Lane",
+	} {
+		if !strings.Contains(worker, required) {
+			t.Fatalf("local worker launcher lost role-lane contract %q", required)
+		}
+	}
+	if !strings.Contains(worker, "'itbem-ai-local'") {
+		t.Fatal("local worker launcher lost the combined migration queue")
+	}
+	if strings.Contains(worker, "'Local\\ITBEM.LocalAIAgent.Worker'") {
+		t.Fatal("explicit role lanes must not share the legacy single-worker mutex")
+	}
+	for _, prohibited := range []string{"$env:MINIMAX_API_KEY =", "$env:OPENAI_API_KEY =", "$env:ANTHROPIC_API_KEY ="} {
+		if strings.Contains(worker, prohibited) {
+			t.Fatalf("local worker launcher embeds a provider secret: %q", prohibited)
 		}
 	}
 }

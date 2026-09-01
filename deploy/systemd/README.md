@@ -46,6 +46,12 @@ installer makes the common root non-listable/non-writable (`0711`) and each
 lane root private to its Unix account (`0700`); do not weaken those modes or
 reuse a checkout across Engineer, Reviewer, QA and Release. This provides the
 independent checkout boundary required by review and exact-SHA evidence.
+When tests need pinned content that intentionally lives outside Git, declare
+its repository-relative directory in the workspace's
+`read_only_fixture_paths`. The worker copies only that operator-approved,
+bounded, non-secret content into isolated worktrees and rejects links, Git
+metadata, credentials and missing fixtures. Never use this setting for keys or
+runtime secrets.
 On upgrades from the earlier shared root, move or freshly clone each managed
 base into its lane root and move the registry from `common.env` into every role
 file before preflight. The tightened unit intentionally makes an old shared

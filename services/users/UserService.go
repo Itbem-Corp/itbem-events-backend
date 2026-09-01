@@ -294,17 +294,27 @@ func (s *UserService) BootstrapConfiguredLocalRoot(cognitoSub, email string) (*m
 		return nil, err
 	}
 	if user == nil {
-		user = &models.User{
+		candidate := &models.User{
 			CognitoSub: cognitoSub,
 			Email:      strings.TrimSpace(email),
 			IsActive:   true,
 			IsRoot:     true,
 			RootLevel:  models.RootLevelPrimary,
 		}
-		if err := s.userRepo.CreateUser(user); err != nil {
-			return nil, fmt.Errorf("create configured local bootstrap user: %w", err)
+		createErr := s.userRepo.CreateUser(candidate)
+		if createErr == nil {
+			return candidate, nil
 		}
-		return user, nil
+		// Two authenticated requests can reach the first-user bootstrap at the
+		// same time (for example the dashboard shell and its token preflight).
+		// The unique Cognito subject remains the database authority: after a
+		// conflicting insert, re-read the winner and continue only when that
+		// exact subject now exists. Other storage failures still fail closed.
+		concurrent, lookupErr := s.userRepo.GetUserByCognitoSub(cognitoSub)
+		if lookupErr != nil || concurrent == nil {
+			return nil, fmt.Errorf("create configured local bootstrap user: %w", createErr)
+		}
+		user = concurrent
 	}
 	if user.IsPrimaryRoot() && user.IsActive {
 		return user, nil

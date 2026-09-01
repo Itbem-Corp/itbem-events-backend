@@ -39,11 +39,14 @@ func TestCompletionTokensForOperationKeepsPlansBoundedAndExpandsImplementation(t
 	if got := CompletionTokensForOperation("ai.chat"); got != DefaultCompletionTokens {
 		t.Fatalf("generic operation budget = %d, want %d", got, DefaultCompletionTokens)
 	}
-	if got := CompletionTokensForOperation("delivery.plan"); got != DefaultCompletionTokens {
-		t.Fatalf("delivery plan budget = %d, want %d", got, DefaultCompletionTokens)
+	if got := CompletionTokensForOperation("delivery.plan"); got != deliveryPlanCompletionLimit {
+		t.Fatalf("delivery plan budget = %d, want %d", got, deliveryPlanCompletionLimit)
 	}
 	if got := CompletionTokensForOperation("code.review"); got != codeReviewCompletionLimit {
 		t.Fatalf("code review budget = %d, want %d", got, codeReviewCompletionLimit)
+	}
+	if codeReviewCompletionLimit != 65536 {
+		t.Fatalf("segmented code review aggregate budget = %d, want 65536", codeReviewCompletionLimit)
 	}
 	if got := CompletionTokensForOperation("delivery.implementation"); got != deliveryImplementationCompletionLimit {
 		t.Fatalf("delivery implementation budget = %d, want %d", got, deliveryImplementationCompletionLimit)
@@ -63,13 +66,13 @@ func TestCompletionTokensForOperationKeepsPlansBoundedAndExpandsImplementation(t
 }
 
 func TestBoundedCompletionTokensNeverLetsQueuePayloadRaiseOperationLimit(t *testing.T) {
-	if got := messageCompletionTokens("delivery.plan", miniMaxM3CompletionLimit+1); got != DefaultCompletionTokens {
+	if got := messageCompletionTokens("delivery.plan", miniMaxM3CompletionLimit+1); got != deliveryPlanCompletionLimit {
 		t.Fatalf("queue payload raised delivery limit to %d", got)
 	}
 	if got := messageCompletionTokens("delivery.plan", 1024); got != 1024 {
 		t.Fatalf("queue payload did not retain stricter limit: %d", got)
 	}
-	if got := messageCompletionTokens("code.review", miniMaxM3CompletionLimit+1); got != codeReviewCompletionLimit {
+	if got := messageCompletionTokens("code.review", codeReviewCompletionLimit+1); got != codeReviewCompletionLimit {
 		t.Fatalf("queue payload raised code review limit to %d", got)
 	}
 	if got := messageCompletionTokens("code.review", 8192); got != 8192 {

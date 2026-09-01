@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"events-stocks/internal/projectvault"
 	"events-stocks/internal/releasegate"
 	"events-stocks/models"
 	"events-stocks/services/deliveryworkflow"
@@ -209,6 +210,49 @@ func TestBuildDeliveryAgentInputSanitizesContextMetadataBeforeInference(t *testi
 	}
 	if snapshots[0].MetadataJSON != rawMetadata {
 		t.Fatal("sanitizing model context must not mutate the frozen timeline snapshot")
+	}
+}
+
+func TestAttachExactProjectVaultsBindsWorkspaceToApprovedGitHubCheckpoint(t *testing.T) {
+	projectID, workItemID, sourceID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
+	revision := strings.Repeat("a", 40)
+	snapshots := []models.DeliveryContextSnapshot{{
+		WorkItemID: workItemID, SourceID: sourceID, Kind: "repository", Name: "Backend",
+		Reference: "workspace://backend", Revision: revision, MetadataJSON: `{"github_repository":"Acme/Backend"}`,
+	}}
+	item := models.DeliveryWorkItem{ID: workItemID, ProjectID: projectID, State: deliveryworkflow.StatePlanning, IncludedScopeJSON: `[]`, ExcludedScopeJSON: `[]`, AcceptanceJSON: `[]`}
+	input, err := buildDeliveryAgentInput(item, models.DeliveryProject{ID: projectID}, snapshots, nil, nil, nil, nil, "", "plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := projectvault.Manifest{
+		SchemaVersion: projectvault.SchemaVersion, Scope: "repository",
+		Repository: projectvault.Repository{Reference: "github://Acme/Backend", DefaultBranch: "main", Revision: revision},
+		Entries:    []projectvault.VaultEntry{{Key: "stack/runtime", Kind: "stack", Lifecycle: "active", Value: map[string]any{"runtime": "go", "api_key": "must-not-leak"}}},
+	}
+	digest, err := projectvault.ManifestSHA256(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(manifest)
+	vaults := []models.DeliveryProjectVaultRevision{{
+		ProjectID: projectID, RepositoryReference: "github://Acme/Backend", Revision: revision,
+		SchemaVersion: projectvault.SchemaVersion, ManifestJSON: string(raw), ContentSHA256: digest, Version: 1,
+	}}
+	if err := attachExactProjectVaults(&input, snapshots, vaults); err != nil {
+		t.Fatalf("exact approved Vault rejected: %v", err)
+	}
+	vault := input.Delivery.ContextSources[0].Vault
+	if vault == nil || vault.Revision != revision || vault.ContentSHA256 != digest || len(vault.Entries) != 1 || vault.Entries[0].Value["runtime"] != "go" || vault.Entries[0].Value["api_key"] != nil {
+		t.Fatalf("Vault-first projection is invalid or unsafe: %#v", vault)
+	}
+	encoded, _ := json.Marshal(input)
+	if strings.Contains(string(encoded), "must-not-leak") {
+		t.Fatal("credential-like Vault values reached model input")
+	}
+	vaults[0].ContentSHA256 = strings.Repeat("b", 64)
+	if err := attachExactProjectVaults(&input, snapshots, vaults); err == nil {
+		t.Fatal("digest-invalid Vault must fail closed")
 	}
 }
 

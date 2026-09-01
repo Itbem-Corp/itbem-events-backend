@@ -3,6 +3,11 @@ param(
 	[Alias('LocalStackEndpoint')]
 	[string]$AwsEmulatorEndpoint = 'http://localhost:4566',
     [string]$ApiBaseURL = 'http://localhost:8081',
+    # Empty preserves the migration-compatible combined queue. Supplying an
+    # identity requires the exact role/lane pair and selects only that lane's
+    # queue; one process can never consume work belonging to another role.
+    [string]$Role = '',
+    [string]$Lane = '',
     # Empty means: derive the region from the local queue URL. This keeps the
     # isolated worker aligned with the control plane even when Cognito/local
     # infrastructure was bootstrapped in a region other than us-east-1.
@@ -118,15 +123,18 @@ function Ensure-StagehandNodeRuntime {
     Write-Host 'Using an isolated Node 24 runtime for the local Stagehand worker.'
 }
 
-function Enter-LocalAgentWorkerLock {
-    # A process-wide, session-local mutex makes the launcher the owner of the
-    # single local consumer. It covers both one-shot and KeepAlive modes, so a
-    # second terminal cannot accidentally double-consume the same SQS queue.
-    # Diagnostics and workspace sync intentionally do not take this lock.
+function Enter-LocalAgentWorkerLock([string]$Lane) {
+    # A process-wide, session-local mutex makes the launcher the only consumer
+    # for its selected queue. Explicit role lanes intentionally use different
+    # mutexes so all five workers can run concurrently, while a duplicate
+    # consumer for the same lane still fails closed. Diagnostics and workspace
+    # sync intentionally do not take this lock.
+    $lockLane = if ([string]::IsNullOrWhiteSpace($Lane)) { 'combined' } else { $Lane }
+    $mutexName = "Local\ITBEM.LocalAIAgent.Worker.$lockLane"
     $createdNew = $false
     $mutex = $null
     try {
-        $mutex = [System.Threading.Mutex]::new($true, 'Local\ITBEM.LocalAIAgent.Worker', [ref]$createdNew)
+        $mutex = [System.Threading.Mutex]::new($true, $mutexName, [ref]$createdNew)
     }
     catch [System.Threading.AbandonedMutexException] {
         # The previous launcher was terminated abruptly. Taking ownership is
@@ -136,12 +144,34 @@ function Enter-LocalAgentWorkerLock {
 
     if (-not $createdNew) {
         if ($null -ne $mutex) { $mutex.Dispose() }
-        throw 'Another local ITBEM AI worker is already running in this Windows session. Stop it first instead of starting a second queue consumer.'
+        throw "Another local ITBEM AI worker is already consuming the '$lockLane' lane in this Windows session. Stop it first instead of starting a duplicate queue consumer."
     }
     return $mutex
 }
 
 Import-LocalAgentEnvironment (Join-Path $backendRoot '.env.ai.local') $PreferProcessEnvironment
+$roleAssignments = @{
+    orchestrator = 'orchestration'
+    principal_engineer = 'engineering'
+    reviewer = 'review'
+    qa = 'qa'
+    release_manager = 'release'
+}
+$Role = $Role.Trim().ToLowerInvariant()
+$Lane = $Lane.Trim().ToLowerInvariant()
+if ([string]::IsNullOrWhiteSpace($Role) -ne [string]::IsNullOrWhiteSpace($Lane)) {
+    throw 'Role and Lane must be configured together.'
+}
+if (-not [string]::IsNullOrWhiteSpace($Role)) {
+    if (-not $roleAssignments.ContainsKey($Role) -or $roleAssignments[$Role] -ne $Lane) {
+        throw 'Role and Lane must form one exact supported worker assignment.'
+    }
+    $env:ITBEM_AI_ROLE = $Role
+    $env:ITBEM_AI_QUEUE_LANE = $Lane
+} else {
+    Remove-Item -Path Env:ITBEM_AI_ROLE -ErrorAction SilentlyContinue
+    Remove-Item -Path Env:ITBEM_AI_QUEUE_LANE -ErrorAction SilentlyContinue
+}
 if ($Doctor) {
     Set-Location $backendRoot
     go run ./cmd/itbem-ai-agent --doctor
@@ -155,19 +185,33 @@ if ($SyncWorkspaces) {
 $provider = [Environment]::GetEnvironmentVariable('ITBEM_AI_PROVIDER', 'Process')
 if ([string]::IsNullOrWhiteSpace($provider)) { $provider = 'minimax' }
 $provider = $provider.Trim().ToLowerInvariant()
+$providerRequired = -not ($Role -eq 'release_manager' -and $Lane -eq 'release')
 $secretName = @{ minimax = 'MINIMAX_API_KEY'; openai = 'OPENAI_API_KEY'; anthropic = 'ANTHROPIC_API_KEY' }[$provider]
-if (-not $secretName) { throw 'ITBEM_AI_PROVIDER must be minimax, openai, or anthropic.' }
+if ($providerRequired -and -not $secretName) { throw 'ITBEM_AI_PROVIDER must be minimax, openai, or anthropic.' }
+if (-not $providerRequired) {
+    # The deterministic release lane has no reason to hold model credentials.
+    # The local file is shared across lanes, so explicitly erase every
+    # supported provider key after import and do not reload one from the User
+    # environment below.
+    foreach ($modelSecret in @('MINIMAX_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY')) {
+        [Environment]::SetEnvironmentVariable($modelSecret, $null, 'Process')
+    }
+    $secretName = $null
+}
 
-foreach ($name in @($secretName, 'ITBEM_AI_WORKSPACES_JSON', 'ITBEM_AI_CONCURRENCY')) {
+foreach ($name in @($secretName, 'ITBEM_AI_WORKSPACES_JSON', 'ITBEM_AI_CONCURRENCY') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) {
     if (-not [Environment]::GetEnvironmentVariable($name, 'Process')) {
         $userValue = [Environment]::GetEnvironmentVariable($name, 'User')
         if ($userValue) { [Environment]::SetEnvironmentVariable($name, $userValue, 'Process') }
     }
 }
-if (-not [Environment]::GetEnvironmentVariable($secretName, 'Process')) {
+if ($providerRequired -and -not [Environment]::GetEnvironmentVariable($secretName, 'Process')) {
     throw "$secretName must be set in .env.ai.local, the current process, or Windows User environment. Never commit local secrets."
 }
 
+if ($ProviderSmoke -and -not $providerRequired) {
+    throw 'The deterministic release worker has no model provider to smoke-test.'
+}
 if ($ProviderSmoke) {
     Write-Host "Running one explicit provider smoke check with '$provider'."
     $env:ITBEM_AI_ALLOW_PROVIDER_SMOKE = '1'
@@ -176,7 +220,9 @@ if ($ProviderSmoke) {
     exit $LASTEXITCODE
 }
 
-Ensure-StagehandNodeRuntime
+if ([string]::IsNullOrWhiteSpace($Role) -or $Role -eq 'qa') {
+    Ensure-StagehandNodeRuntime
+}
 
 $env:AWS_ACCESS_KEY_ID = 'test'
 $env:AWS_SECRET_ACCESS_KEY = 'test'
@@ -185,10 +231,11 @@ $env:AWS_SECRET_ACCESS_KEY = 'test'
 $AWSRegion = Resolve-LocalAWSRegion $AWSRegion $backendRoot
 $env:AWS_REGION = $AWSRegion
 $env:AWS_DEFAULT_REGION = $AWSRegion
-$queueLookup = & aws sqs get-queue-url --endpoint-url $AwsEmulatorEndpoint --queue-name 'itbem-ai-local' --query QueueUrl --output text
+$queueName = if ([string]::IsNullOrWhiteSpace($Lane)) { 'itbem-ai-local' } else { "itbem-ai-local-$Lane" }
+$queueLookup = & aws sqs get-queue-url --endpoint-url $AwsEmulatorEndpoint --queue-name $queueName --query QueueUrl --output text
 $queueURL = ([string]$queueLookup).Trim()
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($queueURL)) {
-    throw 'The local ITBEM automation queue is unavailable. Start the local control plane first.'
+    throw "The local ITBEM automation queue '$queueName' is unavailable. Start the local control plane with the matching role-lane topology first."
 }
 
 $queueRegion = ''
@@ -213,10 +260,12 @@ $env:ITBEM_AI_OUTPUT_BUCKET = 'itbem-ai-outputs-local'
 $env:ITBEM_API_BASE_URL = $ApiBaseURL.TrimEnd('/')
 $env:AUTOMATION_CALLBACK_SECRET = 'local-automation-callback-secret'
 
-$workerLock = Enter-LocalAgentWorkerLock
+$workerLock = Enter-LocalAgentWorkerLock $Lane
 $exitCode = 0
 try {
-    Write-Host "Starting isolated ITBEM Go AI agent with provider '$provider'."
+    $identity = if ([string]::IsNullOrWhiteSpace($Role)) { 'combined migration worker' } else { "$Role/$Lane" }
+    $providerLabel = if ($providerRequired) { $provider } else { 'not required' }
+    Write-Host "Starting isolated ITBEM Go AI agent '$identity' with provider '$providerLabel'."
     Set-Location $backendRoot
     if (-not $KeepAlive) {
         go run ./cmd/itbem-ai-agent
@@ -231,6 +280,12 @@ try {
         go run ./cmd/itbem-ai-agent --doctor
         if ($LASTEXITCODE -ne 0) {
             throw 'Local agent readiness check failed. Fix the reported configuration before starting service mode.'
+        }
+        if ($providerRequired) {
+            go run ./cmd/itbem-ai-agent --provider-auth-probe
+            if ($LASTEXITCODE -ne 0) {
+                throw 'Provider authentication failed. Fix the credential or configured regional endpoint before starting service mode.'
+            }
         }
 
         $consecutiveFailures = 0

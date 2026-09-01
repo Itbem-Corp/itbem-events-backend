@@ -64,6 +64,21 @@ func TestNewCodeReviewInputDerivesManifestFromFrozenPatch(t *testing.T) {
 	}
 }
 
+func TestCodeReviewAllowsEnvironmentTemplatesButRejectsMutableEnvironmentFiles(t *testing.T) {
+	for _, file := range []string{".env.ai.local.example", "config/.env.sample", "deploy/service.env.template"} {
+		patch := "diff --git a/" + file + " b/" + file + "\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n+++ b/" + file + "\n@@ -0,0 +1 @@\n+TOKEN=REPLACE_ME\n"
+		if _, err := NewCodeReviewInput("github://itbem/example", strings.Repeat("a", 40), strings.Repeat("b", 40), patch); err != nil {
+			t.Fatalf("safe environment template %q must remain reviewable: %v", file, err)
+		}
+	}
+	for _, file := range []string{".env", "config/.env.production", "deploy/service.env"} {
+		patch := "diff --git a/" + file + " b/" + file + "\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n+++ b/" + file + "\n@@ -0,0 +1 @@\n+TOKEN=private\n"
+		if _, err := NewCodeReviewInput("github://itbem/example", strings.Repeat("a", 40), strings.Repeat("b", 40), patch); err == nil {
+			t.Fatalf("mutable environment file %q entered the review boundary", file)
+		}
+	}
+}
+
 func TestBindCodeReviewRemoteTargetSealsExactGitHubSubject(t *testing.T) {
 	input, err := ParseCodeReviewInput(validCodeReviewInput())
 	if err != nil {

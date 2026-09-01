@@ -79,6 +79,21 @@ func TestLoadWorkspacesBindsUniqueOperatorOwnedTestKindsByPosition(t *testing.T)
 	}
 }
 
+func TestLoadWorkspacesValidatesReadOnlyFixtureAllowlist(t *testing.T) {
+	root := filepath.ToSlash(t.TempDir())
+	valid := `{"demo":{"path":"` + root + `","read_only_fixture_paths":[".contracts/public-schema"]}}`
+	workspaces, err := LoadWorkspaces(valid)
+	if err != nil || len(workspaces["demo"].Config.ReadOnlyFixturePaths) != 1 {
+		t.Fatalf("valid read-only fixture was rejected: %#v / %v", workspaces, err)
+	}
+	for _, fixture := range []string{"../outside", ".git", "secrets", ".env", "nested/api_token.txt"} {
+		raw := `{"demo":{"path":"` + root + `","read_only_fixture_paths":["` + fixture + `"]}}`
+		if _, err := LoadWorkspaces(raw); err == nil {
+			t.Fatalf("unsafe read-only fixture was accepted: %s", fixture)
+		}
+	}
+}
+
 func TestDescribeWorkspaceExcludesCredentialLikeFilesAndDirectories(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Mkdir(filepath.Join(root, "secrets"), 0700); err != nil {
@@ -137,6 +152,38 @@ func TestDescribeWorkspaceRedactsSensitiveValuesEmbeddedInEligibleFiles(t *testi
 	}
 	if !strings.Contains(got, "feature_flag=true") || !strings.Contains(got, "<redacted>") {
 		t.Fatalf("safe context or redaction marker missing: %q", got)
+	}
+}
+
+func TestRedactSourceExcerptPreservesFormatVerbsWithoutLeakingCredentials(t *testing.T) {
+	content := "return fmt.Errorf(\"mint repository-scoped Reviewer token: %w\", err)\nAPI_KEY=must-not-leak\n"
+	got, redactions := RedactSourceExcerpt(content)
+	if !strings.Contains(got, `token: %w`) {
+		t.Fatalf("source redaction corrupted a format verb: %q", got)
+	}
+	if strings.Contains(got, "must-not-leak") || redactions != 1 {
+		t.Fatalf("source redaction failed to remove the actual credential: %q (%d redactions)", got, redactions)
+	}
+}
+
+func TestRedactSourceExcerptPreservesEmptyAssignmentsAndSourceLiterals(t *testing.T) {
+	content := "API_KEY=\"\"\n" +
+		`for _, prohibited := range []string{"$env:MINIMAX_API_KEY =", "$env:OPENAI_API_KEY ="} {` + "\n" +
+		"OPENAI_API_KEY=\"must-not-leak\"\n" +
+		"ANTHROPIC_API_KEY='also-must-not-leak'\n"
+	got, redactions := RedactSourceExcerpt(content)
+	for _, preserved := range []string{`API_KEY=""`, `"$env:MINIMAX_API_KEY ="`, `"$env:OPENAI_API_KEY ="`} {
+		if !strings.Contains(got, preserved) {
+			t.Fatalf("source redaction corrupted a valueless assignment or source literal %q: %q", preserved, got)
+		}
+	}
+	for _, secret := range []string{"must-not-leak", "also-must-not-leak"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("source redaction leaked quoted credential %q: %q", secret, got)
+		}
+	}
+	if redactions != 2 {
+		t.Fatalf("expected exactly two quoted credential redactions, got %d: %q", redactions, got)
 	}
 }
 

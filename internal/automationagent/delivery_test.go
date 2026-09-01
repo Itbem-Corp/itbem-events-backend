@@ -555,7 +555,7 @@ func TestIsolatedWorktreeCopiesPinnedContractFixture(t *testing.T) {
 	if err := os.WriteFile(contract, []byte(`{"version":1}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	worktree, _, err := isolatedWorktree(context.Background(), Workspace{Root: root}, "a4a4b837-2e18-43af-9f58-6d59629db2bb")
+	worktree, _, err := isolatedWorktree(context.Background(), Workspace{Root: root, Config: WorkspaceConfig{ReadOnlyFixturePaths: []string{".contracts/itbem-product-contract"}}}, "a4a4b837-2e18-43af-9f58-6d59629db2bb")
 	if err != nil {
 		t.Fatal(err)
 	}
