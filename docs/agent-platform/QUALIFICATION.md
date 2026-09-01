@@ -109,7 +109,9 @@ signed identity fixture:
    token file.
 4. Read the non-secret issuer and JWKS URLs from the metadata file. Start
    `scripts/Start-LocalAIControlPlane.ps1` with `-OIDCIssuerURL`,
-   `-OIDCJWKSURL`, and the same audience. Use a fresh database name and an
+   `-OIDCJWKSURL`, the same audience, and
+   `-BootstrapRootEmails qa@local.invalid` matching the issuer's allow-listed
+   fixture email. Use a fresh database name and an
    alternate loopback API port. Pass the isolated Valkey address through
    `-RedisHost`; this path does not read Cognito IDs from the dashboard. When
    the disposable database runs in WSL, pass its exact container name with
