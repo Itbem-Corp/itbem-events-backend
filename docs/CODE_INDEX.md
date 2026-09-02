@@ -77,7 +77,8 @@ itbem-events-backend/
 | Explicit release environment secret/variable reference policy and safe projection | `internal/deliverypolicy/policy.go`, `controllers/delivery/effective_policy.go` |
 | Exact-SHA GitHub release workflow/environment readiness adapter | `internal/automationagent/release_gate_github_environment.go` |
 | Immutable exact-matrix release environment evidence | `internal/environmentevidence/`, `internal/deliveryledger/environment_observation.go` |
-| Linux multiagent systemd distribution, private lane workspaces, TPM-only device allow-list, non-consuming doctor and scoped AWS runtime preflight | `deploy/systemd/`, `internal/automationagent/runtime_probe.go` |
+| Linux multiagent systemd distribution, private lane workspaces, outbound HTTPS gateway transport, non-consuming doctor and lane-bound runtime preflight | `deploy/systemd/`, `internal/automationagent/http_gateway.go` |
+| Physical-host trust boundary, sealed leases and AWS-free execution decision | `docs/agent-platform/EXECUTION_GATEWAY.md`, `controllers/automation/gateway.go` |
 | Moment | `models/Moment.go` |
 | MomentType | `models/MomentType.go` |
 | Color | `models/Color.go` |

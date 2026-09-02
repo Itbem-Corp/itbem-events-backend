@@ -180,8 +180,9 @@ code. Freeze and record every repository branch and SHA before execution.
 
 Before activating any long-lived role worker, run `--doctor`,
 `--runtime-auth-probe` and then `--provider-auth-probe`. The runtime probe
-exercises the temporary AWS identity and exact lane queue using only
-`sqs:GetQueueAttributes`; it never receives or mutates a task. The provider
+authenticates the exact role/lane token to the backend HTTPS gateway and checks
+server-owned queue/storage readiness; it never receives or mutates a task and
+requires no AWS identity on the execution host. The provider
 probe uses only a read-only provider metadata or
 quota endpoint, never creates a completion, and emits no credential, balance or
 quota value. A `configured_unverified`, `rejected`, `region_mismatch`,

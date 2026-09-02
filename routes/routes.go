@@ -298,6 +298,12 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	internalAutomation.Use(token.RequireTenantHost(cfg, "itbem"))
 	internalAutomation.PUT("/agents/heartbeat", automation.AgentHeartbeat)
 	internalAutomation.PUT("/tasks/:id", automation.Complete)
+	internalAutomation.GET("/gateway/probe", automation.GatewayProbe)
+	internalAutomation.POST("/gateway/leases", automation.GatewayLease)
+	internalAutomation.PUT("/gateway/leases/visibility", automation.GatewayVisibility)
+	internalAutomation.DELETE("/gateway/leases", automation.GatewayAcknowledge)
+	internalAutomation.POST("/gateway/objects/read", automation.GatewayReadObject)
+	internalAutomation.PUT("/gateway/objects/write", automation.GatewayWriteObject)
 
 	// GitHub sends signed pull-request events without an end-user JWT. The
 	// handler is disabled unless its independent secret and repository allow

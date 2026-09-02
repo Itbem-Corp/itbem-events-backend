@@ -213,14 +213,13 @@ Every lane has a private `0700` workspace root and its own registry; sharing a
 checkout across Engineer, Reviewer, QA or Release is unsupported. Preflight
 uses the separate oneshot `itbem-ai-agent-doctor@.service`, which cannot poll
 SQS or mutate the checkout. The long-lived unit subsequently runs
-`--runtime-auth-probe`, which reads only the exact queue's immutable ARN
-attribute to exercise its temporary AWS identity and lane policy without
+`--runtime-auth-probe`; on the physical host this is an outbound HTTPS gateway
+probe. It verifies the exact role/lane token plus backend queue/storage readiness without
 leasing work. Review and Release each fail closed when their own,
 distinct GitHub App identity is absent; Release intentionally has no model key.
-On an on-premises host, each lane uses an independent IAM Roles Anywhere
-`credential_process` profile, with EC2 metadata and long-lived shared access
-keys disabled. The AWS SDK therefore receives only renewable temporary
-sessions scoped to that lane.
+On an on-premises host, each lane receives only a distinct HMAC-derived gateway
+token. The backend retains SQS/S3 authority and seals expiring task leases, so
+AWS profiles, receipt handles and the callback root never cross onto Linux.
 
 For a signed `code.review` webhook task, the Reviewer freezes repository, PR,
 installation, head SHA and patch digest before inference. Its deterministic

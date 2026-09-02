@@ -158,6 +158,12 @@ func ProcessQueueMessage(ctx context.Context, worker *Worker, queue Queue, raw Q
 	if err != nil {
 		return err
 	}
+	// HTTP gateway receipt handles are sealed task leases. Carrying the lease in
+	// context binds every object read/write to this exact delivery without
+	// changing the transport-neutral worker and store interfaces.
+	if _, ok := queue.(*HTTPGateway); ok {
+		ctx = context.WithValue(ctx, gatewayLeaseContextKey{}, raw.ReceiptHandle)
+	}
 	if err := worker.Process(ctx, message); err != nil {
 		return err
 	}

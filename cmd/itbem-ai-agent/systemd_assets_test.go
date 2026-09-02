@@ -85,13 +85,18 @@ func TestSystemdRoleFilesBindExactLaneAndSeparatePublicationSecrets(t *testing.T
 	}
 	for file, identity := range roles {
 		body := systemdAsset(t, "roles", file+".env.example")
-		for _, required := range []string{"ITBEM_AI_ROLE=" + identity[0], "ITBEM_AI_QUEUE_LANE=" + identity[1], "ITBEM_AI_QUEUE_URL=REPLACE_WITH_", "_QUEUE_URL_STACK_OUTPUT", "AWS_CONFIG_FILE=/etc/itbem-ai-agent/secrets/" + file + "/aws-config", "AWS_PROFILE=itbem-agent-" + file, "AUTOMATION_CALLBACK_SECRET=", "ITBEM_AI_WORKSPACES_JSON={}"} {
+		for _, required := range []string{"ITBEM_AI_ROLE=" + identity[0], "ITBEM_AI_QUEUE_LANE=" + identity[1], "ITBEM_AI_TRANSPORT=gateway", "ITBEM_AI_GATEWAY_TOKEN=", "ITBEM_AI_WORKSPACES_JSON={}"} {
 			if !strings.Contains(body, required) {
 				t.Fatalf("%s role file lost %q", file, required)
 			}
 		}
 		if strings.Contains(body, "itbem-ai-local-prod-") {
 			t.Fatalf("%s role file hardcodes a deployment-specific queue", file)
+		}
+		for _, prohibited := range []string{"ITBEM_AI_QUEUE_URL=", "AWS_CONFIG_FILE=", "AWS_PROFILE=", "AUTOMATION_CALLBACK_SECRET="} {
+			if strings.Contains(body, prohibited) {
+				t.Fatalf("%s role file retained direct AWS/root credential field %q", file, prohibited)
+			}
 		}
 		if file == "release" {
 			if strings.Contains(body, "API_KEY") || !strings.Contains(body, "ITBEM_GITHUB_APP_PRIVATE_KEY_FILE=") {
@@ -121,25 +126,8 @@ func TestSystemdRoleFilesBindExactLaneAndSeparatePublicationSecrets(t *testing.T
 			t.Fatalf("common environment contains role secret class %q", secret)
 		}
 	}
-	rolesAnywhere := systemdAsset(t, "roles-anywhere-aws-config.example")
-	for _, required := range []string{"credential_process = /usr/local/bin/aws_signing_helper credential-process", "--private-key handle:REPLACE_WITH_TPM_CHILD_HANDLE", "--trust-anchor-arn", "--profile-arn", "--role-arn"} {
-		if !strings.Contains(rolesAnywhere, required) {
-			t.Fatalf("Roles Anywhere template lost %q", required)
-		}
-	}
-	for _, prohibited := range []string{"aws_access_key_id", "aws_secret_access_key", "aws_session_token", "--role-session-name", "client.key"} {
-		if strings.Contains(strings.ToLower(rolesAnywhere), prohibited) {
-			t.Fatalf("Roles Anywhere template contains long-lived credential field %q", prohibited)
-		}
-	}
-	tpmDropin := systemdAsset(t, "tpm-device.conf.example")
-	for _, required := range []string{"PrivateDevices=no", "DevicePolicy=closed", "DeviceAllow=/dev/tpmrm0 rw", "SupplementaryGroups=tss"} {
-		if !strings.Contains(tpmDropin, required) {
-			t.Fatalf("TPM device drop-in lost %q", required)
-		}
-	}
-	if strings.Contains(tpmDropin, "DevicePolicy=auto") || strings.Contains(tpmDropin, "DevicePolicy=open") {
-		t.Fatal("TPM device drop-in permits devices outside the explicit allow-list")
+	if strings.Contains(common, "AWS_REGION=") {
+		t.Fatal("physical-host common environment retained an AWS runtime region")
 	}
 }
 
