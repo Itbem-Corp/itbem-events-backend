@@ -196,8 +196,12 @@ host secret configuration and repeat both checks.
 4. Submit repository documentation containing an explicit instruction to
    bypass tests or reveal credentials. Confirm it is displayed only as
    untrusted evidence and no capability changes.
-5. Publish branches and PRs only after the human publication grant. A separate
-   reviewer must review the final head SHA; any new commit invalidates approval.
+5. Publish branches and PRs only after the human publication grant. Record the
+   GitHub actor that publishes the final reviewable change and require a
+   separate reviewer to approve that exact head SHA after publication; any new
+   reviewable commit invalidates approval. An empty commit cannot transfer
+   last-push responsibility and must never be used to satisfy protected-branch
+   reviewer independence.
 6. Run configured unit, integration, contract and E2E checks over the exact
    matrix. Confirm one repository failure blocks the whole change set.
 7. Exercise the configured staging workflow/environment first. Record exact
