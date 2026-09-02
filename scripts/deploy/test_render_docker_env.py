@@ -135,6 +135,17 @@ class RenderDockerEnvTests(unittest.TestCase):
         self.assertIn("date='7 days ago'", workflow)
         self.assertIn("rds delete-db-snapshot", workflow)
 
+    def test_deploy_verifies_github_webhook_after_exact_revision_promotion(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        promotion = workflow.index(
+            "- name: Deploy through SSM, health-gate promotion, and rollback on failure"
+        )
+        webhook = workflow.index("- name: Verify GitHub review webhook delivery")
+        cleanup = workflow.index("- name: Remove ephemeral delivery artifacts")
+        self.assertLess(promotion, webhook)
+        self.assertLess(webhook, cleanup)
+        self.assertIn("python3 scripts/deploy/verify_github_app_webhook.py", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()
