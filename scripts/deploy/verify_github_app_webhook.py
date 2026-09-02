@@ -72,6 +72,12 @@ def load_private_key(value: str, file_name: str) -> str:
             "configure exactly one GitHub App private key value or root-managed file"
         )
     if value:
+        # Docker --env-file cannot represent literal newlines, so the
+        # production secret uses the same explicit \n form accepted by the
+        # application configuration. Restore PEM framing only in that
+        # unambiguous single-line representation.
+        if "\n" not in value and "\\n" in value:
+            value = value.replace("\\n", "\n")
         return value
     key_path = Path(file_name)
     if not key_path.is_absolute():

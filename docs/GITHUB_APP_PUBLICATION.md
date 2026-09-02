@@ -98,6 +98,10 @@ queda verde si GitHub recibe `200`; un secreto desincronizado, una URL rota o
 un ingress no disponible bloquean la evidencia operativa aunque `/health`
 permanezca saludable. La prueba no imprime el secreto, el payload ni la llave
 privada y no crea una completion del proveedor.
+La llave puede llegar como PEM multilínea desde un archivo root-managed o como
+el formato de una sola línea con `\\n` explícitos requerido por el `env-file`
+de producción; el verificador restaura el framing antes de firmar y nunca
+registra el material normalizado.
 
 Después de validar la salida estructurada contra ese diff, un relay
 determinista obtiene un token efímero restringido al repositorio, vuelve a
