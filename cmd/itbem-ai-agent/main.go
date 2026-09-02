@@ -25,6 +25,7 @@ func main() {
 	smoke := flag.Bool("provider-smoke", false, "make one explicit non-sensitive provider request")
 	authProbe := flag.Bool("provider-auth-probe", false, "verify provider authentication without creating a completion")
 	runtimeAuthProbe := flag.Bool("runtime-auth-probe", false, "verify the configured runtime transport without consuming work")
+	githubAuthProbe := flag.Bool("github-auth-probe", false, "verify the role-specific GitHub App installation with bounded read-only access")
 	doctor := flag.Bool("doctor", false, "validate the local workspace registry without calling a provider")
 	syncWorkspaces := flag.Bool("sync-workspaces", false, "clone or fast-forward operator-managed workspace base checkouts")
 	flag.Parse()
@@ -96,6 +97,20 @@ func main() {
 		}
 		return
 	}
+	if *githubAuthProbe {
+		runtimeConfig, err := automationagent.LoadRuntimeConfig(os.Getenv)
+		if err != nil {
+			fail(err)
+		}
+		report, err := githubAuthProbeReport(context.Background(), runtimeConfig, os.Getenv, func(ctx context.Context, config automationagent.GitHubAppConfig) error {
+			return automationagent.VerifyGitHubAppInstallation(ctx, config, nil, time.Now().UTC())
+		})
+		if err != nil {
+			fail(err)
+		}
+		_ = json.NewEncoder(os.Stdout).Encode(report)
+		return
+	}
 	if !*smoke {
 		run()
 		return
@@ -112,6 +127,25 @@ func main() {
 		fail(err)
 	}
 	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"provider": completion.Provider, "configured_model": config.Model, "reported_model": completion.Model, "response_id": completion.ResponseID, "usage": completion.Usage})
+}
+
+type githubInstallationVerifier func(context.Context, automationagent.GitHubAppConfig) error
+
+func githubAuthProbeReport(ctx context.Context, runtimeConfig automationagent.RuntimeConfig, lookup func(string) string, verify githubInstallationVerifier) (map[string]any, error) {
+	if !githubPublicationRequired(runtimeConfig) {
+		return map[string]any{"ready": true, "status": "not_required", "network_checks_made": false, "provider": "github_app"}, nil
+	}
+	config, err := automationagent.LoadGitHubAppConfig(lookup)
+	if err != nil {
+		return nil, err
+	}
+	if verify == nil {
+		return nil, fmt.Errorf("GitHub App installation verifier is unavailable")
+	}
+	if err := verify(ctx, config); err != nil {
+		return nil, fmt.Errorf("GitHub App installation authentication failed")
+	}
+	return map[string]any{"ready": true, "status": "authenticated", "network_checks_made": true, "provider": "github_app"}, nil
 }
 
 // syncWorkspaceReport is a local, explicit maintenance command. It deliberately
