@@ -102,6 +102,15 @@ class GitHubAppWebhookTests(unittest.TestCase):
 
     def test_private_key_accepts_one_inline_or_absolute_file_source(self) -> None:
         self.assertEqual(load_private_key(" inline-key ", ""), "inline-key")
+        escaped = (
+            "-----BEGIN PRIVATE KEY-----\\n"
+            "encoded-body\\n"
+            "-----END PRIVATE KEY-----"
+        )
+        self.assertEqual(
+            load_private_key(escaped, ""),
+            "-----BEGIN PRIVATE KEY-----\nencoded-body\n-----END PRIVATE KEY-----",
+        )
         with tempfile.TemporaryDirectory() as directory:
             key_path = Path(directory).resolve() / "app.pem"
             key_path.write_text("file-key\n", encoding="utf-8")
