@@ -142,10 +142,16 @@ func githubAuthProbeReport(ctx context.Context, runtimeConfig automationagent.Ru
 	if verify == nil {
 		return nil, fmt.Errorf("GitHub App installation verifier is unavailable")
 	}
-	if err := verify(ctx, config); err != nil {
-		return nil, fmt.Errorf("GitHub App installation authentication failed")
+	verifiedInstallations := 0
+	for _, installationID := range config.InstallationIDs {
+		candidate := config
+		candidate.InstallationID = installationID
+		if err := verify(ctx, candidate); err != nil {
+			return nil, fmt.Errorf("GitHub App installation authentication failed")
+		}
+		verifiedInstallations++
 	}
-	return map[string]any{"ready": true, "status": "authenticated", "network_checks_made": true, "provider": "github_app"}, nil
+	return map[string]any{"ready": true, "status": "authenticated", "network_checks_made": true, "provider": "github_app", "installation_count": verifiedInstallations}, nil
 }
 
 // syncWorkspaceReport is a local, explicit maintenance command. It deliberately

@@ -118,20 +118,25 @@ func TestGitHubAuthProbeIsRequiredOnlyForPublishingRolesAndRedactsFailures(t *te
 	reviewer := automationagent.RuntimeConfig{WorkerConfig: automationagent.WorkerConfig{Role: agentwork.RoleReviewer, Lane: agentwork.LaneReview}}
 	lookup := func(name string) string {
 		values := map[string]string{
-			"ITBEM_GITHUB_APP_ID": "12345", "ITBEM_GITHUB_INSTALLATION_IDS": "67890",
+			"ITBEM_GITHUB_APP_ID": "12345", "ITBEM_GITHUB_INSTALLATION_IDS": "67890,67891",
 			"ITBEM_GITHUB_APP_PRIVATE_KEY": privatePEM,
 		}
 		return values[name]
 	}
+	verifiedInstallations := make([]string, 0, 2)
 	report, err = githubAuthProbeReport(context.Background(), reviewer, lookup, func(_ context.Context, config automationagent.GitHubAppConfig) error {
 		called = true
-		if config.AppID != "12345" || config.InstallationID != "67890" {
+		if config.AppID != "12345" {
 			t.Fatalf("unexpected GitHub App identity: %#v", config)
 		}
+		verifiedInstallations = append(verifiedInstallations, config.InstallationID)
 		return nil
 	})
-	if err != nil || !called || report["ready"] != true || report["status"] != "authenticated" || report["network_checks_made"] != true {
+	if err != nil || !called || report["ready"] != true || report["status"] != "authenticated" || report["network_checks_made"] != true || report["installation_count"] != 2 {
 		t.Fatalf("reviewer GitHub probe = %#v, called=%v, err=%v", report, called, err)
+	}
+	if strings.Join(verifiedInstallations, ",") != "67890,67891" {
+		t.Fatalf("not every configured installation was verified: %#v", verifiedInstallations)
 	}
 
 	_, err = githubAuthProbeReport(context.Background(), reviewer, lookup, func(context.Context, automationagent.GitHubAppConfig) error {

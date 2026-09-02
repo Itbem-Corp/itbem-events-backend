@@ -98,7 +98,8 @@ message. It requires no AWS identity. Review and Release each fail unless their 
 GitHub App identity is complete; other lanes remain locally useful without
 publication authority. Every worker start also runs `--github-auth-probe`:
 Review and Release must mint a short-lived installation token and complete one
-bounded read-only repository-access request, while non-publishing lanes report
+bounded read-only repository-access request for every configured installation,
+while non-publishing lanes report
 `not_required` without contacting GitHub. Do not enable the worker units until all five gateway,
 provider, workspace and GitHub identity preflights pass. Then start one role
 unit at a time and observe one canary per lane before enabling the next.
