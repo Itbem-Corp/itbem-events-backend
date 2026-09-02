@@ -122,12 +122,16 @@ func GitHubPullRequestReviewWebhook(c echo.Context) error {
 	if cfg == nil || !automationqueue.IsConfigured() || strings.TrimSpace(cfg.AutomationInputBucket) == "" || !githubReviewWebhookConfigured(cfg) {
 		return utils.Error(c, http.StatusNotFound, "Not found", "")
 	}
-	if !strings.EqualFold(strings.TrimSpace(c.Request().Header.Get("X-GitHub-Event")), "pull_request") {
-		return utils.Error(c, http.StatusBadRequest, "Invalid GitHub event", "")
-	}
 	body, err := io.ReadAll(io.LimitReader(c.Request().Body, maxGitHubReviewWebhookBytes+1))
 	if err != nil || len(body) == 0 || len(body) > maxGitHubReviewWebhookBytes || !validGitHubWebhookSignature(body, c.Request().Header.Get("X-Hub-Signature-256"), cfg.GitHubReviewWebhookSecret) {
 		return utils.Error(c, http.StatusUnauthorized, "Unauthorized", "")
+	}
+	eventName := strings.TrimSpace(c.Request().Header.Get("X-GitHub-Event"))
+	if githubReviewWebhookPing(eventName, body) {
+		return utils.Success(c, http.StatusOK, "GitHub webhook ready", map[string]string{"status": "ready"})
+	}
+	if !strings.EqualFold(eventName, "pull_request") {
+		return utils.Error(c, http.StatusBadRequest, "Invalid GitHub event", "")
 	}
 	var event githubPullRequestWebhook
 	decoder := json.NewDecoder(strings.NewReader(string(body)))
@@ -251,6 +255,10 @@ func GitHubPullRequestReviewWebhook(c echo.Context) error {
 		return utils.Error(c, http.StatusConflict, "GitHub review already queued", "")
 	}
 	return utils.Success(c, http.StatusAccepted, "GitHub pull request review queued", githubReviewTaskProjection(*task))
+}
+
+func githubReviewWebhookPing(eventName string, body []byte) bool {
+	return strings.EqualFold(strings.TrimSpace(eventName), "ping") && json.Valid(body)
 }
 
 func githubReviewTaskProjection(task models.AutomationTask) githubReviewTaskView {
