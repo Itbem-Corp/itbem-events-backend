@@ -60,9 +60,28 @@ path unreadable/unwritable so migration mistakes fail closed.
 Install one AWS shared config per lane under
 `/etc/itbem-ai-agent/secrets/<lane>/aws-config`, mode `0640`, owned by
 `root:itbem-agent-<lane>`, based on `roles-anywhere-aws-config.example`.
-Install that lane's X.509 certificate and private key beside it, or use the
-helper's PKCS#11/TPM options so the key is non-exportable. Verify the helper's
-published SHA-256 before installation. The common environment disables EC2
+Install that lane's X.509 certificate beside it. On the physical production
+host, every lane must use a distinct TPM child key reference (or a reviewed
+TPM-wrapped TSS2 key); never store a plaintext private key. Verify the helper's
+published SHA-256 before installation. The base unit intentionally hides all
+physical devices. After verifying `/dev/tpmrm0`, the host's `tss` group and the
+five distinct TPM identities, install the reviewed TPM drop-in for each lane:
+
+```bash
+test -c /dev/tpmrm0
+getent group tss
+for lane in orchestration engineering review qa release; do
+  sudo install -d -m 0755 "/etc/systemd/system/itbem-ai-agent@${lane}.service.d"
+  sudo install -m 0644 deploy/systemd/tpm-device.conf.example \
+    "/etc/systemd/system/itbem-ai-agent@${lane}.service.d/tpm-device.conf"
+done
+sudo systemctl daemon-reload
+```
+
+This override exposes only `/dev/tpmrm0` through a closed systemd device
+allow-list and grants the unprivileged lane process the host's `tss` group.
+Do not install it on a host without TPM-backed lane identities. The common
+environment disables EC2
 metadata and points the long-term shared-credentials path at `/dev/null`, so a
 missing/expired certificate fails closed instead of falling back to a machine
 or developer identity. See the official
@@ -71,8 +90,8 @@ The infrastructure profile intentionally rejects a caller-supplied role
 session name, so the helper configuration must not include
 `--role-session-name`. Copy each exact queue URL, input bucket, output bucket,
 profile ARN, role ARN and trust-anchor ARN from the reviewed stack outputs.
-Every checked-in `REPLACE_WITH_*_STACK_OUTPUT` value is deliberately invalid;
-the worker doctor must fail until an operator replaces all of them.
+Every checked-in `REPLACE_WITH_*` value is deliberately invalid; the worker
+doctor must fail until an operator replaces all of them.
 
 Each temporary IAM role must be limited to that lane's queue plus task-input
 read and task-output write. Release may additionally

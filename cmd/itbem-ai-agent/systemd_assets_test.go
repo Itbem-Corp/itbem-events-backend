@@ -122,15 +122,24 @@ func TestSystemdRoleFilesBindExactLaneAndSeparatePublicationSecrets(t *testing.T
 		}
 	}
 	rolesAnywhere := systemdAsset(t, "roles-anywhere-aws-config.example")
-	for _, required := range []string{"credential_process = /usr/local/bin/aws_signing_helper credential-process", "--trust-anchor-arn", "--profile-arn", "--role-arn"} {
+	for _, required := range []string{"credential_process = /usr/local/bin/aws_signing_helper credential-process", "--private-key handle:REPLACE_WITH_TPM_CHILD_HANDLE", "--trust-anchor-arn", "--profile-arn", "--role-arn"} {
 		if !strings.Contains(rolesAnywhere, required) {
 			t.Fatalf("Roles Anywhere template lost %q", required)
 		}
 	}
-	for _, prohibited := range []string{"aws_access_key_id", "aws_secret_access_key", "aws_session_token", "--role-session-name"} {
+	for _, prohibited := range []string{"aws_access_key_id", "aws_secret_access_key", "aws_session_token", "--role-session-name", "client.key"} {
 		if strings.Contains(strings.ToLower(rolesAnywhere), prohibited) {
 			t.Fatalf("Roles Anywhere template contains long-lived credential field %q", prohibited)
 		}
+	}
+	tpmDropin := systemdAsset(t, "tpm-device.conf.example")
+	for _, required := range []string{"PrivateDevices=no", "DevicePolicy=closed", "DeviceAllow=/dev/tpmrm0 rw", "SupplementaryGroups=tss"} {
+		if !strings.Contains(tpmDropin, required) {
+			t.Fatalf("TPM device drop-in lost %q", required)
+		}
+	}
+	if strings.Contains(tpmDropin, "DevicePolicy=auto") || strings.Contains(tpmDropin, "DevicePolicy=open") {
+		t.Fatal("TPM device drop-in permits devices outside the explicit allow-list")
 	}
 }
 

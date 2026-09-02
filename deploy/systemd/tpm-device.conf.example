@@ -1,0 +1,7 @@
+[Service]
+# Opt in only on a reviewed physical host whose lane identity uses a TPM-backed
+# key. Keep the base unit's PrivateDevices=yes everywhere else.
+PrivateDevices=no
+DevicePolicy=closed
+DeviceAllow=/dev/tpmrm0 rw
+SupplementaryGroups=tss
