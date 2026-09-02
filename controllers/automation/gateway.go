@@ -165,8 +165,18 @@ func GatewayProbe(c echo.Context) error {
 	if !ok {
 		return utils.Error(c, http.StatusUnauthorized, "Unauthorized", "")
 	}
-	if !automationqueue.IsConfigured() || configuration.GetS3Client(nil) == nil {
+	cfg, _ := c.Get("config").(*models.Config)
+	storage := configuration.GetS3Client(nil)
+	if !automationqueue.IsConfigured() || storage == nil || cfg == nil || automationqueue.ProbeLane(c.Request().Context(), identity.Lane) != nil {
 		return utils.Error(c, http.StatusServiceUnavailable, "Gateway unavailable", "")
+	}
+	for _, bucket := range []string{strings.TrimSpace(cfg.AutomationInputBucket), strings.TrimSpace(cfg.AutomationOutputBucket)} {
+		if bucket == "" {
+			return utils.Error(c, http.StatusServiceUnavailable, "Gateway unavailable", "")
+		}
+		if _, err := storage.GetBucketLocation(c.Request().Context(), &s3.GetBucketLocationInput{Bucket: aws.String(bucket)}); err != nil {
+			return utils.Error(c, http.StatusServiceUnavailable, "Gateway unavailable", "")
+		}
 	}
 	return utils.Success(c, http.StatusOK, "Agent gateway ready", map[string]any{"ready": true, "role": identity.Role, "lane": identity.Lane})
 }

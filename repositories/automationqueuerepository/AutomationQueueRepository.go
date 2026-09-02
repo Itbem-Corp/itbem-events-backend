@@ -257,6 +257,28 @@ func DeleteLaneMessage(ctx context.Context, lane agentwork.Lane, receiptHandle s
 	return nil
 }
 
+// ProbeLane performs the non-consuming SQS request used by an execution
+// gateway preflight. Configuration presence alone is insufficient: the API
+// process must be able to reach the exact lane with its runtime IAM identity.
+func ProbeLane(ctx context.Context, lane agentwork.Lane) error {
+	if client == nil {
+		return fmt.Errorf("automation queue client is unavailable")
+	}
+	queueURL, err := targets.queueURLForLane(lane)
+	if err != nil {
+		return err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, healthTimeout)
+	defer cancel()
+	if _, _, _, ok := queueCounts(requestCtx, queueURL); !ok {
+		return fmt.Errorf("automation queue lane %s is unreachable", lane)
+	}
+	return nil
+}
+
 // QueueHealth obtains best-effort approximate queue depth with a short,
 // bounded request. A failed read deliberately returns Available=false rather
 // than inventing zero backlog, so an operations surface can distinguish an

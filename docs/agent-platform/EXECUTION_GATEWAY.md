@@ -21,15 +21,22 @@ over HTTPS with a distinct derived token.
   and `automation/<task-id>/` namespace.
 - ACK, defer and visibility renewal require the same sealed lease and lane
   token. Messages are deleted only after terminal worker processing.
+- The backend runtime role, not the Linux host, has receive, visibility,
+  acknowledgement and attribute-read authority only on the five agent lane
+  queues. Its object authority is restricted to automation inputs and outputs;
+  it has no general SQS or S3 wildcard.
 
 ## Availability and recovery
 
 The backend continues using SQS visibility, at-least-once delivery, DLQ and
 the existing idempotent task/result ledger. A gateway or worker failure leaves
 the message for redelivery; it does not acknowledge work optimistically. The
-runtime probe checks authentication plus backend queue/storage readiness but
-does not receive work. Root-secret rotation accepts current and previous roots
-for a bounded overlap while every lane token is replaced.
+runtime probe checks authentication, a non-consuming attribute read on the
+exact lane, and bucket-location access for both private automation buckets. It
+does not receive work. This preflight must fail closed when the deployed IAM
+role cannot act as the gateway, even if queue URLs and SDK clients are present.
+Root-secret rotation accepts current and previous roots for a bounded overlap
+while every lane token is replaced.
 
 The explicit `aws` worker transport remains only for the local emulator and a
 reviewed migration fallback. Production systemd examples select `gateway` and
