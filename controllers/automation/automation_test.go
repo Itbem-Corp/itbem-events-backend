@@ -164,6 +164,12 @@ func TestGitHubReviewWebhookAdmissionIsExplicitAndSignatureBound(t *testing.T) {
 	if !githubReviewActionAllowed("synchronize") || githubReviewActionAllowed("closed") {
 		t.Fatal("only safe active pull-request actions may enqueue a new review")
 	}
+	if !githubReviewWebhookPing(" ping ", []byte(`{"zen":"Keep it logically awesome."}`)) {
+		t.Fatal("a valid signed GitHub ping envelope must complete the webhook handshake without queueing work")
+	}
+	if githubReviewWebhookPing("pull_request", []byte(`{}`)) || githubReviewWebhookPing("ping", []byte(`{} {}`)) {
+		t.Fatal("only one valid JSON ping envelope may complete the webhook handshake")
+	}
 	var decoded githubPullRequestWebhook
 	decoder := json.NewDecoder(strings.NewReader(`{"action":"synchronize"} {}`))
 	if err := decoder.Decode(&decoded); err != nil {

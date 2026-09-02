@@ -87,6 +87,11 @@ un commit nuevo sí recibe una revisión nueva. El webhook no ejecuta código ni
 publica directamente: congela diff, digest, instalación y SHA, y deposita el
 trabajo en la lane Review.
 
+El evento de instalación `ping` también exige la firma HMAC válida y un único
+cuerpo JSON. Responde `200` con estado `ready`, no consulta GitHub, no crea una
+tarea y no toca la cola. Cualquier otro tipo de evento continúa fallando
+cerrado con `400` después de autenticar el cuerpo.
+
 Después de validar la salida estructurada contra ese diff, un relay
 determinista obtiene un token efímero restringido al repositorio, vuelve a
 comprobar que el PR sigue abierto y en el mismo SHA, y publica la revisión. Un
