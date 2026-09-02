@@ -178,8 +178,11 @@ The UI renders backend state; agent prose cannot synthesize a terminal status.
 Use one onboarded test project whose configuration is not embedded in platform
 code. Freeze and record every repository branch and SHA before execution.
 
-Before activating any long-lived role worker, run `--doctor` and then
-`--provider-auth-probe`. The latter uses only a read-only provider metadata or
+Before activating any long-lived role worker, run `--doctor`,
+`--runtime-auth-probe` and then `--provider-auth-probe`. The runtime probe
+exercises the temporary AWS identity and exact lane queue using only
+`sqs:GetQueueAttributes`; it never receives or mutates a task. The provider
+probe uses only a read-only provider metadata or
 quota endpoint, never creates a completion, and emits no credential, balance or
 quota value. A `configured_unverified`, `rejected`, `region_mismatch`,
 `unreachable` or `inconclusive` provider state blocks worker activation. For a

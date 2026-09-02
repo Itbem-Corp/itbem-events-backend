@@ -98,7 +98,11 @@ done
 ```
 
 The doctor unit runs only the local, non-billable `--doctor` command and cannot
-poll SQS or mutate a workspace. Review and Release each fail unless their own
+poll SQS or mutate a workspace. Before every worker start, the service then
+runs `--runtime-auth-probe`, which asks only for the immutable ARN attribute of
+that lane's exact queue. This exercises the Roles Anywhere certificate/TPM
+credential process and `sqs:GetQueueAttributes` without receiving, deleting or
+changing a message. Review and Release each fail unless their own
 GitHub App identity is complete; other lanes remain locally useful without
 publication authority. Do not enable the worker units or configure
 backend lane routing until all five preflights, queue IAM checks and heartbeat

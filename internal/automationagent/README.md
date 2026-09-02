@@ -212,7 +212,10 @@ root-only configuration but intentionally never starts or enables a service.
 Every lane has a private `0700` workspace root and its own registry; sharing a
 checkout across Engineer, Reviewer, QA or Release is unsupported. Preflight
 uses the separate oneshot `itbem-ai-agent-doctor@.service`, which cannot poll
-SQS or mutate the checkout. Review and Release each fail closed when their own,
+SQS or mutate the checkout. The long-lived unit subsequently runs
+`--runtime-auth-probe`, which reads only the exact queue's immutable ARN
+attribute to exercise its temporary AWS identity and lane policy without
+leasing work. Review and Release each fail closed when their own,
 distinct GitHub App identity is absent; Release intentionally has no model key.
 On an on-premises host, each lane uses an independent IAM Roles Anywhere
 `credential_process` profile, with EC2 metadata and long-lived shared access

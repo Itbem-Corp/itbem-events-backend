@@ -24,6 +24,7 @@ import (
 func main() {
 	smoke := flag.Bool("provider-smoke", false, "make one explicit non-sensitive provider request")
 	authProbe := flag.Bool("provider-auth-probe", false, "verify provider authentication without creating a completion")
+	runtimeAuthProbe := flag.Bool("runtime-auth-probe", false, "verify AWS identity and scoped lane queue access without consuming work")
 	doctor := flag.Bool("doctor", false, "validate the local workspace registry without calling a provider")
 	syncWorkspaces := flag.Bool("sync-workspaces", false, "clone or fast-forward operator-managed workspace base checkouts")
 	flag.Parse()
@@ -56,6 +57,25 @@ func main() {
 			fail(err)
 		}
 		report, err := automationagent.ProbeProviderAuth(context.Background(), config, nil)
+		if err != nil {
+			fail(err)
+		}
+		_ = json.NewEncoder(os.Stdout).Encode(report)
+		if !report.Ready {
+			os.Exit(1)
+		}
+		return
+	}
+	if *runtimeAuthProbe {
+		config, err := automationagent.LoadRuntimeConfig(os.Getenv)
+		if err != nil {
+			fail(err)
+		}
+		runtime, err := automationagent.NewAWSRuntime(context.Background(), config)
+		if err != nil {
+			fail(fmt.Errorf("AWS runtime authentication probe could not initialize"))
+		}
+		report, err := automationagent.ProbeRuntimeAuth(context.Background(), config, runtime.SQS)
 		if err != nil {
 			fail(err)
 		}

@@ -35,8 +35,8 @@ run "authoritative QA, security, dependency, environment and recovery evidence" 
 run "safe restart/redelivery and durable queue leases" \
   go test ./internal/automationagent -run 'Test(WorkerRecoveryReusesOriginalInferenceRunWithoutCreatingNewCostIdentity|WorkerReusesPersistedResultInsteadOfReexecutingProvider|LongRunningQueueMessageRenewsItsVisibilityLease|ProcessQueueMessageRetainsRetryableWork)$' -count=1
 
-run "Linux role isolation and non-consuming doctor" \
-  go test ./cmd/itbem-ai-agent -run 'Test(SystemdUnitFailsClosedAndRunsUnprivileged|SystemdDoctorIsReadOnlyAndCannotConsumeQueueWork|SystemdRoleFilesBindExactLaneAndSeparatePublicationSecrets|SystemdInstallerStagesButNeverActivatesServices|DoctorPublicationReadinessRequiresRoleSpecificGitHubAppConfiguration)$' -count=1
+run "Linux role isolation, non-consuming doctor and scoped AWS preflight" \
+  go test ./cmd/itbem-ai-agent ./internal/automationagent -run 'Test(SystemdUnitFailsClosedAndRunsUnprivileged|SystemdDoctorIsReadOnlyAndCannotConsumeQueueWork|SystemdRoleFilesBindExactLaneAndSeparatePublicationSecrets|SystemdInstallerStagesButNeverActivatesServices|DoctorPublicationReadinessRequiresRoleSpecificGitHubAppConfiguration|ProbeRuntimeAuthIsReadOnlyAndRedactsQueueIdentity|ProbeRuntimeAuthFailsClosedWithoutLeakingAWSIdentity)$' -count=1
 
 run "exact-SHA idempotent GitHub review relay and independent identity" \
   go test ./internal/automationagent ./controllers/automation -run 'Test(PublishGitHubCodeReviewIsExactSHAAndRetrySafe|PublishGitHubCodeReviewNeverSelfApproves|CodeReviewPublicationForTaskRequiresExactIndependentGitHubEvidence)$' -count=1
