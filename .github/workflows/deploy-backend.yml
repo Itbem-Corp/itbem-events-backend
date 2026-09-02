@@ -513,6 +513,12 @@ jobs:
           [[ -z "$invocation_error" || "$invocation_error" == None ]] || printf '%s\n' "$invocation_error" >&2
           grep -Fqx "deployed_revision=$REVISION" <<<"$invocation_output"
 
+      - name: Verify GitHub review webhook delivery
+        env:
+          ITBEM_GITHUB_APP_ID: ${{ secrets.ITBEM_GITHUB_APP_ID }}
+          ITBEM_GITHUB_APP_PRIVATE_KEY: ${{ secrets.ITBEM_GITHUB_APP_PRIVATE_KEY }}
+        run: python3 scripts/deploy/verify_github_app_webhook.py
+
       - name: Remove ephemeral delivery artifacts
         if: always()
         run: |

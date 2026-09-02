@@ -92,6 +92,13 @@ cuerpo JSON. Responde `200` con estado `ready`, no consulta GitHub, no crea una
 tarea y no toca la cola. Cualquier otro tipo de evento continúa fallando
 cerrado con `400` después de autenticar el cuerpo.
 
+El despliegue de producción autentica como la misma GitHub App y redeliverya
+su último evento `ping` después de promover el SHA exacto. El workflow sólo
+queda verde si GitHub recibe `200`; un secreto desincronizado, una URL rota o
+un ingress no disponible bloquean la evidencia operativa aunque `/health`
+permanezca saludable. La prueba no imprime el secreto, el payload ni la llave
+privada y no crea una completion del proveedor.
+
 Después de validar la salida estructurada contra ese diff, un relay
 determinista obtiene un token efímero restringido al repositorio, vuelve a
 comprobar que el PR sigue abierto y en el mismo SHA, y publica la revisión. Un
