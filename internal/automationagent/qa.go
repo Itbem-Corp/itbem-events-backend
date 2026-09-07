@@ -3,6 +3,8 @@ package automationagent
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,6 +26,10 @@ import (
 const (
 	maxQAArtifacts     = 12
 	maxQAArtifactBytes = 25 << 20
+	// The provider-capable browser runner is a small, root-operated entrypoint.
+	// Bound its size before hashing so an accidental or hostile registration
+	// cannot turn the credential admission check into an unbounded file read.
+	maxStagehandRunnerBytes = 8 << 20
 )
 
 type screenshotViewport struct {
@@ -420,7 +427,7 @@ func captureSemanticQA(ctx context.Context, taskID, previewURL string, delivery 
 	if err != nil {
 		return nil, nil, err
 	}
-	environment, err := semanticQAEnvironment(rendered, lookup)
+	environment, trustedStagehand, err := semanticQAEnvironment(rendered, root, lookup)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -431,7 +438,7 @@ func captureSemanticQA(ctx context.Context, taskID, previewURL string, delivery 
 	if err != nil {
 		return nil, nil, err
 	}
-	if len(testEnvironment) > 0 && !isPinnedStagehandCommand(rendered) {
+	if len(testEnvironment) > 0 && !trustedStagehand {
 		return nil, nil, fmt.Errorf("approved browser QA test flow requires the pinned Stagehand runner")
 	}
 	for key, value := range testEnvironment {
@@ -552,22 +559,26 @@ func resolveSemanticQACommand(command []string, lookup func(string) string) ([]s
 }
 
 // semanticQAEnvironment keeps provider credentials out of every repository
-// command. The only exception is ITBEM's pinned Stagehand runner, which needs
-// inference to interpret browser state. The command is still configured by an
-// operator, but its script location must be the owned Stagehand entrypoint;
-// generic QA commands and customer repository code never receive this key.
-func semanticQAEnvironment(command []string, lookup func(string) string) (map[string]string, error) {
-	if !isPinnedStagehandCommand(command) {
-		return nil, nil
+// command. The sole exception is an operator-owned Stagehand runner outside
+// the reviewed worktree whose exact content matches the configured SHA-256.
+// A repository can configure a semantic command, but it cannot turn that
+// command into a credential-bearing process by naming a familiar path.
+func semanticQAEnvironment(command []string, workspaceRoot string, lookup func(string) string) (map[string]string, bool, error) {
+	trusted, err := trustedStagehandCommand(command, workspaceRoot, lookup)
+	if err != nil {
+		return nil, false, err
+	}
+	if !trusted {
+		return nil, false, nil
 	}
 	if lookup == nil {
-		return nil, fmt.Errorf("stagehand semantic QA requires a credential lookup")
+		return nil, false, fmt.Errorf("stagehand semantic QA requires a credential lookup")
 	}
 	apiKey := strings.TrimSpace(lookup("MINIMAX_API_KEY"))
 	if apiKey == "" {
-		return nil, fmt.Errorf("stagehand semantic QA requires the configured MiniMax credential")
+		return nil, false, fmt.Errorf("stagehand semantic QA requires the configured MiniMax credential")
 	}
-	return map[string]string{"MINIMAX_API_KEY": apiKey}, nil
+	return map[string]string{"MINIMAX_API_KEY": apiKey}, true, nil
 }
 
 // browserQATestEnvironment resolves only explicitly reviewed test-value
@@ -618,17 +629,89 @@ func browserQATestEnvironment(delivery json.RawMessage, lookup func(string) stri
 	return values, nil
 }
 
-func isPinnedStagehandCommand(command []string) bool {
+// trustedStagehandCommand admits the MiniMax credential only to the runner
+// installed by the execution-plane operator. The runner must be outside the
+// reviewed checkout, named as the Node script argument, and match a digest
+// supplied through machine configuration. This stays generic across projects
+// while preventing a changed repository file from inheriting the credential.
+func trustedStagehandCommand(command []string, workspaceRoot string, lookup func(string) string) (bool, error) {
 	if len(command) < 2 || !approvedSemanticRuntime(command[0]) || (!strings.EqualFold(filepath.Base(command[0]), "node.exe") && command[0] != "node") {
+		return false, nil
+	}
+	if lookup == nil {
+		return false, nil
+	}
+	runnerSetting := strings.TrimSpace(lookup("ITBEM_STAGEHAND_RUNNER_PATH"))
+	digestSetting := strings.TrimSpace(lookup("ITBEM_STAGEHAND_RUNNER_SHA256"))
+	if runnerSetting == "" && digestSetting == "" {
+		return false, nil
+	}
+	if runnerSetting == "" || digestSetting == "" {
+		return false, fmt.Errorf("Stagehand runner configuration requires both path and SHA-256")
+	}
+	expectedDigest, err := hex.DecodeString(digestSetting)
+	if err != nil || len(expectedDigest) != sha256.Size {
+		return false, fmt.Errorf("configured Stagehand runner SHA-256 is invalid")
+	}
+	configuredRunner, err := canonicalExistingAbsolutePath(runnerSetting)
+	if err != nil {
+		return false, fmt.Errorf("configured Stagehand runner path is invalid")
+	}
+	if !filepath.IsAbs(strings.TrimSpace(command[1])) {
+		return false, nil
+	}
+	commandRunner, err := canonicalExistingAbsolutePath(command[1])
+	if err != nil || !sameFilesystemPath(commandRunner, configuredRunner) {
+		return false, nil
+	}
+	workspace, err := canonicalExistingAbsolutePath(workspaceRoot)
+	if err != nil {
+		return false, fmt.Errorf("reviewed workspace path is invalid")
+	}
+	if filesystemPathWithin(workspace, configuredRunner) {
+		return false, fmt.Errorf("configured Stagehand runner must be outside the reviewed workspace")
+	}
+	runner, err := os.Open(configuredRunner)
+	if err != nil {
+		return false, fmt.Errorf("configured Stagehand runner cannot be read")
+	}
+	defer runner.Close()
+	hash := sha256.New()
+	bytesRead, err := io.Copy(hash, io.LimitReader(runner, maxStagehandRunnerBytes+1))
+	if err != nil || bytesRead > maxStagehandRunnerBytes {
+		return false, fmt.Errorf("configured Stagehand runner cannot be verified")
+	}
+	if subtle.ConstantTimeCompare(hash.Sum(nil), expectedDigest) != 1 {
+		return false, fmt.Errorf("configured Stagehand runner SHA-256 does not match")
+	}
+	return true, nil
+}
+
+func canonicalExistingAbsolutePath(value string) (string, error) {
+	path := strings.TrimSpace(value)
+	if !filepath.IsAbs(path) {
+		return "", fmt.Errorf("path must be absolute")
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(resolved), nil
+}
+
+func sameFilesystemPath(left, right string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
+}
+
+func filesystemPathWithin(root, target string) bool {
+	relative, err := filepath.Rel(root, target)
+	if err != nil {
 		return false
 	}
-	for _, part := range command[1:] {
-		clean := strings.ToLower(filepath.ToSlash(strings.TrimSpace(part)))
-		if strings.HasSuffix(clean, "/itbem-events-backend/tools/stagehand-qa/run.mjs") || clean == "tools/stagehand-qa/run.mjs" {
-			return true
-		}
-	}
-	return false
+	return relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative))
 }
 
 // browserQAPlan compiles the human-approved browser cases from the immutable

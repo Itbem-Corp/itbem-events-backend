@@ -333,28 +333,76 @@ func TestStagehandToolExecutionUsesOnlyUploadedSemanticReport(t *testing.T) {
 }
 
 func TestSemanticQAEnvironmentOnlyExposesProviderCredentialToPinnedStagehand(t *testing.T) {
+	workspace := t.TempDir()
+	runnerDirectory := t.TempDir()
+	runner := filepath.Join(runnerDirectory, "run.mjs")
+	runnerBody := []byte("export {}\n")
+	if err := os.WriteFile(runner, runnerBody, 0600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(runnerBody)
 	lookup := func(name string) string {
-		if name == "MINIMAX_API_KEY" {
+		switch name {
+		case "MINIMAX_API_KEY":
 			return "test-minimax-key"
+		case "ITBEM_STAGEHAND_RUNNER_PATH":
+			return runner
+		case "ITBEM_STAGEHAND_RUNNER_SHA256":
+			return fmt.Sprintf("%x", digest)
+		default:
+			return ""
+		}
+	}
+	ordinary, ordinaryTrusted, err := semanticQAEnvironment([]string{"go", "run", "semantic.go", "{preview_url}", "{artifact_path}"}, workspace, lookup)
+	if err != nil || ordinaryTrusted || len(ordinary) != 0 {
+		t.Fatalf("ordinary repository QA must not receive provider credentials: %#v / trusted=%t / %v", ordinary, ordinaryTrusted, err)
+	}
+	pinned := []string{"node", runner, "--url", "{preview_url}", "--output", "{artifact_path}"}
+	environment, trusted, err := semanticQAEnvironment(pinned, workspace, lookup)
+	if err != nil || !trusted || environment["MINIMAX_API_KEY"] != "test-minimax-key" || len(environment) != 1 {
+		t.Fatalf("verified operator Stagehand runner must receive only its provider credential: %#v / trusted=%t / %v", environment, trusted, err)
+	}
+	if _, _, err := semanticQAEnvironment(pinned, workspace, func(name string) string {
+		if name == "ITBEM_STAGEHAND_RUNNER_PATH" {
+			return runner
+		}
+		if name == "ITBEM_STAGEHAND_RUNNER_SHA256" {
+			return fmt.Sprintf("%x", digest)
 		}
 		return ""
+	}); err == nil {
+		t.Fatal("verified Stagehand runner must fail closed without its configured provider credential")
 	}
-	ordinary, err := semanticQAEnvironment([]string{"go", "run", "semantic.go", "{preview_url}", "{artifact_path}"}, lookup)
-	if err != nil || len(ordinary) != 0 {
-		t.Fatalf("ordinary repository QA must not receive provider credentials: %#v / %v", ordinary, err)
+	if err := os.WriteFile(runner, []byte("changed\n"), 0600); err != nil {
+		t.Fatal(err)
 	}
-	pinned := []string{"node", "C:/agent/itbem-events-backend/tools/stagehand-qa/run.mjs", "--url", "{preview_url}", "--output", "{artifact_path}"}
-	environment, err := semanticQAEnvironment(pinned, lookup)
-	if err != nil || environment["MINIMAX_API_KEY"] != "test-minimax-key" || len(environment) != 1 {
-		t.Fatalf("pinned Stagehand runner must receive only its provider credential: %#v / %v", environment, err)
+	if _, _, err := semanticQAEnvironment(pinned, workspace, lookup); err == nil {
+		t.Fatal("a changed Stagehand runner must not receive provider credentials")
 	}
-	if _, err := semanticQAEnvironment(pinned, func(string) string { return "" }); err == nil {
-		t.Fatal("pinned Stagehand runner must fail closed without its configured provider credential")
+	insideWorkspace := filepath.Join(workspace, "run.mjs")
+	if err := os.WriteFile(insideWorkspace, runnerBody, 0600); err != nil {
+		t.Fatal(err)
+	}
+	insideDigest := sha256.Sum256(runnerBody)
+	insideLookup := func(name string) string {
+		switch name {
+		case "MINIMAX_API_KEY":
+			return "test-minimax-key"
+		case "ITBEM_STAGEHAND_RUNNER_PATH":
+			return insideWorkspace
+		case "ITBEM_STAGEHAND_RUNNER_SHA256":
+			return fmt.Sprintf("%x", insideDigest)
+		default:
+			return ""
+		}
+	}
+	if _, _, err := semanticQAEnvironment([]string{"node", insideWorkspace, "--url", "{preview_url}", "--output", "{artifact_path}"}, workspace, insideLookup); err == nil {
+		t.Fatal("a Stagehand runner inside the reviewed workspace must not receive provider credentials")
 	}
 }
 
 func TestResolveSemanticQACommandUsesOnlyConfiguredManagedNodeRuntime(t *testing.T) {
-	command := []string{"node", "C:/agent/itbem-events-backend/tools/stagehand-qa/run.mjs", "--url", "{preview_url}", "--output", "{artifact_path}"}
+	command := []string{"node", "C:/operator/stagehand/run.mjs", "--url", "{preview_url}", "--output", "{artifact_path}"}
 	resolved, err := resolveSemanticQACommand(command, func(name string) string {
 		if name == "ITBEM_STAGEHAND_NODE_EXECUTABLE" {
 			return "C:/managed/node.exe"

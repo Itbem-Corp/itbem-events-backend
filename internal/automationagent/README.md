@@ -280,7 +280,7 @@ available behind their normal human gates.
     "qa_commands": [["npm", "run", "test:e2e"]],
     "qa_command_kinds": ["e2e"],
     "qa_artifact_patterns": ["test-results/*.png"],
-    "qa_semantic_command": ["node", "tools/stagehand-qa/run.mjs", "--url", "{preview_url}", "--output", "{artifact_path}"]
+    "qa_semantic_command": ["node", "/opt/itbem-ai-agent/tools/stagehand-qa/run.mjs", "--url", "{preview_url}", "--output", "{artifact_path}"]
   }
 }
 ```
@@ -296,8 +296,11 @@ leaves a reviewable branch for the human code-review gate.
 
 `qa_semantic_command` is optional. It runs the pinned, read-only Stagehand
 probe only after a preview is healthy and preserves its JSON report and
-screenshot as normal private QA evidence. See `docs/STAGEHAND_QA.md` for the
-local provider configuration and operational boundaries.
+screenshot as normal private QA evidence. Its script must be the absolute,
+operator-owned runner declared by `ITBEM_STAGEHAND_RUNNER_PATH`, outside the
+reviewed workspace, with the matching `ITBEM_STAGEHAND_RUNNER_SHA256`; otherwise
+the command never receives the provider credential. See `docs/STAGEHAND_QA.md`
+for the local provider configuration and operational boundaries.
 
 The default MiniMax model is `MiniMax-M3`. `MINIMAX_MODEL` lets an operator
 select another model such as `MiniMax-M2.7` when needed; M2.7 requests retain
