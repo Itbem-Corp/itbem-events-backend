@@ -20,7 +20,8 @@ systemd services. The installer never enables or starts a service.
   callback secret on this host.
 - Use two distinct GitHub Apps. Keep the Reviewer App PEM and explicit
   installation allow-list only in the review secret file; it needs metadata
-  and contents read plus pull-request read/write solely to publish reviews.
+  and contents read plus pull-request and checks read/write solely to publish
+  exact-SHA reviews and their required check.
   Keep the Release App PEM and allow-list only in the release secret file; it
   owns approved publication and release operations. Never reuse either App or
   its PEM across the two lanes. Model keys belong only to inference roles;

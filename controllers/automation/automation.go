@@ -2337,34 +2337,43 @@ func codeReviewPublicationForTask(task *models.AutomationTask, raw json.RawMessa
 	event := strings.ToUpper(strings.TrimSpace(execution.Event))
 	actor := strings.ToLower(strings.TrimSpace(execution.ReviewerActor))
 	author := strings.ToLower(strings.TrimSpace(execution.AuthorActor))
-	if execution.SchemaVersion != 1 || !githubRepositoryPattern.MatchString(repository) || execution.PullRequest < 1 || !gitCommitSHA.MatchString(strings.ToLower(strings.TrimSpace(execution.HeadSHA))) || !artifactDigestPattern.MatchString(strings.ToLower(strings.TrimSpace(execution.PatchSHA256))) || !artifactDigestPattern.MatchString(strings.ToLower(strings.TrimSpace(execution.SubjectSHA256))) || !artifactDigestPattern.MatchString(strings.ToLower(strings.TrimSpace(execution.PayloadSHA256))) || !strings.EqualFold(execution.SubjectSHA256, task.EvidenceSubjectDigest) || execution.ReviewID < 1 || actor == "" || execution.PublishedAt.IsZero() {
+	checkName := strings.TrimSpace(execution.CheckName)
+	checkConclusion := strings.ToLower(strings.TrimSpace(execution.CheckConclusion))
+	if execution.SchemaVersion != 2 || !githubRepositoryPattern.MatchString(repository) || execution.PullRequest < 1 || !gitCommitSHA.MatchString(strings.ToLower(strings.TrimSpace(execution.HeadSHA))) || !artifactDigestPattern.MatchString(strings.ToLower(strings.TrimSpace(execution.PatchSHA256))) || !artifactDigestPattern.MatchString(strings.ToLower(strings.TrimSpace(execution.SubjectSHA256))) || !artifactDigestPattern.MatchString(strings.ToLower(strings.TrimSpace(execution.PayloadSHA256))) || !strings.EqualFold(execution.SubjectSHA256, task.EvidenceSubjectDigest) || execution.ReviewID < 1 || actor == "" || execution.CheckRunID < 1 || checkName != "Bema Review / exact-sha" || (checkConclusion != "success" && checkConclusion != "failure") || execution.PublishedAt.IsZero() {
 		return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review publication evidence is invalid")
 	}
 	expectedCorrelationID, correlationErr := githubReviewCorrelationID(repository, execution.PullRequest, execution.HeadSHA)
-	if correlationErr != nil || task.CorrelationID != expectedCorrelationID || !validGitHubReviewURL(execution.ReviewURL, repository, execution.PullRequest, execution.ReviewID) {
+	if correlationErr != nil || task.CorrelationID != expectedCorrelationID || !validGitHubReviewURL(execution.ReviewURL, repository, execution.PullRequest, execution.ReviewID) || !validGitHubCheckRunURL(execution.CheckRunURL) {
 		return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review publication does not match its queued pull request")
 	}
 	switch event {
 	case "APPROVE":
-		if verdict != "approve" || author == "" || strings.EqualFold(actor, author) {
+		if verdict != "approve" || author == "" || strings.EqualFold(actor, author) || checkConclusion != "success" {
 			return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review approval is not independent")
 		}
 	case "REQUEST_CHANGES":
-		if verdict != "request_changes" {
+		if verdict != "request_changes" || checkConclusion != "failure" {
 			return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review event contradicts its verdict")
 		}
 	case "COMMENT":
-		if verdict != "comment" && verdict != "blocked" && (verdict != "approve" || author == "" || !strings.EqualFold(actor, author)) {
+		if (verdict != "comment" && verdict != "blocked" && (verdict != "approve" || author == "" || !strings.EqualFold(actor, author))) || checkConclusion != "failure" {
 			return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review comment contradicts its verdict")
 		}
 	default:
 		return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review event is invalid")
 	}
+	checkRunID, checkRunURL := execution.CheckRunID, strings.TrimSpace(execution.CheckRunURL)
 	return models.AutomationCodeReviewPublication{
 		Repository: repository, PullRequest: execution.PullRequest, HeadSHA: strings.ToLower(execution.HeadSHA), PatchSHA256: strings.ToLower(execution.PatchSHA256),
 		SubjectSHA256: strings.ToLower(execution.SubjectSHA256), PayloadSHA256: strings.ToLower(execution.PayloadSHA256), Verdict: verdict, Event: event,
 		ReviewID: execution.ReviewID, ReviewURL: strings.TrimSpace(execution.ReviewURL), ReviewerActor: actor, AuthorActor: author, PublishedAt: execution.PublishedAt,
+		CheckRunID: &checkRunID, CheckRunURL: &checkRunURL, CheckName: &checkName, CheckConclusion: &checkConclusion,
 	}, nil
+}
+
+func validGitHubCheckRunURL(value string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	return err == nil && parsed.Scheme == "https" && strings.EqualFold(parsed.Hostname(), "github.com") && parsed.User == nil && parsed.RawQuery == "" && strings.Trim(parsed.Path, "/") != ""
 }
 
 func validGitHubReviewURL(value, repository string, pullRequest int, reviewID int64) bool {

@@ -15,26 +15,34 @@ import (
 
 var githubAppSlugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,99}$`)
 
-const maxGitHubReviewLookupPages = 10
+const (
+	maxGitHubReviewLookupPages = 10
+	githubExactSHAReviewCheck  = "Bema Review / exact-sha"
+)
 
 // GitHubCodeReviewPublication is the credential-free, exact-SHA handoff from
 // the Reviewer lane. GitHub remains the authority for the review itself.
 type GitHubCodeReviewPublication struct {
-	SchemaVersion int       `json:"schema_version"`
-	Repository    string    `json:"repository"`
-	PullRequest   int       `json:"pull_request"`
-	HeadSHA       string    `json:"head_sha"`
-	PatchSHA256   string    `json:"patch_sha256"`
-	SubjectSHA256 string    `json:"subject_sha256"`
-	PayloadSHA256 string    `json:"payload_sha256"`
-	Verdict       string    `json:"verdict"`
-	Event         string    `json:"event"`
-	ReviewID      int64     `json:"review_id"`
-	ReviewURL     string    `json:"review_url"`
-	ReviewerActor string    `json:"reviewer_actor"`
-	AuthorActor   string    `json:"author_actor"`
-	Reused        bool      `json:"reused"`
-	PublishedAt   time.Time `json:"published_at"`
+	SchemaVersion   int       `json:"schema_version"`
+	Repository      string    `json:"repository"`
+	PullRequest     int       `json:"pull_request"`
+	HeadSHA         string    `json:"head_sha"`
+	PatchSHA256     string    `json:"patch_sha256"`
+	SubjectSHA256   string    `json:"subject_sha256"`
+	PayloadSHA256   string    `json:"payload_sha256"`
+	Verdict         string    `json:"verdict"`
+	Event           string    `json:"event"`
+	ReviewID        int64     `json:"review_id"`
+	ReviewURL       string    `json:"review_url"`
+	ReviewerActor   string    `json:"reviewer_actor"`
+	AuthorActor     string    `json:"author_actor"`
+	Reused          bool      `json:"reused"`
+	CheckRunID      int64     `json:"check_run_id"`
+	CheckRunURL     string    `json:"check_run_url"`
+	CheckName       string    `json:"check_name"`
+	CheckConclusion string    `json:"check_conclusion"`
+	CheckReused     bool      `json:"check_reused"`
+	PublishedAt     time.Time `json:"published_at"`
 }
 
 type githubReviewComment struct {
@@ -65,6 +73,38 @@ type githubRemoteReview struct {
 	} `json:"user"`
 }
 
+type githubCheckRunPayload struct {
+	Name       string               `json:"name"`
+	HeadSHA    string               `json:"head_sha,omitempty"`
+	ExternalID string               `json:"external_id"`
+	Status     string               `json:"status"`
+	Conclusion string               `json:"conclusion"`
+	DetailsURL string               `json:"details_url"`
+	Output     githubCheckRunOutput `json:"output"`
+}
+
+type githubCheckRunOutput struct {
+	Title   string `json:"title"`
+	Summary string `json:"summary"`
+	Text    string `json:"text"`
+}
+
+type githubRemoteCheckRun struct {
+	ID         int64                `json:"id"`
+	Name       string               `json:"name"`
+	HeadSHA    string               `json:"head_sha"`
+	ExternalID string               `json:"external_id"`
+	Status     string               `json:"status"`
+	Conclusion string               `json:"conclusion"`
+	HTMLURL    string               `json:"html_url"`
+	DetailsURL string               `json:"details_url"`
+	Output     githubCheckRunOutput `json:"output"`
+	App        struct {
+		ID   int64  `json:"id"`
+		Slug string `json:"slug"`
+	} `json:"app"`
+}
+
 func CodeReviewPublicationHandoff(publication GitHubCodeReviewPublication) map[string]any {
 	return map[string]any{
 		"schema_version": publication.SchemaVersion, "repository": publication.Repository,
@@ -72,7 +112,9 @@ func CodeReviewPublicationHandoff(publication GitHubCodeReviewPublication) map[s
 		"subject_sha256": publication.SubjectSHA256, "payload_sha256": publication.PayloadSHA256,
 		"verdict": publication.Verdict, "event": publication.Event, "review_id": publication.ReviewID,
 		"review_url": publication.ReviewURL, "reviewer_actor": publication.ReviewerActor, "author_actor": publication.AuthorActor,
-		"reused": publication.Reused, "published_at": publication.PublishedAt.UTC().Format(time.RFC3339),
+		"reused": publication.Reused, "check_run_id": publication.CheckRunID, "check_run_url": publication.CheckRunURL,
+		"check_name": publication.CheckName, "check_conclusion": publication.CheckConclusion, "check_reused": publication.CheckReused,
+		"published_at": publication.PublishedAt.UTC().Format(time.RFC3339),
 	}
 }
 
@@ -164,7 +206,7 @@ func PublishGitHubCodeReview(ctx context.Context, boundary CodeReviewInput, revi
 		if !strings.EqualFold(result.ReviewerActor, actor) {
 			return GitHubCodeReviewPublication{}, fmt.Errorf("existing GitHub review belongs to a different identity")
 		}
-		return result, nil
+		return publishGitHubExactSHAReviewCheck(ctx, client, config, token.Token, repository, result)
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
@@ -194,7 +236,123 @@ func PublishGitHubCodeReview(ctx context.Context, boundary CodeReviewInput, revi
 	if !strings.EqualFold(result.ReviewerActor, actor) || !strings.Contains(published.Body, marker) {
 		return GitHubCodeReviewPublication{}, fmt.Errorf("GitHub pull request review identity is invalid")
 	}
-	return result, nil
+	return publishGitHubExactSHAReviewCheck(ctx, client, config, token.Token, repository, result)
+}
+
+func publishGitHubExactSHAReviewCheck(ctx context.Context, client *http.Client, config GitHubAppConfig, token string, repository githubRepository, publication GitHubCodeReviewPublication) (GitHubCodeReviewPublication, error) {
+	appID, err := strconv.ParseInt(strings.TrimSpace(config.AppID), 10, 64)
+	if err != nil || appID < 1 || publication.ReviewID < 1 || !validGitHubCommitSHA(publication.HeadSHA) {
+		return GitHubCodeReviewPublication{}, fmt.Errorf("reviewer check identity is invalid")
+	}
+	appSlug := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(publication.ReviewerActor)), "[bot]")
+	if !githubAppSlugPattern.MatchString(appSlug) {
+		return GitHubCodeReviewPublication{}, fmt.Errorf("reviewer check identity is invalid")
+	}
+	conclusion := "failure"
+	if publication.Verdict == "approve" && publication.Event == "APPROVE" && !strings.EqualFold(publication.ReviewerActor, publication.AuthorActor) {
+		conclusion = "success"
+	}
+	marker := githubReviewCheckMarker(publication.SubjectSHA256, publication.PayloadSHA256)
+	payload := githubCheckRunPayload{
+		Name: githubExactSHAReviewCheck, HeadSHA: publication.HeadSHA, ExternalID: publication.SubjectSHA256,
+		Status: "completed", Conclusion: conclusion, DetailsURL: publication.ReviewURL,
+		Output: githubCheckRunOutput{Title: "Bema Reviewer: " + conclusion, Summary: "Automated review for the exact pull-request head " + publication.HeadSHA + ".", Text: marker},
+	}
+	baseURL := strings.TrimRight(config.APIBaseURL, "/") + "/repos/" + url.PathEscape(repository.Owner) + "/" + url.PathEscape(repository.Name)
+	existing, found, err := findGitHubExactSHAReviewCheck(ctx, client, token, baseURL+"/commits/"+url.PathEscape(publication.HeadSHA)+"/check-runs", appID, appSlug, payload)
+	if err != nil {
+		return GitHubCodeReviewPublication{}, err
+	}
+	reused := false
+	if found {
+		reused = existing.Status == payload.Status && existing.Conclusion == payload.Conclusion && existing.DetailsURL == payload.DetailsURL
+		if !reused {
+			patchPayload := payload
+			patchPayload.HeadSHA = ""
+			existing, err = writeGitHubExactSHAReviewCheck(ctx, client, token, baseURL+"/check-runs/"+strconv.FormatInt(existing.ID, 10), http.MethodPatch, patchPayload)
+		}
+	} else {
+		existing, err = writeGitHubExactSHAReviewCheck(ctx, client, token, baseURL+"/check-runs", http.MethodPost, payload)
+	}
+	if err != nil {
+		return GitHubCodeReviewPublication{}, err
+	}
+	if err := validateGitHubExactSHAReviewCheck(existing, appID, appSlug, payload); err != nil {
+		return GitHubCodeReviewPublication{}, err
+	}
+	publication.CheckRunID, publication.CheckRunURL = existing.ID, existing.HTMLURL
+	publication.CheckName, publication.CheckConclusion, publication.CheckReused = existing.Name, existing.Conclusion, reused
+	return publication, nil
+}
+
+func githubReviewCheckMarker(subjectSHA256, payloadSHA256 string) string {
+	return "itbem-review-check subject=" + subjectSHA256 + " payload=" + payloadSHA256
+}
+
+func findGitHubExactSHAReviewCheck(ctx context.Context, client *http.Client, token, endpoint string, appID int64, appSlug string, expected githubCheckRunPayload) (githubRemoteCheckRun, bool, error) {
+	request, err := githubAppRequest(ctx, http.MethodGet, endpoint+"?check_name="+url.QueryEscape(expected.Name)+"&filter=all&per_page=100", token, nil)
+	if err != nil {
+		return githubRemoteCheckRun{}, false, err
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return githubRemoteCheckRun{}, false, fmt.Errorf("read existing Reviewer checks")
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return githubRemoteCheckRun{}, false, fmt.Errorf("GitHub Reviewer check lookup was rejected (%d)", response.StatusCode)
+	}
+	var result struct {
+		TotalCount int                    `json:"total_count"`
+		CheckRuns  []githubRemoteCheckRun `json:"check_runs"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(&result); err != nil || result.TotalCount > 100 || len(result.CheckRuns) > 100 || strings.Contains(response.Header.Get("Link"), `rel="next"`) {
+		return githubRemoteCheckRun{}, false, fmt.Errorf("GitHub Reviewer check lookup response exceeds the bounded history")
+	}
+	subjectPrefix := "itbem-review-check subject=" + expected.ExternalID + " payload="
+	for _, check := range result.CheckRuns {
+		if check.App.ID != appID || !strings.EqualFold(check.App.Slug, appSlug) || check.Name != expected.Name || !strings.EqualFold(check.HeadSHA, expected.HeadSHA) || check.ExternalID != expected.ExternalID {
+			continue
+		}
+		if !strings.Contains(check.Output.Text, subjectPrefix) || !strings.Contains(check.Output.Text, expected.Output.Text) {
+			return githubRemoteCheckRun{}, false, fmt.Errorf("a conflicting Reviewer check already exists for the frozen subject")
+		}
+		return check, true, nil
+	}
+	return githubRemoteCheckRun{}, false, nil
+}
+
+func writeGitHubExactSHAReviewCheck(ctx context.Context, client *http.Client, token, endpoint, method string, payload githubCheckRunPayload) (githubRemoteCheckRun, error) {
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return githubRemoteCheckRun{}, err
+	}
+	request, err := githubAppRequest(ctx, method, endpoint, token, strings.NewReader(string(encoded)))
+	if err != nil {
+		return githubRemoteCheckRun{}, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		return githubRemoteCheckRun{}, fmt.Errorf("publish GitHub Reviewer check")
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusCreated && response.StatusCode != http.StatusOK {
+		return githubRemoteCheckRun{}, fmt.Errorf("GitHub Reviewer check was rejected (%d)", response.StatusCode)
+	}
+	var check githubRemoteCheckRun
+	if err := json.NewDecoder(io.LimitReader(response.Body, 128<<10)).Decode(&check); err != nil {
+		return githubRemoteCheckRun{}, fmt.Errorf("GitHub Reviewer check response is invalid")
+	}
+	return check, nil
+}
+
+func validateGitHubExactSHAReviewCheck(check githubRemoteCheckRun, appID int64, appSlug string, expected githubCheckRunPayload) error {
+	parsedURL, err := url.Parse(strings.TrimSpace(check.HTMLURL))
+	if err != nil || parsedURL.Scheme != "https" || !strings.EqualFold(parsedURL.Hostname(), "github.com") || check.ID < 1 || check.App.ID != appID || !strings.EqualFold(check.App.Slug, appSlug) || check.Name != expected.Name || !strings.EqualFold(check.HeadSHA, expected.HeadSHA) || check.ExternalID != expected.ExternalID || check.Status != "completed" || check.Conclusion != expected.Conclusion || check.DetailsURL != expected.DetailsURL || !strings.Contains(check.Output.Text, expected.Output.Text) {
+		return fmt.Errorf("GitHub Reviewer check identity is invalid")
+	}
+	return nil
 }
 
 func githubReviewEvent(verdict string) string {
@@ -313,7 +471,7 @@ func githubReviewPublication(boundary CodeReviewInput, repository, verdict, even
 		return GitHubCodeReviewPublication{}, fmt.Errorf("GitHub pull request review URL is invalid")
 	}
 	return GitHubCodeReviewPublication{
-		SchemaVersion: 1, Repository: repository, PullRequest: boundary.Remote.PullRequestNumber,
+		SchemaVersion: 2, Repository: repository, PullRequest: boundary.Remote.PullRequestNumber,
 		HeadSHA: boundary.HeadSHA, PatchSHA256: boundary.PatchSHA256, SubjectSHA256: subjectSHA256, PayloadSHA256: payloadSHA256,
 		Verdict: verdict, Event: event, ReviewID: review.ID, ReviewURL: parsedURL.String(),
 		ReviewerActor: strings.ToLower(strings.TrimSpace(review.User.Login)), AuthorActor: strings.ToLower(strings.TrimSpace(author)),

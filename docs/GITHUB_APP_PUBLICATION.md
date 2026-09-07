@@ -11,6 +11,10 @@ una configuración válida.
 Reviewer App:
 
 - **Contents: Read-only**: obtener y volver a comprobar el diff exacto.
+- **Checks: Read and write**: publicar un único check
+  `Bema Review / exact-sha` ligado al head exacto. Sólo concluye `success`
+  cuando el veredicto es `APPROVE` y la identidad Reviewer es independiente
+  del autor; cualquier otro resultado concluye `failure`.
 - **Pull requests: Read and write**: leer el head/autor y publicar únicamente
   `COMMENT`, `APPROVE` o `REQUEST_CHANGES`.
 - **Metadata: Read-only**: obligatorio para GitHub Apps.
@@ -111,8 +115,14 @@ comprobar que el PR sigue abierto y en el mismo SHA, y publica la revisión. Un
 marcador de sujeto+payload hace el efecto idempotente tras reinicios. Si ya
 existe un resultado diferente para el mismo sujeto, falla cerrado. Si la App
 Reviewer fuera autora del PR, un `APPROVE` se degrada a `COMMENT` y la revisión
-humana independiente continúa pendiente. PostgreSQL conserva sólo identidad,
-URL y digests públicos; la prosa completa permanece en evidencia privada.
+automática queda bloqueada. Después publica el check `Bema Review / exact-sha`
+con la misma identidad, SHA y digests. El check nunca usa una conclusión
+neutral: `success` significa aprobación independiente exacta y `failure`
+mantiene el merge cerrado. Los repositorios que habiliten la ruta autónoma
+deben exigir ese check, fijarlo a la Reviewer App y no exigir además una review
+humana rutinaria; las políticas de riesgo pueden conservar aprobación humana.
+PostgreSQL conserva sólo identidad, URLs, conclusión y digests públicos; la
+prosa completa permanece en evidencia privada.
 
 La entrada admite ráfagas breves normales de GitHub, pero limita el tráfico por
 origen antes de analizar el cuerpo. Si GitHub recibe `429`, debe reintentar el
