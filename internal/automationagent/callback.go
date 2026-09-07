@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 )
 
 const retryReservationHeader = "X-ITBEM-Automation-Retry-Reservation"
+const retryLeaseHeader = "X-ITBEM-Automation-Retry-Lease"
 
 type HTTPCallback struct {
 	baseURL string
@@ -80,6 +82,9 @@ func (c *HTTPCallback) Update(ctx context.Context, taskID string, update TaskUpd
 	if response.StatusCode == http.StatusConflict {
 		if response.Header.Get(retryReservationHeader) == "1" {
 			return false, &RetryableError{Message: "automation budget reservation expired; awaiting a renewed lease"}
+		}
+		if seconds, parseErr := strconv.ParseInt(strings.TrimSpace(response.Header.Get(retryLeaseHeader)), 10, 32); parseErr == nil && seconds > 0 {
+			return false, &RetryableError{Message: "automation task is held by an active execution lease", RetryAfter: time.Duration(seconds) * time.Second}
 		}
 		return false, nil
 	}
