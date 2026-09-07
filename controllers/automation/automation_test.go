@@ -205,11 +205,12 @@ func TestCodeReviewPublicationForTaskRequiresExactIndependentGitHubEvidence(t *t
 		CorrelationID: correlationID,
 	}
 	execution := automationagent.GitHubCodeReviewPublication{
-		SchemaVersion: 1, Repository: "itbem/backend", PullRequest: 42, HeadSHA: strings.Repeat("b", 40),
+		SchemaVersion: 2, Repository: "itbem/backend", PullRequest: 42, HeadSHA: strings.Repeat("b", 40),
 		PatchSHA256: strings.Repeat("c", 64), SubjectSHA256: subject, PayloadSHA256: strings.Repeat("d", 64),
 		Verdict: "approve", Event: "APPROVE", ReviewID: 77,
 		ReviewURL:     "https://github.com/itbem/backend/pull/42#pullrequestreview-77",
 		ReviewerActor: "reviewer-bot[bot]", AuthorActor: "engineer-bot[bot]", PublishedAt: time.Now().UTC(),
+		CheckRunID: 88, CheckRunURL: "https://github.com/itbem/backend/runs/88", CheckName: "Bema Review / exact-sha", CheckConclusion: "success",
 	}
 	raw, _ := json.Marshal(execution)
 	publication, err := codeReviewPublicationForTask(task, raw)
@@ -228,6 +229,9 @@ func TestCodeReviewPublicationForTaskRequiresExactIndependentGitHubEvidence(t *t
 		},
 		"wrong operation": func(value *models.AutomationTask, _ *automationagent.GitHubCodeReviewPublication) {
 			value.Operation = "delivery.qa"
+		},
+		"contradictory check": func(_ *models.AutomationTask, value *automationagent.GitHubCodeReviewPublication) {
+			value.CheckConclusion = "failure"
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

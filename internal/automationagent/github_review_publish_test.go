@@ -17,6 +17,7 @@ func TestPublishGitHubCodeReviewIsExactSHAAndRetrySafe(t *testing.T) {
 	key := testGitHubAppKey(t)
 	posts := 0
 	var published githubRemoteReview
+	var publishedCheck githubRemoteCheckRun
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		switch {
 		case request.Method == http.MethodGet && request.URL.Path == "/app":
@@ -51,6 +52,19 @@ func TestPublishGitHubCodeReviewIsExactSHAAndRetrySafe(t *testing.T) {
 			published = githubRemoteReview{ID: 77, State: "CHANGES_REQUESTED", Body: payload.Body, CommitID: payload.CommitID, HTMLURL: "https://github.com/itbem/example/pull/42#pullrequestreview-77", Submitted: now.Format(time.RFC3339)}
 			published.User.Login = "bema-review-bot[bot]"
 			_ = json.NewEncoder(response).Encode(published)
+		case request.Method == http.MethodGet && request.URL.Path == "/repos/itbem/example/commits/"+strings.Repeat("b", 40)+"/check-runs":
+			checks := []githubRemoteCheckRun{}
+			if publishedCheck.ID != 0 {
+				checks = append(checks, publishedCheck)
+			}
+			_ = json.NewEncoder(response).Encode(map[string]any{"total_count": len(checks), "check_runs": checks})
+		case request.Method == http.MethodPost && request.URL.Path == "/repos/itbem/example/check-runs":
+			var payload githubCheckRunPayload
+			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			publishedCheck = remoteCheckFromPayload(88, payload)
+			_ = json.NewEncoder(response).Encode(publishedCheck)
 		default:
 			t.Fatalf("unexpected GitHub request: %s %s", request.Method, request.URL.String())
 		}
@@ -78,7 +92,7 @@ func TestPublishGitHubCodeReviewIsExactSHAAndRetrySafe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if posts != 1 || first.Reused || !second.Reused || first.SubjectSHA256 != second.SubjectSHA256 || first.ReviewerActor != "bema-review-bot[bot]" {
+	if posts != 1 || first.Reused || !second.Reused || first.CheckReused || !second.CheckReused || first.CheckConclusion != "failure" || first.SubjectSHA256 != second.SubjectSHA256 || first.ReviewerActor != "bema-review-bot[bot]" {
 		t.Fatalf("review publication was not retry safe: posts=%d first=%#v second=%#v", posts, first, second)
 	}
 	published.User.Login = "untrusted-actor"
@@ -106,6 +120,7 @@ func TestPublishGitHubCodeReviewNeverSelfApproves(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var publishedCheck githubRemoteCheckRun
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		switch {
 		case request.Method == http.MethodGet && request.URL.Path == "/app":
@@ -128,15 +143,32 @@ func TestPublishGitHubCodeReviewNeverSelfApproves(t *testing.T) {
 			published := githubRemoteReview{ID: 78, State: "COMMENTED", Body: payload.Body, CommitID: payload.CommitID, HTMLURL: "https://github.com/itbem/example/pull/42#pullrequestreview-78", Submitted: now.Format(time.RFC3339)}
 			published.User.Login = "bema-review-bot[bot]"
 			_ = json.NewEncoder(response).Encode(published)
+		case request.Method == http.MethodGet && request.URL.Path == "/repos/itbem/example/commits/"+boundary.HeadSHA+"/check-runs":
+			_ = json.NewEncoder(response).Encode(map[string]any{"total_count": 0, "check_runs": []any{}})
+		case request.Method == http.MethodPost && request.URL.Path == "/repos/itbem/example/check-runs":
+			var payload githubCheckRunPayload
+			_ = json.NewDecoder(request.Body).Decode(&payload)
+			publishedCheck = remoteCheckFromPayload(89, payload)
+			_ = json.NewEncoder(response).Encode(publishedCheck)
 		default:
 			t.Fatalf("unexpected GitHub request: %s %s", request.Method, request.URL.String())
 		}
 	}))
 	defer server.Close()
 	publication, err := PublishGitHubCodeReview(context.Background(), boundary, review, githubReviewTestLookup(t, key, server.URL))
-	if err != nil || publication.Event != "COMMENT" || publication.Verdict != "approve" || publication.AuthorActor != publication.ReviewerActor {
+	if err != nil || publication.Event != "COMMENT" || publication.Verdict != "approve" || publication.CheckConclusion != "failure" || publication.AuthorActor != publication.ReviewerActor {
 		t.Fatalf("self approval did not remain non-approving: %#v / %v", publication, err)
 	}
+}
+
+func remoteCheckFromPayload(id int64, payload githubCheckRunPayload) githubRemoteCheckRun {
+	check := githubRemoteCheckRun{
+		ID: id, Name: payload.Name, HeadSHA: payload.HeadSHA, ExternalID: payload.ExternalID,
+		Status: payload.Status, Conclusion: payload.Conclusion, HTMLURL: "https://github.com/itbem/example/runs/" + strconv.FormatInt(id, 10),
+		DetailsURL: payload.DetailsURL, Output: payload.Output,
+	}
+	check.App.ID, check.App.Slug = 12345, "bema-review-bot"
+	return check
 }
 
 func TestFindGitHubCodeReviewSearchesBoundedPagination(t *testing.T) {
@@ -160,6 +192,53 @@ func TestFindGitHubCodeReviewSearchesBoundedPagination(t *testing.T) {
 	review, found, err := findGitHubCodeReview(context.Background(), server.Client(), "token", server.URL+"/reviews", subject, payload, head, "APPROVE")
 	if err != nil || !found || review.ID != 91 || pages != 2 {
 		t.Fatalf("paginated review was not reconciled: %#v found=%v pages=%d err=%v", review, found, pages, err)
+	}
+}
+
+func TestPublishGitHubExactSHAReviewCheckSucceedsOnlyForIndependentApproval(t *testing.T) {
+	head := strings.Repeat("b", 40)
+	publication := GitHubCodeReviewPublication{
+		Repository: "itbem/example", PullRequest: 42, HeadSHA: head, SubjectSHA256: strings.Repeat("a", 64),
+		PayloadSHA256: strings.Repeat("c", 64), Verdict: "approve", Event: "APPROVE", ReviewID: 77,
+		ReviewURL: "https://github.com/itbem/example/pull/42#pullrequestreview-77", ReviewerActor: "bema-review-bot[bot]", AuthorActor: "engineer-bot[bot]",
+	}
+	writes := 0
+	var check githubRemoteCheckRun
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/commits/"+head+"/check-runs"):
+			checks := []githubRemoteCheckRun{}
+			if check.ID > 0 {
+				checks = append(checks, check)
+			}
+			_ = json.NewEncoder(response).Encode(map[string]any{"total_count": len(checks), "check_runs": checks})
+		case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/check-runs"):
+			writes++
+			var payload githubCheckRunPayload
+			_ = json.NewDecoder(request.Body).Decode(&payload)
+			if payload.HeadSHA != head || payload.Conclusion != "success" || payload.ExternalID != publication.SubjectSHA256 {
+				t.Fatalf("check was not bound to the independent exact-SHA approval: %#v", payload)
+			}
+			check = remoteCheckFromPayload(90, payload)
+			_ = json.NewEncoder(response).Encode(check)
+		default:
+			t.Fatalf("unexpected GitHub request: %s %s", request.Method, request.URL.String())
+		}
+	}))
+	defer server.Close()
+	config := GitHubAppConfig{AppID: "12345", APIBaseURL: server.URL}
+	repository := githubRepository{Owner: "itbem", Name: "example"}
+	first, err := publishGitHubExactSHAReviewCheck(context.Background(), server.Client(), config, "token", repository, publication)
+	if err != nil || first.CheckConclusion != "success" || first.CheckReused || writes != 1 {
+		t.Fatalf("valid check was rejected: %#v writes=%d err=%v", first, writes, err)
+	}
+	second, err := publishGitHubExactSHAReviewCheck(context.Background(), server.Client(), config, "token", repository, publication)
+	if err != nil || !second.CheckReused || writes != 1 {
+		t.Fatalf("check retry was not idempotent: %#v writes=%d err=%v", second, writes, err)
+	}
+	check.Output.Text = githubReviewCheckMarker(publication.SubjectSHA256, strings.Repeat("d", 64))
+	if _, err := publishGitHubExactSHAReviewCheck(context.Background(), server.Client(), config, "token", repository, publication); err == nil || !strings.Contains(err.Error(), "conflicting") {
+		t.Fatalf("conflicting check marker was accepted: %v", err)
 	}
 }
 

@@ -157,8 +157,11 @@ Event     Event          `gorm:"foreignKey:EventID" json:"event,omitempty"`
   (`models/AutomationCodeReviewPublication.go`): Append-only public proof that
   the isolated Reviewer App published one validated GitHub review for an exact
   repository, PR, head SHA and patch digest. It stores actor, event, review URL
-  and deterministic subject/payload digests; findings and model prose stay in
-  private evidence. Update/delete hooks reject history rewriting.
+  plus the exact-SHA check run identity/conclusion and deterministic
+  subject/payload digests; findings and model prose stay in private evidence.
+  The nullable check columns preserve rolling compatibility with v1 rows, but
+  every new v2 publication requires a validated check. Update/delete hooks
+  reject history rewriting.
 - **DeliveryEvent** QA observation (`delivery.qa.observed.v2`): Append-only,
   sequence-bearing result for one exact QA task and matrix digest. It stores
   only repository execution order plus operator-owned test identities and

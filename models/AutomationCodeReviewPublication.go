@@ -27,6 +27,10 @@ type AutomationCodeReviewPublication struct {
 	ReviewURL        string    `gorm:"type:text;not null" json:"review_url"`
 	ReviewerActor    string    `gorm:"type:varchar(128);not null;index" json:"reviewer_actor"`
 	AuthorActor      string    `gorm:"type:varchar(128);not null;default:''" json:"author_actor,omitempty"`
+	CheckRunID       *int64    `gorm:"uniqueIndex" json:"check_run_id,omitempty"`
+	CheckRunURL      *string   `gorm:"type:text" json:"check_run_url,omitempty"`
+	CheckName        *string   `gorm:"type:varchar(128)" json:"check_name,omitempty"`
+	CheckConclusion  *string   `gorm:"type:varchar(24)" json:"check_conclusion,omitempty"`
 	PublishedAt      time.Time `gorm:"not null;index" json:"published_at"`
 	CreatedAt        time.Time `gorm:"not null" json:"created_at"`
 }
