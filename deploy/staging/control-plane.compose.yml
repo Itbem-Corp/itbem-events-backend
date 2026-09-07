@@ -23,11 +23,17 @@ services:
   valkey:
     image: valkey/valkey:8-alpine@sha256:e0eb7c480958d32bdc4357a74bdd70653ae15f2f9b4c93c4a5a9fad1dc471c84
     restart: "no"
+    # The upstream entrypoint only attempts to chown /data when it starts as
+    # root. Running as the image's dedicated account keeps cap_drop: ALL
+    # effective and avoids a startup failure in the hardened fixture.
+    user: valkey
     read_only: true
     ports:
       - "127.0.0.1:${ITBEM_QUALIFICATION_VALKEY_PORT:-16379}:6379"
     tmpfs:
       - /data:size=128m
+    cap_drop:
+      - ALL
     security_opt:
       - no-new-privileges:true
     healthcheck:

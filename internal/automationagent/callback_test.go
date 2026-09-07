@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestHTTPCallbackRetainsOnlyAnExplicitExpiredReservationConflict(t *testing.T) {
@@ -48,6 +49,29 @@ func TestHTTPCallbackDoesNotRetryOrdinaryConflict(t *testing.T) {
 	updated, err := callback.Update(context.Background(), "d4a4b837-2e18-43af-9f58-6d59629db2bb", TaskUpdate{Status: "completed"})
 	if updated || err != nil {
 		t.Fatalf("ordinary callback conflict = updated:%v err:%v, want ignored", updated, err)
+	}
+}
+
+func TestHTTPCallbackRetainsConflictUntilActiveLeaseExpires(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set(retryLeaseHeader, "119")
+		writer.WriteHeader(http.StatusConflict)
+	}))
+	defer server.Close()
+
+	callback, err := NewHTTPCallback(server.URL, "test-secret", server.Client())
+	if err != nil {
+		t.Fatalf("NewHTTPCallback: %v", err)
+	}
+	updated, err := callback.Update(context.Background(), "d4a4b837-2e18-43af-9f58-6d59629db2bb", TaskUpdate{Status: "running"})
+	if updated {
+		t.Fatal("active lease conflict must not be accepted")
+	}
+	var retryable *RetryableError
+	if !errors.As(err, &retryable) || retryable.RetryAfter != 119*time.Second {
+		t.Fatalf("active lease conflict = %#v / %v, want 119 second retry", retryable, err)
 	}
 }
 

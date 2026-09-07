@@ -31,7 +31,15 @@ over HTTPS with a distinct derived token.
 The backend continues using SQS visibility, at-least-once delivery, DLQ and
 the existing idempotent task/result ledger. A gateway or worker failure leaves
 the message for redelivery; it does not acknowledge work optimistically. The
-runtime probe checks authentication, a non-consuming attribute read on the
+database execution lease intentionally outlives a short provider-network retry
+delay. When SQS redelivers during that interval, the callback returns the
+remaining lease duration through an authenticated response header; the worker
+defers the message instead of acknowledging it. Once the lease expires, exactly
+one worker can reclaim the task with a new run ID. Ordinary conflicts for an
+already-terminal task remain acknowledgements, so stale duplicate messages do
+not loop forever.
+
+The runtime probe checks authentication, a non-consuming attribute read on the
 exact lane, and bucket-location access for both private automation buckets. It
 does not receive work. This preflight must fail closed when the deployed IAM
 role cannot act as the gateway, even if queue URLs and SDK clients are present.
