@@ -37,7 +37,9 @@ remaining lease duration through an authenticated response header; the worker
 defers the message instead of acknowledging it. Once the lease expires, exactly
 one worker can reclaim the task with a new run ID. Ordinary conflicts for an
 already-terminal task remain acknowledgements, so stale duplicate messages do
-not loop forever.
+not loop forever. During an orderly worker shutdown, the bounded visibility
+update is detached from the cancelled task context so the lane cannot remain
+blocked for the queue's full default visibility timeout.
 
 The runtime probe checks authentication, a non-consuming attribute read on the
 exact lane, and bucket-location access for both private automation buckets. It
