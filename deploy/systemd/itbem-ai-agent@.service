@@ -2,8 +2,11 @@
 Description=ITBEM AI agent role lane (%i)
 After=network-online.target
 Wants=network-online.target
-StartLimitIntervalSec=300
-StartLimitBurst=5
+# A gateway/DNS outage must not leave a 24/7 lane permanently failed after a
+# small burst of harmless preflight attempts.  Every retry still starts with
+# the non-mutating preflights below; use a paced retry rather than a start-rate
+# lockout that needs an operator to reset it.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -24,7 +27,7 @@ ExecStartPre=/opt/itbem-ai-agent/current/itbem-ai-agent --provider-auth-probe
 ExecStartPre=/opt/itbem-ai-agent/current/itbem-ai-agent --github-auth-probe
 ExecStart=/opt/itbem-ai-agent/current/itbem-ai-agent
 Restart=on-failure
-RestartSec=10s
+RestartSec=60s
 TimeoutStartSec=90s
 TimeoutStopSec=60s
 KillSignal=SIGTERM
