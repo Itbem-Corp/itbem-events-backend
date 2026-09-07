@@ -273,7 +273,6 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	// Resources
 	public.GET("/resources/:id", resources.GetResource)
 	public.GET("/resources/section/:key", resources.GetResourcesBySectionID)
-	public.GET("/admin/automation/tasks", automation.List)
 
 	// Invitations & RSVP
 	public.GET("/invitations/ByToken", invitations.GetInvitationByToken)
