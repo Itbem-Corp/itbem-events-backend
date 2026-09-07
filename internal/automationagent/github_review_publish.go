@@ -208,26 +208,22 @@ func PublishGitHubCodeReview(ctx context.Context, boundary CodeReviewInput, revi
 		}
 		return publishGitHubExactSHAReviewCheck(ctx, client, config, token.Token, repository, result)
 	}
-	encoded, err := json.Marshal(payload)
+	published, statusCode, err := postGitHubCodeReview(ctx, client, token.Token, baseURL+"/reviews", payload)
 	if err != nil {
 		return GitHubCodeReviewPublication{}, err
 	}
-	request, err := githubAppRequest(ctx, http.MethodPost, baseURL+"/reviews", token.Token, strings.NewReader(string(encoded)))
-	if err != nil {
-		return GitHubCodeReviewPublication{}, err
+	if statusCode == http.StatusUnprocessableEntity && len(payload.Comments) > 0 {
+		// GitHub can reject an otherwise valid exact-SHA review when an inline
+		// anchor is no longer representable by its diff API. Preserve every
+		// finding in the review body and retry once without inline side effects;
+		// the failure check still blocks unsafe code.
+		published, statusCode, err = postGitHubCodeReview(ctx, client, token.Token, baseURL+"/reviews", githubReviewBodyFallback(payload))
+		if err != nil {
+			return GitHubCodeReviewPublication{}, err
+		}
 	}
-	request.Header.Set("Content-Type", "application/json")
-	response, err := client.Do(request)
-	if err != nil {
-		return GitHubCodeReviewPublication{}, fmt.Errorf("publish GitHub pull request review")
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return GitHubCodeReviewPublication{}, fmt.Errorf("GitHub pull request review was rejected (%d)", response.StatusCode)
-	}
-	var published githubRemoteReview
-	if err := json.NewDecoder(io.LimitReader(response.Body, 128<<10)).Decode(&published); err != nil {
-		return GitHubCodeReviewPublication{}, fmt.Errorf("GitHub pull request review response is invalid")
+	if statusCode != http.StatusOK {
+		return GitHubCodeReviewPublication{}, fmt.Errorf("GitHub pull request review was rejected (%d)", statusCode)
 	}
 	result, err := githubReviewPublication(boundary, repositoryName, verdict, event, subjectSHA256, payloadSHA256, state.AuthorActor, published, false)
 	if err != nil {
@@ -237,6 +233,52 @@ func PublishGitHubCodeReview(ctx context.Context, boundary CodeReviewInput, revi
 		return GitHubCodeReviewPublication{}, fmt.Errorf("GitHub pull request review identity is invalid")
 	}
 	return publishGitHubExactSHAReviewCheck(ctx, client, config, token.Token, repository, result)
+}
+
+func postGitHubCodeReview(ctx context.Context, client *http.Client, token, endpoint string, payload githubReviewCreatePayload) (githubRemoteReview, int, error) {
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return githubRemoteReview{}, 0, err
+	}
+	request, err := githubAppRequest(ctx, http.MethodPost, endpoint, token, strings.NewReader(string(encoded)))
+	if err != nil {
+		return githubRemoteReview{}, 0, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		return githubRemoteReview{}, 0, fmt.Errorf("publish GitHub pull request review")
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 128<<10))
+		return githubRemoteReview{}, response.StatusCode, nil
+	}
+	var published githubRemoteReview
+	if err := json.NewDecoder(io.LimitReader(response.Body, 128<<10)).Decode(&published); err != nil {
+		return githubRemoteReview{}, response.StatusCode, fmt.Errorf("GitHub pull request review response is invalid")
+	}
+	return published, response.StatusCode, nil
+}
+
+func githubReviewBodyFallback(payload githubReviewCreatePayload) githubReviewCreatePayload {
+	var body strings.Builder
+	body.WriteString(payload.Body)
+	body.WriteString("\n\nInline anchors were unavailable; findings are preserved below:\n")
+	for _, comment := range payload.Comments {
+		body.WriteString("\n- **")
+		body.WriteString(comment.Path)
+		body.WriteString(":")
+		body.WriteString(strconv.Itoa(comment.Line))
+		body.WriteString("** — ")
+		body.WriteString(comment.Body)
+	}
+	payload.Body = body.String()
+	if len(payload.Body) > 60_000 {
+		payload.Body = payload.Body[:60_000]
+	}
+	payload.Comments = nil
+	return payload
 }
 
 func publishGitHubExactSHAReviewCheck(ctx context.Context, client *http.Client, config GitHubAppConfig, token string, repository githubRepository, publication GitHubCodeReviewPublication) (GitHubCodeReviewPublication, error) {
@@ -374,7 +416,11 @@ func githubReviewPayload(boundary CodeReviewInput, review map[string]any, event 
 		if !ok {
 			return githubReviewCreatePayload{}, fmt.Errorf("code review finding is invalid")
 		}
-		start, end := int(numberAny(finding["line_start"])), int(numberAny(finding["line_end"]))
+		start, startOK := integralReviewLine(finding["line_start"])
+		end, endOK := integralReviewLine(finding["line_end"])
+		if !startOK || !endOK || end < start {
+			return githubReviewCreatePayload{}, fmt.Errorf("code review finding line range is invalid")
+		}
 		side := "RIGHT"
 		if strings.EqualFold(stringAny(finding["side"]), "base") {
 			side = "LEFT"
@@ -507,9 +553,4 @@ func readGitHubAppActor(ctx context.Context, config GitHubAppConfig, client *htt
 		return "", fmt.Errorf("reviewer GitHub App identity is invalid")
 	}
 	return slug + "[bot]", nil
-}
-
-func numberAny(value any) float64 {
-	result, _ := value.(float64)
-	return result
 }

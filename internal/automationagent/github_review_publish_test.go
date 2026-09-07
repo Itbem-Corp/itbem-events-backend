@@ -46,8 +46,18 @@ func TestPublishGitHubCodeReviewIsExactSHAAndRetrySafe(t *testing.T) {
 			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
 				t.Fatal(err)
 			}
-			if payload.Event != "REQUEST_CHANGES" || payload.CommitID != strings.Repeat("b", 40) || len(payload.Comments) != 1 || payload.Comments[0].Side != "RIGHT" {
+			if payload.Event != "REQUEST_CHANGES" || payload.CommitID != strings.Repeat("b", 40) {
 				t.Fatalf("unexpected review publication: %#v", payload)
+			}
+			if posts == 1 {
+				if len(payload.Comments) != 1 || payload.Comments[0].Side != "RIGHT" {
+					t.Fatalf("initial publication lost its inline finding: %#v", payload)
+				}
+				response.WriteHeader(http.StatusUnprocessableEntity)
+				return
+			}
+			if len(payload.Comments) != 0 || !strings.Contains(payload.Body, "Inline anchors were unavailable") || !strings.Contains(payload.Body, "controllers/orders.go:45") {
+				t.Fatalf("fallback publication lost its summarized finding: %#v", payload)
 			}
 			published = githubRemoteReview{ID: 77, State: "CHANGES_REQUESTED", Body: payload.Body, CommitID: payload.CommitID, HTMLURL: "https://github.com/itbem/example/pull/42#pullrequestreview-77", Submitted: now.Format(time.RFC3339)}
 			published.User.Login = "bema-review-bot[bot]"
@@ -92,14 +102,14 @@ func TestPublishGitHubCodeReviewIsExactSHAAndRetrySafe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if posts != 1 || first.Reused || !second.Reused || first.CheckReused || !second.CheckReused || first.CheckConclusion != "failure" || first.SubjectSHA256 != second.SubjectSHA256 || first.ReviewerActor != "bema-review-bot[bot]" {
+	if posts != 2 || first.Reused || !second.Reused || first.CheckReused || !second.CheckReused || first.CheckConclusion != "failure" || first.SubjectSHA256 != second.SubjectSHA256 || first.ReviewerActor != "bema-review-bot[bot]" {
 		t.Fatalf("review publication was not retry safe: posts=%d first=%#v second=%#v", posts, first, second)
 	}
 	published.User.Login = "untrusted-actor"
 	if _, err := PublishGitHubCodeReview(context.Background(), boundary, review, lookup); err == nil || !strings.Contains(err.Error(), "different identity") {
 		t.Fatalf("a forged idempotency marker was accepted: %v", err)
 	}
-	if posts != 1 {
+	if posts != 2 {
 		t.Fatalf("identity conflict produced another external effect: posts=%d", posts)
 	}
 }
