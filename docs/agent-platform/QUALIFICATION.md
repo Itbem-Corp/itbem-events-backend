@@ -234,9 +234,11 @@ For the exact approved subject:
 4. Observe the configured deployment workflow and record its resulting SHA.
 5. Verify required health checks and non-destructive smoke/canary checks.
    For the review ingress, the production workflow must authenticate as the
-   configured GitHub App, redeliver its latest `ping` and record HTTP `200`;
-   a backend-only synthetic signature is insufficient because it cannot detect
-   App/environment secret drift.
+   configured GitHub App, redeliver its latest `ping` and record HTTP `200`.
+   If the App has no historical `ping`, redeliver its newest previously
+   accepted event and require a `2xx` response; ingestion deduplication must
+   prove this cannot create duplicate work. A backend-only synthetic signature
+   is insufficient because it cannot detect App/environment secret drift.
 6. Exercise or prove the configured rollback, roll-forward or expand/contract
    path. Never claim success from a green build alone.
 

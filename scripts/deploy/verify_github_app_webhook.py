@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify a GitHub App webhook by redelivering its latest ping."""
+"""Verify a GitHub App webhook by safely redelivering a prior delivery."""
 
 from __future__ import annotations
 
@@ -104,44 +104,70 @@ class GitHubWebhookVerifier:
         deliveries = self.request_json("GET", "/app/hook/deliveries?per_page=100", None)
         if not isinstance(deliveries, list):
             raise RuntimeError("GitHub App deliveries response is invalid")
-        source = next(
-            (
-                item
-                for item in deliveries
-                if isinstance(item, dict)
-                and item.get("event") == "ping"
-                and isinstance(item.get("id"), int)
-            ),
-            None,
-        )
+        source = self._source_delivery(deliveries)
         if source is None:
-            raise RuntimeError("GitHub App has no ping delivery to redeliver")
+            raise RuntimeError("GitHub App has no successful delivery to redeliver")
 
         cutoff = self.clock() - timedelta(seconds=2)
         self.request_json("POST", f"/app/hook/deliveries/{source['id']}/attempts", None)
         for _ in range(attempts):
             current = self.request_json("GET", "/app/hook/deliveries?per_page=20", None)
-            candidate = self._new_ping(current, source["id"], cutoff)
+            candidate = self._new_delivery(
+                current, source["id"], source["event"], cutoff
+            )
             if candidate is not None and candidate.get("status_code") is not None:
                 status_code = candidate.get("status_code")
-                if status_code != 200:
+                if not isinstance(status_code, int) or not 200 <= status_code < 300:
                     raise RuntimeError(
-                        f"GitHub App ping redelivery returned HTTP {status_code}"
+                        f"GitHub App {source['event']} redelivery returned HTTP "
+                        f"{status_code}"
                     )
-                return {"delivery_id": candidate["id"], "status_code": status_code}
+                return {
+                    "delivery_id": candidate["id"],
+                    "event": source["event"],
+                    "status_code": status_code,
+                }
             self.sleep(delay_seconds)
-        raise RuntimeError("GitHub App ping redelivery did not complete in time")
+        raise RuntimeError("GitHub App redelivery did not complete in time")
 
     @staticmethod
-    def _new_ping(
-        deliveries: Any, source_id: int, cutoff: datetime
+    def _source_delivery(deliveries: Any) -> dict[str, Any] | None:
+        if not isinstance(deliveries, list):
+            raise RuntimeError("GitHub App deliveries response is invalid")
+        # A ping is side-effect free and therefore preferred. Some GitHub Apps,
+        # including Apps created through the current settings UI, may have no
+        # historical ping at all. In that case redeliver the newest previously
+        # accepted event. The webhook ingestion boundary is idempotent and this
+        # exercises the real App secret instead of a synthetic local signature.
+        for item in deliveries:
+            if (
+                isinstance(item, dict)
+                and isinstance(item.get("id"), int)
+                and item.get("event") == "ping"
+            ):
+                return item
+        for item in deliveries:
+            if (
+                not isinstance(item, dict)
+                or not isinstance(item.get("id"), int)
+                or not isinstance(item.get("event"), str)
+            ):
+                continue
+            status_code = item.get("status_code")
+            if isinstance(status_code, int) and 200 <= status_code < 300:
+                return item
+        return None
+
+    @staticmethod
+    def _new_delivery(
+        deliveries: Any, source_id: int, source_event: str, cutoff: datetime
     ) -> dict[str, Any] | None:
         if not isinstance(deliveries, list):
             raise RuntimeError("GitHub App deliveries response is invalid")
         for item in deliveries:
             if (
                 not isinstance(item, dict)
-                or item.get("event") != "ping"
+                or item.get("event") != source_event
                 or item.get("id") == source_id
                 or item.get("redelivery") is not True
             ):
@@ -204,7 +230,8 @@ def main() -> int:
         return 1
     print(
         "github_review_webhook=ready "
-        f"status_code={evidence['status_code']} delivery_id={evidence['delivery_id']}"
+        f"event={evidence['event']} status_code={evidence['status_code']} "
+        f"delivery_id={evidence['delivery_id']}"
     )
     return 0
 

@@ -62,7 +62,7 @@ class GitHubAppWebhookTests(unittest.TestCase):
         )
         self.assertEqual(
             verifier.verify(attempts=2, delay_seconds=0),
-            {"delivery_id": 11, "status_code": 200},
+            {"delivery_id": 11, "event": "ping", "status_code": 200},
         )
         self.assertEqual(calls[1], ("POST", "/app/hook/deliveries/10/attempts"))
 
@@ -93,9 +93,44 @@ class GitHubAppWebhookTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "HTTP 401"):
             verifier.verify(attempts=1, delay_seconds=0)
 
-    def test_missing_ping_and_untrusted_api_endpoint_fail_closed(self) -> None:
+    def test_falls_back_to_latest_successful_delivery_when_ping_is_missing(self) -> None:
+        calls: list[tuple[str, str]] = []
+        responses = iter(
+            [
+                [
+                    {"id": 20, "event": "pull_request", "status_code": 202},
+                    {"id": 19, "event": "pull_request", "status_code": 400},
+                ],
+                [
+                    {
+                        "id": 21,
+                        "event": "pull_request",
+                        "redelivery": True,
+                        "delivered_at": "2027-01-15T12:00:01Z",
+                        "status_code": 202,
+                    }
+                ],
+            ]
+        )
+
+        def request(method: str, path: str, body: dict[str, object] | None):
+            calls.append((method, path))
+            return None if method == "POST" else next(responses)
+
+        verifier = GitHubWebhookVerifier(
+            request,
+            clock=lambda: datetime(2027, 1, 15, 12, 0, tzinfo=timezone.utc),
+            sleep=lambda _: None,
+        )
+        self.assertEqual(
+            verifier.verify(attempts=1, delay_seconds=0),
+            {"delivery_id": 21, "event": "pull_request", "status_code": 202},
+        )
+        self.assertEqual(calls[1], ("POST", "/app/hook/deliveries/20/attempts"))
+
+    def test_missing_successful_delivery_and_untrusted_api_endpoint_fail_closed(self) -> None:
         verifier = GitHubWebhookVerifier(lambda method, path, body: [])
-        with self.assertRaisesRegex(RuntimeError, "no ping"):
+        with self.assertRaisesRegex(RuntimeError, "no successful delivery"):
             verifier.verify(attempts=1, delay_seconds=0)
         with self.assertRaisesRegex(ValueError, "api.github.com"):
             github_requester("token", "https://example.invalid")
