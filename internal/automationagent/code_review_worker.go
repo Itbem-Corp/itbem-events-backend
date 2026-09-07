@@ -143,6 +143,13 @@ func (w *Worker) processSegmentedCodeReview(ctx context.Context, message TaskMes
 			}
 			segmentAudit.Usage["_itbem_repair"] = map[string]any{"attempted": true, "request_ref": repairRef, "provider_call_count": 2}
 			if repairValidationErr != nil {
+				if boundary.Remote != nil {
+					completion = segmentAudit
+					review = blockedRemoteCodeReview(call.Index, repairValidationErr)
+					completions = append(completions, completion)
+					reviews = append(reviews, review)
+					continue
+				}
 				failedCalls := append(append([]Completion(nil), completions...), segmentAudit)
 				audit, aggregateErr := aggregateCodeReviewCompletions(failedCalls, nil)
 				if aggregateErr != nil {
@@ -197,6 +204,18 @@ func (w *Worker) processSegmentedCodeReview(ctx context.Context, message TaskMes
 	}
 	_, err = w.callback.Update(ctx, message.Payload.TaskID, TaskUpdate{Status: "completed", RunID: runID, RequestRef: requestRef, OutputRef: outputRef, Provider: completion.Provider, Model: completion.Model, Usage: completion.Usage, ResponseID: completion.ResponseID, Execution: execution})
 	return err
+}
+
+func blockedRemoteCodeReview(segment int, cause error) map[string]any {
+	gap := fmt.Sprintf("Reviewer output for segment %d failed deterministic validation: %s. Perform an independent manual review of this exact SHA.", segment, boundedRepairError(cause))
+	return map[string]any{
+		"summary":       "Automated review could not produce evidence that satisfies the exact-SHA contract; this revision remains blocked.",
+		"verdict":       "blocked",
+		"review_scope":  []any{fmt.Sprintf("segment %d deterministic validation", segment)},
+		"findings":      []any{},
+		"test_plan":     []any{"Inspect the frozen diff and rerun the Reviewer after correcting or confirming the reported evidence gap."},
+		"coverage_gaps": []any{gap},
+	}
 }
 
 func codeReviewSegmentPrompt(prompt string, index, total int, segment, boundary CodeReviewInput) string {
