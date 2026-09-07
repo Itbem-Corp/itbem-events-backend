@@ -131,7 +131,12 @@ func GitHubPullRequestReviewWebhook(c echo.Context) error {
 		return utils.Success(c, http.StatusOK, "GitHub webhook ready", map[string]string{"status": "ready"})
 	}
 	if !strings.EqualFold(eventName, "pull_request") {
-		return utils.Error(c, http.StatusBadRequest, "Invalid GitHub event", "")
+		// The App can be subscribed to events which do not create a review
+		// task (for example check_suite). This delivery is authenticated but
+		// intentionally irrelevant, so acknowledge it without decoding,
+		// queuing or persisting anything. Returning a client error would only
+		// cause GitHub to retry a task the reviewer must never execute.
+		return utils.Success(c, http.StatusAccepted, "GitHub event ignored", map[string]string{"status": "unsupported_event"})
 	}
 	var event githubPullRequestWebhook
 	decoder := json.NewDecoder(strings.NewReader(string(body)))
@@ -141,10 +146,10 @@ func GitHubPullRequestReviewWebhook(c echo.Context) error {
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return utils.Error(c, http.StatusBadRequest, "Invalid GitHub event", "")
 	}
-	repository := strings.ToLower(strings.TrimSpace(event.Repository.FullName))
-	if event.PullRequest.Draft || !githubReviewActionAllowed(event.Action) || !githubReviewRepositoryAllowed(cfg.GitHubReviewRepositories, repository) || event.Installation.ID < 1 || event.Number < 1 || !gitCommitSHA.MatchString(strings.ToLower(strings.TrimSpace(event.PullRequest.Base.SHA))) || !gitCommitSHA.MatchString(strings.ToLower(strings.TrimSpace(event.PullRequest.Head.SHA))) || event.PullRequest.Base.SHA == event.PullRequest.Head.SHA {
-		return utils.Error(c, http.StatusBadRequest, "GitHub review ignored", "")
+	if reason := githubReviewWebhookIgnoreReason(event, cfg); reason != "" {
+		return utils.Success(c, http.StatusAccepted, "GitHub review ignored", map[string]string{"status": reason})
 	}
+	repository := strings.ToLower(strings.TrimSpace(event.Repository.FullName))
 	// A deterministic task id makes GitHub redelivery idempotent before a
 	// provider call or a second outbox record can exist.
 	prIdentity := repository + ":" + strconv.Itoa(event.Number)
@@ -320,6 +325,23 @@ func githubReviewWebhookConfigured(cfg *models.Config) bool {
 func githubReviewActionAllowed(action string) bool {
 	_, ok := map[string]struct{}{"opened": {}, "reopened": {}, "ready_for_review": {}, "synchronize": {}}[strings.ToLower(strings.TrimSpace(action))]
 	return ok
+}
+
+// githubReviewWebhookIgnoreReason identifies signed pull-request deliveries
+// that cannot create a review. They are terminal for the webhook, but they
+// never create a task or alter an existing review. Keep the public status
+// fixed; repository and pull-request details stay out of the response.
+func githubReviewWebhookIgnoreReason(event githubPullRequestWebhook, cfg *models.Config) string {
+	if cfg == nil {
+		return "ineligible_pull_request"
+	}
+	repository := strings.ToLower(strings.TrimSpace(event.Repository.FullName))
+	baseSHA := strings.ToLower(strings.TrimSpace(event.PullRequest.Base.SHA))
+	headSHA := strings.ToLower(strings.TrimSpace(event.PullRequest.Head.SHA))
+	if event.PullRequest.Draft || !githubReviewActionAllowed(event.Action) || !githubReviewRepositoryAllowed(cfg.GitHubReviewRepositories, repository) || event.Installation.ID < 1 || event.Number < 1 || !gitCommitSHA.MatchString(baseSHA) || !gitCommitSHA.MatchString(headSHA) || baseSHA == headSHA {
+		return "ineligible_pull_request"
+	}
+	return ""
 }
 func githubReviewRepositories(raw string) map[string]struct{} {
 	result := map[string]struct{}{}

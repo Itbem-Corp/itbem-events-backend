@@ -93,8 +93,12 @@ trabajo en la lane Review.
 
 El evento de instalación `ping` también exige la firma HMAC válida y un único
 cuerpo JSON. Responde `200` con estado `ready`, no consulta GitHub, no crea una
-tarea y no toca la cola. Cualquier otro tipo de evento continúa fallando
-cerrado con `400` después de autenticar el cuerpo.
+tarea y no toca la cola. Una entrega firmada de otro tipo (por ejemplo,
+`check_suite`) o de un PR ineligible (cerrado, draft, fuera de allow-list o con
+SHA inválido) responde `202` con un estado fijo de ignorado; no se decodifica el
+evento ajeno, no se consulta GitHub y no se crea ni altera ningún task. Esto
+evita redeliveries inútiles sin convertir eventos no admitidos en autoridad de
+revisión. Cuerpos malformados o firmas inválidas siguen fallando cerrados.
 
 El despliegue de producción autentica como la misma GitHub App y, después de
 promover el SHA exacto, redeliverya preferentemente su último evento `ping`.
