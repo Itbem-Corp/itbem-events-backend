@@ -327,3 +327,24 @@ func TestCodeReviewSeverityRequiresCommensurateConfidenceAndDistinctRemedy(t *te
 		t.Fatal("review finding must distinguish observed evidence from the proposed remedy")
 	}
 }
+
+func TestRepairCodeReviewEvidenceQuotesUsesExactChangedLine(t *testing.T) {
+	boundary, err := ParseCodeReviewInput(validCodeReviewInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	review, err := ParseCodeReview(validCodeReview())
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings := review["findings"].([]any)
+	finding := findings[0].(map[string]any)
+	finding["evidence_quote"] = "`line42`"
+	repairCodeReviewEvidenceQuotes(review, boundary)
+	if finding["evidence_quote"] != "line42" {
+		t.Fatalf("evidence quote was not grounded in the immutable patch: %#v", finding["evidence_quote"])
+	}
+	if err := ValidateCodeReviewBoundary(review, boundary); err != nil {
+		t.Fatalf("grounded evidence quote remained invalid: %v", err)
+	}
+}

@@ -91,6 +91,7 @@ func (w *Worker) processSegmentedCodeReview(ctx context.Context, message TaskMes
 		}
 		review, parseErr := ParseCodeReview(completion.Content)
 		if parseErr == nil {
+			repairCodeReviewEvidenceQuotes(review, call.Boundary)
 			parseErr = ValidateCodeReviewBoundary(review, call.Boundary)
 		}
 		if parseErr != nil {
@@ -130,6 +131,7 @@ func (w *Worker) processSegmentedCodeReview(ctx context.Context, message TaskMes
 			segmentCalls = append(segmentCalls, repair)
 			repairedReview, repairValidationErr := ParseCodeReview(repair.Content)
 			if repairValidationErr == nil {
+				repairCodeReviewEvidenceQuotes(repairedReview, call.Boundary)
 				repairValidationErr = ValidateCodeReviewBoundary(repairedReview, call.Boundary)
 			}
 			if repairValidationErr == nil && !codeReviewRepairVerdictIsConservative(completion.Content, repairedReview) {

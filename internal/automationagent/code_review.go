@@ -870,6 +870,87 @@ func patchContainsChangedQuote(patch, file, side string, start, end int, quote s
 	return false
 }
 
+// repairCodeReviewEvidenceQuotes replaces only an invalid model quote with an
+// exact, sanitized changed line from the already validated source range. It
+// cannot expand finding authority: file, side and line range remain unchanged,
+// and the normal boundary validator still runs afterward.
+func repairCodeReviewEvidenceQuotes(review map[string]any, boundary CodeReviewInput) {
+	findings, _ := review["findings"].([]any)
+	for _, raw := range findings {
+		finding, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		file := strings.TrimSpace(stringAny(finding["file"]))
+		side := strings.ToLower(strings.TrimSpace(stringAny(finding["side"])))
+		start, startOK := integralReviewLine(finding["line_start"])
+		end, endOK := integralReviewLine(finding["line_end"])
+		quote := strings.TrimSpace(stringAny(finding["evidence_quote"]))
+		if !startOK || !endOK || patchContainsChangedQuote(boundary.Patch, file, side, start, end, quote) {
+			continue
+		}
+		if replacement, found := firstChangedReviewLine(boundary.SanitizedPatch(), file, side, start, end); found {
+			finding["evidence_quote"] = replacement
+		}
+	}
+}
+
+func firstChangedReviewLine(patch, file, side string, start, end int) (string, bool) {
+	currentFile, oldFile := "", ""
+	inHunk := false
+	oldLine, newLine := 0, 0
+	for _, line := range strings.Split(patch, "\n") {
+		switch {
+		case strings.HasPrefix(line, "--- "):
+			value := strings.TrimSpace(strings.TrimPrefix(line, "--- "))
+			if strings.HasPrefix(value, "a/") {
+				oldFile = strings.TrimPrefix(value, "a/")
+			} else if value == "/dev/null" {
+				oldFile = ""
+			} else {
+				return "", false
+			}
+			inHunk = false
+		case strings.HasPrefix(line, "+++ "):
+			value := strings.TrimSpace(strings.TrimPrefix(line, "+++ "))
+			if strings.HasPrefix(value, "b/") {
+				currentFile = strings.TrimPrefix(value, "b/")
+			} else if value == "/dev/null" && oldFile != "" {
+				currentFile = oldFile
+			} else {
+				return "", false
+			}
+			inHunk = false
+		case strings.HasPrefix(line, "@@ "):
+			inHunk = currentFile == file
+			oldStart, newStart, _, _, err := unifiedPatchHunkCounts(line)
+			if err != nil {
+				return "", false
+			}
+			oldLine, newLine = oldStart, newStart
+		case inHunk && strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++"):
+			content := strings.TrimSpace(strings.TrimPrefix(line, "+"))
+			if side == "head" && newLine >= start && newLine <= end && len(content) >= 3 && len(content) <= 1000 {
+				return content, true
+			}
+			newLine++
+		case inHunk && strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---"):
+			content := strings.TrimSpace(strings.TrimPrefix(line, "-"))
+			if side == "base" && oldLine >= start && oldLine <= end && len(content) >= 3 && len(content) <= 1000 {
+				return content, true
+			}
+			oldLine++
+		case inHunk && strings.HasPrefix(line, " "):
+			oldLine++
+			newLine++
+		case strings.HasPrefix(line, "diff --git "):
+			inHunk = false
+			currentFile, oldFile = "", ""
+		}
+	}
+	return "", false
+}
+
 func reviewLineRangeTouched(ranges []CodeReviewChangedLineRange, file, side string, start, end int) bool {
 	for _, lineRange := range ranges {
 		if lineRange.File == file && lineRange.Side == side && start >= lineRange.Start && end <= lineRange.End {
