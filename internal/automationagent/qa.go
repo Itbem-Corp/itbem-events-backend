@@ -647,7 +647,7 @@ func trustedStagehandCommand(command []string, workspaceRoot string, lookup func
 		return false, nil
 	}
 	if runnerSetting == "" || digestSetting == "" {
-		return false, fmt.Errorf("Stagehand runner configuration requires both path and SHA-256")
+		return false, fmt.Errorf("stagehand runner configuration requires both path and SHA-256")
 	}
 	expectedDigest, err := hex.DecodeString(digestSetting)
 	if err != nil || len(expectedDigest) != sha256.Size {
