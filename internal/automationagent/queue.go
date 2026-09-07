@@ -202,11 +202,9 @@ func RunQueue(ctx context.Context, worker *Worker, queue Queue, concurrency int,
 					var retryable *RetryableError
 					if errors.As(err, &retryable) {
 						if extender, ok := queue.(VisibilityExtendingQueue); ok {
-							retryContext, retryCancel := context.WithTimeout(ctx, 15*time.Second)
-							if visibilityErr := extender.ExtendVisibility(retryContext, scheduled.raw, retryVisibilitySeconds(retryable)); visibilityErr != nil && retryContext.Err() == nil {
+							if visibilityErr := extendRetryVisibility(ctx, extender, scheduled.raw, retryVisibilitySeconds(retryable)); visibilityErr != nil {
 								logger.Warn("automation retry delay could not be applied; SQS default visibility remains active", "error", visibilityErr)
 							}
-							retryCancel()
 						}
 						logger.Warn("automation delivery retained for retry", "reason", retryable.Message, "retry_in_seconds", retryVisibilitySeconds(retryable))
 						return
@@ -363,6 +361,16 @@ func RunQueue(ctx context.Context, worker *Worker, queue Queue, concurrency int,
 			}
 		}
 	}
+}
+
+func extendRetryVisibility(ctx context.Context, queue VisibilityExtendingQueue, message QueueMessage, seconds int32) error {
+	// Service shutdown cancels the worker context before an in-flight provider
+	// request returns. Preserve its values but detach that cancellation long
+	// enough to shorten the durable queue lease; otherwise a FIFO lane can stay
+	// blocked for the queue's full default visibility timeout.
+	retryContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
+	return queue.ExtendVisibility(retryContext, message, seconds)
 }
 
 func retainPendingQueueLease(ctx context.Context, queue Queue, raw QueueMessage, logger *slog.Logger) func() {

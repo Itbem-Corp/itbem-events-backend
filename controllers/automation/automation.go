@@ -394,6 +394,12 @@ const automationRunLeaseDuration = 20 * time.Minute
 // the former for a fresh lease; it must never retry every 409 blindly.
 const retryReservationHeader = "X-ITBEM-Automation-Retry-Reservation"
 
+// retryLeaseHeader carries the remaining active execution lease to a worker
+// that received the same at-least-once queue delivery. Without this explicit
+// signal the worker would treat the 409 as terminal and acknowledge the only
+// durable message before the original run becomes recoverable.
+const retryLeaseHeader = "X-ITBEM-Automation-Retry-Lease"
+
 type createTaskRequest struct {
 	Operation string `json:"operation"`
 	InputRef  string `json:"input_ref"`
@@ -2664,6 +2670,7 @@ func claimAutomationTaskRun(c echo.Context, id uuid.UUID, runID string) error {
 	expiresAt := now.Add(automationRunLeaseDuration)
 	reservationExpiresAt := now.Add(2 * automationRunLeaseDuration)
 	claimed := false
+	retryAfterSeconds := int64(0)
 	if err := configuration.DB.Transaction(func(tx *gorm.DB) error {
 		// The budget hold intentionally outlives the execution lease. A worker
 		// may finish uploading a private result shortly after its 20-minute
@@ -2689,6 +2696,7 @@ func claimAutomationTaskRun(c echo.Context, id uuid.UUID, runID string) error {
 			return result.Error
 		}
 		if current.LeaseExpiresAt != nil && current.LeaseExpiresAt.After(now) {
+			retryAfterSeconds = automationLeaseRetryAfterSeconds(*current.LeaseExpiresAt, now)
 			return nil
 		}
 		result = tx.Model(&models.AutomationTask{}).
@@ -2703,9 +2711,20 @@ func claimAutomationTaskRun(c echo.Context, id uuid.UUID, runID string) error {
 		return utils.Error(c, http.StatusInternalServerError, "Automation result failed", "")
 	}
 	if !claimed {
+		if retryAfterSeconds > 0 {
+			c.Response().Header().Set(retryLeaseHeader, strconv.FormatInt(retryAfterSeconds, 10))
+		}
 		return utils.Error(c, http.StatusConflict, "Automation run is already leased", "Another active worker owns this execution; no provider call will be duplicated")
 	}
 	return c.NoContent(http.StatusNoContent)
+}
+
+func automationLeaseRetryAfterSeconds(expiresAt, now time.Time) int64 {
+	remaining := expiresAt.Sub(now)
+	if remaining <= 0 {
+		return 0
+	}
+	return int64((remaining + time.Second - 1) / time.Second)
 }
 
 type implementationExecutionHandoff struct {

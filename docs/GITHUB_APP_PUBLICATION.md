@@ -92,12 +92,14 @@ cuerpo JSON. Responde `200` con estado `ready`, no consulta GitHub, no crea una
 tarea y no toca la cola. Cualquier otro tipo de evento continúa fallando
 cerrado con `400` después de autenticar el cuerpo.
 
-El despliegue de producción autentica como la misma GitHub App y redeliverya
-su último evento `ping` después de promover el SHA exacto. El workflow sólo
-queda verde si GitHub recibe `200`; un secreto desincronizado, una URL rota o
-un ingress no disponible bloquean la evidencia operativa aunque `/health`
-permanezca saludable. La prueba no imprime el secreto, el payload ni la llave
-privada y no crea una completion del proveedor.
+El despliegue de producción autentica como la misma GitHub App y, después de
+promover el SHA exacto, redeliverya preferentemente su último evento `ping`.
+Las Apps sin un `ping` histórico usan su entrega aceptada más reciente; la
+deduplicación por repositorio, PR y head SHA impide crear una segunda tarea.
+El workflow sólo queda verde si GitHub recibe una respuesta `2xx`; un secreto
+desincronizado, una URL rota o un ingress no disponible bloquean la evidencia
+operativa aunque `/health` permanezca saludable. La prueba no imprime el
+secreto, el payload ni la llave privada y no crea una completion del proveedor.
 La llave puede llegar como PEM multilínea desde un archivo root-managed o como
 el formato de una sola línea con `\\n` explícitos requerido por el `env-file`
 de producción; el verificador restaura el framing antes de firmar y nunca

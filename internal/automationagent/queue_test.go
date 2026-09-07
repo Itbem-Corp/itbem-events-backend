@@ -20,6 +20,11 @@ type heartbeatQueue struct {
 	extensions atomic.Int32
 }
 
+type contextAwareQueue struct {
+	heartbeatQueue
+	contextWasCanceled atomic.Bool
+}
+
 type deferQueue struct {
 	heartbeatQueue
 	deferrals atomic.Int32
@@ -31,6 +36,12 @@ func (q *deferQueue) Defer(context.Context, QueueMessage, int32) error {
 }
 
 func (q *heartbeatQueue) ExtendVisibility(context.Context, QueueMessage, int32) error {
+	q.extensions.Add(1)
+	return nil
+}
+
+func (q *contextAwareQueue) ExtendVisibility(ctx context.Context, _ QueueMessage, _ int32) error {
+	q.contextWasCanceled.Store(ctx.Err() != nil)
 	q.extensions.Add(1)
 	return nil
 }
@@ -207,6 +218,18 @@ func TestRetryVisibilitySecondsIsBoundedAndHonorsProviderDelay(t *testing.T) {
 	}
 	if got := retryVisibilitySeconds(&RetryableError{RetryAfter: time.Hour}); got != 900 {
 		t.Fatalf("maximum retry visibility = %d, want 900", got)
+	}
+}
+
+func TestRetryVisibilitySurvivesWorkerContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	queue := &contextAwareQueue{}
+	if err := extendRetryVisibility(ctx, queue, QueueMessage{ReceiptHandle: "receipt"}, 120); err != nil {
+		t.Fatal(err)
+	}
+	if queue.extensions.Load() != 1 || queue.contextWasCanceled.Load() {
+		t.Fatalf("shutdown retry visibility = calls:%d cancelled:%t, want one live bounded call", queue.extensions.Load(), queue.contextWasCanceled.Load())
 	}
 }
 

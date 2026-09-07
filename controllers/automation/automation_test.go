@@ -62,6 +62,16 @@ func TestOnboardingCapabilityProbeForTaskBindsTaskAndProposalSubject(t *testing.
 	}
 }
 
+func TestAutomationLeaseRetryAfterSecondsRoundsUpWithoutInventingDelay(t *testing.T) {
+	now := time.Date(2026, time.September, 7, 3, 30, 0, 500_000_000, time.UTC)
+	if got := automationLeaseRetryAfterSeconds(now.Add(119*time.Second+time.Nanosecond), now); got != 120 {
+		t.Fatalf("retry seconds = %d, want 120", got)
+	}
+	if got := automationLeaseRetryAfterSeconds(now, now); got != 0 {
+		t.Fatalf("expired lease retry seconds = %d, want 0", got)
+	}
+}
+
 func TestReleaseGateCandidateForTaskRequiresAuthenticatedRequester(t *testing.T) {
 	workItemID := uuid.Must(uuid.NewV4())
 	input := releasegate.Input{
