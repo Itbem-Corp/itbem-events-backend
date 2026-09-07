@@ -19,12 +19,26 @@ immutable tool ledger records the actual Stagehand usage after execution.
 
 ## Local setup
 
-Install the pinned runner once from this repository:
+Install the runner once into an execution-plane directory owned by the
+platform operator, never inside a customer or product repository. It may be
+packaged from this source repository, but the deployed copy is an independent,
+immutable release artifact:
 
-```powershell
-Set-Location tools/stagehand-qa
-npm install --ignore-scripts
+```bash
+install -d -m 0755 /opt/itbem-ai-agent/tools/stagehand-qa
+cp tools/stagehand-qa/{run.mjs,package.json,package-lock.json} /opt/itbem-ai-agent/tools/stagehand-qa/
+cd /opt/itbem-ai-agent/tools/stagehand-qa
+npm ci --ignore-scripts
+chown -R root:root /opt/itbem-ai-agent/tools/stagehand-qa
+chmod -R a-w /opt/itbem-ai-agent/tools/stagehand-qa
+sha256sum run.mjs
 ```
+
+Record the resulting lowercase SHA-256 and the absolute path in the QA worker
+configuration. Both values are non-secret, but they are operator-owned. The
+worker refuses to pass `MINIMAX_API_KEY` to any runner outside that path or
+whose digest differs. This protects the credential even when an onboarded
+repository configures its own semantic QA command.
 
 The pinned Stagehand release requires Node `^20.19.0` or `>=22.12.0`. The
 runner verifies this before it reads provider configuration or opens a browser.
@@ -41,6 +55,8 @@ STAGEHAND_QA_ENV=LOCAL
 STAGEHAND_QA_MODEL=MiniMax-M3
 STAGEHAND_QA_BASE_URL=https://api.minimax.io/v1
 STAGEHAND_QA_API_KEY=
+ITBEM_STAGEHAND_RUNNER_PATH=/opt/itbem-ai-agent/tools/stagehand-qa/run.mjs
+ITBEM_STAGEHAND_RUNNER_SHA256=
 ```
 
 `STAGEHAND_QA_API_KEY` may be omitted only when the worker already has its
@@ -56,13 +72,14 @@ model name in ITBEM's cost ledger.
 
 ## Workspace registration
 
-Add this exact, operator-owned command to the relevant workspace in
-`ITBEM_AI_WORKSPACES_JSON`:
+Add the exact operator-owned runner path to the relevant workspace in
+`ITBEM_AI_WORKSPACES_JSON`. It must match
+`ITBEM_STAGEHAND_RUNNER_PATH` after resolving symlinks:
 
 ```json
 {
   "qa_semantic_command": [
-    "node", "tools/stagehand-qa/run.mjs",
+    "node", "/opt/itbem-ai-agent/tools/stagehand-qa/run.mjs",
     "--url", "{preview_url}",
     "--output", "{artifact_path}",
     "--plan", "{qa_plan_path}"
@@ -162,8 +179,7 @@ When a deterministic approved browser plan has passed, the QA run can proceed
 to its still-mandatory human QA gate, but the degradation remains visible in
 private evidence; it is never converted into invented structured evidence.
 
-For a workspace other than this backend repository, register an explicit
-operator-owned absolute path to this pinned runner (or package the same runner
-into that worker image). Commands execute from the reviewed workspace, so the
-relative `tools/stagehand-qa/run.mjs` path above is only valid when that path
-exists inside the reviewed checkout.
+Every registered workspace uses the same operator-owned absolute runner path
+(or a separately hashed runner packaged into that worker image). Commands
+execute from the reviewed workspace, so relative runner paths are never
+eligible to receive the MiniMax credential.

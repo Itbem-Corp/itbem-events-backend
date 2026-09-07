@@ -47,6 +47,9 @@ not a hard-coded runtime assumption.
   and the backend root secret never enter the physical Linux host.
 - MiniMax M3 as the initially qualified inference model for generative lanes;
   deterministic Release operations do not require a model credential.
+- Semantic browser QA receives a provider credential only through a
+  platform-operator-owned runner outside the reviewed worktree, verified
+  against a configured SHA-256; repository commands remain scrubbed.
 - Global and per-lane kill switches, bounded concurrency, idempotent external
   effects and safe restart/redelivery.
 

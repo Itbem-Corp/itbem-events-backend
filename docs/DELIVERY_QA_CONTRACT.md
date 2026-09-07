@@ -17,7 +17,7 @@ Each frozen `workspace://` source carries a harness projection:
 | `named_qa_command_count` | QA commands with an operator-owned policy identity. |
 | `artifact_collection` | Whether configured test artefacts may be retained privately. |
 | `screenshot_mode` | Responsive screenshot evidence capability. |
-| `semantic_qa_mode` | Whether the pinned Stagehand browser harness is available. |
+| `semantic_qa_mode` | Whether a configured semantic browser harness is available. |
 
 Command bodies remain local configuration. The model receives counts and
 capabilities, never shell arguments or credentials. This makes the plan
@@ -54,11 +54,13 @@ task/run IDs and shown in the Delivery work item.
 ## Credential boundary
 
 Repository validation/QA commands inherit a scrubbed environment: provider,
-GitHub and infrastructure secrets are removed. The sole exception is the
-pinned ITBEM Stagehand runner, which receives the MiniMax credential only for
-browser inference and the exact reviewed `ITBEM_QA_*` values required by an
-approved test flow. It cannot be selected by a model and its request/response
-ledger is retained privately with token and cost dimensions.
+GitHub and infrastructure secrets are removed. The sole exception is a
+platform-operator-owned Stagehand runner outside the reviewed workspace whose
+resolved absolute path and SHA-256 match the machine configuration. It receives
+the MiniMax credential only for browser inference and the exact reviewed
+`ITBEM_QA_*` values required by an approved test flow. It cannot be selected by
+a model or substituted by repository code; its request/response ledger is
+retained privately with token and cost dimensions.
 
 ## Human review checklist
 
