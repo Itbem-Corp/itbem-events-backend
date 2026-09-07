@@ -11,6 +11,7 @@ import (
 	"events-stocks/internal/releasegate"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -900,6 +901,7 @@ func (w *Worker) fail(ctx context.Context, taskID, runID string, cause error) er
 	if len(message) > maxErrorMessageLen {
 		message = message[:maxErrorMessageLen]
 	}
+	slog.Error("automation task failed terminally", "task_id", taskID, "run_id", runID, "error", message)
 	_, callbackErr := w.callback.Update(ctx, taskID, TaskUpdate{Status: "failed", RunID: runID, ErrorMessage: message})
 	if callbackErr != nil {
 		return callbackErr
@@ -916,6 +918,7 @@ func (w *Worker) failWithProviderResult(ctx context.Context, taskID, runID, requ
 	if len(message) > maxErrorMessageLen {
 		message = message[:maxErrorMessageLen]
 	}
+	slog.Error("automation task failed terminally after provider response", "task_id", taskID, "run_id", runID, "operation", operation, "provider", completion.Provider, "model", completion.Model, "error", message)
 	output := map[string]any{
 		"schema_version":    1,
 		"task_id":           taskID,
