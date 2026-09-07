@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -346,5 +347,19 @@ func TestRepairCodeReviewEvidenceQuotesUsesExactChangedLine(t *testing.T) {
 	}
 	if err := ValidateCodeReviewBoundary(review, boundary); err != nil {
 		t.Fatalf("grounded evidence quote remained invalid: %v", err)
+	}
+}
+
+func TestBlockedRemoteCodeReviewRemainsFailClosedAndPublishable(t *testing.T) {
+	boundary, err := ParseCodeReviewInput(validCodeReviewInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	review := blockedRemoteCodeReview(1, fmt.Errorf("finding references an unchanged file"))
+	if review["verdict"] != "blocked" || len(review["findings"].([]any)) != 0 || len(review["coverage_gaps"].([]any)) != 1 {
+		t.Fatalf("invalid remote fallback: %#v", review)
+	}
+	if err := ValidateCodeReviewBoundary(review, boundary); err != nil {
+		t.Fatalf("remote fallback cannot be published safely: %v", err)
 	}
 }
