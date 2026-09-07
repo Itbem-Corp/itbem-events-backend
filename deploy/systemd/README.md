@@ -105,6 +105,13 @@ while non-publishing lanes report
 provider, workspace and GitHub identity preflights pass. Then start one role
 unit at a time and observe one canary per lane before enabling the next.
 
+The service retries a failed preflight every 60 seconds without a systemd
+start-limit lockout. This is intentionally safe: all preflight operations are
+non-mutating and cannot lease queue work, invoke a model, publish a review or
+release a change. Fix a persistent configuration error through its root-only
+environment file or use the lane/all kill switch; do not turn a transient DNS
+or gateway outage into a permanent stopped worker.
+
 ## Kill switch and recovery
 
 Create `/etc/itbem-ai-agent/disabled/all` to prevent every subsequent start, or

@@ -37,7 +37,8 @@ func TestSystemdUnitFailsClosedAndRunsUnprivileged(t *testing.T) {
 		"ExecStartPre=/opt/itbem-ai-agent/current/itbem-ai-agent --provider-auth-probe", // gitleaks:allow -- inert systemd directive fixture, never a credential value
 		"ExecStartPre=/opt/itbem-ai-agent/current/itbem-ai-agent --github-auth-probe",   // gitleaks:allow -- inert systemd directive fixture, never an API key
 		"NoNewPrivileges=yes", "ProtectSystem=strict", "ProtectHome=yes",
-		"CapabilityBoundingSet=", "Restart=on-failure",
+		"CapabilityBoundingSet=", "Restart=on-failure", "RestartSec=60s",
+		"StartLimitIntervalSec=0",
 		"ReadWritePaths=/var/lib/itbem-ai-agent/%i /srv/itbem-agent-workspaces/%i",
 	} {
 		if !strings.Contains(unit, required) {
@@ -48,6 +49,9 @@ func TestSystemdUnitFailsClosedAndRunsUnprivileged(t *testing.T) {
 		if strings.Contains(unit, prohibited) {
 			t.Fatalf("systemd unit contains unsafe setting %q", prohibited)
 		}
+	}
+	if strings.Contains(unit, "StartLimitBurst=") || strings.Contains(unit, "RestartSec=10s") {
+		t.Fatal("network preflight failures must use paced retry instead of a start-limit lockout")
 	}
 	if strings.Contains(unit, "ReadWritePaths=/var/lib/itbem-ai-agent/%i /srv/itbem-agent-workspaces\n") {
 		t.Fatal("systemd worker retained cross-lane workspace write access")
