@@ -174,6 +174,17 @@ func TestGitHubReviewWebhookAdmissionIsExplicitAndSignatureBound(t *testing.T) {
 	if !githubReviewActionAllowed("synchronize") || githubReviewActionAllowed("closed") {
 		t.Fatal("only safe active pull-request actions may enqueue a new review")
 	}
+	if got := githubReviewWebhookIgnoreReason(githubPullRequestWebhook{Action: "closed"}, cfg); got != "ineligible_pull_request" {
+		t.Fatalf("closed pull request ignore status = %q", got)
+	}
+	eligible := githubPullRequestWebhook{Action: "synchronize", Number: 42}
+	eligible.Installation.ID = 99
+	eligible.Repository.FullName = "itbem/backend"
+	eligible.PullRequest.Base.SHA = strings.Repeat("a", 40)
+	eligible.PullRequest.Head.SHA = strings.Repeat("b", 40)
+	if got := githubReviewWebhookIgnoreReason(eligible, cfg); got != "" {
+		t.Fatalf("eligible pull request was ignored as %q", got)
+	}
 	if !githubReviewWebhookPing(" ping ", []byte(`{"zen":"Keep it logically awesome."}`)) {
 		t.Fatal("a valid signed GitHub ping envelope must complete the webhook handshake without queueing work")
 	}
