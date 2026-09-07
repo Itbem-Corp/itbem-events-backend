@@ -290,11 +290,23 @@ func AggregateCodeReviewSegments(boundary CodeReviewInput, segments []CodeReview
 	if len(findings) > 24 {
 		return nil, fmt.Errorf("code review aggregate has too many findings")
 	}
-	if blocked && len(findings) > 0 {
-		return nil, fmt.Errorf("code review cannot safely aggregate blocked and finding-bearing segments")
-	}
 	verdict := "approve"
-	if blocked {
+	if blocked && hasBlockingCodeReviewFinding(findings) {
+		// A failed-to-validate sibling cannot erase a grounded medium-or-higher
+		// finding from another exact-SHA segment. request_changes is at least as
+		// conservative as blocked for GitHub, preserves the concrete finding,
+		// and keeps the evidence gap visible for the incomplete segment.
+		verdict = "request_changes"
+	} else if blocked {
+		// The review schema intentionally disallows speculative findings on a
+		// blocked verdict. Preserve the safe terminal state for low-only sibling
+		// observations and require a rerun once the missing evidence is fixed.
+		// Their private segment records remain attached to the task; they do not
+		// become a conclusive GitHub finding on a partial review.
+		if len(findings) > 0 {
+			findings = []any{}
+			gaps = appendUniqueReviewStrings(gaps, []any{"At least one completed segment had non-blocking observations, but the complete review remains blocked until every segment has valid evidence. Rerun the exact-SHA review after resolving the blocked segment."}, 12)
+		}
 		verdict = "blocked"
 	} else if hasBlockingCodeReviewFinding(findings) {
 		verdict = "request_changes"

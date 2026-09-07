@@ -75,6 +75,53 @@ func TestAggregateCodeReviewSegmentsCannotApprovePartialOrInvalidEvidence(t *tes
 	}
 }
 
+func TestAggregateCodeReviewSegmentsPreservesSafeBlockingOutcomeWhenASiblingIsBlocked(t *testing.T) {
+	patch := ""
+	context := make([]CodeReviewContextExcerpt, 0, codeReviewSegmentMaxFiles+1)
+	changedValues := make(map[string]string, codeReviewSegmentMaxFiles+1)
+	for index := 0; index < codeReviewSegmentMaxFiles+1; index++ {
+		file := fmt.Sprintf("src/file_%02d.go", index)
+		value := fmt.Sprintf("new%d", index)
+		patch += fmt.Sprintf("diff --git a/%s b/%s\n--- a/%s\n+++ b/%s\n@@ -1 +1 @@\n-old%d\n+%s\n", file, file, file, file, index, value)
+		context = append(context, CodeReviewContextExcerpt{File: file, Side: "head", Start: 1, End: 1, Content: value})
+		changedValues[file] = value
+	}
+	input, err := NewCodeReviewInput("github://acme/service", strings.Repeat("a", 40), strings.Repeat("b", 40), patch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err = BindCodeReviewContext(input, context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	segments, err := SegmentCodeReviewInput(input)
+	if err != nil || len(segments) != 2 {
+		t.Fatalf("expected two review segments: %#v / %v", segments, err)
+	}
+	blocked, err := ParseCodeReview(`{"summary":"The segment lacks a required contract.","verdict":"blocked","review_scope":["dependency contract"],"findings":[],"test_plan":[],"coverage_gaps":["Provide the exact dependency contract for this frozen SHA."]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetFile := segments[1].ChangedFiles[0]
+	targetValue := changedValues[targetFile]
+	blockingFinding, err := ParseCodeReview(fmt.Sprintf(`{"summary":"The changed implementation omits a required guard.","verdict":"request_changes","review_scope":["implementation"],"findings":[{"id":"missing-guard","severity":"medium","category":"correctness","title":"Required guard is absent","file":%q,"side":"head","line_start":1,"line_end":1,"evidence":"The changed line introduces the value without the required guard.","evidence_quote":%q,"recommendation":"Add the required guard before accepting the value.","confidence":0.9}],"test_plan":["Run the targeted guard regression test."],"coverage_gaps":[]}`, targetFile, targetValue))
+	if err != nil {
+		t.Fatal(err)
+	}
+	aggregate, err := AggregateCodeReviewSegments(input, segments, []map[string]any{blocked, blockingFinding})
+	if err != nil || aggregate["verdict"] != "request_changes" || len(aggregate["findings"].([]any)) != 1 || len(aggregate["coverage_gaps"].([]any)) == 0 {
+		t.Fatalf("grounded blocking findings must survive a blocked sibling: %#v / %v", aggregate, err)
+	}
+	nonBlockingFinding, err := ParseCodeReview(fmt.Sprintf(`{"summary":"A minor improvement is available.","verdict":"comment","review_scope":["implementation"],"findings":[{"id":"minor","severity":"low","category":"maintainability","title":"Minor cleanup is available","file":%q,"side":"head","line_start":1,"line_end":1,"evidence":"The changed line can be simplified after the contract is known.","evidence_quote":%q,"recommendation":"Consider simplifying this line after resolving the contract.","confidence":0.8}],"test_plan":["Run the targeted guard regression test."],"coverage_gaps":[]}`, targetFile, targetValue))
+	if err != nil {
+		t.Fatal(err)
+	}
+	aggregate, err = AggregateCodeReviewSegments(input, segments, []map[string]any{blocked, nonBlockingFinding})
+	if err != nil || aggregate["verdict"] != "blocked" || len(aggregate["findings"].([]any)) != 0 || len(aggregate["coverage_gaps"].([]any)) < 2 {
+		t.Fatalf("a blocked aggregate must not turn low-only sibling observations into conclusive findings: %#v / %v", aggregate, err)
+	}
+}
+
 func TestBoundedCodeReviewSegmentContextIsFairAndStrictlyCapped(t *testing.T) {
 	files := []string{"a.go", "b.go", "c.go"}
 	excerpts := make([]CodeReviewContextExcerpt, 0, 30)
