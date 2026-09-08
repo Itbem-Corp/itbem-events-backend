@@ -417,6 +417,20 @@ func TestRunImplementationUsesIsolatedWorktree(t *testing.T) {
 			t.Fatalf("git commit failed: %#v, %v", result, err)
 		}
 	}
+	initial, err := runLocal(context.Background(), root, commandTimeout, "", "git", "rev-parse", "HEAD")
+	if err != nil || initial.ExitCode != 0 || !gitCommitPattern.MatchString(strings.TrimSpace(initial.Output)) {
+		t.Fatalf("could not capture frozen base revision: %#v, %v", initial, err)
+	}
+	frozenRevision := strings.TrimSpace(initial.Output)
+	if err := os.WriteFile(filepath.Join(root, "note.txt"), []byte("newer base\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range [][]string{{"git", "add", "note.txt"}, {"git", "commit", "-m", "advance base"}} {
+		result, runErr := runLocal(context.Background(), root, commandTimeout, "", command[0], command[1:]...)
+		if runErr != nil || result.ExitCode != 0 {
+			t.Fatalf("git base advance failed: %#v, %v", result, runErr)
+		}
+	}
 	workspaceJSON := `{"repo":{"path":"` + filepath.ToSlash(root) + `"}}`
 	lookup := func(name string) string {
 		if name == "ITBEM_AI_WORKSPACES_JSON" {
@@ -424,7 +438,7 @@ func TestRunImplementationUsesIsolatedWorktree(t *testing.T) {
 		}
 		return ""
 	}
-	delivery := []byte(`{"context_sources":[{"kind":"repository","reference":"workspace://repo"}]}`)
+	delivery := []byte(`{"context_sources":[{"kind":"repository","reference":"workspace://repo","revision":"` + frozenRevision + `"}]}`)
 	proposal := `{"summary":"change note","patch":"diff --git a/note.txt b/note.txt\n--- a/note.txt\n+++ b/note.txt\n@@ -1 +1 @@\n-before\n+after\ndiff --git a/new.txt b/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+new file\n"}`
 	taskID := "d4a4b837-2e18-43af-9f58-6d59629db2bb"
 	result, err := RunImplementation(context.Background(), taskID, delivery, proposal, lookup)
@@ -438,6 +452,9 @@ func TestRunImplementationUsesIsolatedWorktree(t *testing.T) {
 	reviewDigest, _ := result["review_diff_sha256"].(string)
 	if !gitCommitPattern.MatchString(baseSHA) || !sha256DigestPattern.MatchString(reviewDigest) {
 		t.Fatalf("implementation must return an immutable reviewed diff digest: %#v", result)
+	}
+	if baseSHA != frozenRevision {
+		t.Fatalf("implementation must create its worktree at the frozen SHA, got %s want %s", baseSHA, frozenRevision)
 	}
 	worktree := filepath.Join(root, ".itbem-agent-worktrees", taskID)
 	if result["github_repository"] != "Itbem-Corp/test-repo" {
@@ -455,8 +472,8 @@ func TestRunImplementationUsesIsolatedWorktree(t *testing.T) {
 		t.Fatalf("patch was not confined and applied in worktree: %q, %v", content, err)
 	}
 	base, err := os.ReadFile(filepath.Join(root, "note.txt"))
-	if err != nil || string(base) != "before\n" && string(base) != "before\r\n" {
-		t.Fatalf("base workspace was modified: %q, %v", base, err)
+	if err != nil || string(base) != "newer base\n" && string(base) != "newer base\r\n" {
+		t.Fatalf("implementation must not move or modify the newer base workspace: %q, %v", base, err)
 	}
 	if state := ReadWorkspaceGitState(Workspace{Root: root}); !state.Available || state.HasLocalChanges {
 		t.Fatalf("an agent worktree must not make its dedicated base look dirty: %#v", state)
@@ -466,6 +483,36 @@ func TestRunImplementationUsesIsolatedWorktree(t *testing.T) {
 	}
 	if err := verifyReviewedWorktree(context.Background(), worktree, auth); err == nil {
 		t.Fatal("publication must reject a worktree modified after human review")
+	}
+}
+
+func TestIsolatedWorktreeAtRejectsInvalidAndUnavailableFrozenRevisions(t *testing.T) {
+	root := t.TempDir()
+	for _, command := range [][]string{{"git", "init"}, {"git", "config", "user.email", "test@example.invalid"}, {"git", "config", "user.name", "ITBEM Test"}} {
+		result, err := runLocal(context.Background(), root, commandTimeout, "", command[0], command[1:]...)
+		if err != nil || result.ExitCode != 0 {
+			t.Fatalf("git setup failed: %#v / %v", result, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("initial\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range [][]string{{"git", "add", "README.md"}, {"git", "commit", "-m", "initial"}} {
+		result, err := runLocal(context.Background(), root, commandTimeout, "", command[0], command[1:]...)
+		if err != nil || result.ExitCode != 0 {
+			t.Fatalf("git commit failed: %#v / %v", result, err)
+		}
+	}
+	workspace := Workspace{ID: "repo", Root: root}
+	taskID := "d4a4b837-2e18-43af-9f58-6d59629db2bb"
+	if _, _, err := isolatedWorktreeAt(context.Background(), workspace, taskID, "short-sha"); err == nil || !strings.Contains(err.Error(), "expected revision is invalid") {
+		t.Fatalf("abbreviated revision must be rejected: %v", err)
+	}
+	if _, _, err := isolatedWorktreeAt(context.Background(), workspace, taskID, strings.Repeat("f", 40)); err == nil || !strings.Contains(err.Error(), "expected revision is unavailable") {
+		t.Fatalf("unavailable full revision must be rejected: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".itbem-agent-worktrees", taskID)); !os.IsNotExist(err) {
+		t.Fatalf("invalid revisions must not create an isolated worktree: %v", err)
 	}
 }
 

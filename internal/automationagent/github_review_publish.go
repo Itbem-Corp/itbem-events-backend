@@ -120,9 +120,12 @@ func CodeReviewPublicationHandoff(publication GitHubCodeReviewPublication) map[s
 
 // PublishGitHubCodeReview relays only a validated Reviewer verdict. It uses a
 // repository-scoped token minted from the Review lane's own App identity. A
-// subject marker makes crash recovery idempotent and rejects a second,
-// conflicting model result for the same frozen pull-request head.
-func PublishGitHubCodeReview(ctx context.Context, boundary CodeReviewInput, review map[string]any, lookup func(string) string) (GitHubCodeReviewPublication, error) {
+// subject marker makes ordinary delivery recovery idempotent and rejects a
+// second, conflicting model result for the same frozen pull-request head. An
+// explicitly authorized retry is the narrow exception: it may supersede this
+// App's prior failed check for the same immutable subject after a new,
+// validated verdict has been published.
+func PublishGitHubCodeReview(ctx context.Context, boundary CodeReviewInput, review map[string]any, lookup func(string) string, allowFailedCheckSupersede bool) (GitHubCodeReviewPublication, error) {
 	if boundary.Remote == nil {
 		return GitHubCodeReviewPublication{}, fmt.Errorf("remote code review target is required")
 	}
@@ -206,7 +209,7 @@ func PublishGitHubCodeReview(ctx context.Context, boundary CodeReviewInput, revi
 		if !strings.EqualFold(result.ReviewerActor, actor) {
 			return GitHubCodeReviewPublication{}, fmt.Errorf("existing GitHub review belongs to a different identity")
 		}
-		return publishGitHubExactSHAReviewCheck(ctx, client, config, token.Token, repository, result)
+		return publishGitHubExactSHAReviewCheck(ctx, client, config, token.Token, repository, result, allowFailedCheckSupersede)
 	}
 	published, statusCode, err := postGitHubCodeReview(ctx, client, token.Token, baseURL+"/reviews", payload)
 	if err != nil {
@@ -232,7 +235,7 @@ func PublishGitHubCodeReview(ctx context.Context, boundary CodeReviewInput, revi
 	if !strings.EqualFold(result.ReviewerActor, actor) || !strings.Contains(published.Body, marker) {
 		return GitHubCodeReviewPublication{}, fmt.Errorf("GitHub pull request review identity is invalid")
 	}
-	return publishGitHubExactSHAReviewCheck(ctx, client, config, token.Token, repository, result)
+	return publishGitHubExactSHAReviewCheck(ctx, client, config, token.Token, repository, result, allowFailedCheckSupersede)
 }
 
 func postGitHubCodeReview(ctx context.Context, client *http.Client, token, endpoint string, payload githubReviewCreatePayload) (githubRemoteReview, int, error) {
@@ -281,7 +284,7 @@ func githubReviewBodyFallback(payload githubReviewCreatePayload) githubReviewCre
 	return payload
 }
 
-func publishGitHubExactSHAReviewCheck(ctx context.Context, client *http.Client, config GitHubAppConfig, token string, repository githubRepository, publication GitHubCodeReviewPublication) (GitHubCodeReviewPublication, error) {
+func publishGitHubExactSHAReviewCheck(ctx context.Context, client *http.Client, config GitHubAppConfig, token string, repository githubRepository, publication GitHubCodeReviewPublication, allowFailedCheckSupersede bool) (GitHubCodeReviewPublication, error) {
 	appID, err := strconv.ParseInt(strings.TrimSpace(config.AppID), 10, 64)
 	if err != nil || appID < 1 || publication.ReviewID < 1 || !validGitHubCommitSHA(publication.HeadSHA) {
 		return GitHubCodeReviewPublication{}, fmt.Errorf("reviewer check identity is invalid")
@@ -301,14 +304,17 @@ func publishGitHubExactSHAReviewCheck(ctx context.Context, client *http.Client, 
 		Output: githubCheckRunOutput{Title: "Bema Reviewer: " + conclusion, Summary: "Automated review for the exact pull-request head " + publication.HeadSHA + ".", Text: marker},
 	}
 	baseURL := strings.TrimRight(config.APIBaseURL, "/") + "/repos/" + url.PathEscape(repository.Owner) + "/" + url.PathEscape(repository.Name)
-	existing, found, err := findGitHubExactSHAReviewCheck(ctx, client, token, baseURL+"/commits/"+url.PathEscape(publication.HeadSHA)+"/check-runs", appID, appSlug, payload)
+	existing, found, exact, err := findGitHubExactSHAReviewCheck(ctx, client, token, baseURL+"/commits/"+url.PathEscape(publication.HeadSHA)+"/check-runs", appID, appSlug, payload)
 	if err != nil {
 		return GitHubCodeReviewPublication{}, err
 	}
 	reused := false
 	if found {
-		reused = existing.Status == payload.Status && existing.Conclusion == payload.Conclusion && existing.DetailsURL == payload.DetailsURL
+		reused = exact && existing.Status == payload.Status && existing.Conclusion == payload.Conclusion && existing.DetailsURL == payload.DetailsURL
 		if !reused {
+			if !exact && (!allowFailedCheckSupersede || existing.Conclusion != "failure") {
+				return GitHubCodeReviewPublication{}, fmt.Errorf("a conflicting Reviewer check already exists for the frozen subject")
+			}
 			patchPayload := payload
 			patchPayload.HeadSHA = ""
 			existing, err = writeGitHubExactSHAReviewCheck(ctx, client, token, baseURL+"/check-runs/"+strconv.FormatInt(existing.ID, 10), http.MethodPatch, patchPayload)
@@ -331,37 +337,37 @@ func githubReviewCheckMarker(subjectSHA256, payloadSHA256 string) string {
 	return "itbem-review-check subject=" + subjectSHA256 + " payload=" + payloadSHA256
 }
 
-func findGitHubExactSHAReviewCheck(ctx context.Context, client *http.Client, token, endpoint string, appID int64, appSlug string, expected githubCheckRunPayload) (githubRemoteCheckRun, bool, error) {
+func findGitHubExactSHAReviewCheck(ctx context.Context, client *http.Client, token, endpoint string, appID int64, appSlug string, expected githubCheckRunPayload) (githubRemoteCheckRun, bool, bool, error) {
 	request, err := githubAppRequest(ctx, http.MethodGet, endpoint+"?check_name="+url.QueryEscape(expected.Name)+"&filter=all&per_page=100", token, nil)
 	if err != nil {
-		return githubRemoteCheckRun{}, false, err
+		return githubRemoteCheckRun{}, false, false, err
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		return githubRemoteCheckRun{}, false, fmt.Errorf("read existing Reviewer checks")
+		return githubRemoteCheckRun{}, false, false, fmt.Errorf("read existing Reviewer checks")
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return githubRemoteCheckRun{}, false, fmt.Errorf("GitHub Reviewer check lookup was rejected (%d)", response.StatusCode)
+		return githubRemoteCheckRun{}, false, false, fmt.Errorf("GitHub Reviewer check lookup was rejected (%d)", response.StatusCode)
 	}
 	var result struct {
 		TotalCount int                    `json:"total_count"`
 		CheckRuns  []githubRemoteCheckRun `json:"check_runs"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(&result); err != nil || result.TotalCount > 100 || len(result.CheckRuns) > 100 || strings.Contains(response.Header.Get("Link"), `rel="next"`) {
-		return githubRemoteCheckRun{}, false, fmt.Errorf("GitHub Reviewer check lookup response exceeds the bounded history")
+		return githubRemoteCheckRun{}, false, false, fmt.Errorf("GitHub Reviewer check lookup response exceeds the bounded history")
 	}
 	subjectPrefix := "itbem-review-check subject=" + expected.ExternalID + " payload="
 	for _, check := range result.CheckRuns {
 		if check.App.ID != appID || !strings.EqualFold(check.App.Slug, appSlug) || check.Name != expected.Name || !strings.EqualFold(check.HeadSHA, expected.HeadSHA) || check.ExternalID != expected.ExternalID {
 			continue
 		}
-		if !strings.Contains(check.Output.Text, subjectPrefix) || !strings.Contains(check.Output.Text, expected.Output.Text) {
-			return githubRemoteCheckRun{}, false, fmt.Errorf("a conflicting Reviewer check already exists for the frozen subject")
+		if !strings.Contains(check.Output.Text, subjectPrefix) {
+			return githubRemoteCheckRun{}, false, false, fmt.Errorf("a conflicting Reviewer check already exists for the frozen subject")
 		}
-		return check, true, nil
+		return check, true, strings.Contains(check.Output.Text, expected.Output.Text), nil
 	}
-	return githubRemoteCheckRun{}, false, nil
+	return githubRemoteCheckRun{}, false, false, nil
 }
 
 func writeGitHubExactSHAReviewCheck(ctx context.Context, client *http.Client, token, endpoint, method string, payload githubCheckRunPayload) (githubRemoteCheckRun, error) {

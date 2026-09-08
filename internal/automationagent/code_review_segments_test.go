@@ -75,6 +75,96 @@ func TestAggregateCodeReviewSegmentsCannotApprovePartialOrInvalidEvidence(t *tes
 	}
 }
 
+func TestCodeReviewSegmentPromptRestrictsFindingsToTheSegmentFiles(t *testing.T) {
+	boundary, err := ParseCodeReviewInput(validCodeReviewInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	segments, err := SegmentCodeReviewInput(boundary)
+	if err != nil || len(segments) != 1 {
+		t.Fatalf("expected one bounded segment: %#v / %v", segments, err)
+	}
+	prompt := codeReviewSegmentPrompt("review the exact diff", 1, 1, segments[0], boundary)
+	if !strings.Contains(prompt, "The only permitted values of findings[].file in this segment are exactly: controllers/orders.go") || !strings.Contains(prompt, "Never cite supporting context") || !strings.Contains(prompt, "A coverage gap is permitted only") || !strings.Contains(prompt, "Never report a coverage gap merely because") || !strings.Contains(prompt, "Do not require this segment to independently prove coverage") {
+		t.Fatalf("segment prompt must make the file boundary explicit: %s", prompt)
+	}
+}
+
+func TestCodeReviewSegmentPromptKeepsAMultiFileNonTestBoundaryDeterministic(t *testing.T) {
+	patch := "diff --git a/src/a.go b/src/a.go\n--- a/src/a.go\n+++ b/src/a.go\n@@ -1 +1 @@\n-oldA\n+newA\n" +
+		"diff --git a/src/b.go b/src/b.go\n--- a/src/b.go\n+++ b/src/b.go\n@@ -1 +1 @@\n-oldB\n+newB\n"
+	boundary, err := NewCodeReviewInput("github://example/service", strings.Repeat("a", 40), strings.Repeat("b", 40), patch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	segments, err := SegmentCodeReviewInput(boundary)
+	if err != nil || len(segments) != 1 {
+		t.Fatalf("expected one bounded multi-file segment: %#v / %v", segments, err)
+	}
+	prompt := codeReviewSegmentPrompt("review the exact diff", 1, 1, segments[0], boundary)
+	if !strings.Contains(prompt, "The only permitted values of findings[].file in this segment are exactly: src/a.go, src/b.go") || !strings.Contains(prompt, "The complete frozen PR changes these test files: ") {
+		t.Fatalf("multi-file prompt lost deterministic file authority: %s", prompt)
+	}
+}
+
+func TestSupportingCodeReviewTestPatchKeepsWholeTestDiffsOnly(t *testing.T) {
+	input, err := NewCodeReviewInput("github://example/service", strings.Repeat("a", 40), strings.Repeat("b", 40), "diff --git a/internal/service.go b/internal/service.go\n--- a/internal/service.go\n+++ b/internal/service.go\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/internal/service_test.go b/internal/service_test.go\n--- a/internal/service_test.go\n+++ b/internal/service_test.go\n@@ -1 +1 @@\n-old test\n+new test\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	patch := supportingCodeReviewTestPatch(input)
+	if !strings.Contains(patch, "diff --git a/internal/service_test.go") || strings.Contains(patch, "diff --git a/internal/service.go") || !strings.HasSuffix(patch, "new test\n") {
+		t.Fatalf("expected only the complete test-file diff: %q", patch)
+	}
+}
+
+func TestSupportingCodeReviewTestPatchHonorsItsByteCapWithoutTruncatingFiles(t *testing.T) {
+	patch := ""
+	for index := 0; index < 30; index++ {
+		file := fmt.Sprintf("internal/service_%02d_test.go", index)
+		payload := strings.Repeat("x", 1200)
+		patch += fmt.Sprintf("diff --git a/%s b/%s\n--- a/%s\n+++ b/%s\n@@ -1 +1 @@\n-old\n+%s\n", file, file, file, file, payload)
+	}
+	input, err := NewCodeReviewInput("github://example/service", strings.Repeat("a", 40), strings.Repeat("b", 40), patch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	support := supportingCodeReviewTestPatch(input)
+	if len(support) > codeReviewSupportingTestPatchBytes {
+		t.Fatalf("supporting test patch escaped its byte cap: %d", len(support))
+	}
+	blocks, err := splitCodeReviewPatchFiles(support)
+	if err != nil || strings.Join(blocks, "") != support || len(blocks) == 0 || len(blocks) == 30 {
+		t.Fatalf("supporting test patch must contain only complete capped file blocks: %d / %v", len(blocks), err)
+	}
+}
+
+func TestSupportingCodeReviewTestPatchReportsNoContextWhenOneFileExceedsCap(t *testing.T) {
+	payload := strings.Repeat("x", codeReviewSupportingTestPatchBytes+1)
+	patch := "diff --git a/internal/oversized_test.go b/internal/oversized_test.go\n--- a/internal/oversized_test.go\n+++ b/internal/oversized_test.go\n@@ -1 +1 @@\n-old\n+" + payload + "\n"
+	input, err := NewCodeReviewInput("github://example/service", strings.Repeat("a", 40), strings.Repeat("b", 40), patch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if support := supportingCodeReviewTestPatch(input); support != "No bounded changed test patch is available." {
+		t.Fatalf("oversized test file must not be truncated into review context: %q", support)
+	}
+}
+
+func TestCodeReviewRepairBoundaryRestatesExactPermittedLocations(t *testing.T) {
+	boundary := segmentedReviewFixture(t)
+	boundary.ChangedFiles = []string{"src/b_test.go", "src/a.go"}
+	boundary.ChangedLines = []CodeReviewChangedLineRange{{File: "src/b_test.go", Side: "head", Start: 1, End: 1}, {File: "src/a.go", Side: "head", Start: 1, End: 1}}
+	messages := codeReviewRepairMessages(nil, `{"verdict":"request_changes"}`, fmt.Errorf("code review finding must reference a changed file"), boundary)
+	content := ""
+	if len(messages) == 1 {
+		content = messages[0].Content
+	}
+	if len(messages) != 1 || !strings.Contains(content, "Authoritative permitted finding files: src/a.go, src/b_test.go") || !strings.Contains(content, "src/a.go:head:1-1, src/b_test.go:head:1-1") || !strings.Contains(content, "findings=[]") {
+		t.Fatalf("repair prompt lost its deterministic finding boundary: %#v", messages)
+	}
+}
+
 func TestAggregateCodeReviewSegmentsPreservesSafeBlockingOutcomeWhenASiblingIsBlocked(t *testing.T) {
 	patch := ""
 	context := make([]CodeReviewContextExcerpt, 0, codeReviewSegmentMaxFiles+1)

@@ -348,6 +348,10 @@ func TestRetryCodeReviewIsNarrowAndPreservesTheFrozenInputBoundary(t *testing.T)
 	if retry.ID == failed.ID || retry.JobID == failed.JobID || retry.Status != "queued" || retry.InputRef != failed.InputRef || retry.EvidenceSubjectDigest != digest || retry.CorrelationID != failed.CorrelationID || retry.RequestedBy != failed.RequestedBy || retry.MaxCompletionTokens != failed.MaxCompletionTokens {
 		t.Fatalf("retry did not preserve the immutable review boundary: %#v", retry)
 	}
+	message := codeReviewRetryQueueMessage(failed, retry)
+	if message.SchemaVersion != 1 || message.JobID != retry.JobID.String() || message.Payload.TaskID != retry.ID.String() || message.Payload.RetryOfTaskID != failed.ID.String() || message.Payload.InputRef != failed.InputRef || message.Payload.Operation != "code.review" || message.Payload.Attempt != 1 {
+		t.Fatalf("retry queue message did not preserve and bind the failed review: %#v", message)
+	}
 	for _, task := range []*models.AutomationTask{
 		{Operation: "code.review", Status: "completed", InputRef: failed.InputRef, EvidenceSubjectDigest: digest},
 		{Operation: "ai.chat", Status: "failed", InputRef: failed.InputRef, EvidenceSubjectDigest: digest},

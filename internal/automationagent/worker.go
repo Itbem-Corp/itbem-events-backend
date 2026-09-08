@@ -42,6 +42,10 @@ type TaskMessage struct {
 		MaxCompletionTokens int    `json:"max_completion_tokens,omitempty"`
 		InputRef            string `json:"input_ref"`
 		Attempt             int    `json:"attempt"`
+		// RetryOfTaskID is set only by the control-plane retry endpoint. It
+		// permits one reviewer retry to supersede its own failed check for the
+		// same immutable subject; an ordinary queue delivery stays idempotent.
+		RetryOfTaskID string `json:"retry_of_task_id,omitempty"`
 	} `json:"payload"`
 }
 
@@ -360,6 +364,11 @@ func (w *Worker) Process(ctx context.Context, message TaskMessage) error {
 	}
 	if message.Payload.Operation == "code.review" {
 		return w.processSegmentedCodeReview(ctx, message, runID, input, codeReviewBoundary)
+	}
+	if message.Payload.Operation == "delivery.plan" || message.Payload.Operation == "delivery.implementation" {
+		if err := PrepareDeliveryWorkspaces(ctx, input.Delivery, os.Getenv); err != nil {
+			return w.fail(ctx, message.Payload.TaskID, runID, err)
+		}
 	}
 	messages, err := buildTaskMessages(message.Payload.Operation, input, os.Getenv)
 	if err != nil {

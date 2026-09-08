@@ -496,11 +496,96 @@ func TestSyncManagedWorkspaceSupportsNonMainBranchAndRejectsDirtyCheckout(t *tes
 	if err != nil || state.HeadSHA == firstSHA || state.Branch != baseBranch {
 		t.Fatalf("managed checkout did not fast-forward: %#v / %v", state, err)
 	}
+	registryValue, err := json.Marshal(map[string]any{"managed": map[string]any{
+		"path": root, "repository_url": remote, "base_branch": baseBranch,
+		"capabilities": []string{WorkspaceCapabilityReadRepository, WorkspaceCapabilityFetchRemote},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := string(registryValue)
+	lookup := func(key string) string {
+		if key == "ITBEM_AI_WORKSPACES_JSON" {
+			return registry
+		}
+		return ""
+	}
+	freshDelivery := []byte(`{"context_sources":[{"kind":"repository","reference":"workspace://managed","revision":"` + state.HeadSHA + `"}]}`)
+	if err := PrepareDeliveryWorkspaces(context.Background(), freshDelivery, lookup); err != nil {
+		t.Fatalf("managed workspace at its exact frozen revision must prepare: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("three\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range [][]string{{"git", "add", "README.md"}, {"git", "commit", "-m", "advance again"}, {"git", "push", "origin", baseBranch}} {
+		result, runErr := runLocal(context.Background(), seed, commandTimeout, "", command[0], command[1:]...)
+		if runErr != nil || result.ExitCode != 0 {
+			t.Fatalf("seed second advance failed: %#v / %v", result, runErr)
+		}
+	}
+	if err := PrepareDeliveryWorkspaces(context.Background(), freshDelivery, lookup); err == nil || !strings.Contains(err.Error(), "fetched origin has advanced") {
+		t.Fatalf("stale Delivery snapshot must be rejected after fetch/prune: %v", err)
+	}
+	for _, command := range [][]string{{"git", "config", "user.email", "test@example.invalid"}, {"git", "config", "user.name", "ITBEM Test"}} {
+		result, runErr := runLocal(context.Background(), root, commandTimeout, "", command[0], command[1:]...)
+		if runErr != nil || result.ExitCode != 0 {
+			t.Fatalf("managed checkout identity setup failed: %#v / %v", result, runErr)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("local ahead\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range [][]string{{"git", "add", "README.md"}, {"git", "commit", "-m", "local ahead"}} {
+		result, runErr := runLocal(context.Background(), root, commandTimeout, "", command[0], command[1:]...)
+		if runErr != nil || result.ExitCode != 0 {
+			t.Fatalf("local managed branch advance failed: %#v / %v", result, runErr)
+		}
+	}
+	if _, err := SyncManagedWorkspace(context.Background(), workspace); err == nil || !strings.Contains(err.Error(), "not identical to fetched origin") {
+		t.Fatalf("locally-ahead managed base must be rejected after a no-op fast-forward: %v", err)
+	}
 	if err := os.WriteFile(filepath.Join(root, "local.txt"), []byte("do not overwrite"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := SyncManagedWorkspace(context.Background(), workspace); err == nil || !strings.Contains(err.Error(), "local changes") {
 		t.Fatalf("dirty managed checkout must not be switched: %v", err)
+	}
+}
+
+func TestPrepareDeliveryWorkspacesRejectsInvalidManagedRevisionBeforeSyncAndSkipsLegacyWorkspace(t *testing.T) {
+	managedRoot, legacyRoot := filepath.Join(t.TempDir(), "managed"), filepath.Join(t.TempDir(), "legacy")
+	if err := os.MkdirAll(managedRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(legacyRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	registryValue, err := json.Marshal(map[string]any{
+		"managed": map[string]any{
+			"path": managedRoot, "repository_url": "https://example.invalid/managed.git", "base_branch": "main",
+			"capabilities": []string{WorkspaceCapabilityReadRepository, WorkspaceCapabilityFetchRemote},
+		},
+		"legacy": map[string]any{"path": legacyRoot},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lookup := func(key string) string {
+		if key == "ITBEM_AI_WORKSPACES_JSON" {
+			return string(registryValue)
+		}
+		return ""
+	}
+	invalid := json.RawMessage(`{"context_sources":[{"kind":"repository","reference":"workspace://managed","revision":"short-sha"}]}`)
+	if err := PrepareDeliveryWorkspaces(context.Background(), invalid, lookup); err == nil || !strings.Contains(err.Error(), "no immutable frozen revision") {
+		t.Fatalf("invalid managed revision must fail before remote synchronization: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(managedRoot, ".git")); !os.IsNotExist(err) {
+		t.Fatalf("invalid revision must not create or mutate a managed checkout: %v", err)
+	}
+	legacy := json.RawMessage(`{"context_sources":[{"kind":"repository","reference":"workspace://legacy","revision":"` + strings.Repeat("a", 40) + `"}]}`)
+	if err := PrepareDeliveryWorkspaces(context.Background(), legacy, lookup); err != nil {
+		t.Fatalf("legacy local-only workspace should not require managed synchronization: %v", err)
 	}
 }
 

@@ -54,6 +54,12 @@ type LocalArtifact struct {
 }
 
 func RunQA(ctx context.Context, taskID string, delivery json.RawMessage, lookup func(string) string) (map[string]any, []LocalArtifact, error) {
+	// QA may run well after an implementation branch was created. Re-fetch all
+	// managed bases first so an advanced main invalidates the stale change-set
+	// instead of silently testing it against obsolete repository context.
+	if err := PrepareDeliveryWorkspaces(ctx, delivery, lookup); err != nil {
+		return nil, nil, err
+	}
 	previewURL, err := deliveryPreviewURL(delivery)
 	if err != nil {
 		return nil, nil, err

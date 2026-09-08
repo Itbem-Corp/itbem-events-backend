@@ -201,6 +201,12 @@ func RunImplementation(ctx context.Context, taskID string, delivery json.RawMess
 	if !taskIDPattern.MatchString(strings.ToLower(taskID)) {
 		return nil, fmt.Errorf("task ID is invalid for a local worktree")
 	}
+	// Worker.Process performs this same check before paying for a model call.
+	// Repeat it immediately before we create a worktree so direct callers and
+	// a branch that advanced while the model was reasoning fail closed too.
+	if err := PrepareDeliveryWorkspaces(ctx, delivery, lookup); err != nil {
+		return nil, err
+	}
 	targets, err := deliveryImplementationTargets(delivery, proposal, lookup)
 	if err != nil {
 		return nil, err
@@ -208,7 +214,7 @@ func RunImplementation(ctx context.Context, taskID string, delivery json.RawMess
 	changeSets := make([]any, 0, len(targets))
 	executionOrder := make([]string, 0, len(targets))
 	for _, target := range targets {
-		changeSet, runErr := runWorkspaceImplementation(ctx, taskID, target.workspace, target.patch)
+		changeSet, runErr := runWorkspaceImplementation(ctx, taskID, target.workspace, target.revision, target.patch)
 		if runErr != nil {
 			return nil, runErr
 		}
@@ -230,6 +236,7 @@ func RunImplementation(ctx context.Context, taskID string, delivery json.RawMess
 type implementationTarget struct {
 	workspace Workspace
 	reference string
+	revision  string
 	patch     string
 }
 
@@ -311,16 +318,20 @@ func deliveryImplementationTargets(delivery json.RawMessage, proposal ChangeProp
 		if required, declared := approvedChangedRepositoryReferences(delivery); declared && len(required) > 1 {
 			return nil, fmt.Errorf("implementation must provide a separate repository patch for every repository marked as changed in the approved plan")
 		}
-		workspace, err := deliveryRepositoryWorkspace(delivery, lookup)
+		workspace, revision, err := deliveryRepositoryWorkspaceWithRevision(delivery, lookup)
 		if err != nil {
 			return nil, err
 		}
-		return []implementationTarget{{workspace: workspace, patch: proposal.Patch}}, nil
+		if revision != "" && !gitCommitPattern.MatchString(revision) {
+			return nil, fmt.Errorf("implementation repository has an invalid frozen revision")
+		}
+		return []implementationTarget{{workspace: workspace, revision: revision, patch: proposal.Patch}}, nil
 	}
 	var value struct {
 		ContextSources []struct {
 			Kind      string `json:"kind"`
 			Reference string `json:"reference"`
+			Revision  string `json:"revision"`
 		} `json:"context_sources"`
 		ApprovedPlan struct {
 			RepositoryImpact []struct {
@@ -333,10 +344,10 @@ func deliveryImplementationTargets(delivery json.RawMessage, proposal ChangeProp
 	if err := json.Unmarshal(delivery, &value); err != nil {
 		return nil, fmt.Errorf("delivery input must be a JSON object")
 	}
-	contextRepositories := make(map[string]struct{})
+	contextRepositories := make(map[string]string)
 	for _, source := range value.ContextSources {
 		if source.Kind == "repository" && strings.HasPrefix(strings.TrimSpace(source.Reference), "workspace://") {
-			contextRepositories[strings.TrimSpace(source.Reference)] = struct{}{}
+			contextRepositories[strings.TrimSpace(source.Reference)] = strings.ToLower(strings.TrimSpace(source.Revision))
 		}
 	}
 	required := make(map[string]struct{})
@@ -354,14 +365,18 @@ func deliveryImplementationTargets(delivery json.RawMessage, proposal ChangeProp
 		if _, approved := required[reference]; !approved {
 			return nil, fmt.Errorf("implementation patch is outside the approved repository impact: %s", reference)
 		}
-		if _, present := contextRepositories[reference]; !present {
+		revision, present := contextRepositories[reference]
+		if !present {
 			return nil, fmt.Errorf("implementation patch repository is absent from frozen context: %s", reference)
+		}
+		if revision != "" && !gitCommitPattern.MatchString(revision) {
+			return nil, fmt.Errorf("implementation patch repository has an invalid frozen revision: %s", reference)
 		}
 		workspace, err := RegisteredWorkspace(reference, lookup)
 		if err != nil {
 			return nil, err
 		}
-		targets = append(targets, implementationTarget{workspace: workspace, reference: reference, patch: proposalPatch.Patch})
+		targets = append(targets, implementationTarget{workspace: workspace, reference: reference, revision: revision, patch: proposalPatch.Patch})
 	}
 	references := make([]string, 0, len(targets))
 	targetByReference := make(map[string]implementationTarget, len(targets))
@@ -411,14 +426,14 @@ func approvedChangedRepositoryReferences(delivery json.RawMessage) (map[string]s
 	return required, true
 }
 
-func runWorkspaceImplementation(ctx context.Context, taskID string, workspace Workspace, patch string) (map[string]any, error) {
+func runWorkspaceImplementation(ctx context.Context, taskID string, workspace Workspace, expectedRevision, patch string) (map[string]any, error) {
 	if err := workspace.RequireCapability(WorkspaceCapabilityCreateWorktree); err != nil {
 		return nil, err
 	}
 	if err := workspace.RequireCapability(WorkspaceCapabilityApplyPatch); err != nil {
 		return nil, err
 	}
-	worktree, branch, err := isolatedWorktree(ctx, workspace, taskID)
+	worktree, branch, err := isolatedWorktreeAt(ctx, workspace, taskID, expectedRevision)
 	if err != nil {
 		return nil, err
 	}
@@ -535,46 +550,85 @@ func worktreeDiffSHA256(ctx context.Context, worktree, baseSHA string, staged bo
 }
 
 func deliveryRepositoryWorkspace(delivery json.RawMessage, lookup func(string) string) (Workspace, error) {
+	workspace, _, err := deliveryRepositoryWorkspaceWithRevision(delivery, lookup)
+	return workspace, err
+}
+
+// deliveryRepositoryWorkspaceWithRevision selects the same explicit primary
+// repository as the legacy helper, while retaining the frozen source SHA for
+// implementation. QA and older callers intentionally keep using the wrapper
+// because they select an already-published reviewed worktree instead.
+func deliveryRepositoryWorkspaceWithRevision(delivery json.RawMessage, lookup func(string) string) (Workspace, string, error) {
 	var value struct {
 		ContextSources []struct {
 			Kind      string         `json:"kind"`
 			Reference string         `json:"reference"`
+			Revision  string         `json:"revision"`
 			Metadata  map[string]any `json:"metadata"`
 		} `json:"context_sources"`
 	}
 	if json.Unmarshal(delivery, &value) != nil {
-		return Workspace{}, fmt.Errorf("delivery input must be a JSON object")
+		return Workspace{}, "", fmt.Errorf("delivery input must be a JSON object")
 	}
-	var references []string
-	var primaryReferences []string
+	var references []struct{ reference, revision string }
+	var primaryReferences []struct{ reference, revision string }
 	for _, source := range value.ContextSources {
 		if source.Kind == "repository" {
-			references = append(references, source.Reference)
+			candidate := struct{ reference, revision string }{strings.TrimSpace(source.Reference), strings.ToLower(strings.TrimSpace(source.Revision))}
+			references = append(references, candidate)
 			if role, _ := source.Metadata["repository_role"].(string); strings.EqualFold(strings.TrimSpace(role), "primary") {
-				primaryReferences = append(primaryReferences, source.Reference)
+				primaryReferences = append(primaryReferences, candidate)
 			}
 		}
 	}
 	if len(references) == 1 {
-		return RegisteredWorkspace(references[0], lookup)
+		workspace, err := RegisteredWorkspace(references[0].reference, lookup)
+		return workspace, references[0].revision, err
 	}
 	if len(primaryReferences) == 1 {
-		return RegisteredWorkspace(primaryReferences[0], lookup)
+		workspace, err := RegisteredWorkspace(primaryReferences[0].reference, lookup)
+		return workspace, primaryReferences[0].revision, err
 	}
 	if len(references) == 0 {
-		return Workspace{}, fmt.Errorf("implementation requires a registered repository context")
+		return Workspace{}, "", fmt.Errorf("implementation requires a registered repository context")
 	}
-	return Workspace{}, fmt.Errorf("multi-repository implementation requires exactly one context source with metadata.repository_role=primary")
+	return Workspace{}, "", fmt.Errorf("multi-repository implementation requires exactly one context source with metadata.repository_role=primary")
 }
 
 func isolatedWorktree(ctx context.Context, workspace Workspace, taskID string) (string, string, error) {
+	return isolatedWorktreeAt(ctx, workspace, taskID, "")
+}
+
+// isolatedWorktreeAt never bases an implementation on an ambient local HEAD
+// when the Delivery context froze an immutable revision. The caller has
+// already synchronized managed checkouts; this second exact-SHA selection
+// closes the race between that preparation and worktree creation.
+func isolatedWorktreeAt(ctx context.Context, workspace Workspace, taskID, expectedRevision string) (string, string, error) {
 	inside, err := runLocal(ctx, workspace.Root, 20*time.Second, "", "git", "rev-parse", "--is-inside-work-tree")
 	if err != nil || inside.ExitCode != 0 || strings.TrimSpace(inside.Output) != "true" {
 		return "", "", fmt.Errorf("registered workspace must be a Git worktree")
 	}
 	branch := "itbem-agent/" + taskID
 	directory := filepath.Join(workspace.Root, ".itbem-agent-worktrees", taskID)
+	revision := "HEAD"
+	expectedRevision = strings.ToLower(strings.TrimSpace(expectedRevision))
+	if expectedRevision != "" {
+		if !gitCommitPattern.MatchString(expectedRevision) {
+			return "", "", fmt.Errorf("isolated worktree expected revision is invalid")
+		}
+		known, knownErr := runLocal(ctx, workspace.Root, 20*time.Second, "", "git", "rev-parse", "--verify", "--quiet", expectedRevision+"^{commit}")
+		if knownErr != nil || known.ExitCode != 0 || !strings.EqualFold(strings.TrimSpace(known.Output), expectedRevision) {
+			return "", "", fmt.Errorf("isolated worktree expected revision is unavailable locally")
+		}
+		revision = expectedRevision
+	}
 	if info, statErr := os.Stat(directory); statErr == nil && info.IsDir() {
+		if expectedRevision != "" {
+			head, headErr := runLocal(ctx, directory, 20*time.Second, "", "git", "rev-parse", "HEAD")
+			if headErr != nil || head.ExitCode != 0 || !strings.EqualFold(strings.TrimSpace(head.Output), expectedRevision) {
+				return "", "", fmt.Errorf("existing isolated worktree does not match the frozen revision")
+			}
+		}
 		if err := copyReadOnlyWorkspaceFixtures(workspace, directory); err != nil {
 			return "", "", err
 		}
@@ -583,7 +637,7 @@ func isolatedWorktree(ctx context.Context, workspace Workspace, taskID string) (
 	if err := os.MkdirAll(filepath.Dir(directory), 0700); err != nil {
 		return "", "", fmt.Errorf("prepare isolated worktree: %w", err)
 	}
-	created, err := runLocal(ctx, workspace.Root, 90*time.Second, "", "git", "worktree", "add", "-b", branch, directory, "HEAD")
+	created, err := runLocal(ctx, workspace.Root, 90*time.Second, "", "git", "worktree", "add", "-b", branch, directory, revision)
 	if err != nil {
 		return "", "", err
 	}

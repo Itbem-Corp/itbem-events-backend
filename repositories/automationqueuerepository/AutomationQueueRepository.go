@@ -54,6 +54,9 @@ type Message struct {
 		MaxCompletionTokens int    `json:"max_completion_tokens,omitempty"`
 		InputRef            string `json:"input_ref"`
 		Attempt             int    `json:"attempt"`
+		// RetryOfTaskID is set only for an explicitly authorized code-review
+		// retry. Consumers keep ordinary deliveries strictly idempotent.
+		RetryOfTaskID string `json:"retry_of_task_id,omitempty"`
 	} `json:"payload"`
 }
 
