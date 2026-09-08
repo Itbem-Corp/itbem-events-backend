@@ -99,7 +99,9 @@ func TestDoctorPublicationReadinessRequiresRoleSpecificGitHubAppConfiguration(t 
 func TestGitHubAuthProbeRequiresPublicationOrRegisteredGitHubSourceAndRedactsFailures(t *testing.T) {
 	engineer := automationagent.RuntimeConfig{WorkerConfig: automationagent.WorkerConfig{Role: agentwork.RolePrincipalEngineer, Lane: agentwork.LaneEngineering}}
 	called := false
-	report, err := githubAuthProbeReport(context.Background(), engineer, func(string) string {
+	lookedUp := make([]string, 0, 4)
+	report, err := githubAuthProbeReport(context.Background(), engineer, func(name string) string {
+		lookedUp = append(lookedUp, name)
 		return ""
 	}, func(context.Context, automationagent.GitHubAppConfig) error {
 		called = true
@@ -107,6 +109,11 @@ func TestGitHubAuthProbeRequiresPublicationOrRegisteredGitHubSourceAndRedactsFai
 	})
 	if err != nil || called || report["ready"] != true || report["status"] != "not_required" || report["network_checks_made"] != false {
 		t.Fatalf("non-publishing GitHub probe = %#v, called=%v, err=%v", report, called, err)
+	}
+	for _, name := range lookedUp {
+		if strings.HasPrefix(name, "ITBEM_GITHUB_APP_") || strings.HasPrefix(name, "ITBEM_GITHUB_INSTALLATION_") {
+			t.Fatalf("non-publishing, unregistered engineer probe read publication credential %q", name)
+		}
 	}
 
 	key, err := rsa.GenerateKey(rand.Reader, 2048)

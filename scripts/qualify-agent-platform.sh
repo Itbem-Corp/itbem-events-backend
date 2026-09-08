@@ -55,7 +55,10 @@ run "Linux role isolation, non-consuming doctor and outbound gateway preflight" 
   go test ./cmd/itbem-ai-agent ./internal/automationagent ./controllers/automation -run 'Test(SystemdUnitFailsClosedAndRunsUnprivileged|SystemdDoctorIsReadOnlyAndCannotConsumeQueueWork|SystemdRoleFilesBindExactLaneAndSeparatePublicationSecrets|SystemdInstallerStagesButNeverActivatesServices|DoctorPublicationReadinessRequiresRoleSpecificGitHubAppConfiguration|LoadRuntimeConfigSelectsHTTPSGatewayWithoutAWSIdentity|GatewayTokensAreLaneBoundAndDoNotExposeRoot|GatewayLeaseIsConfidentialTamperEvidentAndIdentityBound)$' -count=1
 
 run "exact-SHA idempotent GitHub review relay and independent identity" \
-  go test ./internal/automationagent ./controllers/automation -run 'Test(CodeReviewPassesExactSHAGateAllowsOnlySafeIndependentOutcomes|PublishGitHubExactSHAReviewCheckSucceedsOnlyForSafeIndependentOutcome|PublishGitHubCodeReviewIsExactSHAAndRetrySafe|PublishGitHubCodeReviewNeverSelfApproves|CodeReviewPublicationForTaskRequiresExactIndependentGitHubEvidence)$' -count=1
+  go test ./internal/automationagent ./controllers/automation -run 'Test(PublishGitHubCodeReviewIsExactSHAAndRetrySafe|PublishGitHubCodeReviewNeverSelfApproves|CodeReviewPublicationForTaskRequiresExactIndependentGitHubEvidence)$' -count=1
+
+run "exact-SHA review merge-gate classification" \
+  go test ./internal/automationagent ./controllers/automation -run 'Test(CodeReviewPassesExactSHAGateAllowsOnlySafeIndependentOutcomes|PublishGitHubExactSHAReviewCheckSucceedsOnlyForSafeIndependentOutcome)$' -count=1
 
 run "complete backend regression suite" go test ./... -count=1
 run "static analysis" go vet ./...
