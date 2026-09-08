@@ -50,6 +50,49 @@ func TestGitHubInstallationWorkspaceCommandsDisableCredentialHelpers(t *testing.
 	}
 }
 
+func TestGitHubSourceAccessRequiredUsesOnlyRegisteredGitHubWorkspaces(t *testing.T) {
+	root := filepath.ToSlash(t.TempDir())
+	managed := func(repositoryURL string) string {
+		return `{"service":{"path":"` + root + `","repository_url":"` + repositoryURL + `","base_branch":"main","capabilities":["repository:read","repository:fetch"]}}`
+	}
+	for name, fixture := range map[string]struct {
+		registry string
+		want     bool
+		wantErr  string
+	}{
+		"HTTPS GitHub repository requires Source App": {
+			registry: managed("https://github.com/acme/service.git"), want: true,
+		},
+		"empty local registry does not require Source App": {
+			registry: `{"local":{"path":"` + root + `"}}`, want: false,
+		},
+		"non-GitHub repository does not require Source App": {
+			registry: managed("https://gitlab.example/acme/service.git"), want: false,
+		},
+		"invalid GitHub repository fails closed": {
+			registry: managed("https://github.com/acme"), wantErr: "invalid GitHub repository_url",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := GitHubSourceAccessRequired(func(key string) string {
+				if key == "ITBEM_AI_WORKSPACES_JSON" {
+					return fixture.registry
+				}
+				return ""
+			})
+			if fixture.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), fixture.wantErr) {
+					t.Fatalf("GitHub Source requirement error = %v, want %q", err, fixture.wantErr)
+				}
+				return
+			}
+			if err != nil || got != fixture.want {
+				t.Fatalf("GitHub Source requirement = %v, %v; want %v, nil", got, err, fixture.want)
+			}
+		})
+	}
+}
+
 func TestLoadWorkspaceRegistryRequiresExplicitManagedDefaultBranch(t *testing.T) {
 	root := filepath.ToSlash(filepath.Join(t.TempDir(), "managed"))
 	if err := os.MkdirAll(filepath.FromSlash(root), 0700); err != nil {
