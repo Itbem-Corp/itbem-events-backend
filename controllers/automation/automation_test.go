@@ -232,16 +232,18 @@ func TestCodeReviewPublicationForTaskRequiresExactIndependentGitHubEvidence(t *t
 	nonBlockingComment.Verdict, nonBlockingComment.Event = "comment", "COMMENT"
 	nonBlockingComment.ReviewGatePassed, nonBlockingComment.CheckConclusion = true, "success"
 	raw, _ = json.Marshal(nonBlockingComment)
-	if _, err := codeReviewPublicationForTask(task, raw); err != nil {
-		t.Fatalf("independent non-blocking exact-SHA comment was rejected: %v", err)
+	commentPublication, err := codeReviewPublicationForTask(task, raw)
+	if err != nil || commentPublication.Verdict != "comment" || commentPublication.Event != "COMMENT" || commentPublication.CheckConclusion == nil || *commentPublication.CheckConclusion != "success" {
+		t.Fatalf("independent non-blocking exact-SHA comment was not persisted explicitly: %#v / %v", commentPublication, err)
 	}
 	nonBlockingComment.ReviewGatePassed = false
 	raw, _ = json.Marshal(nonBlockingComment)
 	if _, err := codeReviewPublicationForTask(task, raw); err == nil {
 		t.Fatal("a successful comment without the reviewer gate classification was accepted")
 	}
-	nonBlockingComment.ReviewGatePassed, nonBlockingComment.CheckConclusion = true, "failure"
-	raw, _ = json.Marshal(nonBlockingComment)
+	contradictoryNonBlockingComment := nonBlockingComment
+	contradictoryNonBlockingComment.ReviewGatePassed, contradictoryNonBlockingComment.CheckConclusion = true, "failure"
+	raw, _ = json.Marshal(contradictoryNonBlockingComment)
 	if _, err := codeReviewPublicationForTask(task, raw); err == nil {
 		t.Fatal("a non-blocking reviewer classification with a failed GitHub check was accepted")
 	}

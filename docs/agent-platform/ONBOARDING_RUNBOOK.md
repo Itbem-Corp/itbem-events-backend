@@ -9,6 +9,12 @@ installation of the platform's dedicated read-only Source App.
 - Configure the Source App ID, private key and explicit installation ID
   allow-list in the backend secret provider or the isolated Linux lane. Do not
   reuse the Reviewer or Release App identity/key.
+- On Linux, put a distinct lane-local copy of the read-only Source App PEM at
+  that lane's root-managed `ITBEM_GITHUB_SOURCE_APP_PRIVATE_KEY_FILE` path and
+  set the matching App ID and allow-list in the same role environment file.
+  Copies may belong to one Source App, but must not be shared across lane
+  accounts. Before activation, run that lane's `--doctor` and
+  `--github-auth-probe`; the latter is the identity/installation check.
 - Grant the Source App repository metadata and contents read access only.
   Onboarding does not need source write, pull-request, checks, merge or
   deployment permission.

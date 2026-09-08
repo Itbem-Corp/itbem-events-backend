@@ -211,22 +211,28 @@ func TestCodeReviewPassesExactSHAGateAllowsOnlySafeIndependentOutcomes(t *testin
 		"findings": []any{map[string]any{"severity": "low", "category": "maintainability"}},
 	}
 	cases := []struct {
-		name   string
-		review map[string]any
-		event  string
-		author string
-		want   bool
+		name     string
+		review   map[string]any
+		event    string
+		reviewer string
+		author   string
+		want     bool
 	}{
-		{"independent approval", map[string]any{"verdict": "approve"}, "APPROVE", "engineer-bot[bot]", true},
-		{"low maintainability note", lowMaintainability, "COMMENT", "engineer-bot[bot]", true},
-		{"author cannot pass own approval", map[string]any{"verdict": "approve"}, "APPROVE", "bema-review-bot[bot]", false},
-		{"low security note remains a gate failure", map[string]any{"verdict": "comment", "coverage_gaps": []any{}, "findings": []any{map[string]any{"severity": "low", "category": "security"}}}, "COMMENT", "engineer-bot[bot]", false},
-		{"coverage gap remains a gate failure", map[string]any{"verdict": "comment", "coverage_gaps": []any{"Run a missing regression test."}, "findings": []any{}}, "COMMENT", "engineer-bot[bot]", false},
-		{"requested changes remain a gate failure", map[string]any{"verdict": "request_changes"}, "REQUEST_CHANGES", "engineer-bot[bot]", false},
+		{"independent approval", map[string]any{"verdict": "approve"}, "APPROVE", "bema-review-bot[bot]", "engineer-bot[bot]", true},
+		{"low maintainability note", lowMaintainability, "COMMENT", "bema-review-bot[bot]", "engineer-bot[bot]", true},
+		{"blank reviewer cannot pass", map[string]any{"verdict": "approve"}, "APPROVE", "", "engineer-bot[bot]", false},
+		{"author cannot pass own approval", map[string]any{"verdict": "approve"}, "APPROVE", "bema-review-bot[bot]", "bema-review-bot[bot]", false},
+		{"low security note remains a gate failure", map[string]any{"verdict": "comment", "coverage_gaps": []any{}, "findings": []any{map[string]any{"severity": "low", "category": "security"}}}, "COMMENT", "bema-review-bot[bot]", "engineer-bot[bot]", false},
+		{"low correctness note remains a gate failure", map[string]any{"verdict": "comment", "coverage_gaps": []any{}, "findings": []any{map[string]any{"severity": "low", "category": "correctness"}}}, "COMMENT", "bema-review-bot[bot]", "engineer-bot[bot]", false},
+		{"low reliability note remains a gate failure", map[string]any{"verdict": "comment", "coverage_gaps": []any{}, "findings": []any{map[string]any{"severity": "low", "category": "reliability"}}}, "COMMENT", "bema-review-bot[bot]", "engineer-bot[bot]", false},
+		{"low performance note remains a gate failure", map[string]any{"verdict": "comment", "coverage_gaps": []any{}, "findings": []any{map[string]any{"severity": "low", "category": "performance"}}}, "COMMENT", "bema-review-bot[bot]", "engineer-bot[bot]", false},
+		{"low test coverage note remains a gate failure", map[string]any{"verdict": "comment", "coverage_gaps": []any{}, "findings": []any{map[string]any{"severity": "low", "category": "test_coverage"}}}, "COMMENT", "bema-review-bot[bot]", "engineer-bot[bot]", false},
+		{"coverage gap remains a gate failure", map[string]any{"verdict": "comment", "coverage_gaps": []any{"Run a missing regression test."}, "findings": []any{}}, "COMMENT", "bema-review-bot[bot]", "engineer-bot[bot]", false},
+		{"requested changes remain a gate failure", map[string]any{"verdict": "request_changes"}, "REQUEST_CHANGES", "bema-review-bot[bot]", "engineer-bot[bot]", false},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			if got := codeReviewPassesExactSHAGate(testCase.review, testCase.event, "bema-review-bot[bot]", testCase.author); got != testCase.want {
+			if got := codeReviewPassesExactSHAGate(testCase.review, testCase.event, testCase.reviewer, testCase.author); got != testCase.want {
 				t.Fatalf("gate eligibility = %v, want %v", got, testCase.want)
 			}
 		})

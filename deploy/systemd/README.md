@@ -62,6 +62,14 @@ sudo install -m 0640 -o root -g itbem-agent-review /secure/source/bema-review-bo
 sudo install -m 0640 -o root -g itbem-agent-release /secure/source/bema-delivery-bot.pem /etc/itbem-ai-agent/secrets/release/github-app.pem
 ```
 
+The PEM does not encode its GitHub App ID. For every lane, set the matching
+`ITBEM_GITHUB_SOURCE_APP_ID`, installation allow-list and
+`ITBEM_GITHUB_SOURCE_APP_PRIVATE_KEY_FILE` in that lane's role file, then run
+its `--github-auth-probe` during preflight. That bounded GitHub read proves the
+lane's copied key belongs to the configured read-only Source App and can access
+only an allowed installation; a filename, copied PEM or successful `install`
+command is not identity proof.
+
 Each role file owns its own `ITBEM_AI_WORKSPACES_JSON`. Register only managed
 checkouts below `/srv/itbem-agent-workspaces/<lane>` for that exact lane. The
 installer makes the common root non-listable/non-writable (`0711`) and each

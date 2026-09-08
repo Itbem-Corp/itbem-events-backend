@@ -29,9 +29,10 @@ Reviewer App:
   `Bema Review / exact-sha` ligado al head exacto. Sólo concluye `success`
   cuando una identidad Reviewer independiente aprueba el SHA o deja sólo
   hallazgos concretos `low` de mantenibilidad, sin huecos de evidencia. Esos
-  comentarios permanecen visibles pero no bloquean; cualquier observación de
-  seguridad, corrección, confiabilidad, rendimiento, cobertura, un cambio
-  solicitado, un bloqueo o una auto-revisión concluye `failure`.
+  comentarios permanecen visibles pero no bloquean; cualquier hallazgo de
+  seguridad, corrección, confiabilidad, rendimiento o cobertura (incluso
+  `low`), un cambio solicitado, un bloqueo o una auto-revisión concluye
+  `failure`.
 - **Pull requests: Read and write**: leer el head/autor y publicar únicamente
   `COMMENT`, `APPROVE` o `REQUEST_CHANGES`.
 - **Metadata: Read-only**: obligatorio para GitHub Apps.
