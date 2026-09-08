@@ -153,7 +153,7 @@ func TestSystemdInstallerStagesButNeverActivatesServices(t *testing.T) {
 func TestSystemdSourceAppSecretInstallationMatchesDocumentedLaneBoundary(t *testing.T) {
 	installer := systemdAsset(t, "install.sh")
 	const secretDirectory = "install -d -m 0710 -o root -g \"$account\" \"/etc/itbem-ai-agent/secrets/$lane\""
-	if strings.Index(installer, "for lane in orchestration engineering review qa release; do") < 0 || !strings.Contains(installer, secretDirectory) {
+	if !strings.Contains(installer, "for lane in orchestration engineering review qa release; do") || !strings.Contains(installer, secretDirectory) {
 		t.Fatal("installer no longer creates every Source App secret directory with its exact lane group and non-listable mode")
 	}
 	readme := systemdAsset(t, "README.md")
