@@ -600,6 +600,42 @@ func TestAutomationWorkerLastSeenAllowsNoHeartbeats(t *testing.T) {
 	}
 }
 
+func TestCurrentAutomationWorkersUsesNewestHeartbeatForEachRoleLane(t *testing.T) {
+	now := time.Date(2026, time.September, 8, 22, 0, 0, 0, time.UTC)
+	workers := []automationWorkerHealth{
+		{Role: "release_manager", Lane: "release", Concurrency: 1, StartedAt: now.Add(-2 * time.Minute), LastSeenAt: now.Add(-30 * time.Second), WorkspaceReadinessJSON: `[{"id":"backend","ready":false}]`},
+		{Role: "release_manager", Lane: "release", Concurrency: 1, StartedAt: now.Add(-time.Minute), LastSeenAt: now, WorkspaceReadinessJSON: `[{"id":"backend","ready":true}]`},
+		{Role: "reviewer", Lane: "review", Concurrency: 1, StartedAt: now.Add(-time.Minute), LastSeenAt: now.Add(-10 * time.Second)},
+		{Concurrency: 1, StartedAt: now.Add(-time.Minute), LastSeenAt: now.Add(-20 * time.Second)},
+		{Concurrency: 1, StartedAt: now.Add(-time.Minute), LastSeenAt: now.Add(-15 * time.Second)},
+	}
+
+	got := currentAutomationWorkers(workers)
+	if len(got) != 4 {
+		t.Fatalf("current workers = %d, want release, review, and two legacy entries", len(got))
+	}
+	var release *automationWorkerHealth
+	legacy := 0
+	for index := range got {
+		worker := &got[index]
+		if worker.Role == "release_manager" && worker.Lane == "release" {
+			release = worker
+		}
+		if worker.Role == "" && worker.Lane == "" {
+			legacy++
+		}
+	}
+	if release == nil || !release.LastSeenAt.Equal(now) || !strings.Contains(release.WorkspaceReadinessJSON, `"ready":true`) {
+		t.Fatalf("release worker did not retain its newest heartbeat: %#v", release)
+	}
+	if legacy != 2 {
+		t.Fatalf("legacy workers must not be coalesced without a role/lane: %d", legacy)
+	}
+	if latest := newestAutomationWorkerLastSeen(got); latest == nil || !latest.Equal(now) {
+		t.Fatalf("newest worker heartbeat = %v, want %v", latest, now)
+	}
+}
+
 func TestToolExecutionLedgerCostsOnlyUploadedStagehandReport(t *testing.T) {
 	taskID, workItemID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
 	task := &models.AutomationTask{ID: taskID, DeliveryWorkItemID: &workItemID, Operation: "delivery.qa"}

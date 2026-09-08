@@ -53,6 +53,13 @@ var workerWorkspaceIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,
 
 const maxGitHubReviewWebhookBytes = 1 << 20
 
+// A systemd restart deliberately assigns a new worker ID. Keep enough recent
+// heartbeat rows for diagnostics, but project only the newest heartbeat for a
+// configured role/lane into operational health. Otherwise a healthy restart
+// looks like duplicate capacity and can combine old, failing workspace
+// readiness with the current successful preflight.
+const maxAutomationHealthWorkerRows = 64
+
 var allowedOperations = map[string]struct{}{
 	"ai.chat":                   {},
 	"document.analyze":          {},
@@ -1833,26 +1840,20 @@ func Health(c echo.Context) error {
 	if user.IsPlatformAdmin() {
 		result.OperationalTelemetryAvailable = true
 		workerQuery := configuration.DB.Model(&models.AutomationAgentHeartbeat{}).Where("last_seen_at >= ?", now.Add(-90*time.Second))
-		if err := workerQuery.Session(&gorm.Session{}).Count(&result.ActiveWorkers).Error; err != nil {
-			return utils.Error(c, http.StatusInternalServerError, "Automation health unavailable", "")
-		}
-		if err := workerQuery.Session(&gorm.Session{}).Select("COALESCE(SUM(concurrency), 0) AS worker_capacity").Scan(&result.WorkerCapacity).Error; err != nil {
-			return utils.Error(c, http.StatusInternalServerError, "Automation health unavailable", "")
-		}
-		lastSeen, err := automationWorkerLastSeen(workerQuery)
-		if err != nil {
-			return utils.Error(c, http.StatusInternalServerError, "Automation health unavailable", "")
-		}
-		if lastSeen != nil {
-			result.LastWorkerSeenAt = lastSeen
-		}
+		var heartbeatRows []automationWorkerHealth
 		if err := workerQuery.Session(&gorm.Session{}).
 			Select("provider, model, role, lane, concurrency, started_at, last_seen_at, workspace_readiness").
 			Order("last_seen_at DESC").
-			Limit(8).
-			Find(&result.Workers).Error; err != nil {
+			Limit(maxAutomationHealthWorkerRows).
+			Find(&heartbeatRows).Error; err != nil {
 			return utils.Error(c, http.StatusInternalServerError, "Automation health unavailable", "")
 		}
+		result.Workers = currentAutomationWorkers(heartbeatRows)
+		result.ActiveWorkers = int64(len(result.Workers))
+		for _, worker := range result.Workers {
+			result.WorkerCapacity += int64(worker.Concurrency)
+		}
+		result.LastWorkerSeenAt = newestAutomationWorkerLastSeen(result.Workers)
 		for index := range result.Workers {
 			// Legacy heartbeats predate workspace readiness. Keep them visible as
 			// live workers, but omit their preflight data instead of fabricating a
@@ -1865,10 +1866,10 @@ func Health(c echo.Context) error {
 			}
 		}
 		var reviewWorkers int64
-		if err := workerQuery.Session(&gorm.Session{}).
-			Where("(role = '' AND lane = '') OR (role = ? AND lane = ?)", agentwork.RoleReviewer, agentwork.LaneReview).
-			Count(&reviewWorkers).Error; err != nil {
-			return utils.Error(c, http.StatusInternalServerError, "Automation health unavailable", "")
+		for _, worker := range result.Workers {
+			if (worker.Role == "" && worker.Lane == "") || (worker.Role == string(agentwork.RoleReviewer) && worker.Lane == string(agentwork.LaneReview)) {
+				reviewWorkers++
+			}
 		}
 		cfg, _ := c.Get("config").(*models.Config)
 		result.ReviewIngress = automationReviewIngressStatus(cfg, reviewWorkers)
@@ -1903,6 +1904,61 @@ func automationWorkerLastSeen(query *gorm.DB) (*time.Time, error) {
 	}
 	value := lastSeen.Time
 	return &value, nil
+}
+
+// currentAutomationWorkers returns the live operational projection while
+// retaining the heartbeat rows themselves in storage for audit and diagnosis.
+// V1 intentionally permits one local worker per declared role/lane; a restart
+// must replace that lane's presentation rather than inflate capacity. Legacy
+// workers without a role/lane retain their individual entries for migration
+// compatibility because they cannot be grouped safely.
+func currentAutomationWorkers(candidates []automationWorkerHealth) []automationWorkerHealth {
+	newestByLane := make(map[string]automationWorkerHealth)
+	legacy := make([]automationWorkerHealth, 0, len(candidates))
+	for _, worker := range candidates {
+		role, lane := strings.TrimSpace(worker.Role), strings.TrimSpace(worker.Lane)
+		if role == "" && lane == "" {
+			legacy = append(legacy, worker)
+			continue
+		}
+		key := role + "\x00" + lane
+		current, exists := newestByLane[key]
+		if !exists || worker.LastSeenAt.After(current.LastSeenAt) || (worker.LastSeenAt.Equal(current.LastSeenAt) && worker.StartedAt.After(current.StartedAt)) {
+			newestByLane[key] = worker
+		}
+	}
+
+	result := make([]automationWorkerHealth, 0, len(legacy)+len(newestByLane))
+	result = append(result, legacy...)
+	for _, worker := range newestByLane {
+		result = append(result, worker)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if !result[i].LastSeenAt.Equal(result[j].LastSeenAt) {
+			return result[i].LastSeenAt.After(result[j].LastSeenAt)
+		}
+		if result[i].Role != result[j].Role {
+			return result[i].Role < result[j].Role
+		}
+		if result[i].Lane != result[j].Lane {
+			return result[i].Lane < result[j].Lane
+		}
+		return result[i].StartedAt.After(result[j].StartedAt)
+	})
+	return result
+}
+
+func newestAutomationWorkerLastSeen(workers []automationWorkerHealth) *time.Time {
+	if len(workers) == 0 {
+		return nil
+	}
+	newest := workers[0].LastSeenAt
+	for _, worker := range workers[1:] {
+		if worker.LastSeenAt.After(newest) {
+			newest = worker.LastSeenAt
+		}
+	}
+	return &newest
 }
 
 func validateWorkerWorkspaceReadiness(readiness []automationWorkspaceHealth) error {
