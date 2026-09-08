@@ -58,8 +58,12 @@ not a hard-coded runtime assumption.
 1. Freeze the task, effective policy, Vault revision and repository SHAs.
 2. Produce a visible plan, dependency DAG, risks, expected files, tests and
    release/recovery route before changing code.
-3. Create task-specific branches/worktrees from current remote default-branch
-   SHAs and implement the smallest coherent change-set.
+3. Before every code-reading, implementation, or QA task, fetch/prune each
+   configured managed checkout and fast-forward only its clean configured
+   default branch. Reject an advanced, divergent, dirty, or unpinned source;
+   then create task-specific branches/worktrees from the exact frozen remote
+   SHA (never an ambient local `HEAD`) and implement the smallest coherent
+   change-set.
 4. Reconcile the Vault and execute configured local checks.
 5. Open or update one consolidated PR per affected repository and publish the
    cross-repository change-set matrix.

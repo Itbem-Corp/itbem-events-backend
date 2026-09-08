@@ -361,6 +361,11 @@ func (w *Worker) Process(ctx context.Context, message TaskMessage) error {
 	if message.Payload.Operation == "code.review" {
 		return w.processSegmentedCodeReview(ctx, message, runID, input, codeReviewBoundary)
 	}
+	if message.Payload.Operation == "delivery.plan" || message.Payload.Operation == "delivery.implementation" {
+		if err := PrepareDeliveryWorkspaces(ctx, input.Delivery, os.Getenv); err != nil {
+			return w.fail(ctx, message.Payload.TaskID, runID, err)
+		}
+	}
 	messages, err := buildTaskMessages(message.Payload.Operation, input, os.Getenv)
 	if err != nil {
 		return w.fail(ctx, message.Payload.TaskID, runID, err)

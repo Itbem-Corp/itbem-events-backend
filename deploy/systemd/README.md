@@ -129,6 +129,9 @@ green required checks and the deterministic Gatekeeper decision.
 Orchestration and Review receive only their own lane workspace tree read-only
 through systemd drop-ins. Engineering, QA and Release may write only under
 their distinct private state and lane workspace roots. No unit may use a
-developer's checkout or another lane's checkout. Base
-checkouts are explicitly synchronized to their configured main branch before a
-task, and every implementation uses a task-specific worktree.
+developer's checkout or another lane's checkout. For every code-reading,
+implementation, and QA task, the worker itself fetches/prunes and safely
+fast-forwards an operator-managed base checkout before it proceeds. It rejects
+stale, divergent, dirty, or unpinned sources rather than pulling destructively.
+Every implementation then uses a task-specific worktree created at the exact
+frozen remote SHA, never an ambient local `HEAD`.

@@ -496,6 +496,36 @@ func TestSyncManagedWorkspaceSupportsNonMainBranchAndRejectsDirtyCheckout(t *tes
 	if err != nil || state.HeadSHA == firstSHA || state.Branch != baseBranch {
 		t.Fatalf("managed checkout did not fast-forward: %#v / %v", state, err)
 	}
+	registryValue, err := json.Marshal(map[string]any{"managed": map[string]any{
+		"path": root, "repository_url": remote, "base_branch": baseBranch,
+		"capabilities": []string{WorkspaceCapabilityReadRepository, WorkspaceCapabilityFetchRemote},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := string(registryValue)
+	lookup := func(key string) string {
+		if key == "ITBEM_AI_WORKSPACES_JSON" {
+			return registry
+		}
+		return ""
+	}
+	freshDelivery := []byte(`{"context_sources":[{"kind":"repository","reference":"workspace://managed","revision":"` + state.HeadSHA + `"}]}`)
+	if err := PrepareDeliveryWorkspaces(context.Background(), freshDelivery, lookup); err != nil {
+		t.Fatalf("managed workspace at its exact frozen revision must prepare: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("three\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range [][]string{{"git", "add", "README.md"}, {"git", "commit", "-m", "advance again"}, {"git", "push", "origin", baseBranch}} {
+		result, runErr := runLocal(context.Background(), seed, commandTimeout, "", command[0], command[1:]...)
+		if runErr != nil || result.ExitCode != 0 {
+			t.Fatalf("seed second advance failed: %#v / %v", result, runErr)
+		}
+	}
+	if err := PrepareDeliveryWorkspaces(context.Background(), freshDelivery, lookup); err == nil || !strings.Contains(err.Error(), "fetched origin has advanced") {
+		t.Fatalf("stale Delivery snapshot must be rejected after fetch/prune: %v", err)
+	}
 	if err := os.WriteFile(filepath.Join(root, "local.txt"), []byte("do not overwrite"), 0600); err != nil {
 		t.Fatal(err)
 	}

@@ -16,6 +16,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"events-stocks/internal/projectvault"
 )
 
 const (
@@ -981,6 +983,17 @@ func SyncManagedWorkspace(ctx context.Context, workspace Workspace) (WorkspaceGi
 	if err != nil || updated.ExitCode != 0 {
 		return WorkspaceGitState{}, fmt.Errorf("managed workspace base branch cannot fast-forward; resolve it without rewriting history")
 	}
+	// A successful fast-forward alone is not enough: Git accepts the no-op
+	// merge when a locally-created base branch is ahead of origin. Delivery
+	// must never start from unpublished local history, so the operator-managed
+	// checkout has to be byte-for-byte at the fetched remote base afterwards.
+	// This also makes the later task worktree's base an explicit GitHub
+	// checkpoint rather than an implicit local HEAD.
+	head, headErr := runLocal(ctx, workspace.Root, 20*time.Second, "", "git", "rev-parse", "HEAD")
+	remoteHead, remoteErr := runLocal(ctx, workspace.Root, 20*time.Second, "", "git", "rev-parse", remoteBase)
+	if headErr != nil || remoteErr != nil || head.ExitCode != 0 || remoteHead.ExitCode != 0 || !strings.EqualFold(strings.TrimSpace(head.Output), strings.TrimSpace(remoteHead.Output)) {
+		return WorkspaceGitState{}, fmt.Errorf("managed workspace base branch is not identical to fetched origin")
+	}
 	return workspaceGitState(workspace.Root), nil
 }
 
@@ -1182,6 +1195,64 @@ func DeliveryWorkspaceContext(delivery json.RawMessage, lookup func(string) stri
 		result = append(result, context)
 	}
 	return result, nil
+}
+
+// PrepareDeliveryWorkspaces synchronizes every operator-managed repository
+// checkout before a Delivery phase can read code, run tests, or create a
+// task worktree. It is deliberately separate from context rendering: summary
+// and ledger-only phases can still read a frozen snapshot through a read-only
+// lane, while plan, implementation, and QA must prove their local base is the
+// fetched remote branch at the exact frozen SHA.
+//
+// A workspace without repository_url/base_branch is retained only for legacy
+// local-only tasks. Every real GitHub onboarding is required to register both
+// values and repository:fetch, so it follows the managed path below.
+func PrepareDeliveryWorkspaces(ctx context.Context, delivery json.RawMessage, lookup func(string) string) error {
+	var value struct {
+		ContextSources []struct {
+			Kind      string `json:"kind"`
+			Reference string `json:"reference"`
+			Revision  string `json:"revision"`
+		} `json:"context_sources"`
+	}
+	if err := json.Unmarshal(delivery, &value); err != nil {
+		return fmt.Errorf("delivery input must be a JSON object")
+	}
+	seen := make(map[string]struct{}, len(value.ContextSources))
+	for _, source := range value.ContextSources {
+		if source.Kind != "repository" || !strings.HasPrefix(strings.TrimSpace(source.Reference), "workspace://") {
+			continue
+		}
+		reference := strings.TrimSpace(source.Reference)
+		if _, duplicate := seen[reference]; duplicate {
+			continue
+		}
+		seen[reference] = struct{}{}
+		workspace, err := RegisteredWorkspace(reference, lookup)
+		if err != nil {
+			return err
+		}
+		remoteURL := strings.TrimSpace(workspace.Config.RepositoryURL)
+		baseBranch := strings.TrimSpace(workspace.Config.BaseBranch)
+		if remoteURL == "" && baseBranch == "" {
+			continue
+		}
+		if remoteURL == "" || baseBranch == "" {
+			return fmt.Errorf("workspace %s must configure both repository_url and base_branch for managed Delivery synchronization", workspace.ID)
+		}
+		state, err := SyncManagedWorkspace(ctx, workspace)
+		if err != nil {
+			return fmt.Errorf("workspace %s could not synchronize its managed base before Delivery: %w", workspace.ID, err)
+		}
+		expected := strings.ToLower(strings.TrimSpace(source.Revision))
+		if !projectvault.ValidRevision(expected) {
+			return fmt.Errorf("workspace %s managed Delivery source has no immutable frozen revision", workspace.ID)
+		}
+		if !strings.EqualFold(state.HeadSHA, expected) {
+			return fmt.Errorf("workspace %s fetched origin has advanced beyond the frozen context revision; refresh the project checkpoint and replan", workspace.ID)
+		}
+	}
+	return nil
 }
 
 // DeliveryRemoteRepositoryContexts returns only the bounded GitHub metadata
