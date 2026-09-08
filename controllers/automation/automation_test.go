@@ -240,6 +240,11 @@ func TestCodeReviewPublicationForTaskRequiresExactIndependentGitHubEvidence(t *t
 	if _, err := codeReviewPublicationForTask(task, raw); err == nil {
 		t.Fatal("a successful comment without the reviewer gate classification was accepted")
 	}
+	nonBlockingComment.ReviewGatePassed, nonBlockingComment.CheckConclusion = true, "failure"
+	raw, _ = json.Marshal(nonBlockingComment)
+	if _, err := codeReviewPublicationForTask(task, raw); err == nil {
+		t.Fatal("a non-blocking reviewer classification with a failed GitHub check was accepted")
+	}
 	for name, mutate := range map[string]func(*models.AutomationTask, *automationagent.GitHubCodeReviewPublication){
 		"stale subject": func(_ *models.AutomationTask, value *automationagent.GitHubCodeReviewPublication) {
 			value.SubjectSHA256 = strings.Repeat("e", 64)
