@@ -27,6 +27,16 @@ func (s *artifactFakeStore) PutEncryptedObject(_ context.Context, bucket, key st
 
 func TestRunQACapturesBoundedRegisteredWorkspaceEvidence(t *testing.T) {
 	root := t.TempDir()
+	remote := filepath.ToSlash(filepath.Join(t.TempDir(), "origin.git"))
+	if initialized, err := runLocal(context.Background(), filepath.Dir(remote), commandTimeout, "", "git", "init", "--bare", remote); err != nil || initialized.ExitCode != 0 {
+		t.Fatalf("remote setup failed: %#v / %v", initialized, err)
+	}
+	for _, command := range [][]string{{"git", "init", "-b", "main"}, {"git", "config", "user.email", "test@example.invalid"}, {"git", "config", "user.name", "ITBEM Test"}} {
+		result, err := runLocal(context.Background(), root, commandTimeout, "", command[0], command[1:]...)
+		if err != nil || result.ExitCode != 0 {
+			t.Fatalf("workspace git setup failed: %#v / %v", result, err)
+		}
+	}
 	if err := os.WriteFile(filepath.Join(root, "result.txt"), []byte("evidence"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -48,16 +58,23 @@ func main() {
 	if err := os.WriteFile(filepath.Join(root, "capture.go"), []byte(captureProgram), 0600); err != nil {
 		t.Fatal(err)
 	}
+	for _, command := range [][]string{{"git", "add", "result.txt", "capture.go"}, {"git", "commit", "-m", "qa harness"}, {"git", "remote", "add", "origin", remote}, {"git", "push", "-u", "origin", "main"}} {
+		result, err := runLocal(context.Background(), root, commandTimeout, "", command[0], command[1:]...)
+		if err != nil || result.ExitCode != 0 {
+			t.Fatalf("managed workspace seed failed: %#v / %v", result, err)
+		}
+	}
+	frozen := workspaceGitState(root).HeadSHA
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusOK) }))
 	defer server.Close()
-	registry := `{"repo":{"path":"` + filepath.ToSlash(root) + `","qa_artifact_patterns":["result.txt"],"qa_screenshot_command":["go","run","capture.go","{preview_url}","{artifact_path}"]}}`
+	registry := `{"repo":{"path":"` + filepath.ToSlash(root) + `","repository_url":"` + remote + `","base_branch":"main","capabilities":["repository:read","repository:fetch"],"qa_artifact_patterns":["result.txt"],"qa_screenshot_command":["go","run","capture.go","{preview_url}","{artifact_path}"]}}`
 	lookup := func(name string) string {
 		if name == "ITBEM_AI_WORKSPACES_JSON" {
 			return registry
 		}
 		return ""
 	}
-	delivery := []byte(`{"work_item":{"preview_url":"` + server.URL + `"},"context_sources":[{"kind":"repository","reference":"workspace://repo"}]}`)
+	delivery := []byte(`{"work_item":{"preview_url":"` + server.URL + `"},"context_sources":[{"kind":"repository","reference":"workspace://repo","revision":"` + frozen + `"}]}`)
 	result, artifacts, err := RunQA(context.Background(), "task", delivery, lookup)
 	if err != nil || result["preview"].(map[string]any)["passed"] != true || len(artifacts) != 2 {
 		t.Fatalf("unexpected QA result: %#v / %#v / %v", result, artifacts, err)

@@ -486,6 +486,36 @@ func TestRunImplementationUsesIsolatedWorktree(t *testing.T) {
 	}
 }
 
+func TestIsolatedWorktreeAtRejectsInvalidAndUnavailableFrozenRevisions(t *testing.T) {
+	root := t.TempDir()
+	for _, command := range [][]string{{"git", "init"}, {"git", "config", "user.email", "test@example.invalid"}, {"git", "config", "user.name", "ITBEM Test"}} {
+		result, err := runLocal(context.Background(), root, commandTimeout, "", command[0], command[1:]...)
+		if err != nil || result.ExitCode != 0 {
+			t.Fatalf("git setup failed: %#v / %v", result, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("initial\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range [][]string{{"git", "add", "README.md"}, {"git", "commit", "-m", "initial"}} {
+		result, err := runLocal(context.Background(), root, commandTimeout, "", command[0], command[1:]...)
+		if err != nil || result.ExitCode != 0 {
+			t.Fatalf("git commit failed: %#v / %v", result, err)
+		}
+	}
+	workspace := Workspace{ID: "repo", Root: root}
+	taskID := "d4a4b837-2e18-43af-9f58-6d59629db2bb"
+	if _, _, err := isolatedWorktreeAt(context.Background(), workspace, taskID, "short-sha"); err == nil || !strings.Contains(err.Error(), "expected revision is invalid") {
+		t.Fatalf("abbreviated revision must be rejected: %v", err)
+	}
+	if _, _, err := isolatedWorktreeAt(context.Background(), workspace, taskID, strings.Repeat("f", 40)); err == nil || !strings.Contains(err.Error(), "expected revision is unavailable") {
+		t.Fatalf("unavailable full revision must be rejected: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".itbem-agent-worktrees", taskID)); !os.IsNotExist(err) {
+		t.Fatalf("invalid revisions must not create an isolated worktree: %v", err)
+	}
+}
+
 func TestRunImplementationCreatesIndependentWorktreesForEveryChangedRepository(t *testing.T) {
 	apiRoot, webRoot := filepath.Join(t.TempDir(), "api"), filepath.Join(t.TempDir(), "web")
 	for _, repository := range []string{apiRoot, webRoot} {

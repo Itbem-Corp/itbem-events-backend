@@ -526,6 +526,24 @@ func TestSyncManagedWorkspaceSupportsNonMainBranchAndRejectsDirtyCheckout(t *tes
 	if err := PrepareDeliveryWorkspaces(context.Background(), freshDelivery, lookup); err == nil || !strings.Contains(err.Error(), "fetched origin has advanced") {
 		t.Fatalf("stale Delivery snapshot must be rejected after fetch/prune: %v", err)
 	}
+	for _, command := range [][]string{{"git", "config", "user.email", "test@example.invalid"}, {"git", "config", "user.name", "ITBEM Test"}} {
+		result, runErr := runLocal(context.Background(), root, commandTimeout, "", command[0], command[1:]...)
+		if runErr != nil || result.ExitCode != 0 {
+			t.Fatalf("managed checkout identity setup failed: %#v / %v", result, runErr)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("local ahead\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range [][]string{{"git", "add", "README.md"}, {"git", "commit", "-m", "local ahead"}} {
+		result, runErr := runLocal(context.Background(), root, commandTimeout, "", command[0], command[1:]...)
+		if runErr != nil || result.ExitCode != 0 {
+			t.Fatalf("local managed branch advance failed: %#v / %v", result, runErr)
+		}
+	}
+	if _, err := SyncManagedWorkspace(context.Background(), workspace); err == nil || !strings.Contains(err.Error(), "not identical to fetched origin") {
+		t.Fatalf("locally-ahead managed base must be rejected after a no-op fast-forward: %v", err)
+	}
 	if err := os.WriteFile(filepath.Join(root, "local.txt"), []byte("do not overwrite"), 0600); err != nil {
 		t.Fatal(err)
 	}
