@@ -172,6 +172,91 @@ func TestNormalizeCodeReviewCoverageDoesNotPenalizeIncludedTestEvidence(t *testi
 	}
 }
 
+func TestNormalizeCodeReviewCoveragePromotesAnEmptyCommentOnlyWhenNoCoverageGapIsNeeded(t *testing.T) {
+	for name, fixture := range map[string]struct {
+		boundary CodeReviewInput
+		review   string
+		want     string
+	}{
+		"no evidence means no advisory block": {
+			boundary: CodeReviewInput{ChangedFiles: []string{"scripts/qualify.sh"}},
+			review:   `{"summary":"The shell change is internally consistent.","verdict":"comment","review_scope":["qualification script"],"findings":[],"test_plan":["Run the isolated qualification."],"coverage_gaps":[]}`,
+			want:     "approve",
+		},
+		"an explicit coverage gap remains advisory": {
+			boundary: CodeReviewInput{ChangedFiles: []string{"scripts/qualify.sh"}},
+			review:   `{"summary":"The shell change needs one environment check.","verdict":"comment","review_scope":["qualification script"],"findings":[],"test_plan":["Run the isolated qualification."],"coverage_gaps":["Confirm the target Docker version."]}`,
+			want:     "comment",
+		},
+		"missing pre-CI output is not a code-review gap": {
+			boundary: CodeReviewInput{ChangedFiles: []string{"scripts/qualify.sh"}},
+			review:   `{"summary":"The shell change is internally consistent.","verdict":"comment","review_scope":["qualification script"],"findings":[],"test_plan":["Run the isolated qualification."],"coverage_gaps":["No executed test output was supplied with this review segment; verify the new test passes before approving."]}`,
+			want:     "approve",
+		},
+		"a statement that there is no segment gap is not a gap": {
+			boundary: CodeReviewInput{ChangedFiles: []string{"scripts/qualify.sh"}},
+			review:   `{"summary":"The segment is internally consistent.","verdict":"comment","review_scope":["qualification script"],"findings":[],"test_plan":["Run the isolated qualification."],"coverage_gaps":["Segment 2 carries the production-code obligations. No gap within this segment."]}`,
+			want:     "approve",
+		},
+		"an asset outside one segment is not a gap in the aggregate": {
+			boundary: CodeReviewInput{ChangedFiles: []string{"cmd/itbem-ai-agent/assets/install.sh", "cmd/itbem-ai-agent/systemd_assets_test.go"}},
+			review:   `{"summary":"The exact diff is internally consistent.","verdict":"comment","review_scope":["installer guard"],"findings":[],"test_plan":["Run the installer asset test."],"coverage_gaps":["The actual cmd/itbem-ai-agent/assets/install.sh content in this PR is outside the supplied segment; the new substring assertions must be cross-checked against the real production installer before trusting the guard."]}`,
+			want:     "approve",
+		},
+		"an actionable gap mentioning no gap remains advisory": {
+			boundary: CodeReviewInput{ChangedFiles: []string{"scripts/qualify.sh"}},
+			review:   `{"summary":"The segment needs contract context.","verdict":"comment","review_scope":["qualification script"],"findings":[],"test_plan":["Read the dependency contract."],"coverage_gaps":["No gap can be closed until the missing dependency contract is supplied."]}`,
+			want:     "comment",
+		},
+		"a qualified no-gap statement remains advisory": {
+			boundary: CodeReviewInput{ChangedFiles: []string{"scripts/qualify.sh"}},
+			review:   `{"summary":"The segment needs deployment evidence.","verdict":"comment","review_scope":["qualification script"],"findings":[],"test_plan":["Capture the deployment evidence."],"coverage_gaps":["No gap within this segment until the deployment evidence is supplied."]}`,
+			want:     "comment",
+		},
+		"scope narration is case insensitive and non-blocking": {
+			boundary: CodeReviewInput{ChangedFiles: []string{"scripts/qualify.sh"}},
+			review:   `{"summary":"The segment is internally consistent.","verdict":"comment","review_scope":["qualification script"],"findings":[],"test_plan":["Run the isolated qualification."],"coverage_gaps":["Segment 2 Carries the production-code obligations."]}`,
+			want:     "approve",
+		},
+		"cross segment coverage narration is not a missing test": {
+			boundary: CodeReviewInput{ChangedFiles: []string{"internal/handler.go", "internal/handler_test.go"}},
+			review:   `{"summary":"The exact segments are internally consistent.","verdict":"comment","review_scope":["implementation and tests"],"findings":[],"test_plan":["Run the targeted handler tests."],"coverage_gaps":["Segment 1 only contains test-file diffs; production changes live in later segments, so the cross-segment aggregate must confirm their test coverage there before any final approve."]}`,
+			want:     "approve",
+		},
+		"a static scope request is not missing evidence": {
+			boundary: CodeReviewInput{ChangedFiles: []string{"internal/handler.go", "internal/handler_test.go"}},
+			review:   `{"summary":"The exact segments are internally consistent.","verdict":"comment","review_scope":["implementation and tests"],"findings":[],"test_plan":["Run the targeted handler tests."],"coverage_gaps":["Cannot confirm whether the package compiles after removing a helper because other call sites are not in this segment's changed_line_ranges. Provide the head content and full go build output."]}`,
+			want:     "approve",
+		},
+		"a scope-only head source request is not missing evidence": {
+			boundary: CodeReviewInput{ChangedFiles: []string{"internal/handler.go", "internal/handler_test.go"}},
+			review:   `{"summary":"The exact segments are internally consistent.","verdict":"comment","review_scope":["implementation and tests"],"findings":[],"test_plan":["Run the targeted handler tests."],"coverage_gaps":["This segment's review is incomplete without the exact source for both files. Source the exact-revision excerpt before approving."]}`,
+			want:     "approve",
+		},
+		"absent evidence remains an actionable gap": {
+			boundary: CodeReviewInput{ChangedFiles: []string{"scripts/qualify.sh"}},
+			review:   `{"summary":"The segment needs evidence.","verdict":"comment","review_scope":["qualification script"],"findings":[],"test_plan":["Attach the missing evidence."],"coverage_gaps":["Segment 2 carries the obligation, but the regression evidence is absent and not attached."]}`,
+			want:     "comment",
+		},
+		"cross segment narration does not hide a missing test": {
+			boundary: CodeReviewInput{ChangedFiles: []string{"internal/handler.go", "internal/handler_test.go"}},
+			review:   `{"summary":"The exact segments need a regression test.","verdict":"comment","review_scope":["implementation and tests"],"findings":[],"test_plan":["Add the regression test."],"coverage_gaps":["Segment 1 only contains test-file diffs; production changes live in a later segment, so the cross-segment aggregate must confirm their test coverage. A regression test is required for the production change."]}`,
+			want:     "comment",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			review, err := ParseCodeReview(fixture.review)
+			if err != nil {
+				t.Fatal(err)
+			}
+			NormalizeCodeReviewCoverage(review, fixture.boundary)
+			if got := review["verdict"]; got != fixture.want {
+				t.Fatalf("unexpected normalized verdict: got %q want %q (%#v)", got, fixture.want, review)
+			}
+		})
+	}
+}
+
 func TestCodeReviewRejectsChangedFilesThatDoNotMatchPatch(t *testing.T) {
 	var input map[string]any
 	if err := json.Unmarshal(validCodeReviewInput(), &input); err != nil {
@@ -347,6 +432,43 @@ func TestRepairCodeReviewEvidenceQuotesUsesExactChangedLine(t *testing.T) {
 	}
 	if err := ValidateCodeReviewBoundary(review, boundary); err != nil {
 		t.Fatalf("grounded evidence quote remained invalid: %v", err)
+	}
+}
+
+func TestDiscardUngroundedCodeReviewFindingsKeepsOnlyExactEvidence(t *testing.T) {
+	boundary, err := ParseCodeReviewInput(validCodeReviewInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	review, err := ParseCodeReview(`{"summary":"A high severity issue is suspected.","verdict":"request_changes","review_scope":["handler"],"findings":[{"id":"invented","severity":"high","category":"correctness","title":"Ungrounded issue","file":"controllers/orders.go","side":"head","line_start":99,"line_end":99,"evidence":"The issue is outside the frozen diff.","evidence_quote":"line50","recommendation":"Correct the implementation.","confidence":0.9},{"id":"grounded","severity":"medium","category":"correctness","title":"Grounded issue","file":"controllers/orders.go","side":"head","line_start":40,"line_end":40,"evidence":"The changed line is observable in the frozen diff.","evidence_quote":"line40","recommendation":"Validate the changed behavior.","confidence":0.9}],"test_plan":["Run the handler tests."],"coverage_gaps":[]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clean, dropped, err := discardUngroundedCodeReviewFindings(review, boundary)
+	if err != nil || !dropped {
+		t.Fatalf("expected unsupported finding to be removed: %#v / %v / %v", clean, dropped, err)
+	}
+	findings := clean["findings"].([]any)
+	if clean["verdict"] != "request_changes" || len(findings) != 1 || findings[0].(map[string]any)["id"] != "grounded" {
+		t.Fatalf("grounded blocking evidence was not preserved: %#v", clean)
+	}
+	if err := ValidateCodeReviewBoundary(clean, boundary); err != nil {
+		t.Fatalf("sanitized review escaped its exact boundary: %v", err)
+	}
+}
+
+func TestDiscardUngroundedCodeReviewFindingsDoesNotRewriteGroundedEvidence(t *testing.T) {
+	boundary, err := ParseCodeReviewInput(validCodeReviewInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	review, err := ParseCodeReview(`{"summary":"A grounded issue exists.","verdict":"request_changes","review_scope":["handler"],"findings":[{"id":"grounded","severity":"medium","category":"correctness","title":"Grounded issue","file":"controllers/orders.go","side":"head","line_start":40,"line_end":40,"evidence":"The changed line is observable in the frozen diff.","evidence_quote":"line40","recommendation":"Validate the changed behavior.","confidence":0.9}],"test_plan":["Run the handler tests."],"coverage_gaps":[]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clean, dropped, err := discardUngroundedCodeReviewFindings(review, boundary)
+	if err != nil || dropped || clean["verdict"] != "request_changes" {
+		t.Fatalf("grounded evidence must remain untouched: %#v / %v / %v", clean, dropped, err)
 	}
 }
 

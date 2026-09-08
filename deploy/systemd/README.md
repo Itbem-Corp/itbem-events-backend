@@ -9,8 +9,10 @@ systemd services. The installer never enables or starts a service.
   independent review of that exact SHA.
 - Confirm the backend owns the configured role-lane SQS queues and private
   input/output buckets. The physical host does not receive those AWS outputs.
-- Build the binary from the exact reviewed backend commit and verify its
-  SHA-256 before copying it to the Linux host.
+- Build the binary from the exact reviewed backend commit and obtain its
+  SHA-256 from the approved release manifest before copying it to the Linux
+  host. The installer rejects a binary whose digest differs from that approved
+  value; never calculate the expected digest from the untrusted local copy.
 - Provision outbound-only network access. No worker needs an inbound port.
 - Configure five distinct gateway tokens derived by the backend deployment
   from `AUTOMATION_CALLBACK_SECRET`, one for each exact role/lane. The Linux
@@ -30,7 +32,9 @@ systemd services. The installer never enables or starts a service.
 ## Install without activation
 
 ```bash
-sudo deploy/systemd/install.sh /tmp/itbem-ai-agent
+# Copy this digest from the approved release manifest, not from /tmp.
+APPROVED_SHA256=replace-with-approved-release-sha256
+sudo deploy/systemd/install.sh "$APPROVED_SHA256" /tmp/itbem-ai-agent
 sudoedit /etc/itbem-ai-agent/common.env
 sudoedit /etc/itbem-ai-agent/roles/orchestration.env
 sudoedit /etc/itbem-ai-agent/roles/engineering.env

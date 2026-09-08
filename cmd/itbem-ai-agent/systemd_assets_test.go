@@ -138,7 +138,7 @@ func TestSystemdRoleFilesBindExactLaneAndSeparatePublicationSecrets(t *testing.T
 
 func TestSystemdInstallerStagesButNeverActivatesServices(t *testing.T) {
 	installer := systemdAsset(t, "install.sh")
-	for _, required := range []string{"useradd --system", "install -m 0600", "install -m 0644 \"$asset_dir/itbem-ai-agent-doctor@.service\"", "install -d -m 0711 -o root -g root /srv/itbem-agent-workspaces", "install -d -m 0700 -o \"$account\" -g \"$account\" \"/srv/itbem-agent-workspaces/$lane\"", "systemctl daemon-reload"} {
+	for _, required := range []string{"usage: install.sh <approved-sha256> /path/to/reviewed/itbem-ai-agent", "approved-sha256 must be a lowercase SHA-256 digest", "reviewed binary SHA-256 does not match the approved release digest", "useradd --system", "install -m 0600", "install -m 0644 \"$asset_dir/itbem-ai-agent-doctor@.service\"", "install -d -m 0711 -o root -g root /srv/itbem-agent-workspaces", "install -d -m 0700 -o \"$account\" -g \"$account\" \"/srv/itbem-agent-workspaces/$lane\"", "systemctl daemon-reload"} {
 		if !strings.Contains(installer, required) {
 			t.Fatalf("installer lost %q", required)
 		}

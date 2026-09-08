@@ -8,7 +8,6 @@ import (
 	"events-stocks/internal/authz"
 	"events-stocks/models"
 	"events-stocks/utils"
-	"fmt"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -353,14 +352,31 @@ func loadAutomationPortfolioReviewQueue(input *automationPortfolioBuildInput) er
 	`, automationPortfolioMaxReviewTasks).Scan(&rows).Error; err != nil {
 		return err
 	}
+	appendAutomationPortfolioReviews(input, rows)
+	return nil
+}
+
+// appendAutomationPortfolioReviews keeps the portfolio available when a
+// historical task cannot be safely projected. The row stays private: one
+// malformed correlation or publication record must not hide other valid
+// exact-SHA reviews from the release operator. The snapshot explicitly marks
+// the review queue as partial instead of pretending that every task was shown.
+func appendAutomationPortfolioReviews(input *automationPortfolioBuildInput, rows []automationPortfolioReviewRow) {
+	if input == nil {
+		return
+	}
+	queueIsPartial := false
 	for _, row := range rows {
 		review, ok := automationPortfolioReviewFromRow(row)
 		if !ok {
-			return fmt.Errorf("automation review queue contains invalid public identity")
+			queueIsPartial = true
+			continue
 		}
 		input.ReviewQueue = append(input.ReviewQueue, review)
 	}
-	return nil
+	if queueIsPartial {
+		input.SummarySourcesUnavailable = append(input.SummarySourcesUnavailable, "review_queue")
+	}
 }
 
 func automationPortfolioReviewFromRow(row automationPortfolioReviewRow) (automationPortfolioReview, bool) {

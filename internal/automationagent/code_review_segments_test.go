@@ -66,12 +66,50 @@ func TestAggregateCodeReviewSegmentsCannotApprovePartialOrInvalidEvidence(t *tes
 	if err != nil || aggregate["verdict"] != "approve" {
 		t.Fatalf("complete valid segments should aggregate: %#v / %v", aggregate, err)
 	}
+	emptyComment, err := ParseCodeReview(`{"summary":"The exact segment is consistent.","verdict":"comment","review_scope":["implementation and tests"],"findings":[],"test_plan":["Run go test ./..."],"coverage_gaps":[]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aggregate, err = AggregateCodeReviewSegments(input, segments, []map[string]any{emptyComment})
+	if err != nil || aggregate["verdict"] != "approve" {
+		t.Fatalf("an empty model comment must not block a complete exact-SHA review: %#v / %v", aggregate, err)
+	}
 	if _, err := AggregateCodeReviewSegments(input, segments, nil); err == nil {
 		t.Fatal("partial segment results were accepted")
 	}
 	invalid, _ := ParseCodeReview(`{"summary":"An issue exists.","verdict":"request_changes","review_scope":["implementation"],"findings":[{"id":"outside","severity":"high","category":"correctness","title":"Outside","file":"src/a.go","side":"head","line_start":50,"line_end":50,"evidence":"Outside the diff.","evidence_quote":"newA","recommendation":"Correct the changed line.","confidence":0.9}],"test_plan":["Run tests"],"coverage_gaps":[]}`)
 	if _, err := AggregateCodeReviewSegments(input, segments, []map[string]any{invalid}); err == nil {
 		t.Fatal("segment evidence outside its exact changed lines was accepted")
+	}
+}
+
+func TestAggregateCodeReviewSegmentsIgnoresOnlyCrossSegmentAssetNarration(t *testing.T) {
+	patch := ""
+	for index := 0; index < codeReviewSegmentMaxFiles; index++ {
+		file := fmt.Sprintf("cmd/agent/source_%d.go", index)
+		patch += fmt.Sprintf("diff --git a/%s b/%s\n--- a/%s\n+++ b/%s\n@@ -1 +1 @@\n-old\n+new\n", file, file, file, file)
+	}
+	patch += "diff --git a/cmd/agent/assets/install.sh b/cmd/agent/assets/install.sh\n--- a/cmd/agent/assets/install.sh\n+++ b/cmd/agent/assets/install.sh\n@@ -1 +1 @@\n-old\n+new\n" +
+		"diff --git a/cmd/agent/systemd_assets_test.go b/cmd/agent/systemd_assets_test.go\n--- a/cmd/agent/systemd_assets_test.go\n+++ b/cmd/agent/systemd_assets_test.go\n@@ -1 +1 @@\n-old\n+new\n"
+	input, err := NewCodeReviewInput("github://acme/agent", strings.Repeat("a", 40), strings.Repeat("b", 40), patch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	segments, err := SegmentCodeReviewInput(input)
+	if err != nil || len(segments) != 2 {
+		t.Fatalf("expected two exact-SHA segments: %#v / %v", segments, err)
+	}
+	narration, err := ParseCodeReview(`{"summary":"The segment is internally consistent.","verdict":"comment","review_scope":["installer guard"],"findings":[],"test_plan":["Run the installer asset test."],"coverage_gaps":["The actual cmd/agent/assets/install.sh content in this PR is outside the supplied segment; the new substring assertions must be cross-checked against the real production installer before trusting the guard."]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviews := make([]map[string]any, len(segments))
+	for index := range reviews {
+		reviews[index] = narration
+	}
+	aggregate, err := AggregateCodeReviewSegments(input, segments, reviews)
+	if err != nil || aggregate["verdict"] != "approve" || len(aggregate["coverage_gaps"].([]any)) != 0 {
+		t.Fatalf("cross-segment narration blocked a complete frozen review: %#v / %v", aggregate, err)
 	}
 }
 
@@ -85,7 +123,7 @@ func TestCodeReviewSegmentPromptRestrictsFindingsToTheSegmentFiles(t *testing.T)
 		t.Fatalf("expected one bounded segment: %#v / %v", segments, err)
 	}
 	prompt := codeReviewSegmentPrompt("review the exact diff", 1, 1, segments[0], boundary)
-	if !strings.Contains(prompt, "The only permitted values of findings[].file in this segment are exactly: controllers/orders.go") || !strings.Contains(prompt, "Never cite supporting context") || !strings.Contains(prompt, "A coverage gap is permitted only") || !strings.Contains(prompt, "Never report a coverage gap merely because") || !strings.Contains(prompt, "Do not require this segment to independently prove coverage") {
+	if !strings.Contains(prompt, "The only permitted values of findings[].file in this segment are exactly: controllers/orders.go") || !strings.Contains(prompt, "Never cite supporting context") || !strings.Contains(prompt, "A coverage gap is permitted only") || !strings.Contains(prompt, "Never report a coverage gap merely because") || !strings.Contains(prompt, "Do not require this segment to independently prove coverage") || !strings.Contains(prompt, "A coverage gap must never request go build/go vet output") {
 		t.Fatalf("segment prompt must make the file boundary explicit: %s", prompt)
 	}
 }
@@ -209,6 +247,14 @@ func TestAggregateCodeReviewSegmentsPreservesSafeBlockingOutcomeWhenASiblingIsBl
 	aggregate, err = AggregateCodeReviewSegments(input, segments, []map[string]any{blocked, nonBlockingFinding})
 	if err != nil || aggregate["verdict"] != "blocked" || len(aggregate["findings"].([]any)) != 0 || len(aggregate["coverage_gaps"].([]any)) < 2 {
 		t.Fatalf("a blocked aggregate must not turn low-only sibling observations into conclusive findings: %#v / %v", aggregate, err)
+	}
+	emptyComment, err := ParseCodeReview(`{"summary":"The exact segment is consistent.","verdict":"comment","review_scope":["implementation"],"findings":[],"test_plan":["Run the targeted guard regression test."],"coverage_gaps":[]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aggregate, err = AggregateCodeReviewSegments(input, segments, []map[string]any{emptyComment, blockingFinding})
+	if err != nil || aggregate["verdict"] != "request_changes" || len(aggregate["findings"].([]any)) != 1 {
+		t.Fatalf("an evidence-free comment must not weaken a blocking sibling: %#v / %v", aggregate, err)
 	}
 }
 

@@ -546,9 +546,21 @@ func (input CodeReviewInput) AnnotatedSanitizedPatch() (string, error) {
 // test is not necessarily defective, but this reviewer has not inspected the
 // repository's existing test suite or CI. It therefore becomes an advisory
 // comment with a precise coverage gap instead of an unqualified approval.
+// Conversely, a model-only comment without a finding or a coverage gap is not
+// review evidence and must not block an otherwise conclusive exact-SHA review.
 // The operation is deterministic and only derives from the immutable manifest.
 func NormalizeCodeReviewCoverage(review map[string]any, boundary CodeReviewInput) {
+	// Code review is intentionally a static, pre-CI activity. QA and required
+	// GitHub checks own executed-command evidence. A model cannot turn that
+	// expected separation into a review blocker by merely noting that no output
+	// was supplied in its frozen source packet.
+	review["coverage_gaps"] = normalizedCodeReviewCoverageGaps(review["coverage_gaps"])
 	if !reviewNeedsCoverageGap(boundary) {
+		findings, _ := review["findings"].([]any)
+		gaps, _ := review["coverage_gaps"].([]any)
+		if strings.EqualFold(strings.TrimSpace(stringAny(review["verdict"])), "comment") && len(findings) == 0 && len(gaps) == 0 {
+			review["verdict"] = "approve"
+		}
 		return
 	}
 	gaps, _ := review["coverage_gaps"].([]any)
@@ -558,6 +570,149 @@ func NormalizeCodeReviewCoverage(review map[string]any, boundary CodeReviewInput
 	if strings.EqualFold(strings.TrimSpace(stringAny(review["verdict"])), "approve") {
 		review["verdict"] = "comment"
 	}
+}
+
+func normalizedCodeReviewCoverageGaps(value any) []any {
+	gaps, _ := value.([]any)
+	result := make([]any, 0, len(gaps))
+	for _, raw := range gaps {
+		gap := strings.TrimSpace(stringAny(raw))
+		normalized := strings.ToLower(gap)
+		// A segmented reviewer sometimes restates that another segment owns a
+		// concern and then explicitly says there is no gap here. That is scope
+		// narration, not missing evidence, so it cannot block the aggregate.
+		// Do not use a broad substring match: a sentence such as "no gap until
+		// the missing contract is supplied" is still an actionable gap.
+		if codeReviewCoverageIsOnlySegmentNarration(normalized) {
+			continue
+		}
+		mentionsExecution := strings.Contains(normalized, "executed") && (strings.Contains(normalized, "test") || strings.Contains(normalized, "command") || strings.Contains(normalized, "check"))
+		mentionsOutput := strings.Contains(normalized, "output") || strings.Contains(normalized, "result")
+		mentionsAbsence := strings.Contains(normalized, "no executed") || strings.Contains(normalized, "not supplied") || strings.Contains(normalized, "not provided") || strings.Contains(normalized, "unavailable") || strings.Contains(normalized, "missing")
+		if mentionsExecution && mentionsOutput && mentionsAbsence {
+			continue
+		}
+		result = append(result, raw)
+	}
+	return result
+}
+
+func codeReviewCoverageIsOnlySegmentNarration(value string) bool {
+	// A segment is intentionally allowed to contain only tests or only the
+	// production change. When the model merely asks the already-running
+	// aggregate to connect those two exact-SHA segments, it has not identified
+	// missing coverage. Keep this deliberately narrow: an actual missing or
+	// required test, contract, or artifact remains an advisory gap below.
+	if codeReviewCoverageIsCrossSegmentAggregationNarration(value) {
+		return true
+	}
+	if codeReviewCoverageIsStaticScopeRequest(value) {
+		return true
+	}
+	sentences := strings.FieldsFunc(value, func(character rune) bool {
+		return character == '.' || character == '!' || character == '?'
+	})
+	if len(sentences) == 0 {
+		return false
+	}
+	hasOnlyScopeNarration := false
+	for _, sentence := range sentences {
+		sentence = strings.Join(strings.Fields(sentence), " ")
+		if sentence == "" {
+			continue
+		}
+		if sentence == "no gap" || sentence == "no coverage gap" ||
+			sentence == "no gap within this segment" || sentence == "no gap in this segment" ||
+			sentence == "no gap for this segment" || sentence == "no coverage gap within this segment" ||
+			sentence == "no coverage gap in this segment" || sentence == "no coverage gap for this segment" {
+			hasOnlyScopeNarration = true
+			continue
+		}
+		// Keep scope narration narrow. Any sentence outside this exact shape
+		// remains an advisory gap rather than being interpreted optimistically.
+		if strings.Contains(sentence, "segment") && strings.Contains(sentence, "carries") &&
+			!strings.Contains(sentence, "missing") && !strings.Contains(sentence, "required") &&
+			!strings.Contains(sentence, "requires") && !strings.Contains(sentence, "unavailable") &&
+			!strings.Contains(sentence, "absent") && !strings.Contains(sentence, "not attached") {
+			hasOnlyScopeNarration = true
+			continue
+		}
+		return false
+	}
+	return hasOnlyScopeNarration
+}
+
+// codeReviewCoverageIsStaticScopeRequest rejects a request for evidence that
+// this static, segmented review deliberately cannot own. The immutable diff,
+// tests and permitted source excerpts are enough to publish a finding; build
+// output, a full file dump or another segment are owned by CI/QA or the
+// aggregate. Keep this narrow: a named missing contract, test, migration or
+// security boundary remains an actionable gap.
+func codeReviewCoverageIsStaticScopeRequest(value string) bool {
+	if !strings.Contains(value, "segment") {
+		return false
+	}
+	scopeBoundary := strings.Contains(value, "changed_line_ranges") ||
+		strings.Contains(value, "outside this segment") ||
+		strings.Contains(value, "not in this segment") ||
+		strings.Contains(value, "only partial diff") ||
+		strings.Contains(value, "only the test was updated") ||
+		strings.Contains(value, "segment's review is incomplete") ||
+		strings.Contains(value, "cross-segment") ||
+		strings.Contains(value, "cross segment") ||
+		strings.Contains(value, "no supplied changed_line_ranges")
+	verificationRequest := strings.Contains(value, "go build") ||
+		strings.Contains(value, "go vet") ||
+		strings.Contains(value, "head content") ||
+		strings.Contains(value, "head lines") ||
+		strings.Contains(value, "full text") ||
+		strings.Contains(value, "source the exact") ||
+		strings.Contains(value, "exact-revision source") ||
+		strings.Contains(value, "exact source") ||
+		strings.Contains(value, "source_context") ||
+		strings.Contains(value, "runner output") ||
+		strings.Contains(value, "command output")
+	if !scopeBoundary || !verificationRequest {
+		return false
+	}
+	for _, actionable := range []string{
+		"missing test", "no test", "regression test", "required contract",
+		"migration", "authentication", "authorization", "privilege", "secret",
+		"injection", "data loss", "backward compatibility", "compatibility",
+	} {
+		if strings.Contains(value, actionable) {
+			return false
+		}
+	}
+	return true
+}
+
+func codeReviewCoverageIsCrossSegmentAggregationNarration(value string) bool {
+	crossSegmentAggregate := strings.Contains(value, "segment") &&
+		(strings.Contains(value, "cross-segment aggregate") || strings.Contains(value, "cross segment aggregate")) &&
+		strings.Contains(value, "test coverage") &&
+		(strings.Contains(value, "later segment") || strings.Contains(value, "another segment"))
+	// The aggregate already receives every bounded segment of the same frozen
+	// diff. A model may note that an asset lives outside *its* supplied segment
+	// and ask the aggregate to cross-check it against a changed test in this PR.
+	// That is visibility narration, not a missing test or a defect. Keep the
+	// wording deliberately strict so a statement that a source is actually
+	// absent or untested remains an advisory gap.
+	sourceOutsideCurrentSegment := strings.Contains(value, "outside the supplied segment") &&
+		strings.Contains(value, "in this pr") &&
+		(strings.Contains(value, "cross-check") || strings.Contains(value, "crosscheck"))
+	if !crossSegmentAggregate && !sourceOutsideCurrentSegment {
+		return false
+	}
+	for _, actionable := range []string{
+		"missing", "required", "requires", "unavailable", "absent", "not attached",
+		"no test", "untested", "lack", "add a test", "write a test", "regression test",
+	} {
+		if strings.Contains(value, actionable) {
+			return false
+		}
+	}
+	return true
 }
 
 func reviewNeedsCoverageGap(boundary CodeReviewInput) bool {
@@ -814,6 +969,80 @@ func ValidateCodeReviewBoundary(review map[string]any, boundary CodeReviewInput)
 		}
 	}
 	return nil
+}
+
+// discardUngroundedCodeReviewFindings removes only findings that cannot be
+// tied to an exact changed file, line range and quote. A model response that
+// fails this proof has no admissible evidence to veto a PR; retaining it would
+// let fabricated coordinates block delivery. Grounded findings, coverage gaps,
+// parser failures and all other boundary failures remain intact and fail closed.
+func discardUngroundedCodeReviewFindings(review map[string]any, boundary CodeReviewInput) (map[string]any, bool, error) {
+	findings, ok := review["findings"].([]any)
+	if !ok || len(findings) == 0 {
+		return review, false, nil
+	}
+	changed := make(map[string]struct{}, len(boundary.ChangedFiles))
+	for _, file := range boundary.ChangedFiles {
+		changed[file] = struct{}{}
+	}
+	retained := make([]any, 0, len(findings))
+	dropped := false
+	for _, raw := range findings {
+		finding, isFinding := raw.(map[string]any)
+		if !isFinding || !codeReviewFindingIsGrounded(finding, boundary, changed) {
+			dropped = true
+			continue
+		}
+		retained = append(retained, raw)
+	}
+	if !dropped {
+		return review, false, nil
+	}
+	clean := make(map[string]any, len(review))
+	for key, value := range review {
+		clean[key] = value
+	}
+	clean["findings"] = retained
+	clean["verdict"] = "comment"
+	for _, raw := range retained {
+		finding, _ := raw.(map[string]any)
+		severity := strings.ToLower(strings.TrimSpace(stringAny(finding["severity"])))
+		if severity == "critical" || severity == "high" || severity == "medium" {
+			clean["verdict"] = "request_changes"
+			break
+		}
+	}
+	clean["summary"] = "Excluded reviewer observations without exact changed-line evidence; retained only verified frozen-diff evidence."
+	raw, err := json.Marshal(clean)
+	if err != nil {
+		return review, false, err
+	}
+	normalized, err := ParseCodeReview(string(raw))
+	if err != nil {
+		return review, false, err
+	}
+	if err := ValidateCodeReviewBoundary(normalized, boundary); err != nil {
+		return review, false, err
+	}
+	return normalized, true, nil
+}
+
+func codeReviewFindingIsGrounded(finding map[string]any, boundary CodeReviewInput, changed map[string]struct{}) bool {
+	file := strings.TrimSpace(stringAny(finding["file"]))
+	if _, present := changed[file]; !present {
+		return false
+	}
+	side := strings.ToLower(strings.TrimSpace(stringAny(finding["side"])))
+	if side == "" {
+		side = "head"
+	}
+	start, startOK := integralReviewLine(finding["line_start"])
+	end, endOK := integralReviewLine(finding["line_end"])
+	if !startOK || !endOK || !reviewLineRangeTouched(boundary.ChangedLines, file, side, start, end) {
+		return false
+	}
+	quote := strings.TrimSpace(stringAny(finding["evidence_quote"]))
+	return len(quote) >= 3 && len(quote) <= 1000 && patchContainsChangedQuote(boundary.Patch, file, side, start, end, quote)
 }
 
 func patchContainsChangedQuote(patch, file, side string, start, end int, quote string) bool {
