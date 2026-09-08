@@ -223,6 +223,16 @@ func TestNormalizeCodeReviewCoveragePromotesAnEmptyCommentOnlyWhenNoCoverageGapI
 			review:   `{"summary":"The exact segments are internally consistent.","verdict":"comment","review_scope":["implementation and tests"],"findings":[],"test_plan":["Run the targeted handler tests."],"coverage_gaps":["Segment 1 only contains test-file diffs; production changes live in later segments, so the cross-segment aggregate must confirm their test coverage there before any final approve."]}`,
 			want:     "approve",
 		},
+		"a static scope request is not missing evidence": {
+			boundary: CodeReviewInput{ChangedFiles: []string{"internal/handler.go", "internal/handler_test.go"}},
+			review:   `{"summary":"The exact segments are internally consistent.","verdict":"comment","review_scope":["implementation and tests"],"findings":[],"test_plan":["Run the targeted handler tests."],"coverage_gaps":["Cannot confirm whether the package compiles after removing a helper because other call sites are not in this segment's changed_line_ranges. Provide the head content and full go build output."]}`,
+			want:     "approve",
+		},
+		"a scope-only head source request is not missing evidence": {
+			boundary: CodeReviewInput{ChangedFiles: []string{"internal/handler.go", "internal/handler_test.go"}},
+			review:   `{"summary":"The exact segments are internally consistent.","verdict":"comment","review_scope":["implementation and tests"],"findings":[],"test_plan":["Run the targeted handler tests."],"coverage_gaps":["This segment's review is incomplete without the exact source for both files. Source the exact-revision excerpt before approving."]}`,
+			want:     "approve",
+		},
 		"absent evidence remains an actionable gap": {
 			boundary: CodeReviewInput{ChangedFiles: []string{"scripts/qualify.sh"}},
 			review:   `{"summary":"The segment needs evidence.","verdict":"comment","review_scope":["qualification script"],"findings":[],"test_plan":["Attach the missing evidence."],"coverage_gaps":["Segment 2 carries the obligation, but the regression evidence is absent and not attached."]}`,

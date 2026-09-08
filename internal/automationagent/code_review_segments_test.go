@@ -123,7 +123,7 @@ func TestCodeReviewSegmentPromptRestrictsFindingsToTheSegmentFiles(t *testing.T)
 		t.Fatalf("expected one bounded segment: %#v / %v", segments, err)
 	}
 	prompt := codeReviewSegmentPrompt("review the exact diff", 1, 1, segments[0], boundary)
-	if !strings.Contains(prompt, "The only permitted values of findings[].file in this segment are exactly: controllers/orders.go") || !strings.Contains(prompt, "Never cite supporting context") || !strings.Contains(prompt, "A coverage gap is permitted only") || !strings.Contains(prompt, "Never report a coverage gap merely because") || !strings.Contains(prompt, "Do not require this segment to independently prove coverage") {
+	if !strings.Contains(prompt, "The only permitted values of findings[].file in this segment are exactly: controllers/orders.go") || !strings.Contains(prompt, "Never cite supporting context") || !strings.Contains(prompt, "A coverage gap is permitted only") || !strings.Contains(prompt, "Never report a coverage gap merely because") || !strings.Contains(prompt, "Do not require this segment to independently prove coverage") || !strings.Contains(prompt, "A coverage gap must never request go build/go vet output") {
 		t.Fatalf("segment prompt must make the file boundary explicit: %s", prompt)
 	}
 }

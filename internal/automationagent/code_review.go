@@ -606,6 +606,9 @@ func codeReviewCoverageIsOnlySegmentNarration(value string) bool {
 	if codeReviewCoverageIsCrossSegmentAggregationNarration(value) {
 		return true
 	}
+	if codeReviewCoverageIsStaticScopeRequest(value) {
+		return true
+	}
 	sentences := strings.FieldsFunc(value, func(character rune) bool {
 		return character == '.' || character == '!' || character == '?'
 	})
@@ -637,6 +640,51 @@ func codeReviewCoverageIsOnlySegmentNarration(value string) bool {
 		return false
 	}
 	return hasOnlyScopeNarration
+}
+
+// codeReviewCoverageIsStaticScopeRequest rejects a request for evidence that
+// this static, segmented review deliberately cannot own. The immutable diff,
+// tests and permitted source excerpts are enough to publish a finding; build
+// output, a full file dump or another segment are owned by CI/QA or the
+// aggregate. Keep this narrow: a named missing contract, test, migration or
+// security boundary remains an actionable gap.
+func codeReviewCoverageIsStaticScopeRequest(value string) bool {
+	if !strings.Contains(value, "segment") {
+		return false
+	}
+	scopeBoundary := strings.Contains(value, "changed_line_ranges") ||
+		strings.Contains(value, "outside this segment") ||
+		strings.Contains(value, "not in this segment") ||
+		strings.Contains(value, "only partial diff") ||
+		strings.Contains(value, "only the test was updated") ||
+		strings.Contains(value, "segment's review is incomplete") ||
+		strings.Contains(value, "cross-segment") ||
+		strings.Contains(value, "cross segment") ||
+		strings.Contains(value, "no supplied changed_line_ranges")
+	verificationRequest := strings.Contains(value, "go build") ||
+		strings.Contains(value, "go vet") ||
+		strings.Contains(value, "head content") ||
+		strings.Contains(value, "head lines") ||
+		strings.Contains(value, "full text") ||
+		strings.Contains(value, "source the exact") ||
+		strings.Contains(value, "exact-revision source") ||
+		strings.Contains(value, "exact source") ||
+		strings.Contains(value, "source_context") ||
+		strings.Contains(value, "runner output") ||
+		strings.Contains(value, "command output")
+	if !scopeBoundary || !verificationRequest {
+		return false
+	}
+	for _, actionable := range []string{
+		"missing test", "no test", "regression test", "required contract",
+		"migration", "authentication", "authorization", "privilege", "secret",
+		"injection", "data loss", "backward compatibility", "compatibility",
+	} {
+		if strings.Contains(value, actionable) {
+			return false
+		}
+	}
+	return true
 }
 
 func codeReviewCoverageIsCrossSegmentAggregationNarration(value string) bool {
