@@ -85,7 +85,7 @@ func TestCodeReviewSegmentPromptRestrictsFindingsToTheSegmentFiles(t *testing.T)
 		t.Fatalf("expected one bounded segment: %#v / %v", segments, err)
 	}
 	prompt := codeReviewSegmentPrompt("review the exact diff", 1, 1, segments[0], boundary)
-	if !strings.Contains(prompt, "The only permitted values of findings[].file in this segment are exactly: controllers/orders.go") || !strings.Contains(prompt, "Never cite supporting context") || !strings.Contains(prompt, "Do not require this segment to independently prove coverage") {
+	if !strings.Contains(prompt, "The only permitted values of findings[].file in this segment are exactly: controllers/orders.go") || !strings.Contains(prompt, "Never cite supporting context") || !strings.Contains(prompt, "A coverage gap is permitted only") || !strings.Contains(prompt, "Never report a coverage gap merely because") || !strings.Contains(prompt, "Do not require this segment to independently prove coverage") {
 		t.Fatalf("segment prompt must make the file boundary explicit: %s", prompt)
 	}
 }
@@ -119,6 +119,18 @@ func TestSupportingCodeReviewTestPatchHonorsItsByteCapWithoutTruncatingFiles(t *
 	blocks, err := splitCodeReviewPatchFiles(support)
 	if err != nil || strings.Join(blocks, "") != support || len(blocks) == 0 || len(blocks) == 30 {
 		t.Fatalf("supporting test patch must contain only complete capped file blocks: %d / %v", len(blocks), err)
+	}
+}
+
+func TestSupportingCodeReviewTestPatchReportsNoContextWhenOneFileExceedsCap(t *testing.T) {
+	payload := strings.Repeat("x", codeReviewSupportingTestPatchBytes+1)
+	patch := "diff --git a/internal/oversized_test.go b/internal/oversized_test.go\n--- a/internal/oversized_test.go\n+++ b/internal/oversized_test.go\n@@ -1 +1 @@\n-old\n+" + payload + "\n"
+	input, err := NewCodeReviewInput("github://example/service", strings.Repeat("a", 40), strings.Repeat("b", 40), patch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if support := supportingCodeReviewTestPatch(input); support != "No bounded changed test patch is available." {
+		t.Fatalf("oversized test file must not be truncated into review context: %q", support)
 	}
 }
 

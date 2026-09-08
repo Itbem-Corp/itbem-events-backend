@@ -1240,13 +1240,13 @@ func PrepareDeliveryWorkspaces(ctx context.Context, delivery json.RawMessage, lo
 		if remoteURL == "" || baseBranch == "" {
 			return fmt.Errorf("workspace %s must configure both repository_url and base_branch for managed Delivery synchronization", workspace.ID)
 		}
-		state, err := SyncManagedWorkspace(ctx, workspace)
-		if err != nil {
-			return fmt.Errorf("workspace %s could not synchronize its managed base before Delivery: %w", workspace.ID, err)
-		}
 		expected := strings.ToLower(strings.TrimSpace(source.Revision))
 		if !projectvault.ValidRevision(expected) {
 			return fmt.Errorf("workspace %s managed Delivery source has no immutable frozen revision", workspace.ID)
+		}
+		state, err := SyncManagedWorkspace(ctx, workspace)
+		if err != nil {
+			return fmt.Errorf("workspace %s could not synchronize its managed base before Delivery: %w", workspace.ID, err)
 		}
 		if !strings.EqualFold(state.HeadSHA, expected) {
 			return fmt.Errorf("workspace %s fetched origin has advanced beyond the frozen context revision; refresh the project checkpoint and replan", workspace.ID)

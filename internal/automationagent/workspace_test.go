@@ -534,6 +534,43 @@ func TestSyncManagedWorkspaceSupportsNonMainBranchAndRejectsDirtyCheckout(t *tes
 	}
 }
 
+func TestPrepareDeliveryWorkspacesRejectsInvalidManagedRevisionBeforeSyncAndSkipsLegacyWorkspace(t *testing.T) {
+	managedRoot, legacyRoot := filepath.Join(t.TempDir(), "managed"), filepath.Join(t.TempDir(), "legacy")
+	if err := os.MkdirAll(managedRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(legacyRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	registryValue, err := json.Marshal(map[string]any{
+		"managed": map[string]any{
+			"path": managedRoot, "repository_url": "https://example.invalid/managed.git", "base_branch": "main",
+			"capabilities": []string{WorkspaceCapabilityReadRepository, WorkspaceCapabilityFetchRemote},
+		},
+		"legacy": map[string]any{"path": legacyRoot},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lookup := func(key string) string {
+		if key == "ITBEM_AI_WORKSPACES_JSON" {
+			return string(registryValue)
+		}
+		return ""
+	}
+	invalid := json.RawMessage(`{"context_sources":[{"kind":"repository","reference":"workspace://managed","revision":"short-sha"}]}`)
+	if err := PrepareDeliveryWorkspaces(context.Background(), invalid, lookup); err == nil || !strings.Contains(err.Error(), "no immutable frozen revision") {
+		t.Fatalf("invalid managed revision must fail before remote synchronization: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(managedRoot, ".git")); !os.IsNotExist(err) {
+		t.Fatalf("invalid revision must not create or mutate a managed checkout: %v", err)
+	}
+	legacy := json.RawMessage(`{"context_sources":[{"kind":"repository","reference":"workspace://legacy","revision":"` + strings.Repeat("a", 40) + `"}]}`)
+	if err := PrepareDeliveryWorkspaces(context.Background(), legacy, lookup); err != nil {
+		t.Fatalf("legacy local-only workspace should not require managed synchronization: %v", err)
+	}
+}
+
 func TestSyncManagedWorkspaceRejectsOriginThatDiffersFromRegisteredRemote(t *testing.T) {
 	root := t.TempDir()
 	for _, command := range [][]string{{"git", "init", "-b", "main"}, {"git", "config", "user.email", "test@example.invalid"}, {"git", "config", "user.name", "ITBEM Test"}} {
