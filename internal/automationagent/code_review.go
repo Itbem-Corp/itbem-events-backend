@@ -546,9 +546,16 @@ func (input CodeReviewInput) AnnotatedSanitizedPatch() (string, error) {
 // test is not necessarily defective, but this reviewer has not inspected the
 // repository's existing test suite or CI. It therefore becomes an advisory
 // comment with a precise coverage gap instead of an unqualified approval.
+// Conversely, a model-only comment without a finding or a coverage gap is not
+// review evidence and must not block an otherwise conclusive exact-SHA review.
 // The operation is deterministic and only derives from the immutable manifest.
 func NormalizeCodeReviewCoverage(review map[string]any, boundary CodeReviewInput) {
 	if !reviewNeedsCoverageGap(boundary) {
+		findings, _ := review["findings"].([]any)
+		gaps, _ := review["coverage_gaps"].([]any)
+		if strings.EqualFold(strings.TrimSpace(stringAny(review["verdict"])), "comment") && len(findings) == 0 && len(gaps) == 0 {
+			review["verdict"] = "approve"
+		}
 		return
 	}
 	gaps, _ := review["coverage_gaps"].([]any)

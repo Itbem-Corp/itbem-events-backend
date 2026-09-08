@@ -66,6 +66,14 @@ func TestAggregateCodeReviewSegmentsCannotApprovePartialOrInvalidEvidence(t *tes
 	if err != nil || aggregate["verdict"] != "approve" {
 		t.Fatalf("complete valid segments should aggregate: %#v / %v", aggregate, err)
 	}
+	emptyComment, err := ParseCodeReview(`{"summary":"The exact segment is consistent.","verdict":"comment","review_scope":["implementation and tests"],"findings":[],"test_plan":["Run go test ./..."],"coverage_gaps":[]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aggregate, err = AggregateCodeReviewSegments(input, segments, []map[string]any{emptyComment})
+	if err != nil || aggregate["verdict"] != "approve" {
+		t.Fatalf("an empty model comment must not block a complete exact-SHA review: %#v / %v", aggregate, err)
+	}
 	if _, err := AggregateCodeReviewSegments(input, segments, nil); err == nil {
 		t.Fatal("partial segment results were accepted")
 	}

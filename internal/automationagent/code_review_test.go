@@ -172,6 +172,36 @@ func TestNormalizeCodeReviewCoverageDoesNotPenalizeIncludedTestEvidence(t *testi
 	}
 }
 
+func TestNormalizeCodeReviewCoveragePromotesAnEmptyCommentOnlyWhenNoCoverageGapIsNeeded(t *testing.T) {
+	for name, fixture := range map[string]struct {
+		boundary CodeReviewInput
+		review   string
+		want     string
+	}{
+		"no evidence means no advisory block": {
+			boundary: CodeReviewInput{ChangedFiles: []string{"scripts/qualify.sh"}},
+			review:   `{"summary":"The shell change is internally consistent.","verdict":"comment","review_scope":["qualification script"],"findings":[],"test_plan":["Run the isolated qualification."],"coverage_gaps":[]}`,
+			want:     "approve",
+		},
+		"an explicit coverage gap remains advisory": {
+			boundary: CodeReviewInput{ChangedFiles: []string{"scripts/qualify.sh"}},
+			review:   `{"summary":"The shell change needs one environment check.","verdict":"comment","review_scope":["qualification script"],"findings":[],"test_plan":["Run the isolated qualification."],"coverage_gaps":["Confirm the target Docker version."]}`,
+			want:     "comment",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			review, err := ParseCodeReview(fixture.review)
+			if err != nil {
+				t.Fatal(err)
+			}
+			NormalizeCodeReviewCoverage(review, fixture.boundary)
+			if got := review["verdict"]; got != fixture.want {
+				t.Fatalf("unexpected normalized verdict: got %q want %q (%#v)", got, fixture.want, review)
+			}
+		})
+	}
+}
+
 func TestCodeReviewRejectsChangedFilesThatDoNotMatchPatch(t *testing.T) {
 	var input map[string]any
 	if err := json.Unmarshal(validCodeReviewInput(), &input); err != nil {
