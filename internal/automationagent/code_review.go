@@ -598,6 +598,14 @@ func normalizedCodeReviewCoverageGaps(value any) []any {
 }
 
 func codeReviewCoverageIsOnlySegmentNarration(value string) bool {
+	// A segment is intentionally allowed to contain only tests or only the
+	// production change. When the model merely asks the already-running
+	// aggregate to connect those two exact-SHA segments, it has not identified
+	// missing coverage. Keep this deliberately narrow: an actual missing or
+	// required test, contract, or artifact remains an advisory gap below.
+	if codeReviewCoverageIsCrossSegmentAggregationNarration(value) {
+		return true
+	}
 	sentences := strings.FieldsFunc(value, func(character rune) bool {
 		return character == '.' || character == '!' || character == '?'
 	})
@@ -629,6 +637,24 @@ func codeReviewCoverageIsOnlySegmentNarration(value string) bool {
 		return false
 	}
 	return hasOnlyScopeNarration
+}
+
+func codeReviewCoverageIsCrossSegmentAggregationNarration(value string) bool {
+	if !strings.Contains(value, "segment") ||
+		!(strings.Contains(value, "cross-segment aggregate") || strings.Contains(value, "cross segment aggregate")) ||
+		!strings.Contains(value, "test coverage") ||
+		!(strings.Contains(value, "later segment") || strings.Contains(value, "another segment")) {
+		return false
+	}
+	for _, actionable := range []string{
+		"missing", "required", "requires", "unavailable", "absent", "not attached",
+		"no test", "untested", "lack", "add a test", "write a test", "regression test",
+	} {
+		if strings.Contains(value, actionable) {
+			return false
+		}
+	}
+	return true
 }
 
 func reviewNeedsCoverageGap(boundary CodeReviewInput) bool {

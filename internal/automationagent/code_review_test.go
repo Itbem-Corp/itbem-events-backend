@@ -213,9 +213,19 @@ func TestNormalizeCodeReviewCoveragePromotesAnEmptyCommentOnlyWhenNoCoverageGapI
 			review:   `{"summary":"The segment is internally consistent.","verdict":"comment","review_scope":["qualification script"],"findings":[],"test_plan":["Run the isolated qualification."],"coverage_gaps":["Segment 2 Carries the production-code obligations."]}`,
 			want:     "approve",
 		},
+		"cross segment coverage narration is not a missing test": {
+			boundary: CodeReviewInput{ChangedFiles: []string{"internal/handler.go", "internal/handler_test.go"}},
+			review:   `{"summary":"The exact segments are internally consistent.","verdict":"comment","review_scope":["implementation and tests"],"findings":[],"test_plan":["Run the targeted handler tests."],"coverage_gaps":["Segment 1 only contains test-file diffs; production changes live in later segments, so the cross-segment aggregate must confirm their test coverage there before any final approve."]}`,
+			want:     "approve",
+		},
 		"absent evidence remains an actionable gap": {
 			boundary: CodeReviewInput{ChangedFiles: []string{"scripts/qualify.sh"}},
 			review:   `{"summary":"The segment needs evidence.","verdict":"comment","review_scope":["qualification script"],"findings":[],"test_plan":["Attach the missing evidence."],"coverage_gaps":["Segment 2 carries the obligation, but the regression evidence is absent and not attached."]}`,
+			want:     "comment",
+		},
+		"cross segment narration does not hide a missing test": {
+			boundary: CodeReviewInput{ChangedFiles: []string{"internal/handler.go", "internal/handler_test.go"}},
+			review:   `{"summary":"The exact segments need a regression test.","verdict":"comment","review_scope":["implementation and tests"],"findings":[],"test_plan":["Add the regression test."],"coverage_gaps":["Segment 1 only contains test-file diffs; production changes live in a later segment, so the cross-segment aggregate must confirm their test coverage. A regression test is required for the production change."]}`,
 			want:     "comment",
 		},
 	} {
