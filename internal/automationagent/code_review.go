@@ -554,7 +554,7 @@ func NormalizeCodeReviewCoverage(review map[string]any, boundary CodeReviewInput
 	// GitHub checks own executed-command evidence. A model cannot turn that
 	// expected separation into a review blocker by merely noting that no output
 	// was supplied in its frozen source packet.
-	review["coverage_gaps"] = withoutUnverifiableExecutionGaps(review["coverage_gaps"])
+	review["coverage_gaps"] = normalizedCodeReviewCoverageGaps(review["coverage_gaps"])
 	if !reviewNeedsCoverageGap(boundary) {
 		findings, _ := review["findings"].([]any)
 		gaps, _ := review["coverage_gaps"].([]any)
@@ -572,12 +572,18 @@ func NormalizeCodeReviewCoverage(review map[string]any, boundary CodeReviewInput
 	}
 }
 
-func withoutUnverifiableExecutionGaps(value any) []any {
+func normalizedCodeReviewCoverageGaps(value any) []any {
 	gaps, _ := value.([]any)
 	result := make([]any, 0, len(gaps))
 	for _, raw := range gaps {
 		gap := strings.TrimSpace(stringAny(raw))
 		normalized := strings.ToLower(gap)
+		// A segmented reviewer sometimes restates that another segment owns a
+		// concern and then explicitly says there is no gap here. That is scope
+		// narration, not missing evidence, so it cannot block the aggregate.
+		if strings.Contains(normalized, "no gap") || strings.Contains(normalized, "no coverage gap") {
+			continue
+		}
 		mentionsExecution := strings.Contains(normalized, "executed") && (strings.Contains(normalized, "test") || strings.Contains(normalized, "command") || strings.Contains(normalized, "check"))
 		mentionsOutput := strings.Contains(normalized, "output") || strings.Contains(normalized, "result")
 		mentionsAbsence := strings.Contains(normalized, "no executed") || strings.Contains(normalized, "not supplied") || strings.Contains(normalized, "not provided") || strings.Contains(normalized, "unavailable") || strings.Contains(normalized, "missing")

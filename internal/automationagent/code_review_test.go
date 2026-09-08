@@ -193,6 +193,11 @@ func TestNormalizeCodeReviewCoveragePromotesAnEmptyCommentOnlyWhenNoCoverageGapI
 			review:   `{"summary":"The shell change is internally consistent.","verdict":"comment","review_scope":["qualification script"],"findings":[],"test_plan":["Run the isolated qualification."],"coverage_gaps":["No executed test output was supplied with this review segment; verify the new test passes before approving."]}`,
 			want:     "approve",
 		},
+		"a statement that there is no segment gap is not a gap": {
+			boundary: CodeReviewInput{ChangedFiles: []string{"scripts/qualify.sh"}},
+			review:   `{"summary":"The segment is internally consistent.","verdict":"comment","review_scope":["qualification script"],"findings":[],"test_plan":["Run the isolated qualification."],"coverage_gaps":["Segment 2 carries the production-code obligations. No gap within this segment."]}`,
+			want:     "approve",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			review, err := ParseCodeReview(fixture.review)
