@@ -298,19 +298,25 @@ func TestWorkerFailsBeforeProviderWhenManagedWorkspaceAdvanced(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, callback, provider := &fakeStore{input: input}, &fakeCallback{}, &sequenceProvider{}
-	worker, err := NewWorker(WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"}, store, callback, provider)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := worker.Process(context.Background(), validMessage()); err != nil {
-		t.Fatal(err)
-	}
-	if provider.calls != 0 || len(store.writes) != 0 {
-		t.Fatalf("stale managed context reached inference or request storage: calls=%d writes=%#v", provider.calls, store.writes)
-	}
-	if len(callback.updates) != 2 || callback.updates[1].Status != "failed" || !strings.Contains(callback.updates[1].ErrorMessage, "fetched origin has advanced") {
-		t.Fatalf("stale managed base was not surfaced before inference: %#v", callback.updates)
+	for _, operation := range []string{"delivery.plan", "delivery.implementation"} {
+		t.Run(operation, func(t *testing.T) {
+			store, callback, provider := &fakeStore{input: input}, &fakeCallback{}, &sequenceProvider{}
+			worker, err := NewWorker(WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"}, store, callback, provider)
+			if err != nil {
+				t.Fatal(err)
+			}
+			message := validMessage()
+			message.Payload.Operation = operation
+			if err := worker.Process(context.Background(), message); err != nil {
+				t.Fatal(err)
+			}
+			if provider.calls != 0 || len(store.writes) != 0 {
+				t.Fatalf("stale managed context reached inference or request storage: calls=%d writes=%#v", provider.calls, store.writes)
+			}
+			if len(callback.updates) != 2 || callback.updates[1].Status != "failed" || !strings.Contains(callback.updates[1].ErrorMessage, "fetched origin has advanced") {
+				t.Fatalf("stale managed base was not surfaced before inference: %#v", callback.updates)
+			}
+		})
 	}
 }
 
