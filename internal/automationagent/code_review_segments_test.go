@@ -75,6 +75,21 @@ func TestAggregateCodeReviewSegmentsCannotApprovePartialOrInvalidEvidence(t *tes
 	}
 }
 
+func TestCodeReviewSegmentPromptRestrictsFindingsToTheSegmentFiles(t *testing.T) {
+	boundary, err := ParseCodeReviewInput(validCodeReviewInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	segments, err := SegmentCodeReviewInput(boundary)
+	if err != nil || len(segments) != 1 {
+		t.Fatalf("expected one bounded segment: %#v / %v", segments, err)
+	}
+	prompt := codeReviewSegmentPrompt("review the exact diff", 1, 1, segments[0], boundary)
+	if !strings.Contains(prompt, "The only permitted values of findings[].file in this segment are exactly: controllers/orders.go") || !strings.Contains(prompt, "Never cite supporting context") {
+		t.Fatalf("segment prompt must make the file boundary explicit: %s", prompt)
+	}
+}
+
 func TestAggregateCodeReviewSegmentsPreservesSafeBlockingOutcomeWhenASiblingIsBlocked(t *testing.T) {
 	patch := ""
 	context := make([]CodeReviewContextExcerpt, 0, codeReviewSegmentMaxFiles+1)
