@@ -641,9 +641,9 @@ func codeReviewCoverageIsOnlySegmentNarration(value string) bool {
 
 func codeReviewCoverageIsCrossSegmentAggregationNarration(value string) bool {
 	if !strings.Contains(value, "segment") ||
-		!(strings.Contains(value, "cross-segment aggregate") || strings.Contains(value, "cross segment aggregate")) ||
+		(!strings.Contains(value, "cross-segment aggregate") && !strings.Contains(value, "cross segment aggregate")) ||
 		!strings.Contains(value, "test coverage") ||
-		!(strings.Contains(value, "later segment") || strings.Contains(value, "another segment")) {
+		(!strings.Contains(value, "later segment") && !strings.Contains(value, "another segment")) {
 		return false
 	}
 	for _, actionable := range []string{
