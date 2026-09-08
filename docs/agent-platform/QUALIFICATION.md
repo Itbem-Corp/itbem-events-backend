@@ -5,6 +5,13 @@ separates repeatable local qualification from live GitHub, staging and
 production evidence. A local pass is necessary but never grants merge or
 release authority.
 
+The local qualifier first initializes only the repository's declared Git
+submodules at their committed gitlinks. This makes a clean worktree test the
+same pinned source graph as CI without naming a product or repository in the
+platform. The initial bootstrap can reach the submodule remotes; once those
+exact revisions are present, the remaining qualification is network-free.
+Local-file submodule transport remains disabled.
+
 ## Repeatable local qualification
 
 From the backend repository root on Linux:
