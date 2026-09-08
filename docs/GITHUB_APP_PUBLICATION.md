@@ -116,15 +116,22 @@ registra el material normalizado.
 Después de validar la salida estructurada contra ese diff, un relay
 determinista obtiene un token efímero restringido al repositorio, vuelve a
 comprobar que el PR sigue abierto y en el mismo SHA, y publica la revisión. Un
-marcador de sujeto+payload hace el efecto idempotente tras reinicios. Si ya
-existe un resultado diferente para el mismo sujeto, falla cerrado. Si la App
-Reviewer fuera autora del PR, un `APPROVE` se degrada a `COMMENT` y la revisión
+marcador de sujeto+payload hace el efecto idempotente tras reinicios. Un
+resultado diferente para el mismo sujeto falla cerrado, salvo un reintento
+explícitamente autorizado de una revisión que ya falló. Si la App Reviewer
+fuera autora del PR, un `APPROVE` se degrada a `COMMENT` y la revisión
 automática queda bloqueada. Después publica el check `Bema Review / exact-sha`
 con la misma identidad, SHA y digests. El check nunca usa una conclusión
 neutral: `success` significa aprobación independiente exacta y `failure`
 mantiene el merge cerrado. Los repositorios que habiliten la ruta autónoma
 deben exigir ese check, fijarlo a la Reviewer App y no exigir además una review
 humana rutinaria; las políticas de riesgo pueden conservar aprobación humana.
+
+El reintento conserva la tarea fallida y su evidencia privada. Si y sólo si
+produce un nuevo veredicto válido para el mismo sujeto, SHA y App Reviewer,
+puede actualizar el único check previo que estaba en `failure`. Nunca puede
+sustituir un check ya `success`, y una redelivery ordinaria no puede cambiar
+un resultado distinto.
 PostgreSQL conserva sólo identidad, URLs, conclusión y digests públicos; la
 prosa completa permanece en evidencia privada.
 

@@ -1146,9 +1146,7 @@ func RetryCodeReview(c echo.Context) error {
 	if err != nil {
 		return utils.Error(c, http.StatusConflict, "Automation retry rejected", "The failed review no longer has a valid immutable evidence boundary")
 	}
-	newTaskID, newJobID := retry.ID, retry.JobID
-	message := automationqueue.Message{SchemaVersion: 1, JobID: newJobID.String(), TenantCode: "itbem", CorrelationID: retry.CorrelationID, Type: "ai.local.process"}
-	message.Payload.TaskID, message.Payload.Operation, message.Payload.MaxCompletionTokens, message.Payload.InputRef, message.Payload.Attempt = newTaskID.String(), retry.Operation, retry.MaxCompletionTokens, retry.InputRef, 1
+	message := codeReviewRetryQueueMessage(&original, retry)
 	if err := configuration.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(retry).Error; err != nil {
 			return err
@@ -3251,6 +3249,21 @@ func newCodeReviewRetryTask(original *models.AutomationTask) (*models.Automation
 		InputRef:              original.InputRef,
 		Status:                "queued",
 	}, nil
+}
+
+// codeReviewRetryQueueMessage carries the sole authorization for a Reviewer
+// retry to supersede its earlier failed exact-SHA check. It is emitted only by
+// RetryCodeReview after that endpoint verified both the original task and the
+// caller; ordinary queue delivery and redelivery leave RetryOfTaskID empty.
+func codeReviewRetryQueueMessage(original, retry *models.AutomationTask) automationqueue.Message {
+	message := automationqueue.Message{SchemaVersion: 1, JobID: retry.JobID.String(), TenantCode: "itbem", CorrelationID: retry.CorrelationID, Type: "ai.local.process"}
+	message.Payload.TaskID = retry.ID.String()
+	message.Payload.Operation = retry.Operation
+	message.Payload.MaxCompletionTokens = retry.MaxCompletionTokens
+	message.Payload.InputRef = retry.InputRef
+	message.Payload.Attempt = 1
+	message.Payload.RetryOfTaskID = original.ID.String()
+	return message
 }
 
 // mayRetryAutomationTask is intentionally no broader than cancellation. A

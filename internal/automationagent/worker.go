@@ -42,6 +42,10 @@ type TaskMessage struct {
 		MaxCompletionTokens int    `json:"max_completion_tokens,omitempty"`
 		InputRef            string `json:"input_ref"`
 		Attempt             int    `json:"attempt"`
+		// RetryOfTaskID is set only by the control-plane retry endpoint. It
+		// permits one reviewer retry to supersede its own failed check for the
+		// same immutable subject; an ordinary queue delivery stays idempotent.
+		RetryOfTaskID string `json:"retry_of_task_id,omitempty"`
 	} `json:"payload"`
 }
 

@@ -94,11 +94,11 @@ func TestPublishGitHubCodeReviewIsExactSHAAndRetrySafe(t *testing.T) {
 		t.Fatal(err)
 	}
 	lookup := githubReviewTestLookup(t, key, server.URL)
-	first, err := PublishGitHubCodeReview(context.Background(), boundary, review, lookup)
+	first, err := PublishGitHubCodeReview(context.Background(), boundary, review, lookup, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := PublishGitHubCodeReview(context.Background(), boundary, review, lookup)
+	second, err := PublishGitHubCodeReview(context.Background(), boundary, review, lookup, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestPublishGitHubCodeReviewIsExactSHAAndRetrySafe(t *testing.T) {
 		t.Fatalf("review publication was not retry safe: posts=%d first=%#v second=%#v", posts, first, second)
 	}
 	published.User.Login = "untrusted-actor"
-	if _, err := PublishGitHubCodeReview(context.Background(), boundary, review, lookup); err == nil || !strings.Contains(err.Error(), "different identity") {
+	if _, err := PublishGitHubCodeReview(context.Background(), boundary, review, lookup, false); err == nil || !strings.Contains(err.Error(), "different identity") {
 		t.Fatalf("a forged idempotency marker was accepted: %v", err)
 	}
 	if posts != 2 {
@@ -165,7 +165,7 @@ func TestPublishGitHubCodeReviewNeverSelfApproves(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	publication, err := PublishGitHubCodeReview(context.Background(), boundary, review, githubReviewTestLookup(t, key, server.URL))
+	publication, err := PublishGitHubCodeReview(context.Background(), boundary, review, githubReviewTestLookup(t, key, server.URL), false)
 	if err != nil || publication.Event != "COMMENT" || publication.Verdict != "approve" || publication.CheckConclusion != "failure" || publication.AuthorActor != publication.ReviewerActor {
 		t.Fatalf("self approval did not remain non-approving: %#v / %v", publication, err)
 	}
@@ -231,6 +231,16 @@ func TestPublishGitHubExactSHAReviewCheckSucceedsOnlyForIndependentApproval(t *t
 			}
 			check = remoteCheckFromPayload(90, payload)
 			_ = json.NewEncoder(response).Encode(check)
+		case request.Method == http.MethodPatch && strings.HasSuffix(request.URL.Path, "/check-runs/90"):
+			writes++
+			var payload githubCheckRunPayload
+			_ = json.NewDecoder(request.Body).Decode(&payload)
+			if payload.HeadSHA != "" || payload.Conclusion != "success" || payload.ExternalID != publication.SubjectSHA256 {
+				t.Fatalf("retry did not preserve the check's exact-SHA identity: %#v", payload)
+			}
+			check = remoteCheckFromPayload(90, payload)
+			check.HeadSHA = head
+			_ = json.NewEncoder(response).Encode(check)
 		default:
 			t.Fatalf("unexpected GitHub request: %s %s", request.Method, request.URL.String())
 		}
@@ -238,17 +248,29 @@ func TestPublishGitHubExactSHAReviewCheckSucceedsOnlyForIndependentApproval(t *t
 	defer server.Close()
 	config := GitHubAppConfig{AppID: "12345", APIBaseURL: server.URL}
 	repository := githubRepository{Owner: "itbem", Name: "example"}
-	first, err := publishGitHubExactSHAReviewCheck(context.Background(), server.Client(), config, "token", repository, publication)
+	first, err := publishGitHubExactSHAReviewCheck(context.Background(), server.Client(), config, "token", repository, publication, false)
 	if err != nil || first.CheckConclusion != "success" || first.CheckReused || writes != 1 {
 		t.Fatalf("valid check was rejected: %#v writes=%d err=%v", first, writes, err)
 	}
-	second, err := publishGitHubExactSHAReviewCheck(context.Background(), server.Client(), config, "token", repository, publication)
+	second, err := publishGitHubExactSHAReviewCheck(context.Background(), server.Client(), config, "token", repository, publication, false)
 	if err != nil || !second.CheckReused || writes != 1 {
 		t.Fatalf("check retry was not idempotent: %#v writes=%d err=%v", second, writes, err)
 	}
 	check.Output.Text = githubReviewCheckMarker(publication.SubjectSHA256, strings.Repeat("d", 64))
-	if _, err := publishGitHubExactSHAReviewCheck(context.Background(), server.Client(), config, "token", repository, publication); err == nil || !strings.Contains(err.Error(), "conflicting") {
+	if _, err := publishGitHubExactSHAReviewCheck(context.Background(), server.Client(), config, "token", repository, publication, false); err == nil || !strings.Contains(err.Error(), "conflicting") {
 		t.Fatalf("conflicting check marker was accepted: %v", err)
+	}
+	if _, err := publishGitHubExactSHAReviewCheck(context.Background(), server.Client(), config, "token", repository, publication, true); err == nil || !strings.Contains(err.Error(), "conflicting") {
+		t.Fatalf("an explicit retry weakened an existing successful check: %v", err)
+	}
+
+	check.Conclusion = "failure"
+	retried := publication
+	retried.PayloadSHA256 = strings.Repeat("e", 64)
+	retried.ReviewURL = "https://github.com/itbem/example/pull/42#pullrequestreview-78"
+	updated, err := publishGitHubExactSHAReviewCheck(context.Background(), server.Client(), config, "token", repository, retried, true)
+	if err != nil || updated.CheckConclusion != "success" || updated.CheckReused || writes != 2 || !strings.Contains(check.Output.Text, githubReviewCheckMarker(retried.SubjectSHA256, retried.PayloadSHA256)) {
+		t.Fatalf("authorized retry did not supersede only the prior failed exact-SHA check: %#v writes=%d check=%#v err=%v", updated, writes, check, err)
 	}
 }
 

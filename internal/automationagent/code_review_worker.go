@@ -34,6 +34,10 @@ type codeReviewProviderCall struct {
 }
 
 func (w *Worker) processSegmentedCodeReview(ctx context.Context, message TaskMessage, runID string, input TaskInput, boundary CodeReviewInput) error {
+	retryOfTaskID := strings.ToLower(strings.TrimSpace(message.Payload.RetryOfTaskID))
+	if retryOfTaskID != "" && !taskIDPattern.MatchString(retryOfTaskID) {
+		return w.fail(ctx, message.Payload.TaskID, runID, fmt.Errorf("code review retry source task ID is invalid"))
+	}
 	segments, err := SegmentCodeReviewInput(boundary)
 	if err != nil {
 		return w.fail(ctx, message.Payload.TaskID, runID, err)
@@ -173,7 +177,7 @@ func (w *Worker) processSegmentedCodeReview(ctx context.Context, message TaskMes
 	}
 	execution := map[string]any(nil)
 	if boundary.Remote != nil {
-		publication, publishErr := PublishGitHubCodeReview(ctx, boundary, aggregate, os.Getenv)
+		publication, publishErr := PublishGitHubCodeReview(ctx, boundary, aggregate, os.Getenv, retryOfTaskID != "")
 		if publishErr != nil {
 			audit, auditErr := aggregateCodeReviewCompletions(completions, aggregate)
 			if auditErr != nil {
