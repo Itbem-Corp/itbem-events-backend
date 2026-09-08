@@ -192,6 +192,14 @@ func PublishGitHubCodeReview(ctx context.Context, boundary CodeReviewInput, revi
 	if err != nil {
 		return GitHubCodeReviewPublication{}, err
 	}
+	if reviewGatePassed && event == "COMMENT" {
+		// A passing COMMENT is deliberately limited to low-maintainability
+		// guidance. Keep it visible in the review summary, but do not create
+		// GitHub review threads: protected repositories can require every
+		// thread to be resolved, which would otherwise turn a non-blocking
+		// recommendation into an accidental merge gate.
+		payload = githubReviewAdvisoryBody(payload)
+	}
 	subjectSHA256, err := CodeReviewPublicationSubjectSHA256(boundary)
 	if err != nil {
 		return GitHubCodeReviewPublication{}, err
@@ -311,9 +319,22 @@ func postGitHubCodeReview(ctx context.Context, client *http.Client, token, endpo
 }
 
 func githubReviewBodyFallback(payload githubReviewCreatePayload) githubReviewCreatePayload {
+	return githubReviewBodyWithFindings(payload, "Inline anchors were unavailable; findings are preserved below:")
+}
+
+// githubReviewAdvisoryBody preserves safe, low-maintainability feedback in
+// the top-level review instead of opening threads that a repository policy
+// could interpret as unresolved blocking conversations.
+func githubReviewAdvisoryBody(payload githubReviewCreatePayload) githubReviewCreatePayload {
+	return githubReviewBodyWithFindings(payload, "Non-blocking findings are summarized below; they do not open merge-blocking review threads:")
+}
+
+func githubReviewBodyWithFindings(payload githubReviewCreatePayload, heading string) githubReviewCreatePayload {
 	var body strings.Builder
 	body.WriteString(payload.Body)
-	body.WriteString("\n\nInline anchors were unavailable; findings are preserved below:\n")
+	body.WriteString("\n\n")
+	body.WriteString(heading)
+	body.WriteString("\n")
 	for _, comment := range payload.Comments {
 		body.WriteString("\n- **")
 		body.WriteString(comment.Path)
