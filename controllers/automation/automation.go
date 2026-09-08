@@ -2376,7 +2376,15 @@ func codeReviewPublicationForTask(task *models.AutomationTask, raw json.RawMessa
 			return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review event contradicts its verdict")
 		}
 	case "COMMENT":
-		if (verdict != "comment" && verdict != "blocked" && (verdict != "approve" || author == "" || !strings.EqualFold(actor, author))) || checkConclusion != "failure" {
+		// A Reviewer COMMENT normally blocks because it means the exact review
+		// cannot approve the head. The narrowly classified exception is a
+		// worker-calculated, independent low-maintainability observation with no
+		// evidence gap. Its GitHub check is the authoritative proof that the
+		// Reviewer App applied that exception; controller persistence never turns
+		// an arbitrary successful COMMENT into a release signal.
+		nonBlockingComment := verdict == "comment" && execution.ReviewGatePassed && author != "" && !strings.EqualFold(actor, author) && checkConclusion == "success"
+		blockingComment := (verdict == "comment" || verdict == "blocked" || (verdict == "approve" && author != "" && strings.EqualFold(actor, author))) && !execution.ReviewGatePassed && checkConclusion == "failure"
+		if !nonBlockingComment && !blockingComment {
 			return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review comment contradicts its verdict")
 		}
 	default:

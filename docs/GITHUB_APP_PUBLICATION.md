@@ -27,8 +27,11 @@ Reviewer App:
 - **Contents: Read-only**: obtener y volver a comprobar el diff exacto.
 - **Checks: Read and write**: publicar un único check
   `Bema Review / exact-sha` ligado al head exacto. Sólo concluye `success`
-  cuando el veredicto es `APPROVE` y la identidad Reviewer es independiente
-  del autor; cualquier otro resultado concluye `failure`.
+  cuando una identidad Reviewer independiente aprueba el SHA o deja sólo
+  hallazgos concretos `low` de mantenibilidad, sin huecos de evidencia. Esos
+  comentarios permanecen visibles pero no bloquean; cualquier observación de
+  seguridad, corrección, confiabilidad, rendimiento, cobertura, un cambio
+  solicitado, un bloqueo o una auto-revisión concluye `failure`.
 - **Pull requests: Read and write**: leer el head/autor y publicar únicamente
   `COMMENT`, `APPROVE` o `REQUEST_CHANGES`.
 - **Metadata: Read-only**: obligatorio para GitHub Apps.
@@ -147,7 +150,8 @@ explícitamente autorizado de una revisión que ya falló. Si la App Reviewer
 fuera autora del PR, un `APPROVE` se degrada a `COMMENT` y la revisión
 automática queda bloqueada. Después publica el check `Bema Review / exact-sha`
 con la misma identidad, SHA y digests. El check nunca usa una conclusión
-neutral: `success` significa aprobación independiente exacta y `failure`
+neutral: `success` significa una revisión independiente exacta que aprobó o
+sólo dejó una nota de mantenibilidad baja sin hueco de evidencia; `failure`
 mantiene el merge cerrado. Los repositorios que habiliten la ruta autónoma
 deben exigir ese check, fijarlo a la Reviewer App y no exigir además una review
 humana rutinaria; las políticas de riesgo pueden conservar aprobación humana.

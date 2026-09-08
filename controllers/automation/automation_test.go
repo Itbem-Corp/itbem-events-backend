@@ -228,6 +228,18 @@ func TestCodeReviewPublicationForTaskRequiresExactIndependentGitHubEvidence(t *t
 	if err != nil || publication.AutomationTaskID != uuid.Nil || publication.ReviewerActor != "reviewer-bot[bot]" {
 		t.Fatalf("valid review publication rejected: %#v / %v", publication, err)
 	}
+	nonBlockingComment := execution
+	nonBlockingComment.Verdict, nonBlockingComment.Event = "comment", "COMMENT"
+	nonBlockingComment.ReviewGatePassed, nonBlockingComment.CheckConclusion = true, "success"
+	raw, _ = json.Marshal(nonBlockingComment)
+	if _, err := codeReviewPublicationForTask(task, raw); err != nil {
+		t.Fatalf("independent non-blocking exact-SHA comment was rejected: %v", err)
+	}
+	nonBlockingComment.ReviewGatePassed = false
+	raw, _ = json.Marshal(nonBlockingComment)
+	if _, err := codeReviewPublicationForTask(task, raw); err == nil {
+		t.Fatal("a successful comment without the reviewer gate classification was accepted")
+	}
 	for name, mutate := range map[string]func(*models.AutomationTask, *automationagent.GitHubCodeReviewPublication){
 		"stale subject": func(_ *models.AutomationTask, value *automationagent.GitHubCodeReviewPublication) {
 			value.SubjectSHA256 = strings.Repeat("e", 64)

@@ -23,26 +23,31 @@ const (
 // GitHubCodeReviewPublication is the credential-free, exact-SHA handoff from
 // the Reviewer lane. GitHub remains the authority for the review itself.
 type GitHubCodeReviewPublication struct {
-	SchemaVersion   int       `json:"schema_version"`
-	Repository      string    `json:"repository"`
-	PullRequest     int       `json:"pull_request"`
-	HeadSHA         string    `json:"head_sha"`
-	PatchSHA256     string    `json:"patch_sha256"`
-	SubjectSHA256   string    `json:"subject_sha256"`
-	PayloadSHA256   string    `json:"payload_sha256"`
-	Verdict         string    `json:"verdict"`
-	Event           string    `json:"event"`
-	ReviewID        int64     `json:"review_id"`
-	ReviewURL       string    `json:"review_url"`
-	ReviewerActor   string    `json:"reviewer_actor"`
-	AuthorActor     string    `json:"author_actor"`
-	Reused          bool      `json:"reused"`
-	CheckRunID      int64     `json:"check_run_id"`
-	CheckRunURL     string    `json:"check_run_url"`
-	CheckName       string    `json:"check_name"`
-	CheckConclusion string    `json:"check_conclusion"`
-	CheckReused     bool      `json:"check_reused"`
-	PublishedAt     time.Time `json:"published_at"`
+	SchemaVersion int    `json:"schema_version"`
+	Repository    string `json:"repository"`
+	PullRequest   int    `json:"pull_request"`
+	HeadSHA       string `json:"head_sha"`
+	PatchSHA256   string `json:"patch_sha256"`
+	SubjectSHA256 string `json:"subject_sha256"`
+	PayloadSHA256 string `json:"payload_sha256"`
+	Verdict       string `json:"verdict"`
+	Event         string `json:"event"`
+	// ReviewGatePassed is calculated from the already parsed, boundary-checked
+	// verdict before this record is published. It is never model-provided: only
+	// an independent approval, or an explicitly non-blocking maintainability
+	// note, may pass the exact-SHA review gate.
+	ReviewGatePassed bool      `json:"review_gate_passed"`
+	ReviewID         int64     `json:"review_id"`
+	ReviewURL        string    `json:"review_url"`
+	ReviewerActor    string    `json:"reviewer_actor"`
+	AuthorActor      string    `json:"author_actor"`
+	Reused           bool      `json:"reused"`
+	CheckRunID       int64     `json:"check_run_id"`
+	CheckRunURL      string    `json:"check_run_url"`
+	CheckName        string    `json:"check_name"`
+	CheckConclusion  string    `json:"check_conclusion"`
+	CheckReused      bool      `json:"check_reused"`
+	PublishedAt      time.Time `json:"published_at"`
 }
 
 type githubReviewComment struct {
@@ -110,7 +115,7 @@ func CodeReviewPublicationHandoff(publication GitHubCodeReviewPublication) map[s
 		"schema_version": publication.SchemaVersion, "repository": publication.Repository,
 		"pull_request": publication.PullRequest, "head_sha": publication.HeadSHA, "patch_sha256": publication.PatchSHA256,
 		"subject_sha256": publication.SubjectSHA256, "payload_sha256": publication.PayloadSHA256,
-		"verdict": publication.Verdict, "event": publication.Event, "review_id": publication.ReviewID,
+		"verdict": publication.Verdict, "event": publication.Event, "review_gate_passed": publication.ReviewGatePassed, "review_id": publication.ReviewID,
 		"review_url": publication.ReviewURL, "reviewer_actor": publication.ReviewerActor, "author_actor": publication.AuthorActor,
 		"reused": publication.Reused, "check_run_id": publication.CheckRunID, "check_run_url": publication.CheckRunURL,
 		"check_name": publication.CheckName, "check_conclusion": publication.CheckConclusion, "check_reused": publication.CheckReused,
@@ -182,6 +187,7 @@ func PublishGitHubCodeReview(ctx context.Context, boundary CodeReviewInput, revi
 		// comment while keeping the independent approval gate unsatisfied.
 		event = "COMMENT"
 	}
+	reviewGatePassed := codeReviewPassesExactSHAGate(review, event, actor, state.AuthorActor)
 	payload, err := githubReviewPayload(boundary, review, event)
 	if err != nil {
 		return GitHubCodeReviewPublication{}, err
@@ -209,6 +215,7 @@ func PublishGitHubCodeReview(ctx context.Context, boundary CodeReviewInput, revi
 		if !strings.EqualFold(result.ReviewerActor, actor) {
 			return GitHubCodeReviewPublication{}, fmt.Errorf("existing GitHub review belongs to a different identity")
 		}
+		result.ReviewGatePassed = reviewGatePassed
 		return publishGitHubExactSHAReviewCheck(ctx, client, config, token.Token, repository, result, allowFailedCheckSupersede)
 	}
 	published, statusCode, err := postGitHubCodeReview(ctx, client, token.Token, baseURL+"/reviews", payload)
@@ -235,7 +242,46 @@ func PublishGitHubCodeReview(ctx context.Context, boundary CodeReviewInput, revi
 	if !strings.EqualFold(result.ReviewerActor, actor) || !strings.Contains(published.Body, marker) {
 		return GitHubCodeReviewPublication{}, fmt.Errorf("GitHub pull request review identity is invalid")
 	}
+	result.ReviewGatePassed = reviewGatePassed
 	return publishGitHubExactSHAReviewCheck(ctx, client, config, token.Token, repository, result, allowFailedCheckSupersede)
+}
+
+// codeReviewPassesExactSHAGate separates a merge-relevant review result from
+// an advisory note. The input has already passed ParseCodeReview and
+// ValidateCodeReviewBoundary, but this predicate remains deliberately narrow:
+// a low security, correctness, reliability, performance or test-coverage
+// observation is never silently made merge-eligible. Only an independent
+// approval, or a concrete low maintainability comment with no evidence gap,
+// can pass. The low comment stays attached to the PR for follow-up.
+func codeReviewPassesExactSHAGate(review map[string]any, event, reviewerActor, authorActor string) bool {
+	if strings.TrimSpace(reviewerActor) == "" || strings.EqualFold(reviewerActor, authorActor) {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(stringAny(review["verdict"]))) {
+	case "approve":
+		return event == "APPROVE"
+	case "comment":
+		if event != "COMMENT" {
+			return false
+		}
+		gaps, ok := review["coverage_gaps"].([]any)
+		if !ok || len(gaps) != 0 {
+			return false
+		}
+		findings, ok := review["findings"].([]any)
+		if !ok || len(findings) == 0 {
+			return false
+		}
+		for _, raw := range findings {
+			finding, ok := raw.(map[string]any)
+			if !ok || strings.ToLower(strings.TrimSpace(stringAny(finding["severity"]))) != "low" || strings.ToLower(strings.TrimSpace(stringAny(finding["category"]))) != "maintainability" {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
 }
 
 func postGitHubCodeReview(ctx context.Context, client *http.Client, token, endpoint string, payload githubReviewCreatePayload) (githubRemoteReview, int, error) {
@@ -294,14 +340,20 @@ func publishGitHubExactSHAReviewCheck(ctx context.Context, client *http.Client, 
 		return GitHubCodeReviewPublication{}, fmt.Errorf("reviewer check identity is invalid")
 	}
 	conclusion := "failure"
-	if publication.Verdict == "approve" && publication.Event == "APPROVE" && !strings.EqualFold(publication.ReviewerActor, publication.AuthorActor) {
+	if publication.ReviewGatePassed {
 		conclusion = "success"
+	}
+	gateSummary := "Automated review did not pass the exact-SHA merge gate."
+	if publication.ReviewGatePassed && publication.Verdict == "comment" {
+		gateSummary = "Exact-SHA review passed; only non-blocking low maintainability notes remain on the pull request."
+	} else if publication.ReviewGatePassed {
+		gateSummary = "Independent exact-SHA approval passed the merge gate."
 	}
 	marker := githubReviewCheckMarker(publication.SubjectSHA256, publication.PayloadSHA256)
 	payload := githubCheckRunPayload{
 		Name: githubExactSHAReviewCheck, HeadSHA: publication.HeadSHA, ExternalID: publication.SubjectSHA256,
 		Status: "completed", Conclusion: conclusion, DetailsURL: publication.ReviewURL,
-		Output: githubCheckRunOutput{Title: "Bema Reviewer: " + conclusion, Summary: "Automated review for the exact pull-request head " + publication.HeadSHA + ".", Text: marker},
+		Output: githubCheckRunOutput{Title: "Bema Reviewer: " + conclusion, Summary: gateSummary + " Head: " + publication.HeadSHA + ".", Text: marker},
 	}
 	baseURL := strings.TrimRight(config.APIBaseURL, "/") + "/repos/" + url.PathEscape(repository.Owner) + "/" + url.PathEscape(repository.Name)
 	existing, found, exact, err := findGitHubExactSHAReviewCheck(ctx, client, token, baseURL+"/commits/"+url.PathEscape(publication.HeadSHA)+"/check-runs", appID, appSlug, payload)

@@ -205,11 +205,39 @@ func TestFindGitHubCodeReviewSearchesBoundedPagination(t *testing.T) {
 	}
 }
 
-func TestPublishGitHubExactSHAReviewCheckSucceedsOnlyForIndependentApproval(t *testing.T) {
+func TestCodeReviewPassesExactSHAGateAllowsOnlySafeIndependentOutcomes(t *testing.T) {
+	lowMaintainability := map[string]any{
+		"verdict": "comment", "coverage_gaps": []any{},
+		"findings": []any{map[string]any{"severity": "low", "category": "maintainability"}},
+	}
+	cases := []struct {
+		name   string
+		review map[string]any
+		event  string
+		author string
+		want   bool
+	}{
+		{"independent approval", map[string]any{"verdict": "approve"}, "APPROVE", "engineer-bot[bot]", true},
+		{"low maintainability note", lowMaintainability, "COMMENT", "engineer-bot[bot]", true},
+		{"author cannot pass own approval", map[string]any{"verdict": "approve"}, "APPROVE", "bema-review-bot[bot]", false},
+		{"low security note remains a gate failure", map[string]any{"verdict": "comment", "coverage_gaps": []any{}, "findings": []any{map[string]any{"severity": "low", "category": "security"}}}, "COMMENT", "engineer-bot[bot]", false},
+		{"coverage gap remains a gate failure", map[string]any{"verdict": "comment", "coverage_gaps": []any{"Run a missing regression test."}, "findings": []any{}}, "COMMENT", "engineer-bot[bot]", false},
+		{"requested changes remain a gate failure", map[string]any{"verdict": "request_changes"}, "REQUEST_CHANGES", "engineer-bot[bot]", false},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := codeReviewPassesExactSHAGate(testCase.review, testCase.event, "bema-review-bot[bot]", testCase.author); got != testCase.want {
+				t.Fatalf("gate eligibility = %v, want %v", got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestPublishGitHubExactSHAReviewCheckSucceedsOnlyForSafeIndependentOutcome(t *testing.T) {
 	head := strings.Repeat("b", 40)
 	publication := GitHubCodeReviewPublication{
 		Repository: "itbem/example", PullRequest: 42, HeadSHA: head, SubjectSHA256: strings.Repeat("a", 64),
-		PayloadSHA256: strings.Repeat("c", 64), Verdict: "approve", Event: "APPROVE", ReviewID: 77,
+		PayloadSHA256: strings.Repeat("c", 64), Verdict: "approve", Event: "APPROVE", ReviewGatePassed: true, ReviewID: 77,
 		ReviewURL: "https://github.com/itbem/example/pull/42#pullrequestreview-77", ReviewerActor: "bema-review-bot[bot]", AuthorActor: "engineer-bot[bot]",
 	}
 	writes := 0
