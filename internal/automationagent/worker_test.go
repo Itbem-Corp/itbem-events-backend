@@ -481,6 +481,44 @@ func TestWorkerAcceptsValidatedRepairAfterMalformedCandidate(t *testing.T) {
 	}
 }
 
+func TestWorkerDiscardsUngroundedRepairFindings(t *testing.T) {
+	input, _ := json.Marshal(TaskInput{Prompt: "Review the frozen pull request.", Delivery: json.RawMessage(validCodeReviewInput())})
+	unsupported := `{"summary":"An unsupported issue exists.","verdict":"request_changes","review_scope":["handler"],"findings":[{"id":"outside","severity":"high","category":"correctness","title":"Outside","file":"controllers/orders.go","side":"head","line_start":99,"line_end":99,"evidence":"Outside the frozen line.","evidence_quote":"line50","recommendation":"Correct the changed line.","confidence":0.9}],"test_plan":["Run tests"],"coverage_gaps":[]}`
+	provider := &sequenceProvider{completions: []Completion{
+		{Provider: ProviderMiniMax, Model: "MiniMax-M2.7", ResponseID: "invalid", Content: unsupported, Usage: map[string]any{"total_tokens": float64(20)}},
+		{Provider: ProviderMiniMax, Model: "MiniMax-M2.7", ResponseID: "still-invalid", Content: unsupported, Usage: map[string]any{"total_tokens": float64(10)}},
+	}}
+	store, callback := &fakeStore{input: input}, &fakeCallback{}
+	worker, _ := NewWorker(WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"}, store, callback, provider)
+	message := validMessage()
+	message.Payload.Operation = "code.review"
+	if err := worker.Process(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	if len(callback.updates) != 2 || callback.updates[1].Status != "completed" || callback.updates[1].Usage["total_tokens"] != float64(30) {
+		t.Fatalf("ungrounded repair finding should not veto the exact review: %#v", callback.updates)
+	}
+}
+
+func TestWorkerFailsClosedWhenRepairCannotProduceGroundedEvidence(t *testing.T) {
+	input, _ := json.Marshal(TaskInput{Prompt: "Review the frozen pull request.", Delivery: json.RawMessage(validCodeReviewInput())})
+	unsupported := `{"summary":"An unsupported issue exists.","verdict":"request_changes","review_scope":["handler"],"findings":[{"id":"outside","severity":"high","category":"correctness","title":"Outside","file":"controllers/orders.go","side":"head","line_start":99,"line_end":99,"evidence":"Outside the frozen line.","evidence_quote":"line50","recommendation":"Correct the changed line.","confidence":0.9}],"test_plan":["Run tests"],"coverage_gaps":[]}`
+	provider := &sequenceProvider{completions: []Completion{
+		{Provider: ProviderMiniMax, Model: "MiniMax-M2.7", ResponseID: "invalid", Content: unsupported, Usage: map[string]any{"total_tokens": float64(20)}},
+		{Provider: ProviderMiniMax, Model: "MiniMax-M2.7", ResponseID: "malformed-repair", Content: `{"verdict":"approve"}`, Usage: map[string]any{"total_tokens": float64(10)}},
+	}}
+	store, callback := &fakeStore{input: input}, &fakeCallback{}
+	worker, _ := NewWorker(WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"}, store, callback, provider)
+	message := validMessage()
+	message.Payload.Operation = "code.review"
+	if err := worker.Process(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	if len(callback.updates) != 2 || callback.updates[1].Status != "failed" || !strings.Contains(callback.updates[1].ErrorMessage, "failed validation") {
+		t.Fatalf("invalid repair must remain fail-closed: %#v", callback.updates)
+	}
+}
+
 func TestCodeReviewCompletionBudgetIsSizeWeightedAndGloballyBounded(t *testing.T) {
 	calls := []codeReviewProviderCall{
 		{Messages: []Message{{Role: "user", Content: strings.Repeat("a", 100)}}},

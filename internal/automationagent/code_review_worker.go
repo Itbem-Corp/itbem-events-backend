@@ -137,6 +137,12 @@ func (w *Worker) processSegmentedCodeReview(ctx context.Context, message TaskMes
 			if repairValidationErr == nil {
 				repairCodeReviewEvidenceQuotes(repairedReview, call.Boundary)
 				repairValidationErr = ValidateCodeReviewBoundary(repairedReview, call.Boundary)
+				if repairValidationErr != nil {
+					if sanitized, dropped, sanitizeErr := discardUngroundedCodeReviewFindings(repairedReview, call.Boundary); sanitizeErr == nil && dropped {
+						repairedReview = sanitized
+						repairValidationErr = nil
+					}
+				}
 			}
 			segmentAudit, auditErr := aggregateCodeReviewCompletions(segmentCalls, repairedReview)
 			if auditErr != nil {

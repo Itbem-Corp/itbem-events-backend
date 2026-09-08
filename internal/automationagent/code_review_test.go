@@ -435,6 +435,43 @@ func TestRepairCodeReviewEvidenceQuotesUsesExactChangedLine(t *testing.T) {
 	}
 }
 
+func TestDiscardUngroundedCodeReviewFindingsKeepsOnlyExactEvidence(t *testing.T) {
+	boundary, err := ParseCodeReviewInput(validCodeReviewInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	review, err := ParseCodeReview(`{"summary":"A high severity issue is suspected.","verdict":"request_changes","review_scope":["handler"],"findings":[{"id":"invented","severity":"high","category":"correctness","title":"Ungrounded issue","file":"controllers/orders.go","side":"head","line_start":99,"line_end":99,"evidence":"The issue is outside the frozen diff.","evidence_quote":"line50","recommendation":"Correct the implementation.","confidence":0.9},{"id":"grounded","severity":"medium","category":"correctness","title":"Grounded issue","file":"controllers/orders.go","side":"head","line_start":40,"line_end":40,"evidence":"The changed line is observable in the frozen diff.","evidence_quote":"line40","recommendation":"Validate the changed behavior.","confidence":0.9}],"test_plan":["Run the handler tests."],"coverage_gaps":[]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clean, dropped, err := discardUngroundedCodeReviewFindings(review, boundary)
+	if err != nil || !dropped {
+		t.Fatalf("expected unsupported finding to be removed: %#v / %v / %v", clean, dropped, err)
+	}
+	findings := clean["findings"].([]any)
+	if clean["verdict"] != "request_changes" || len(findings) != 1 || findings[0].(map[string]any)["id"] != "grounded" {
+		t.Fatalf("grounded blocking evidence was not preserved: %#v", clean)
+	}
+	if err := ValidateCodeReviewBoundary(clean, boundary); err != nil {
+		t.Fatalf("sanitized review escaped its exact boundary: %v", err)
+	}
+}
+
+func TestDiscardUngroundedCodeReviewFindingsDoesNotRewriteGroundedEvidence(t *testing.T) {
+	boundary, err := ParseCodeReviewInput(validCodeReviewInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	review, err := ParseCodeReview(`{"summary":"A grounded issue exists.","verdict":"request_changes","review_scope":["handler"],"findings":[{"id":"grounded","severity":"medium","category":"correctness","title":"Grounded issue","file":"controllers/orders.go","side":"head","line_start":40,"line_end":40,"evidence":"The changed line is observable in the frozen diff.","evidence_quote":"line40","recommendation":"Validate the changed behavior.","confidence":0.9}],"test_plan":["Run the handler tests."],"coverage_gaps":[]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clean, dropped, err := discardUngroundedCodeReviewFindings(review, boundary)
+	if err != nil || dropped || clean["verdict"] != "request_changes" {
+		t.Fatalf("grounded evidence must remain untouched: %#v / %v / %v", clean, dropped, err)
+	}
+}
+
 func TestBlockedRemoteCodeReviewRemainsFailClosedAndPublishable(t *testing.T) {
 	boundary, err := ParseCodeReviewInput(validCodeReviewInput())
 	if err != nil {

@@ -971,6 +971,80 @@ func ValidateCodeReviewBoundary(review map[string]any, boundary CodeReviewInput)
 	return nil
 }
 
+// discardUngroundedCodeReviewFindings removes only findings that cannot be
+// tied to an exact changed file, line range and quote. A model response that
+// fails this proof has no admissible evidence to veto a PR; retaining it would
+// let fabricated coordinates block delivery. Grounded findings, coverage gaps,
+// parser failures and all other boundary failures remain intact and fail closed.
+func discardUngroundedCodeReviewFindings(review map[string]any, boundary CodeReviewInput) (map[string]any, bool, error) {
+	findings, ok := review["findings"].([]any)
+	if !ok || len(findings) == 0 {
+		return review, false, nil
+	}
+	changed := make(map[string]struct{}, len(boundary.ChangedFiles))
+	for _, file := range boundary.ChangedFiles {
+		changed[file] = struct{}{}
+	}
+	retained := make([]any, 0, len(findings))
+	dropped := false
+	for _, raw := range findings {
+		finding, isFinding := raw.(map[string]any)
+		if !isFinding || !codeReviewFindingIsGrounded(finding, boundary, changed) {
+			dropped = true
+			continue
+		}
+		retained = append(retained, raw)
+	}
+	if !dropped {
+		return review, false, nil
+	}
+	clean := make(map[string]any, len(review))
+	for key, value := range review {
+		clean[key] = value
+	}
+	clean["findings"] = retained
+	clean["verdict"] = "comment"
+	for _, raw := range retained {
+		finding, _ := raw.(map[string]any)
+		severity := strings.ToLower(strings.TrimSpace(stringAny(finding["severity"])))
+		if severity == "critical" || severity == "high" || severity == "medium" {
+			clean["verdict"] = "request_changes"
+			break
+		}
+	}
+	clean["summary"] = "Excluded reviewer observations without exact changed-line evidence; retained only verified frozen-diff evidence."
+	raw, err := json.Marshal(clean)
+	if err != nil {
+		return review, false, err
+	}
+	normalized, err := ParseCodeReview(string(raw))
+	if err != nil {
+		return review, false, err
+	}
+	if err := ValidateCodeReviewBoundary(normalized, boundary); err != nil {
+		return review, false, err
+	}
+	return normalized, true, nil
+}
+
+func codeReviewFindingIsGrounded(finding map[string]any, boundary CodeReviewInput, changed map[string]struct{}) bool {
+	file := strings.TrimSpace(stringAny(finding["file"]))
+	if _, present := changed[file]; !present {
+		return false
+	}
+	side := strings.ToLower(strings.TrimSpace(stringAny(finding["side"])))
+	if side == "" {
+		side = "head"
+	}
+	start, startOK := integralReviewLine(finding["line_start"])
+	end, endOK := integralReviewLine(finding["line_end"])
+	if !startOK || !endOK || !reviewLineRangeTouched(boundary.ChangedLines, file, side, start, end) {
+		return false
+	}
+	quote := strings.TrimSpace(stringAny(finding["evidence_quote"]))
+	return len(quote) >= 3 && len(quote) <= 1000 && patchContainsChangedQuote(boundary.Patch, file, side, start, end, quote)
+}
+
 func patchContainsChangedQuote(patch, file, side string, start, end int, quote string) bool {
 	currentFile, oldFile := "", ""
 	inHunk := false
