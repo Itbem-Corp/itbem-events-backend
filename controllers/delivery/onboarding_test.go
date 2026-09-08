@@ -1,15 +1,51 @@
 package delivery
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"strings"
 	"testing"
 	"time"
 
+	"events-stocks/internal/automationagent"
 	"events-stocks/internal/projectvault"
 	"events-stocks/models"
 	"github.com/gofrs/uuid"
 )
+
+func TestLoadOnboardingGitHubAppConfigUsesDedicatedReadOnlySourceApp(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	values := map[string]string{
+		"ITBEM_GITHUB_APP_ID":                  "11111",
+		"ITBEM_GITHUB_INSTALLATION_IDS":        "11111",
+		"ITBEM_GITHUB_APP_PRIVATE_KEY":         string(encoded),
+		"ITBEM_GITHUB_SOURCE_APP_ID":           "22222",
+		"ITBEM_GITHUB_SOURCE_INSTALLATION_IDS": "22222",
+		"ITBEM_GITHUB_SOURCE_APP_PRIVATE_KEY":  string(encoded),
+	}
+	config, err := loadOnboardingGitHubAppConfig(func(name string) string { return values[name] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.AppID != "22222" || !config.AllowsInstallationID(22222) || config.AllowsInstallationID(11111) {
+		t.Fatalf("onboarding must use only the read-only Source App configuration, got %#v", config)
+	}
+	if _, err := automationagent.LoadGitHubSourceAppConfig(func(name string) string {
+		if strings.HasPrefix(name, "ITBEM_GITHUB_SOURCE_") {
+			return ""
+		}
+		return values[name]
+	}); err == nil {
+		t.Fatal("publication configuration unexpectedly satisfied Source App loading")
+	}
+}
 
 func TestCapabilityProbeTaskViewNeverExposesPrivateTaskMetadata(t *testing.T) {
 	now := time.Now().UTC()

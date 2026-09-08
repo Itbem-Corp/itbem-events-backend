@@ -53,6 +53,13 @@ type repositoryCapabilityProbeTask struct {
 var errOnboardingRejected = errors.New("repository onboarding approval rejected")
 var onboardingProposalDigest = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
+// loadOnboardingGitHubAppConfig names the authority boundary used by
+// repository discovery. Keeping it separate from publication configuration is
+// intentional: onboarding must remain possible for a contents-read-only App.
+func loadOnboardingGitHubAppConfig(lookup func(string) string) (automationagent.GitHubAppConfig, error) {
+	return automationagent.LoadGitHubSourceAppConfig(lookup)
+}
+
 // InspectRepositoryOnboarding performs only bounded, read-only GitHub API
 // calls. It never clones code, executes repository commands or treats README
 // prose as instructions. The result remains a proposal until a human approves
@@ -81,9 +88,14 @@ func InspectRepositoryOnboarding(c echo.Context) error {
 	if expectedRevision != "" && !projectvault.ValidRevision(expectedRevision) {
 		return badRequest(c, "Invalid repository onboarding", "revision must be an immutable full Git commit SHA")
 	}
-	appConfig, err := automationagent.LoadGitHubAppConfig(os.Getenv)
+	// Onboarding is read-only discovery. It must use the dedicated Source App,
+	// never the publication/review App: the proposal does not create branches,
+	// pull requests, reviews, checks, merges, or deployments. Keeping this
+	// boundary here (rather than relying on an operator convention) means a
+	// generic repository can be inspected with the least-privileged identity.
+	appConfig, err := loadOnboardingGitHubAppConfig(os.Getenv)
 	if err != nil {
-		return conflict(c, "Repository onboarding unavailable", "Configure the GitHub App before inspecting a repository")
+		return conflict(c, "Repository onboarding unavailable", "Configure the read-only GitHub Source App before inspecting a repository")
 	}
 	proposal, err := inspectGitHubRepositoryForOnboarding(c.Request().Context(), appConfig, reference, expectedRevision, time.Now().UTC())
 	if err != nil {

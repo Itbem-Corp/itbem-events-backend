@@ -77,7 +77,7 @@ modelo.
 ```dotenv
 ITBEM_GITHUB_APP_ID=12345
 ITBEM_GITHUB_INSTALLATION_IDS=67890
-ITBEM_GITHUB_APP_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
+ITBEM_GITHUB_APP_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----" # gitleaks:allow — inert documentation placeholder
 ITBEM_GITHUB_API_BASE_URL=https://api.github.com
 
 # Source App: required by a Linux lane only when its workspace registry
