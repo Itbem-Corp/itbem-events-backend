@@ -46,7 +46,7 @@ for lane in orchestration engineering review qa release; do
   fi
   install -d -m 0700 -o "$account" -g "$account" "/var/lib/itbem-ai-agent/$lane"
   install -d -m 0700 -o "$account" -g "$account" "/srv/itbem-agent-workspaces/$lane"
-  install -d -m 0750 -o root -g "$account" "/etc/itbem-ai-agent/secrets/$lane"
+  install -d -m 0710 -o root -g "$account" "/etc/itbem-ai-agent/secrets/$lane"
   if [ ! -e "/etc/itbem-ai-agent/roles/$lane.env" ]; then
     install -m 0600 -o root -g root "$asset_dir/roles/$lane.env.example" "/etc/itbem-ai-agent/roles/$lane.env"
   fi
@@ -65,6 +65,6 @@ done
 systemctl daemon-reload
 
 echo "Installed reviewed binary revision $revision."
-echo "Fill root-only common/role environment files, scoped AWS credentials and the separate review/release GitHub App PEMs."
+echo "Fill root-only common/role environment files, lane-bound gateway tokens, source App PEMs, and the separate review/release GitHub App PEMs."
 echo "Place a separate managed checkout registry under each private /srv/itbem-agent-workspaces/<lane> root."
 echo "Run each --doctor through systemctl before enabling any lane; this installer starts no service."

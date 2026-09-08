@@ -26,7 +26,14 @@ systemd services. The installer never enables or starts a service.
   leases while SQS receipt handles, AWS credentials and S3 authority remain in
   the backend. Never install AWS profiles, IAM keys, certificates or the root
   callback secret on this host.
-- Use two distinct GitHub Apps. Keep the Reviewer App PEM and explicit
+- Use three distinct GitHub App roles. The **Source App** has only Contents
+  read and Metadata read and is used to clone/fetch an operator-registered
+  GitHub workspace. It cannot approve, create checks, push, merge or deploy.
+  Give every lane that registers a GitHub workspace its own private Source App
+  key file; these keys may belong to the same read-only App, but never to the
+  Reviewer or Release App. Keep its explicit installation allow-list only in
+  that lane's secret file.
+  Keep the Reviewer App PEM and explicit
   installation allow-list only in the review secret file; it needs metadata
   and contents read plus pull-request and checks read/write solely to publish
   exact-SHA reviews and their required check.
@@ -47,9 +54,26 @@ sudoedit /etc/itbem-ai-agent/roles/engineering.env
 sudoedit /etc/itbem-ai-agent/roles/review.env
 sudoedit /etc/itbem-ai-agent/roles/qa.env
 sudoedit /etc/itbem-ai-agent/roles/release.env
+for lane in orchestration engineering review qa release; do
+  sudo install -d -m 0710 -o root -g "itbem-agent-${lane}" "/etc/itbem-ai-agent/secrets/${lane}"
+  sudo install -m 0640 -o root -g "itbem-agent-${lane}" "/secure/source/bema-source-bot-${lane}.pem" "/etc/itbem-ai-agent/secrets/${lane}/source-github-app.pem"
+  sudo stat -c '%a %U %G %n' "/etc/itbem-ai-agent/secrets/${lane}"
+done
 sudo install -m 0640 -o root -g itbem-agent-review /secure/source/bema-review-bot.pem /etc/itbem-ai-agent/secrets/review/github-app.pem
 sudo install -m 0640 -o root -g itbem-agent-release /secure/source/bema-delivery-bot.pem /etc/itbem-ai-agent/secrets/release/github-app.pem
 ```
+
+Each `stat` line must report mode `710`, owner `root`, the matching
+`itbem-agent-<lane>` group, and that lane's secret directory. Stop if any lane
+differs; do not compensate by loosening permissions.
+
+The PEM does not encode its GitHub App ID. For every lane, set the matching
+`ITBEM_GITHUB_SOURCE_APP_ID`, installation allow-list and
+`ITBEM_GITHUB_SOURCE_APP_PRIVATE_KEY_FILE` in that lane's role file, then run
+its `--github-auth-probe` during preflight. That bounded GitHub read proves the
+lane's copied key belongs to the configured read-only Source App and can access
+only an allowed installation; a filename, copied PEM or successful `install`
+command is not identity proof.
 
 Each role file owns its own `ITBEM_AI_WORKSPACES_JSON`. Register only managed
 checkouts below `/srv/itbem-agent-workspaces/<lane>` for that exact lane. The
@@ -79,11 +103,16 @@ plaintext. Rotate the root with the existing current/previous overlap, then
 replace every lane token and remove the previous root after all workers have
 restarted.
 
-Release may additionally
-resolve the exact configured GitHub App installation for the approved
-repository and mint a short-lived token restricted to that repository.
-Installations outside the allow-list, PATs and SSH credentials are never
-fallback paths; no other lane receives the PEM.
+Any lane with a `github.com` workspace refuses to fetch or synchronize it
+until its dedicated Source App is configured. It resolves the exact configured
+installation and mints a short-lived token restricted to that repository for
+each Git command. The registered `origin` remains operator-owned; the token
+is supplied only to a temporary askpass process and never becomes part of a
+remote URL, command, log, result or Vault. Release separately resolves its
+own configured GitHub App installation for approved publication/release
+operations. Installations outside an allow-list, PATs, SSH credentials and
+credential helpers are never fallback paths; no lane receives a Reviewer or
+Release PEM except its owning role.
 
 Environment files are root-only. systemd reads them before switching to the
 unprivileged per-lane Unix account. Never place their values in a repository,
@@ -105,15 +134,16 @@ The doctor unit runs only the local, non-billable `--doctor` command and cannot
 lease work or mutate a workspace. Before every worker start, the service then
 runs `--runtime-auth-probe`, which authenticates to the backend gateway and
 verifies queue/storage readiness without receiving, deleting or changing a
-message. It requires no AWS identity. Review and Release each fail unless their own
-GitHub App identity is complete; other lanes remain locally useful without
-publication authority. Every worker start also runs `--github-auth-probe`:
-Review and Release must mint a short-lived installation token and complete one
-bounded read-only repository-access request for every configured installation,
-while non-publishing lanes report
-`not_required` without contacting GitHub. Do not enable the worker units until all five gateway,
-provider, workspace and GitHub identity preflights pass. Then start one role
-unit at a time and observe one canary per lane before enabling the next.
+message. It requires no AWS identity. A lane with a registered GitHub workspace
+fails doctor until its Source App configuration is present; Review and Release
+also fail unless their own publication App identity is complete. Every worker
+start then runs `--github-auth-probe`: it mints a short-lived token and makes
+one bounded read-only repository-access request for every configured Source
+and/or publication App installation that the lane needs. A lane with neither
+reports `not_required` without contacting GitHub. Do not enable the worker
+units until all five gateway, provider, workspace and GitHub identity
+preflights pass. Then start one role unit at a time and observe one canary per
+lane before enabling the next.
 
 The service retries a failed preflight every 60 seconds without a systemd
 start-limit lockout. This is intentionally safe: all preflight operations are

@@ -24,6 +24,9 @@ prepare_pinned_submodules() {
 
 run "pinned Git submodule checkout" prepare_pinned_submodules
 
+run "GitHub source synchronization with a dedicated read-only App" \
+  go test ./cmd/itbem-ai-agent ./internal/automationagent -run 'Test(LoadGitHubSourceAppConfigRequiresItsDedicatedNamespace|FetchAuthorizedWorkspaceRemoteRequiresDedicatedSourceApp|GitHubInstallationWorkspaceCommandsDisableCredentialHelpers|RunOnboardingCapabilityProbesUsesExactSHAOperatorCommandsAndCleansUp|GitHubAuthProbeRequiresPublicationOrRegisteredGitHubSourceAndRedactsFailures)$' -count=1
+
 run "generic onboarding, monorepo discovery and prompt-injection boundary" \
   go test ./internal/projectvault -run 'Test(BuildCreatesDeterministicEvidenceBasedProposal|BuildEnvironmentTemplatesAreNameOnlyEvidence|BuildProposesCommandsPerMonorepoModule|BuildTreatsRepositoryTextAsData|ApplyCapabilityProbesRequiresExactSHAAndSealedSandboxEvidence|ReconcilePreservesChangedRemovedAndUnchangedVaultHistory|ReconcileRejectsCrossRepositoryOrMutableHistory)$' -count=1
 
@@ -53,6 +56,9 @@ run "Linux role isolation, non-consuming doctor and outbound gateway preflight" 
 
 run "exact-SHA idempotent GitHub review relay and independent identity" \
   go test ./internal/automationagent ./controllers/automation -run 'Test(PublishGitHubCodeReviewIsExactSHAAndRetrySafe|PublishGitHubCodeReviewNeverSelfApproves|CodeReviewPublicationForTaskRequiresExactIndependentGitHubEvidence)$' -count=1
+
+run "exact-SHA review merge-gate classification" \
+  go test ./internal/automationagent ./controllers/automation -run 'Test(CodeReviewPassesExactSHAGateAllowsOnlySafeIndependentOutcomes|PublishGitHubExactSHAReviewCheckSucceedsOnlyForSafeIndependentOutcome)$' -count=1
 
 run "complete backend regression suite" go test ./... -count=1
 run "static analysis" go vet ./...

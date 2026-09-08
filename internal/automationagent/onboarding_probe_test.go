@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"events-stocks/internal/agentwork"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRunOnboardingCapabilityProbesUsesExactSHAOperatorCommandsAndCleansUp(t *testing.T) {
@@ -64,6 +67,7 @@ func TestRunOnboardingCapabilityProbesUsesExactSHAOperatorCommandsAndCleansUp(t 
 func TestWorkerRunsOnboardingProbeDeterministicallyWithoutProvider(t *testing.T) {
 	_, revision, lookup := testOnboardingProbeWorkspace(t, false)
 	t.Setenv("ITBEM_AI_WORKSPACES_JSON", lookup("ITBEM_AI_WORKSPACES_JSON"))
+	setOnboardingProbeSourceEnvironment(t, lookup)
 	delivery, err := BuildOnboardingProbeDelivery("workspace://service", "github://acme/service", "trunk", revision, []string{"unit"})
 	if err != nil {
 		t.Fatal(err)
@@ -99,6 +103,19 @@ func TestRunOnboardingCapabilityProbesRejectsTrackedMutation(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(workspace.Root, ".itbem-agent-worktrees", "probe-"+taskID)); !os.IsNotExist(err) {
 		t.Fatalf("failed probe worktree was retained: %v", err)
+	}
+}
+
+func TestFetchAuthorizedWorkspaceRemoteRequiresDedicatedSourceApp(t *testing.T) {
+	workspace, _, lookup := testOnboardingProbeWorkspace(t, false)
+	withoutSource := func(name string) string {
+		if name == "ITBEM_AI_WORKSPACES_JSON" {
+			return lookup(name)
+		}
+		return ""
+	}
+	if _, err := FetchAuthorizedWorkspaceRemote(context.Background(), workspace, withoutSource); err == nil || !strings.Contains(err.Error(), "GitHub source App is required") {
+		t.Fatalf("GitHub workspace fell back without Source App credentials: %v", err)
 	}
 }
 
@@ -191,15 +208,46 @@ func testOnboardingProbeWorkspace(t *testing.T, mutate bool) (Workspace, string,
 		ReadOnlyFixturePaths: []string{".fixtures"},
 	}}
 	raw, _ := json.Marshal(config)
-	lookup := func(key string) string {
-		if key == "ITBEM_AI_WORKSPACES_JSON" {
-			return string(raw)
+	key := testGitHubAppKey(t)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == "/repos/acme/service/installation":
+			_ = json.NewEncoder(response).Encode(map[string]int64{"id": 67890})
+		case request.Method == http.MethodPost && request.URL.Path == "/app/installations/67890/access_tokens":
+			response.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(response).Encode(map[string]string{
+				"token": "test-source-installation-token", "expires_at": time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+			})
+		default:
+			t.Fatalf("unexpected Source App request: %s %s", request.Method, request.URL.Path)
 		}
-		return ""
+	}))
+	t.Cleanup(server.Close)
+	values := map[string]string{
+		"ITBEM_AI_WORKSPACES_JSON":             string(raw),
+		"ITBEM_GITHUB_SOURCE_APP_ID":           "12345",
+		"ITBEM_GITHUB_SOURCE_INSTALLATION_IDS": "67890",
+		"ITBEM_GITHUB_SOURCE_APP_PRIVATE_KEY":  testGitHubAppPEM(t, key),
+		"ITBEM_GITHUB_SOURCE_API_BASE_URL":     server.URL,
+	}
+	lookup := func(key string) string {
+		return values[key]
 	}
 	workspace, err := RegisteredWorkspace("workspace://service", lookup)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return workspace, strings.TrimSpace(head.Output), lookup
+}
+
+func setOnboardingProbeSourceEnvironment(t *testing.T, lookup func(string) string) {
+	t.Helper()
+	for _, name := range []string{
+		"ITBEM_GITHUB_SOURCE_APP_ID",
+		"ITBEM_GITHUB_SOURCE_INSTALLATION_IDS",
+		"ITBEM_GITHUB_SOURCE_APP_PRIVATE_KEY",
+		"ITBEM_GITHUB_SOURCE_API_BASE_URL",
+	} {
+		t.Setenv(name, lookup(name))
+	}
 }

@@ -1,20 +1,38 @@
 # GitHub App para publicación controlada
 
-La plataforma no publica con llaves SSH ni tokens personales. Usa dos GitHub
-Apps privadas e independientes, instaladas sólo en repositorios autorizados:
-una identidad **Reviewer** para revisiones y otra **Release** para publicación
-controlada. Compartir una App entre ambos roles rompe la independencia y no es
-una configuración válida.
+La plataforma no publica ni sincroniza código con llaves SSH ni tokens
+personales. Usa tres roles de GitHub App privados e independientes, instalados
+sólo en repositorios autorizados: **Source** para obtener código,
+**Reviewer** para revisiones y **Release** para publicación controlada.
+Compartir la App Source con Reviewer o Release rompe la separación de
+privilegios y no es una configuración válida.
 
 ## Permisos mínimos de las Apps
+
+Source App:
+
+- **Contents: Read-only**: clonar/fetch únicamente el repositorio registrado
+  por el operador y crear contexto de onboarding en un SHA exacto.
+- **Metadata: Read-only**: obligatorio para GitHub Apps.
+
+No conceder Pull requests, Checks, Actions, Workflows, Deployments,
+Environments, administración, secrets ni permisos de organización. El token
+es de corta vida, se restringe al repositorio exacto y se entrega sólo al
+proceso temporal de Git askpass; nunca se escribe en la URL remota. En Linux,
+cada lane que lea un workspace de GitHub usa un archivo de llave propio aun si
+las llaves pertenecen a la misma App Source de solo lectura.
 
 Reviewer App:
 
 - **Contents: Read-only**: obtener y volver a comprobar el diff exacto.
 - **Checks: Read and write**: publicar un único check
   `Bema Review / exact-sha` ligado al head exacto. Sólo concluye `success`
-  cuando el veredicto es `APPROVE` y la identidad Reviewer es independiente
-  del autor; cualquier otro resultado concluye `failure`.
+  cuando una identidad Reviewer independiente aprueba el SHA o deja sólo
+  hallazgos concretos `low` de mantenibilidad, sin huecos de evidencia. Esos
+  comentarios permanecen visibles pero no bloquean; cualquier hallazgo de
+  seguridad, corrección, confiabilidad, rendimiento o cobertura (incluso
+  `low`), un cambio solicitado, un bloqueo o una auto-revisión concluye
+  `failure`.
 - **Pull requests: Read and write**: leer el head/autor y publicar únicamente
   `COMMENT`, `APPROVE` o `REQUEST_CHANGES`.
 - **Metadata: Read-only**: obligatorio para GitHub Apps.
@@ -41,11 +59,11 @@ workflow, modificar secrets, administrar environments, mergear ni desplegar.
 
 ## Instalación inicial (una sola vez)
 
-1. En la organización de GitHub, crear dos **GitHub Apps** privadas: Reviewer y Release.
-2. En **Repository access**, seleccionar **Only select repositories** y añadir únicamente los repositorios que ese entorno puede publicar. No elegir acceso a todos los repositorios de la organización.
-3. Conceder a cada App sólo sus permisos y generar una llave privada distinta. Las llaves no se pegan en el dashboard ni se comparten entre procesos.
-4. Instalar la App en la organización y anotar el identificador de instalación. Mantener una instalación distinta por entorno cuando producción y pruebas no compartan el mismo perímetro.
-5. Guardar los tres secretos del siguiente apartado en el control plane y, desde **Delivery → una tarea → Integración de publicación**, usar **Verificar conexión**. La comprobación usa un token efímero y una lectura mínima; no lista repositorios ni muestra credenciales.
+1. En la organización de GitHub, crear tres **GitHub Apps** privadas: Source, Reviewer y Release.
+2. En **Repository access**, seleccionar **Only select repositories** y añadir únicamente los repositorios que ese entorno necesita leer, revisar o publicar. No elegir acceso a todos los repositorios de la organización.
+3. Conceder a cada App sólo sus permisos y generar llaves privadas distintas. Las llaves no se pegan en el dashboard ni se comparten entre procesos. La App Source puede tener una llave distinta por lane Linux.
+4. Instalar cada App en la organización y anotar el identificador de instalación. Mantener una instalación distinta por entorno cuando producción y pruebas no compartan el mismo perímetro.
+5. Guardar los secretos del siguiente apartado en el control plane y, en cada lane que use un workspace GitHub, ejecutar la preflight `--github-auth-probe`. La comprobación usa un token efímero y una lectura mínima; no lista repositorios ni muestra credenciales.
 
 Una verificación fallida no habilita publicación. El error visible es deliberadamente genérico: las causas detalladas se revisan sólo en la configuración del runtime, nunca desde el navegador.
 
@@ -62,12 +80,23 @@ ITBEM_GITHUB_INSTALLATION_IDS=67890
 ITBEM_GITHUB_APP_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
 ITBEM_GITHUB_API_BASE_URL=https://api.github.com
 
+# Source App: required by a Linux lane only when its workspace registry
+# contains a GitHub repository. This identity is read-only and separate from
+# the Reviewer/Release App above.
+ITBEM_GITHUB_SOURCE_APP_ID=23456
+ITBEM_GITHUB_SOURCE_INSTALLATION_IDS=67890
+ITBEM_GITHUB_SOURCE_APP_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
+ITBEM_GITHUB_SOURCE_API_BASE_URL=https://api.github.com
+
 # Optional automatic review ingress; disabled when either is absent.
 GITHUB_REVIEW_WEBHOOK_SECRET=generate-a-dedicated-random-secret
 GITHUB_REVIEW_REPOSITORIES=itbem/itbem-events-backend,itbem/dashboard
 ```
 
-En local, el archivo es `itbem-events-backend/.env.ai.local`. El script de control plane importa exclusivamente las tres credenciales de la App; no transfiere `MINIMAX_API_KEY` ni otros secretos del archivo al proceso que expone la API del dashboard.
+En local, el archivo es `itbem-events-backend/.env.ai.local`. El script de
+control plane importa exclusivamente las credenciales de App necesarias para
+la operación solicitada; no transfiere `MINIMAX_API_KEY` ni otros secretos del
+archivo al proceso que expone la API del dashboard.
 
 El worker firma un JWT de App de menos de diez minutos y solicita un token de
 instalación de duración limitada para cada publicación. El token no se guarda
@@ -122,7 +151,8 @@ explícitamente autorizado de una revisión que ya falló. Si la App Reviewer
 fuera autora del PR, un `APPROVE` se degrada a `COMMENT` y la revisión
 automática queda bloqueada. Después publica el check `Bema Review / exact-sha`
 con la misma identidad, SHA y digests. El check nunca usa una conclusión
-neutral: `success` significa aprobación independiente exacta y `failure`
+neutral: `success` significa una revisión independiente exacta que aprobó o
+sólo dejó una nota de mantenibilidad baja sin hueco de evidencia; `failure`
 mantiene el merge cerrado. Los repositorios que habiliten la ruta autónoma
 deben exigir ese check, fijarlo a la Reviewer App y no exigir además una review
 humana rutinaria; las políticas de riesgo pueden conservar aprobación humana.

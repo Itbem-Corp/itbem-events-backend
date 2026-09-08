@@ -77,6 +77,11 @@ go run ./cmd/api
 | `ITBEM_GITHUB_APP_PRIVATE_KEY` | local only | Inline PEM accepted for local development. Never store it in a repository, Vault, prompt, task or production environment file. |
 | `ITBEM_GITHUB_APP_PRIVATE_KEY_FILE` | Linux publication roles | Root-managed path to the role-specific PEM. Review and Release use separate files readable only by their Unix groups. |
 | `ITBEM_GITHUB_API_BASE_URL` | no | GitHub API origin, default `https://api.github.com`; overrides exist for tests/GitHub Enterprise only. |
+| `ITBEM_GITHUB_SOURCE_APP_ID` | GitHub workspace lanes | Numeric ID of the dedicated read-only Source App. It must not equal the Reviewer or Release App identity. Required when that lane's workspace registry contains a `github.com` repository. |
+| `ITBEM_GITHUB_SOURCE_INSTALLATION_IDS` | GitHub workspace lanes | Explicit comma-separated Source App installation allow-list. A repository whose resolved installation is outside this list fails before any Git network operation. |
+| `ITBEM_GITHUB_SOURCE_APP_PRIVATE_KEY` | local only | Inline Source App PEM for local development only. Never store it in a repository, Vault, prompt, task or production environment file. |
+| `ITBEM_GITHUB_SOURCE_APP_PRIVATE_KEY_FILE` | Linux GitHub workspace lanes | Root-managed, lane-specific Source App PEM path. This App has only Contents/Metadata read and can never publish, review, merge or deploy. |
+| `ITBEM_GITHUB_SOURCE_API_BASE_URL` | no | Source App GitHub API origin, default `https://api.github.com`; separate from publication App configuration. |
 | `SNS_WORKER_TOPIC_ARN` | no | EventiApp producer topic. SNS routes each workload lane to the shared Rust worker without exposing another app's topic. Production deployments require it. |
 | `EVENT_PREVIEW_SECRET` | deployed | Dedicated HMAC secret for signed dashboard preview URLs. It never falls back to another credential. Production/staging require at least 32 bytes. Generate with `openssl rand -hex 32`. |
 | `EVENT_ACCESS_SECRET` | deployed | Dedicated HMAC secret for password-gate access proofs (`X-Event-Access-Token`). It never falls back to another credential. Production/staging require at least 32 bytes. Generate with `openssl rand -hex 32`. |

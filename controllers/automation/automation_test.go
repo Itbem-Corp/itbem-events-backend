@@ -215,18 +215,54 @@ func TestCodeReviewPublicationForTaskRequiresExactIndependentGitHubEvidence(t *t
 		ID: taskID, RequestedBy: "github-app-review", Operation: "code.review", EvidenceSubjectDigest: subject,
 		CorrelationID: correlationID,
 	}
-	execution := automationagent.GitHubCodeReviewPublication{
-		SchemaVersion: 2, Repository: "itbem/backend", PullRequest: 42, HeadSHA: strings.Repeat("b", 40),
-		PatchSHA256: strings.Repeat("c", 64), SubjectSHA256: subject, PayloadSHA256: strings.Repeat("d", 64),
-		Verdict: "approve", Event: "APPROVE", ReviewID: 77,
-		ReviewURL:     "https://github.com/itbem/backend/pull/42#pullrequestreview-77",
-		ReviewerActor: "reviewer-bot[bot]", AuthorActor: "engineer-bot[bot]", PublishedAt: time.Now().UTC(),
-		CheckRunID: 88, CheckRunURL: "https://github.com/itbem/backend/runs/88", CheckName: "Bema Review / exact-sha", CheckConclusion: "success",
+	newExecution := func() automationagent.GitHubCodeReviewPublication {
+		return automationagent.GitHubCodeReviewPublication{
+			SchemaVersion: 2, Repository: "itbem/backend", PullRequest: 42, HeadSHA: strings.Repeat("b", 40),
+			PatchSHA256: strings.Repeat("c", 64), SubjectSHA256: subject, PayloadSHA256: strings.Repeat("d", 64),
+			Verdict: "approve", Event: "APPROVE", ReviewGatePassed: true, ReviewID: 77,
+			ReviewURL:     "https://github.com/itbem/backend/pull/42#pullrequestreview-77",
+			ReviewerActor: "reviewer-bot[bot]", AuthorActor: "engineer-bot[bot]", PublishedAt: time.Now().UTC(),
+			CheckRunID: 88, CheckRunURL: "https://github.com/itbem/backend/runs/88", CheckName: "Bema Review / exact-sha", CheckConclusion: "success",
+		}
 	}
+	execution := newExecution()
 	raw, _ := json.Marshal(execution)
 	publication, err := codeReviewPublicationForTask(task, raw)
 	if err != nil || publication.AutomationTaskID != uuid.Nil || publication.ReviewerActor != "reviewer-bot[bot]" {
 		t.Fatalf("valid review publication rejected: %#v / %v", publication, err)
+	}
+	nonBlockingComment := newExecution()
+	nonBlockingComment.Verdict, nonBlockingComment.Event = "comment", "COMMENT"
+	nonBlockingComment.ReviewGatePassed, nonBlockingComment.CheckConclusion = true, "success"
+	raw, _ = json.Marshal(nonBlockingComment)
+	commentPublication, err := codeReviewPublicationForTask(task, raw)
+	if err != nil || !commentPublication.ReviewGatePassed || commentPublication.Verdict != "comment" || commentPublication.Event != "COMMENT" || commentPublication.CheckConclusion == nil || *commentPublication.CheckConclusion != "success" {
+		t.Fatalf("independent non-blocking exact-SHA comment was not persisted explicitly: %#v / %v", commentPublication, err)
+	}
+	missingGateClassification := newExecution()
+	missingGateClassification.Verdict, missingGateClassification.Event = "comment", "COMMENT"
+	missingGateClassification.ReviewGatePassed, missingGateClassification.CheckConclusion = false, "success"
+	raw, _ = json.Marshal(missingGateClassification)
+	if _, err := codeReviewPublicationForTask(task, raw); err == nil {
+		t.Fatal("a successful comment without the reviewer gate classification was accepted")
+	}
+	contradictoryNonBlockingComment := newExecution()
+	contradictoryNonBlockingComment.Verdict, contradictoryNonBlockingComment.Event = "comment", "COMMENT"
+	contradictoryNonBlockingComment.ReviewGatePassed, contradictoryNonBlockingComment.CheckConclusion = true, "failure"
+	raw, _ = json.Marshal(contradictoryNonBlockingComment)
+	if _, err := codeReviewPublicationForTask(task, raw); err == nil {
+		t.Fatal("a non-blocking reviewer classification with a failed GitHub check was accepted")
+	}
+	requestedChanges := newExecution()
+	requestedChanges.Verdict, requestedChanges.Event, requestedChanges.ReviewGatePassed, requestedChanges.CheckConclusion = "request_changes", "REQUEST_CHANGES", false, "failure"
+	raw, _ = json.Marshal(requestedChanges)
+	if _, err := codeReviewPublicationForTask(task, raw); err != nil {
+		t.Fatalf("a failed exact-SHA request-changes review was rejected: %v", err)
+	}
+	requestedChanges.ReviewGatePassed = true
+	raw, _ = json.Marshal(requestedChanges)
+	if _, err := codeReviewPublicationForTask(task, raw); err == nil {
+		t.Fatal("a request-changes review with a passing gate classification was accepted")
 	}
 	for name, mutate := range map[string]func(*models.AutomationTask, *automationagent.GitHubCodeReviewPublication){
 		"stale subject": func(_ *models.AutomationTask, value *automationagent.GitHubCodeReviewPublication) {
@@ -234,6 +270,9 @@ func TestCodeReviewPublicationForTaskRequiresExactIndependentGitHubEvidence(t *t
 		},
 		"self approval": func(_ *models.AutomationTask, value *automationagent.GitHubCodeReviewPublication) {
 			value.AuthorActor = value.ReviewerActor
+		},
+		"approval missing gate classification": func(_ *models.AutomationTask, value *automationagent.GitHubCodeReviewPublication) {
+			value.ReviewGatePassed = false
 		},
 		"wrong PR": func(_ *models.AutomationTask, value *automationagent.GitHubCodeReviewPublication) {
 			value.PullRequest = 43
@@ -246,7 +285,7 @@ func TestCodeReviewPublicationForTaskRequiresExactIndependentGitHubEvidence(t *t
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			candidateTask, candidateExecution := *task, execution
+			candidateTask, candidateExecution := *task, newExecution()
 			mutate(&candidateTask, &candidateExecution)
 			candidateRaw, _ := json.Marshal(candidateExecution)
 			if _, err := codeReviewPublicationForTask(&candidateTask, candidateRaw); err == nil {

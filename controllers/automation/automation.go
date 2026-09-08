@@ -2368,15 +2368,23 @@ func codeReviewPublicationForTask(task *models.AutomationTask, raw json.RawMessa
 	}
 	switch event {
 	case "APPROVE":
-		if verdict != "approve" || author == "" || strings.EqualFold(actor, author) || checkConclusion != "success" {
+		if verdict != "approve" || !execution.ReviewGatePassed || author == "" || strings.EqualFold(actor, author) || checkConclusion != "success" {
 			return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review approval is not independent")
 		}
 	case "REQUEST_CHANGES":
-		if verdict != "request_changes" || checkConclusion != "failure" {
+		if verdict != "request_changes" || execution.ReviewGatePassed || checkConclusion != "failure" {
 			return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review event contradicts its verdict")
 		}
 	case "COMMENT":
-		if (verdict != "comment" && verdict != "blocked" && (verdict != "approve" || author == "" || !strings.EqualFold(actor, author))) || checkConclusion != "failure" {
+		// A Reviewer COMMENT normally blocks because it means the exact review
+		// cannot approve the head. The narrowly classified exception is a
+		// worker-calculated, independent low-maintainability observation with no
+		// evidence gap. Its GitHub check is the authoritative proof that the
+		// Reviewer App applied that exception; controller persistence never turns
+		// an arbitrary successful COMMENT into a release signal.
+		nonBlockingComment := verdict == "comment" && execution.ReviewGatePassed && author != "" && !strings.EqualFold(actor, author) && checkConclusion == "success"
+		blockingComment := (verdict == "comment" || verdict == "blocked" || (verdict == "approve" && author != "" && strings.EqualFold(actor, author))) && !execution.ReviewGatePassed && checkConclusion == "failure"
+		if !nonBlockingComment && !blockingComment {
 			return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review comment contradicts its verdict")
 		}
 	default:
@@ -2385,7 +2393,7 @@ func codeReviewPublicationForTask(task *models.AutomationTask, raw json.RawMessa
 	checkRunID, checkRunURL := execution.CheckRunID, strings.TrimSpace(execution.CheckRunURL)
 	return models.AutomationCodeReviewPublication{
 		Repository: repository, PullRequest: execution.PullRequest, HeadSHA: strings.ToLower(execution.HeadSHA), PatchSHA256: strings.ToLower(execution.PatchSHA256),
-		SubjectSHA256: strings.ToLower(execution.SubjectSHA256), PayloadSHA256: strings.ToLower(execution.PayloadSHA256), Verdict: verdict, Event: event,
+		SubjectSHA256: strings.ToLower(execution.SubjectSHA256), PayloadSHA256: strings.ToLower(execution.PayloadSHA256), Verdict: verdict, Event: event, ReviewGatePassed: execution.ReviewGatePassed,
 		ReviewID: execution.ReviewID, ReviewURL: strings.TrimSpace(execution.ReviewURL), ReviewerActor: actor, AuthorActor: author, PublishedAt: execution.PublishedAt,
 		CheckRunID: &checkRunID, CheckRunURL: &checkRunURL, CheckName: &checkName, CheckConclusion: &checkConclusion,
 	}, nil

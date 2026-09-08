@@ -733,28 +733,53 @@ func VerifyGitHubAppInstallation(ctx context.Context, config GitHubAppConfig, cl
 	return nil
 }
 
-// LoadGitHubAppConfig reads only process-owned environment values. In
-// deployment these should come from a secrets manager; local development may
-// use .env.ai.local, which is explicitly excluded from agent context.
+// LoadGitHubAppConfig reads the App identity used for publication roles. In
+// deployment these values should come from a secrets manager; local
+// development may use .env.ai.local, which is explicitly excluded from agent
+// context.
 func LoadGitHubAppConfig(lookup func(string) string) (GitHubAppConfig, error) {
-	appID := strings.TrimSpace(lookup("ITBEM_GITHUB_APP_ID"))
-	installationIDs, err := parseGitHubInstallationIDs(lookup("ITBEM_GITHUB_INSTALLATION_IDS"))
+	return loadGitHubAppConfig(lookup, "ITBEM_GITHUB_", "ITBEM_GITHUB_APP")
+}
+
+// LoadGitHubSourceAppConfig reads a dedicated contents-read GitHub App used
+// only to synchronize an operator-registered repository checkout. It is
+// deliberately a different namespace from the Reviewer and Release Apps: a
+// code-reading lane must never borrow an identity that can approve a review or
+// publish a branch.
+//
+// The source App is still constrained to the configured installation allow
+// list and mints a fresh repository-scoped token for each Git operation. A
+// missing source App blocks a GitHub workspace before a provider call; there
+// is no PAT, SSH key, credential-helper, or public-repository fallback.
+func LoadGitHubSourceAppConfig(lookup func(string) string) (GitHubAppConfig, error) {
+	return loadGitHubAppConfig(lookup, "ITBEM_GITHUB_SOURCE_", "ITBEM_GITHUB_SOURCE_APP")
+}
+
+func loadGitHubAppConfig(lookup func(string) string, prefix, label string) (GitHubAppConfig, error) {
+	appIDKey := prefix + "APP_ID"
+	installationIDsKey := prefix + "INSTALLATION_IDS"
+	installationIDKey := prefix + "INSTALLATION_ID"
+	privateKeyKey := prefix + "APP_PRIVATE_KEY"
+	privateKeyFileKey := prefix + "APP_PRIVATE_KEY_FILE"
+	apiBaseURLKey := prefix + "API_BASE_URL"
+	appID := strings.TrimSpace(lookup(appIDKey))
+	installationIDs, err := parseGitHubInstallationIDs(lookup(installationIDsKey), strings.TrimSuffix(prefix, "_"))
 	if err != nil {
 		return GitHubAppConfig{}, err
 	}
 	if len(installationIDs) == 0 {
-		installationIDs, err = parseGitHubInstallationIDs(lookup("ITBEM_GITHUB_INSTALLATION_ID"))
+		installationIDs, err = parseGitHubInstallationIDs(lookup(installationIDKey), strings.TrimSuffix(prefix, "_"))
 		if err != nil {
 			return GitHubAppConfig{}, err
 		}
 	}
-	privatePEM := strings.TrimSpace(lookup("ITBEM_GITHUB_APP_PRIVATE_KEY"))
+	privatePEM := strings.TrimSpace(lookup(privateKeyKey))
 	if privatePEM == "" {
-		privateKeyFile := strings.TrimSpace(lookup("ITBEM_GITHUB_APP_PRIVATE_KEY_FILE"))
+		privateKeyFile := strings.TrimSpace(lookup(privateKeyFileKey))
 		if privateKeyFile != "" {
 			contents, readErr := os.ReadFile(privateKeyFile)
 			if readErr != nil {
-				return GitHubAppConfig{}, fmt.Errorf("ITBEM_GITHUB_APP_PRIVATE_KEY_FILE is unreadable")
+				return GitHubAppConfig{}, fmt.Errorf("%s_PRIVATE_KEY_FILE is unreadable", label)
 			}
 			privatePEM = strings.TrimSpace(string(contents))
 		}
@@ -763,20 +788,20 @@ func LoadGitHubAppConfig(lookup func(string) string) (GitHubAppConfig, error) {
 		return GitHubAppConfig{}, ErrGitHubAppNotConfigured
 	}
 	if _, err := strconv.ParseInt(appID, 10, 64); err != nil {
-		return GitHubAppConfig{}, fmt.Errorf("ITBEM_GITHUB_APP_ID is invalid")
+		return GitHubAppConfig{}, fmt.Errorf("%s_ID is invalid", label)
 	}
-	privateKey, err := parseGitHubAppPrivateKey(privatePEM)
+	privateKey, err := parseGitHubAppPrivateKey(privatePEM, label)
 	if err != nil {
 		return GitHubAppConfig{}, err
 	}
-	baseURL, err := normalizeGitHubAPIBaseURL(lookup("ITBEM_GITHUB_API_BASE_URL"))
+	baseURL, err := normalizeGitHubAPIBaseURL(lookup(apiBaseURLKey), label)
 	if err != nil {
 		return GitHubAppConfig{}, err
 	}
 	return GitHubAppConfig{AppID: appID, InstallationID: installationIDs[0], InstallationIDs: installationIDs, PrivateKey: privateKey, APIBaseURL: baseURL}, nil
 }
 
-func parseGitHubInstallationIDs(value string) ([]string, error) {
+func parseGitHubInstallationIDs(value, label string) ([]string, error) {
 	seen := map[string]struct{}{}
 	result := make([]string, 0, 3)
 	for _, item := range strings.Split(value, ",") {
@@ -786,7 +811,7 @@ func parseGitHubInstallationIDs(value string) ([]string, error) {
 		}
 		parsed, err := strconv.ParseInt(item, 10, 64)
 		if err != nil || parsed < 1 {
-			return nil, fmt.Errorf("ITBEM_GITHUB_INSTALLATION_ID is invalid")
+			return nil, fmt.Errorf("%s_INSTALLATION_ID is invalid", label)
 		}
 		item = strconv.FormatInt(parsed, 10)
 		if _, exists := seen[item]; !exists {
@@ -827,35 +852,35 @@ func (config GitHubAppConfig) WithInstallationID(id int64) (GitHubAppConfig, err
 	return config, nil
 }
 
-func parseGitHubAppPrivateKey(value string) (*rsa.PrivateKey, error) {
+func parseGitHubAppPrivateKey(value, label string) (*rsa.PrivateKey, error) {
 	block, _ := pem.Decode([]byte(strings.ReplaceAll(value, `\n`, "\n")))
 	if block == nil {
-		return nil, fmt.Errorf("ITBEM_GITHUB_APP_PRIVATE_KEY is not PEM")
+		return nil, fmt.Errorf("%s_PRIVATE_KEY is not PEM", label)
 	}
 	if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
 		return key, nil
 	}
 	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
 	if err != nil {
-		return nil, fmt.Errorf("ITBEM_GITHUB_APP_PRIVATE_KEY is invalid")
+		return nil, fmt.Errorf("%s_PRIVATE_KEY is invalid", label)
 	}
 	key, ok := parsed.(*rsa.PrivateKey)
 	if !ok {
-		return nil, fmt.Errorf("ITBEM_GITHUB_APP_PRIVATE_KEY must be an RSA key")
+		return nil, fmt.Errorf("%s_PRIVATE_KEY must be an RSA key", label)
 	}
 	return key, nil
 }
 
-func normalizeGitHubAPIBaseURL(value string) (string, error) {
+func normalizeGitHubAPIBaseURL(value, label string) (string, error) {
 	if strings.TrimSpace(value) == "" {
 		return "https://api.github.com", nil
 	}
 	parsed, err := url.Parse(strings.TrimSpace(value))
 	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return "", fmt.Errorf("ITBEM_GITHUB_API_BASE_URL is invalid")
+		return "", fmt.Errorf("%s_API_BASE_URL is invalid", label)
 	}
 	if parsed.Scheme != "https" && (parsed.Scheme != "http" || !isGitHubAPILoopbackHost(parsed.Hostname())) {
-		return "", fmt.Errorf("ITBEM_GITHUB_API_BASE_URL must use HTTPS")
+		return "", fmt.Errorf("%s_API_BASE_URL must use HTTPS", label)
 	}
 	return strings.TrimRight(parsed.String(), "/"), nil
 }

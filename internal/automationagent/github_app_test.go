@@ -46,6 +46,27 @@ func TestLoadGitHubAppConfigAcceptsEscapedPEMAndRejectsUnsafeEndpoint(t *testing
 	}
 }
 
+func TestLoadGitHubSourceAppConfigRequiresItsDedicatedNamespace(t *testing.T) {
+	key := testGitHubAppKey(t)
+	publicationOnly := map[string]string{
+		"ITBEM_GITHUB_APP_ID":           "12345",
+		"ITBEM_GITHUB_INSTALLATION_IDS": "67890",
+		"ITBEM_GITHUB_APP_PRIVATE_KEY":  testGitHubAppPEM(t, key),
+	}
+	if _, err := LoadGitHubSourceAppConfig(func(name string) string { return publicationOnly[name] }); !errors.Is(err, ErrGitHubAppNotConfigured) {
+		t.Fatalf("source access must not inherit a publication App identity: %v", err)
+	}
+	values := map[string]string{
+		"ITBEM_GITHUB_SOURCE_APP_ID":           "23456",
+		"ITBEM_GITHUB_SOURCE_INSTALLATION_IDS": "67890,67891",
+		"ITBEM_GITHUB_SOURCE_APP_PRIVATE_KEY":  testGitHubAppPEM(t, key),
+	}
+	config, err := LoadGitHubSourceAppConfig(func(name string) string { return values[name] })
+	if err != nil || config.AppID != "23456" || !config.AllowsInstallationID(67890) || config.AllowsInstallationID(1) {
+		t.Fatalf("expected a separately bounded Source App configuration, got %#v / %v", config, err)
+	}
+}
+
 func TestGitHubAppConfigAllowsOnlyExplicitInstallationIDs(t *testing.T) {
 	key := testGitHubAppKey(t)
 	values := map[string]string{

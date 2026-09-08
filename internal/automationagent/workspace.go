@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -907,8 +908,8 @@ func operatorRegisteredGitHubRepository(workspace Workspace) (githubRepository, 
 	if registered == "" {
 		return githubRepository{}, fmt.Errorf("workspace has no operator-registered remote")
 	}
-	origin, err := runLocal(context.Background(), workspace.Root, 15*time.Second, "", "git", "remote", "get-url", "origin")
-	if err != nil || origin.ExitCode != 0 || !sameOperatorRegisteredRemote(origin.Output, registered) {
+	origin, err := managedWorkspaceOrigin(context.Background(), workspace)
+	if err != nil || !sameOperatorRegisteredRemote(origin, registered) {
 		return githubRepository{}, fmt.Errorf("workspace origin does not match its operator-registered remote")
 	}
 	if repository, parseErr := parseGitHubRemote(registered); parseErr == nil {
@@ -949,6 +950,51 @@ func parseOperatorSSHGitHubAlias(value string) (githubRepository, error) {
 // apply a merge/rebase, create a worktree or make a commit. Credentials remain
 // outside the process environment and interactive prompts are disabled.
 func FetchWorkspaceRemote(ctx context.Context, workspace Workspace) (WorkspaceGitState, error) {
+	return fetchWorkspaceRemote(ctx, workspace, "origin", nil)
+}
+
+// FetchAuthorizedWorkspaceRemote refreshes a GitHub workspace through the
+// dedicated read-only Source App. GitHub repositories never fall back to a
+// developer credential, a cached credential helper, SSH, or unauthenticated
+// public access merely because a repository happens to be public today.
+// Local/non-GitHub fixtures keep the legacy operator-owned fetch path so the
+// deterministic test harness does not need a cloud identity.
+func FetchAuthorizedWorkspaceRemote(ctx context.Context, workspace Workspace, lookup func(string) string) (WorkspaceGitState, error) {
+	repository, remote, required, err := gitHubSourceWorkspaceRemote(workspace)
+	if err != nil {
+		return WorkspaceGitState{}, err
+	}
+	if !required {
+		return FetchWorkspaceRemote(ctx, workspace)
+	}
+	config, err := LoadGitHubSourceAppConfig(lookup)
+	if err != nil {
+		return WorkspaceGitState{}, fmt.Errorf("GitHub source App is required for workspace %s: %w", workspace.ID, err)
+	}
+	return FetchWorkspaceRemoteWithGitHubApp(ctx, workspace, repository, remote, config, nil, time.Now().UTC())
+}
+
+// FetchWorkspaceRemoteWithGitHubApp performs one remote-ref refresh using an
+// installation token scoped to the exact operator-registered repository. It
+// is exported for the process entrypoint and test fixtures; callers should use
+// FetchAuthorizedWorkspaceRemote with their process configuration.
+func FetchWorkspaceRemoteWithGitHubApp(ctx context.Context, workspace Workspace, repository githubRepository, remote string, config GitHubAppConfig, client *http.Client, now time.Time) (WorkspaceGitState, error) {
+	if err := ensureManagedWorkspaceOrigin(ctx, workspace); err != nil {
+		return WorkspaceGitState{}, err
+	}
+	token, err := MintGitHubRepositoryToken(ctx, config, client, now, repository.Owner+"/"+repository.Name)
+	if err != nil {
+		return WorkspaceGitState{}, fmt.Errorf("GitHub source App could not authenticate the registered repository")
+	}
+	environment, cleanup, err := gitHubInstallationTokenEnvironment(token.Token)
+	if err != nil {
+		return WorkspaceGitState{}, err
+	}
+	defer cleanup()
+	return fetchWorkspaceRemote(ctx, workspace, remote, environment)
+}
+
+func fetchWorkspaceRemote(ctx context.Context, workspace Workspace, remote string, environment map[string]string) (WorkspaceGitState, error) {
 	if err := workspace.RequireCapability(WorkspaceCapabilityFetchRemote); err != nil {
 		return WorkspaceGitState{}, err
 	}
@@ -960,7 +1006,7 @@ func FetchWorkspaceRemote(ctx context.Context, workspace Workspace) (WorkspaceGi
 	if err != nil || origin.ExitCode != 0 || strings.TrimSpace(origin.Output) == "" {
 		return WorkspaceGitState{}, fmt.Errorf("workspace has no readable origin remote")
 	}
-	fetched, err := runLocalWithEnv(ctx, workspace.Root, 60*time.Second, "", map[string]string{"GIT_TERMINAL_PROMPT": "0"}, "git", "fetch", "--prune", "--tags", "--no-recurse-submodules", "origin")
+	fetched, err := runLocalWithEnv(ctx, workspace.Root, 60*time.Second, "", gitWorkspaceEnvironment(environment), "git", gitWorkspaceFetchArguments(remote, gitWorkspaceUsesInstallationToken(environment))...)
 	if err != nil || fetched.ExitCode != 0 {
 		return WorkspaceGitState{}, fmt.Errorf("remote fetch could not complete")
 	}
@@ -976,6 +1022,46 @@ func FetchWorkspaceRemote(ctx context.Context, workspace Workspace) (WorkspaceGi
 // returns to base_branch and fast-forwards it. It never resets, rebases, merges
 // non-fast-forward history, touches an agent worktree, or accepts task input.
 func SyncManagedWorkspace(ctx context.Context, workspace Workspace) (WorkspaceGitState, error) {
+	return syncManagedWorkspace(ctx, workspace, "", nil)
+}
+
+// SyncAuthorizedManagedWorkspace is the Delivery path for managed source
+// checkouts. Every GitHub repository is synchronized with a dedicated,
+// read-only Source App token selected for that exact repository. The legacy
+// synchronizer remains available only for local/non-GitHub fixtures.
+func SyncAuthorizedManagedWorkspace(ctx context.Context, workspace Workspace, lookup func(string) string) (WorkspaceGitState, error) {
+	repository, remote, required, err := gitHubSourceWorkspaceRemote(workspace)
+	if err != nil {
+		return WorkspaceGitState{}, err
+	}
+	if !required {
+		return SyncManagedWorkspace(ctx, workspace)
+	}
+	config, err := LoadGitHubSourceAppConfig(lookup)
+	if err != nil {
+		return WorkspaceGitState{}, fmt.Errorf("GitHub source App is required for workspace %s: %w", workspace.ID, err)
+	}
+	return SyncManagedWorkspaceWithGitHubApp(ctx, workspace, repository, remote, config, nil, time.Now().UTC())
+}
+
+// SyncManagedWorkspaceWithGitHubApp keeps an operator-managed GitHub checkout
+// on its configured base branch using only a short-lived, repository-scoped
+// Source App token. The token is never written into a remote URL, command
+// argument, log, task result, Vault, or evidence object.
+func SyncManagedWorkspaceWithGitHubApp(ctx context.Context, workspace Workspace, repository githubRepository, remote string, config GitHubAppConfig, client *http.Client, now time.Time) (WorkspaceGitState, error) {
+	token, err := MintGitHubRepositoryToken(ctx, config, client, now, repository.Owner+"/"+repository.Name)
+	if err != nil {
+		return WorkspaceGitState{}, fmt.Errorf("GitHub source App could not authenticate the registered repository")
+	}
+	environment, cleanup, err := gitHubInstallationTokenEnvironment(token.Token)
+	if err != nil {
+		return WorkspaceGitState{}, err
+	}
+	defer cleanup()
+	return syncManagedWorkspace(ctx, workspace, remote, environment)
+}
+
+func syncManagedWorkspace(ctx context.Context, workspace Workspace, authenticatedRemote string, environment map[string]string) (WorkspaceGitState, error) {
 	if err := workspace.RequireCapability(WorkspaceCapabilityFetchRemote); err != nil {
 		return WorkspaceGitState{}, err
 	}
@@ -987,13 +1073,23 @@ func SyncManagedWorkspace(ctx context.Context, workspace Workspace) (WorkspaceGi
 	if err := validateWorkspaceBase(remoteURL, baseBranch); err != nil {
 		return WorkspaceGitState{}, err
 	}
+	cloneRemote, fetchRemote := remoteURL, "origin"
+	if strings.TrimSpace(authenticatedRemote) != "" {
+		cloneRemote, fetchRemote = authenticatedRemote, authenticatedRemote
+	}
 	if _, err := os.Stat(workspace.Root); errors.Is(err, os.ErrNotExist) {
 		if err := os.MkdirAll(filepath.Dir(workspace.Root), 0700); err != nil {
 			return WorkspaceGitState{}, fmt.Errorf("prepare managed workspace parent: %w", err)
 		}
-		cloned, cloneErr := runLocalWithEnv(ctx, filepath.Dir(workspace.Root), 2*time.Minute, "", map[string]string{"GIT_TERMINAL_PROMPT": "0"}, "git", "clone", "--origin", "origin", "--branch", baseBranch, "--no-recurse-submodules", remoteURL, workspace.Root)
+		cloned, cloneErr := runLocalWithEnv(ctx, filepath.Dir(workspace.Root), 2*time.Minute, "", gitWorkspaceEnvironment(environment), "git", gitWorkspaceCloneArguments(baseBranch, cloneRemote, workspace.Root, gitWorkspaceUsesInstallationToken(environment))...)
 		if cloneErr != nil || cloned.ExitCode != 0 {
 			return WorkspaceGitState{}, fmt.Errorf("managed workspace clone could not complete")
+		}
+		if !sameManagedRemote(cloneRemote, remoteURL) {
+			bound, bindErr := runLocal(ctx, workspace.Root, 20*time.Second, "", "git", "remote", "set-url", "origin", remoteURL)
+			if bindErr != nil || bound.ExitCode != 0 {
+				return WorkspaceGitState{}, fmt.Errorf("managed workspace could not bind its registered origin")
+			}
 		}
 	} else if err != nil {
 		return WorkspaceGitState{}, fmt.Errorf("inspect managed workspace: %w", err)
@@ -1005,14 +1101,14 @@ func SyncManagedWorkspace(ctx context.Context, workspace Workspace) (WorkspaceGi
 	if state.HasLocalChanges {
 		return WorkspaceGitState{}, fmt.Errorf("managed workspace has local changes; refusing to switch its base branch")
 	}
-	origin, err := runLocal(ctx, workspace.Root, 20*time.Second, "", "git", "remote", "get-url", "origin")
-	if err != nil || origin.ExitCode != 0 || strings.TrimSpace(origin.Output) == "" {
+	origin, err := managedWorkspaceOrigin(ctx, workspace)
+	if err != nil {
 		return WorkspaceGitState{}, fmt.Errorf("managed workspace has no readable origin remote")
 	}
-	if !sameManagedRemote(origin.Output, remoteURL) {
+	if !sameManagedRemote(origin, remoteURL) {
 		return WorkspaceGitState{}, fmt.Errorf("managed workspace origin does not match its registered repository_url")
 	}
-	fetched, err := runLocalWithEnv(ctx, workspace.Root, 60*time.Second, "", map[string]string{"GIT_TERMINAL_PROMPT": "0"}, "git", "fetch", "--prune", "--tags", "--no-recurse-submodules", "origin")
+	fetched, err := runLocalWithEnv(ctx, workspace.Root, 60*time.Second, "", gitWorkspaceEnvironment(environment), "git", gitWorkspaceFetchArguments(fetchRemote, gitWorkspaceUsesInstallationToken(environment))...)
 	if err != nil || fetched.ExitCode != 0 {
 		return WorkspaceGitState{}, fmt.Errorf("managed workspace remote fetch could not complete")
 	}
@@ -1052,6 +1148,123 @@ func SyncManagedWorkspace(ctx context.Context, workspace Workspace) (WorkspaceGi
 		return WorkspaceGitState{}, fmt.Errorf("managed workspace base branch is not identical to fetched origin")
 	}
 	return workspaceGitState(workspace.Root), nil
+}
+
+func gitHubSourceWorkspaceRemote(workspace Workspace) (githubRepository, string, bool, error) {
+	registered := strings.TrimSpace(workspace.Config.RepositoryURL)
+	if registered == "" {
+		return githubRepository{}, "", false, nil
+	}
+	lower := strings.ToLower(registered)
+	if !strings.HasPrefix(lower, "https://github.com/") && !strings.HasPrefix(lower, "git@") {
+		return githubRepository{}, "", false, nil
+	}
+	repository, err := parseGitHubRemote(registered)
+	if err != nil {
+		repository, err = parseOperatorSSHGitHubAlias(registered)
+	}
+	if err != nil {
+		return githubRepository{}, "", true, fmt.Errorf("workspace %s has an invalid GitHub repository_url", workspace.ID)
+	}
+	return repository, "https://github.com/" + repository.Owner + "/" + repository.Name + ".git", true, nil
+}
+
+// GitHubSourceAccessRequired reports whether this lane has any
+// operator-registered GitHub workspace that must be synchronized through the
+// dedicated Source App. It is safe for doctor/preflight use: it reads only the
+// registry and never opens a checkout, contacts GitHub, or loads a credential.
+func GitHubSourceAccessRequired(lookup func(string) string) (bool, error) {
+	workspaces, err := LoadWorkspaceRegistry(lookup("ITBEM_AI_WORKSPACES_JSON"))
+	if err != nil {
+		return false, err
+	}
+	for _, workspace := range workspaces {
+		_, _, required, sourceErr := gitHubSourceWorkspaceRemote(workspace)
+		if sourceErr != nil {
+			return false, sourceErr
+		}
+		if required {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func ensureManagedWorkspaceOrigin(ctx context.Context, workspace Workspace) error {
+	if err := workspace.RequireCapability(WorkspaceCapabilityFetchRemote); err != nil {
+		return err
+	}
+	state := workspaceGitState(workspace.Root)
+	if !state.Available || strings.TrimSpace(state.HeadSHA) == "" {
+		return fmt.Errorf("workspace is not a readable Git repository")
+	}
+	origin, err := managedWorkspaceOrigin(ctx, workspace)
+	if err != nil || !sameManagedRemote(origin, workspace.Config.RepositoryURL) {
+		return fmt.Errorf("workspace origin does not match its registered repository_url")
+	}
+	return nil
+}
+
+// managedWorkspaceOrigin reads the literal remote value owned by the
+// checkout. Unlike `git remote get-url`, this deliberately does not expand
+// url.*.insteadOf rules: those rules are transport routing, not evidence that
+// the checkout is registered to a particular repository.
+func managedWorkspaceOrigin(ctx context.Context, workspace Workspace) (string, error) {
+	origin, err := runLocal(ctx, workspace.Root, 20*time.Second, "", "git", "config", "--get", "remote.origin.url")
+	if err != nil || origin.ExitCode != 0 || strings.TrimSpace(origin.Output) == "" {
+		return "", fmt.Errorf("workspace has no readable origin remote")
+	}
+	return strings.TrimSpace(origin.Output), nil
+}
+
+func gitWorkspaceEnvironment(environment map[string]string) map[string]string {
+	if len(environment) == 0 {
+		return map[string]string{"GIT_TERMINAL_PROMPT": "0"}
+	}
+	result := make(map[string]string, len(environment)+1)
+	for key, value := range environment {
+		result[key] = value
+	}
+	result["GIT_TERMINAL_PROMPT"] = "0"
+	return result
+}
+
+func gitWorkspaceUsesInstallationToken(environment map[string]string) bool {
+	return strings.TrimSpace(environment["ITBEM_GITHUB_INSTALLATION_TOKEN"]) != ""
+}
+
+func gitWorkspaceCloneArguments(branch, remote, directory string, suppressCredentialHelper bool) []string {
+	arguments := []string{"clone", "--origin", "origin", "--branch", branch, "--no-recurse-submodules", remote, directory}
+	if suppressCredentialHelper {
+		arguments = append(gitHubInstallationGitConfigArguments(), arguments...)
+	}
+	return arguments
+}
+
+func gitWorkspaceFetchArguments(remote string, suppressCredentialHelper bool) []string {
+	arguments := []string{"fetch", "--prune", "--tags", "--no-recurse-submodules", remote}
+	if suppressCredentialHelper {
+		arguments = append(gitHubInstallationGitConfigArguments(), arguments...)
+	}
+	if remote != "origin" {
+		arguments = append(arguments, "+refs/heads/*:refs/remotes/origin/*")
+	}
+	return arguments
+}
+
+// gitHubInstallationGitConfigArguments overrides the few local Git settings
+// that could replace or intercept a repository-scoped App token. The checkout
+// is still used for Git objects and the registered origin binding, but an
+// operator/developer local configuration cannot silently select a credential
+// helper, an HTTP proxy, a weakened TLS policy, or an extra authorization
+// header for the authenticated network operation.
+func gitHubInstallationGitConfigArguments() []string {
+	return []string{
+		"-c", "credential.helper=",
+		"-c", "http.proxy=",
+		"-c", "http.sslVerify=true",
+		"-c", "http.extraHeader=",
+	}
 }
 
 // sameManagedRemote deliberately accepts only cosmetic trailing slashes. A
@@ -1301,7 +1514,7 @@ func PrepareDeliveryWorkspaces(ctx context.Context, delivery json.RawMessage, lo
 		if !projectvault.ValidRevision(expected) {
 			return fmt.Errorf("workspace %s managed Delivery source has no immutable frozen revision", workspace.ID)
 		}
-		state, err := SyncManagedWorkspace(ctx, workspace)
+		state, err := SyncAuthorizedManagedWorkspace(ctx, workspace, lookup)
 		if err != nil {
 			return fmt.Errorf("workspace %s could not synchronize its managed base before Delivery: %w", workspace.ID, err)
 		}

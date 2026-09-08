@@ -322,7 +322,7 @@ func safeCommitTitle(value string) string {
 }
 
 func pushGitHubBranch(ctx context.Context, worktree string, repository githubRepository, branch, token string) error {
-	askpass, cleanup, err := gitAskPass(token)
+	environment, cleanup, err := gitHubInstallationTokenEnvironment(token)
 	if err != nil {
 		return err
 	}
@@ -332,19 +332,33 @@ func pushGitHubBranch(ctx context.Context, worktree string, repository githubRep
 	// hook substitute a developer identity for the ephemeral GitHub App token.
 	// The only credential reaching this child is the short-lived token consumed
 	// by our temporary askpass helper.
-	environment := map[string]string{
+	result, err := runLocalWithEnv(ctx, worktree, 2*time.Minute, "", environment, "git", publicationPushArguments(remote, branch)...)
+	if err != nil || result.ExitCode != 0 {
+		return fmt.Errorf("could not publish the approved branch")
+	}
+	return nil
+}
+
+// gitHubInstallationTokenEnvironment confines one short-lived installation
+// token to a single Git subprocess. Repository commands never inherit the
+// worker's provider, App-key, deployment, or developer credentials. The
+// caller must defer the returned cleanup before any output can escape.
+func gitHubInstallationTokenEnvironment(token string) (map[string]string, func(), error) {
+	if strings.TrimSpace(token) == "" {
+		return nil, nil, fmt.Errorf("GitHub installation token is empty")
+	}
+	askpass, cleanup, err := gitAskPass(token)
+	if err != nil {
+		return nil, nil, err
+	}
+	return map[string]string{
 		"GIT_TERMINAL_PROMPT":             "0",
 		"GIT_ASKPASS":                     askpass,
 		"GIT_ASKPASS_REQUIRE":             "force",
 		"GIT_CONFIG_NOSYSTEM":             "1",
 		"GIT_CONFIG_GLOBAL":               os.DevNull,
 		"ITBEM_GITHUB_INSTALLATION_TOKEN": token,
-	}
-	result, err := runLocalWithEnv(ctx, worktree, 2*time.Minute, "", environment, "git", publicationPushArguments(remote, branch)...)
-	if err != nil || result.ExitCode != 0 {
-		return fmt.Errorf("could not publish the approved branch")
-	}
-	return nil
+	}, cleanup, nil
 }
 
 func publicationPushArguments(remote, branch string) []string {

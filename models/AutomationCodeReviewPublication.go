@@ -23,6 +23,7 @@ type AutomationCodeReviewPublication struct {
 	PayloadSHA256    string    `gorm:"type:char(64);not null" json:"payload_sha256"`
 	Verdict          string    `gorm:"type:varchar(24);not null" json:"verdict"`
 	Event            string    `gorm:"type:varchar(24);not null" json:"event"`
+	ReviewGatePassed bool      `gorm:"not null;default:false" json:"review_gate_passed"`
 	ReviewID         int64     `gorm:"not null;uniqueIndex" json:"review_id"`
 	ReviewURL        string    `gorm:"type:text;not null" json:"review_url"`
 	ReviewerActor    string    `gorm:"type:varchar(128);not null;index" json:"reviewer_actor"`

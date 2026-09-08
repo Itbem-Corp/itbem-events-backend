@@ -205,11 +205,48 @@ func TestFindGitHubCodeReviewSearchesBoundedPagination(t *testing.T) {
 	}
 }
 
-func TestPublishGitHubExactSHAReviewCheckSucceedsOnlyForIndependentApproval(t *testing.T) {
+func TestCodeReviewPassesExactSHAGateAllowsOnlySafeIndependentOutcomes(t *testing.T) {
+	lowMaintainability := map[string]any{
+		"verdict": "comment", "coverage_gaps": []any{},
+		"findings": []any{map[string]any{"severity": "low", "category": "maintainability"}},
+	}
+	cases := []struct {
+		name     string
+		review   map[string]any
+		event    string
+		reviewer string
+		author   string
+		want     bool
+	}{
+		{"independent approval", map[string]any{"verdict": "approve"}, "APPROVE", "bema-review-bot[bot]", "engineer-bot[bot]", true},
+		{"low maintainability note", lowMaintainability, "COMMENT", "bema-review-bot[bot]", "engineer-bot[bot]", true},
+		{"blank reviewer cannot pass", map[string]any{"verdict": "approve"}, "APPROVE", "", "engineer-bot[bot]", false},
+		{"blank author cannot pass", map[string]any{"verdict": "approve"}, "APPROVE", "bema-review-bot[bot]", "", false},
+		{"author cannot pass own approval", map[string]any{"verdict": "approve"}, "APPROVE", "bema-review-bot[bot]", "bema-review-bot[bot]", false},
+		{"low security note remains a gate failure", map[string]any{"verdict": "comment", "coverage_gaps": []any{}, "findings": []any{map[string]any{"severity": "low", "category": "security"}}}, "COMMENT", "bema-review-bot[bot]", "engineer-bot[bot]", false},
+		{"low correctness note remains a gate failure", map[string]any{"verdict": "comment", "coverage_gaps": []any{}, "findings": []any{map[string]any{"severity": "low", "category": "correctness"}}}, "COMMENT", "bema-review-bot[bot]", "engineer-bot[bot]", false},
+		{"low reliability note remains a gate failure", map[string]any{"verdict": "comment", "coverage_gaps": []any{}, "findings": []any{map[string]any{"severity": "low", "category": "reliability"}}}, "COMMENT", "bema-review-bot[bot]", "engineer-bot[bot]", false},
+		{"low performance note remains a gate failure", map[string]any{"verdict": "comment", "coverage_gaps": []any{}, "findings": []any{map[string]any{"severity": "low", "category": "performance"}}}, "COMMENT", "bema-review-bot[bot]", "engineer-bot[bot]", false},
+		{"low test coverage note remains a gate failure", map[string]any{"verdict": "comment", "coverage_gaps": []any{}, "findings": []any{map[string]any{"severity": "low", "category": "test_coverage"}}}, "COMMENT", "bema-review-bot[bot]", "engineer-bot[bot]", false},
+		{"comment without findings remains a gate failure", map[string]any{"verdict": "comment", "coverage_gaps": []any{}, "findings": []any{}}, "COMMENT", "bema-review-bot[bot]", "engineer-bot[bot]", false},
+		{"comment without coverage declaration remains a gate failure", map[string]any{"verdict": "comment", "findings": []any{map[string]any{"severity": "low", "category": "maintainability"}}}, "COMMENT", "bema-review-bot[bot]", "engineer-bot[bot]", false},
+		{"coverage gap remains a gate failure", map[string]any{"verdict": "comment", "coverage_gaps": []any{"Run a missing regression test."}, "findings": []any{}}, "COMMENT", "bema-review-bot[bot]", "engineer-bot[bot]", false},
+		{"requested changes remain a gate failure", map[string]any{"verdict": "request_changes"}, "REQUEST_CHANGES", "bema-review-bot[bot]", "engineer-bot[bot]", false},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := codeReviewPassesExactSHAGate(testCase.review, testCase.event, testCase.reviewer, testCase.author); got != testCase.want {
+				t.Fatalf("gate eligibility = %v, want %v", got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestPublishGitHubExactSHAReviewCheckSucceedsOnlyForSafeIndependentOutcome(t *testing.T) {
 	head := strings.Repeat("b", 40)
 	publication := GitHubCodeReviewPublication{
 		Repository: "itbem/example", PullRequest: 42, HeadSHA: head, SubjectSHA256: strings.Repeat("a", 64),
-		PayloadSHA256: strings.Repeat("c", 64), Verdict: "approve", Event: "APPROVE", ReviewID: 77,
+		PayloadSHA256: strings.Repeat("c", 64), Verdict: "approve", Event: "APPROVE", ReviewGatePassed: true, ReviewID: 77,
 		ReviewURL: "https://github.com/itbem/example/pull/42#pullrequestreview-77", ReviewerActor: "bema-review-bot[bot]", AuthorActor: "engineer-bot[bot]",
 	}
 	writes := 0

@@ -59,7 +59,9 @@ not a hard-coded runtime assumption.
 2. Produce a visible plan, dependency DAG, risks, expected files, tests and
    release/recovery route before changing code.
 3. Before every code-reading, implementation, or QA task, fetch/prune each
-   configured managed checkout and fast-forward only its clean configured
+   configured GitHub checkout through the dedicated read-only Source App
+   (never SSH, a PAT, a credential helper or public-repository fallback), and
+   fast-forward only its clean configured
    default branch. Reject an advanced, divergent, dirty, or unpinned source;
    then create task-specific branches/worktrees from the exact frozen remote
    SHA (never an ambient local `HEAD`) and implement the smallest coherent

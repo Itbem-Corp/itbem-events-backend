@@ -96,11 +96,12 @@ func TestDoctorPublicationReadinessRequiresRoleSpecificGitHubAppConfiguration(t 
 	}
 }
 
-func TestGitHubAuthProbeIsRequiredOnlyForPublishingRolesAndRedactsFailures(t *testing.T) {
+func TestGitHubAuthProbeRequiresPublicationOrRegisteredGitHubSourceAndRedactsFailures(t *testing.T) {
 	engineer := automationagent.RuntimeConfig{WorkerConfig: automationagent.WorkerConfig{Role: agentwork.RolePrincipalEngineer, Lane: agentwork.LaneEngineering}}
 	called := false
-	report, err := githubAuthProbeReport(context.Background(), engineer, func(string) string {
-		t.Fatal("non-publishing probe read GitHub credentials")
+	lookedUp := make([]string, 0, 4)
+	report, err := githubAuthProbeReport(context.Background(), engineer, func(name string) string {
+		lookedUp = append(lookedUp, name)
 		return ""
 	}, func(context.Context, automationagent.GitHubAppConfig) error {
 		called = true
@@ -108,6 +109,11 @@ func TestGitHubAuthProbeIsRequiredOnlyForPublishingRolesAndRedactsFailures(t *te
 	})
 	if err != nil || called || report["ready"] != true || report["status"] != "not_required" || report["network_checks_made"] != false {
 		t.Fatalf("non-publishing GitHub probe = %#v, called=%v, err=%v", report, called, err)
+	}
+	for _, name := range lookedUp {
+		if strings.HasPrefix(name, "ITBEM_GITHUB_APP_") || strings.HasPrefix(name, "ITBEM_GITHUB_INSTALLATION_") {
+			t.Fatalf("non-publishing, unregistered engineer probe read publication credential %q", name)
+		}
 	}
 
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -144,5 +150,55 @@ func TestGitHubAuthProbeIsRequiredOnlyForPublishingRolesAndRedactsFailures(t *te
 	})
 	if err == nil || strings.Contains(err.Error(), "must-never-appear") {
 		t.Fatalf("GitHub probe did not redact remote failure: %v", err)
+	}
+
+	registry, marshalErr := json.Marshal(map[string]automationagent.WorkspaceConfig{"service": {
+		Path: t.TempDir(), RepositoryURL: "https://github.com/acme/service.git", BaseBranch: "main",
+		Capabilities: []string{automationagent.WorkspaceCapabilityReadRepository, automationagent.WorkspaceCapabilityFetchRemote},
+	}})
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	sourceLookup := func(name string) string {
+		values := map[string]string{
+			"ITBEM_AI_WORKSPACES_JSON":             string(registry),
+			"ITBEM_GITHUB_SOURCE_APP_ID":           "54321",
+			"ITBEM_GITHUB_SOURCE_INSTALLATION_IDS": "98765",
+			"ITBEM_GITHUB_SOURCE_APP_PRIVATE_KEY":  privatePEM,
+		}
+		return values[name]
+	}
+	verifiedInstallations = nil
+	report, err = githubAuthProbeReport(context.Background(), engineer, sourceLookup, func(_ context.Context, config automationagent.GitHubAppConfig) error {
+		if config.AppID != "54321" {
+			t.Fatalf("source probe used the wrong GitHub App identity: %#v", config)
+		}
+		verifiedInstallations = append(verifiedInstallations, config.InstallationID)
+		return nil
+	})
+	if err != nil || report["source_required"] != true || report["installation_count"] != 1 || strings.Join(verifiedInstallations, ",") != "98765" {
+		t.Fatalf("registered GitHub source probe = %#v, installations=%#v, err=%v", report, verifiedInstallations, err)
+	}
+	if _, err := githubAuthProbeReport(context.Background(), engineer, func(name string) string {
+		if name == "ITBEM_AI_WORKSPACES_JSON" {
+			return string(registry)
+		}
+		return ""
+	}, func(context.Context, automationagent.GitHubAppConfig) error { return nil }); err == nil || strings.Contains(err.Error(), privatePEM) {
+		t.Fatalf("missing Source App was not rejected safely: %v", err)
+	}
+	if _, err := githubAuthProbeReport(context.Background(), reviewer, func(name string) string {
+		values := map[string]string{
+			"ITBEM_AI_WORKSPACES_JSON":             string(registry),
+			"ITBEM_GITHUB_SOURCE_APP_ID":           "12345",
+			"ITBEM_GITHUB_SOURCE_INSTALLATION_IDS": "98765",
+			"ITBEM_GITHUB_SOURCE_APP_PRIVATE_KEY":  privatePEM,
+			"ITBEM_GITHUB_APP_ID":                  "12345",
+			"ITBEM_GITHUB_INSTALLATION_IDS":        "67890",
+			"ITBEM_GITHUB_APP_PRIVATE_KEY":         privatePEM,
+		}
+		return values[name]
+	}, func(context.Context, automationagent.GitHubAppConfig) error { return nil }); err == nil || !strings.Contains(err.Error(), "distinct identities") {
+		t.Fatalf("Source and publication Apps were allowed to share an identity: %v", err)
 	}
 }
