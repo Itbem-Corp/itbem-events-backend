@@ -2372,7 +2372,7 @@ func codeReviewPublicationForTask(task *models.AutomationTask, raw json.RawMessa
 			return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review approval is not independent")
 		}
 	case "REQUEST_CHANGES":
-		if verdict != "request_changes" || checkConclusion != "failure" {
+		if verdict != "request_changes" || execution.ReviewGatePassed || checkConclusion != "failure" {
 			return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review event contradicts its verdict")
 		}
 	case "COMMENT":
