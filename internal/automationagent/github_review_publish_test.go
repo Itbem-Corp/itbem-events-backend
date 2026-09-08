@@ -171,6 +171,66 @@ func TestPublishGitHubCodeReviewNeverSelfApproves(t *testing.T) {
 	}
 }
 
+func TestPublishGitHubCodeReviewSummarizesPassingAdvisoryFindings(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	key := testGitHubAppKey(t)
+	boundary, err := ParseCodeReviewInput(validCodeReviewInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundary, err = BindCodeReviewRemoteTarget(boundary, 42, 67890)
+	if err != nil {
+		t.Fatal(err)
+	}
+	review, err := ParseCodeReview(`{"summary":"One advisory improvement remains.","verdict":"comment","review_scope":["review publication"],"findings":[{"id":"advisory-summary","severity":"low","category":"maintainability","title":"Use a summary instead of an inline thread","file":"controllers/orders.go","line_start":42,"line_end":45,"evidence":"The protected repository requires conversations to be resolved.","evidence_quote":"line45","recommendation":"Keep this non-blocking note in the review summary.","confidence":0.91}],"test_plan":["Verify the review has no inline comments."],"coverage_gaps":[]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var publishedCheck githubRemoteCheckRun
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == "/app":
+			_ = json.NewEncoder(response).Encode(map[string]string{"slug": "bema-review-bot"})
+		case request.Method == http.MethodGet && request.URL.Path == "/repos/itbem/example/installation":
+			_ = json.NewEncoder(response).Encode(map[string]int64{"id": 67890})
+		case request.Method == http.MethodPost && request.URL.Path == "/app/installations/67890/access_tokens":
+			response.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(response).Encode(map[string]any{"token": "review-token", "expires_at": now.Add(time.Hour)})
+		case request.Method == http.MethodGet && request.URL.Path == "/repos/itbem/example/pulls/42":
+			_ = json.NewEncoder(response).Encode(map[string]any{"state": "open", "head": map[string]string{"sha": boundary.HeadSHA}, "user": map[string]string{"login": "engineer-bot[bot]"}})
+		case request.Method == http.MethodGet && request.URL.Path == "/repos/itbem/example/pulls/42/reviews":
+			_ = json.NewEncoder(response).Encode([]any{})
+		case request.Method == http.MethodPost && request.URL.Path == "/repos/itbem/example/pulls/42/reviews":
+			var payload githubReviewCreatePayload
+			_ = json.NewDecoder(request.Body).Decode(&payload)
+			if payload.Event != "COMMENT" || len(payload.Comments) != 0 || !strings.Contains(payload.Body, "Non-blocking findings are summarized below") || !strings.Contains(payload.Body, "controllers/orders.go:45") {
+				t.Fatalf("passing advisory finding opened a blocking review thread: %#v", payload)
+			}
+			published := githubRemoteReview{ID: 79, State: "COMMENTED", Body: payload.Body, CommitID: payload.CommitID, HTMLURL: "https://github.com/itbem/example/pull/42#pullrequestreview-79", Submitted: now.Format(time.RFC3339)}
+			published.User.Login = "bema-review-bot[bot]"
+			_ = json.NewEncoder(response).Encode(published)
+		case request.Method == http.MethodGet && request.URL.Path == "/repos/itbem/example/commits/"+boundary.HeadSHA+"/check-runs":
+			_ = json.NewEncoder(response).Encode(map[string]any{"total_count": 0, "check_runs": []any{}})
+		case request.Method == http.MethodPost && request.URL.Path == "/repos/itbem/example/check-runs":
+			var payload githubCheckRunPayload
+			_ = json.NewDecoder(request.Body).Decode(&payload)
+			if payload.Conclusion != "success" {
+				t.Fatalf("safe advisory finding did not pass the exact-SHA check: %#v", payload)
+			}
+			publishedCheck = remoteCheckFromPayload(91, payload)
+			_ = json.NewEncoder(response).Encode(publishedCheck)
+		default:
+			t.Fatalf("unexpected GitHub request: %s %s", request.Method, request.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	publication, err := PublishGitHubCodeReview(context.Background(), boundary, review, githubReviewTestLookup(t, key, server.URL), false)
+	if err != nil || publication.Event != "COMMENT" || !publication.ReviewGatePassed || publication.CheckConclusion != "success" || publishedCheck.ID == 0 {
+		t.Fatalf("passing advisory publication was not preserved safely: %#v / %v", publication, err)
+	}
+}
+
 func remoteCheckFromPayload(id int64, payload githubCheckRunPayload) githubRemoteCheckRun {
 	check := githubRemoteCheckRun{
 		ID: id, Name: payload.Name, HeadSHA: payload.HeadSHA, ExternalID: payload.ExternalID,
