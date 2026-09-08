@@ -227,6 +227,8 @@ func TestCodeReviewPassesExactSHAGateAllowsOnlySafeIndependentOutcomes(t *testin
 		{"low reliability note remains a gate failure", map[string]any{"verdict": "comment", "coverage_gaps": []any{}, "findings": []any{map[string]any{"severity": "low", "category": "reliability"}}}, "COMMENT", "bema-review-bot[bot]", "engineer-bot[bot]", false},
 		{"low performance note remains a gate failure", map[string]any{"verdict": "comment", "coverage_gaps": []any{}, "findings": []any{map[string]any{"severity": "low", "category": "performance"}}}, "COMMENT", "bema-review-bot[bot]", "engineer-bot[bot]", false},
 		{"low test coverage note remains a gate failure", map[string]any{"verdict": "comment", "coverage_gaps": []any{}, "findings": []any{map[string]any{"severity": "low", "category": "test_coverage"}}}, "COMMENT", "bema-review-bot[bot]", "engineer-bot[bot]", false},
+		{"comment without findings remains a gate failure", map[string]any{"verdict": "comment", "coverage_gaps": []any{}, "findings": []any{}}, "COMMENT", "bema-review-bot[bot]", "engineer-bot[bot]", false},
+		{"comment without coverage declaration remains a gate failure", map[string]any{"verdict": "comment", "findings": []any{map[string]any{"severity": "low", "category": "maintainability"}}}, "COMMENT", "bema-review-bot[bot]", "engineer-bot[bot]", false},
 		{"coverage gap remains a gate failure", map[string]any{"verdict": "comment", "coverage_gaps": []any{"Run a missing regression test."}, "findings": []any{}}, "COMMENT", "bema-review-bot[bot]", "engineer-bot[bot]", false},
 		{"requested changes remain a gate failure", map[string]any{"verdict": "request_changes"}, "REQUEST_CHANGES", "bema-review-bot[bot]", "engineer-bot[bot]", false},
 	}
