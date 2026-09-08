@@ -138,7 +138,7 @@ class GitHubAppWebhookTests(unittest.TestCase):
     def test_private_key_accepts_one_inline_or_absolute_file_source(self) -> None:
         self.assertEqual(load_private_key(" inline-key ", ""), "inline-key")
         escaped = (
-            "-----BEGIN PRIVATE KEY-----\\n"
+            "-----BEGIN PRIVATE KEY-----\\n"  # gitleaks:allow — inert parser fixture
             "encoded-body\\n"
             "-----END PRIVATE KEY-----"
         )
