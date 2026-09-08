@@ -35,7 +35,11 @@ func TestGatewayLeaseIsConfidentialTamperEvidentAndIdentityBound(t *testing.T) {
 	if _, err := openGatewayLease(token, gatewayIdentity{Role: agentwork.RoleQA, Lane: agentwork.LaneQA}); err == nil {
 		t.Fatal("lease crossed its role/lane boundary")
 	}
-	tampered := token[:len(token)-1] + "A"
+	replacement := "A"
+	if strings.HasSuffix(token, replacement) {
+		replacement = "B"
+	}
+	tampered := token[:len(token)-1] + replacement
 	if _, err := openGatewayLease(tampered, identity); err == nil {
 		t.Fatal("tampered lease was accepted")
 	}
