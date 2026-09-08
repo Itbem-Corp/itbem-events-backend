@@ -550,6 +550,11 @@ func (input CodeReviewInput) AnnotatedSanitizedPatch() (string, error) {
 // review evidence and must not block an otherwise conclusive exact-SHA review.
 // The operation is deterministic and only derives from the immutable manifest.
 func NormalizeCodeReviewCoverage(review map[string]any, boundary CodeReviewInput) {
+	// Code review is intentionally a static, pre-CI activity. QA and required
+	// GitHub checks own executed-command evidence. A model cannot turn that
+	// expected separation into a review blocker by merely noting that no output
+	// was supplied in its frozen source packet.
+	review["coverage_gaps"] = withoutUnverifiableExecutionGaps(review["coverage_gaps"])
 	if !reviewNeedsCoverageGap(boundary) {
 		findings, _ := review["findings"].([]any)
 		gaps, _ := review["coverage_gaps"].([]any)
@@ -565,6 +570,23 @@ func NormalizeCodeReviewCoverage(review map[string]any, boundary CodeReviewInput
 	if strings.EqualFold(strings.TrimSpace(stringAny(review["verdict"])), "approve") {
 		review["verdict"] = "comment"
 	}
+}
+
+func withoutUnverifiableExecutionGaps(value any) []any {
+	gaps, _ := value.([]any)
+	result := make([]any, 0, len(gaps))
+	for _, raw := range gaps {
+		gap := strings.TrimSpace(stringAny(raw))
+		normalized := strings.ToLower(gap)
+		mentionsExecution := strings.Contains(normalized, "executed") && (strings.Contains(normalized, "test") || strings.Contains(normalized, "command") || strings.Contains(normalized, "check"))
+		mentionsOutput := strings.Contains(normalized, "output") || strings.Contains(normalized, "result")
+		mentionsAbsence := strings.Contains(normalized, "no executed") || strings.Contains(normalized, "not supplied") || strings.Contains(normalized, "not provided") || strings.Contains(normalized, "unavailable") || strings.Contains(normalized, "missing")
+		if mentionsExecution && mentionsOutput && mentionsAbsence {
+			continue
+		}
+		result = append(result, raw)
+	}
+	return result
 }
 
 func reviewNeedsCoverageGap(boundary CodeReviewInput) bool {

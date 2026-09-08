@@ -560,6 +560,7 @@ func TestCodeReviewPromptPinsBoundedStringArrayTypes(t *testing.T) {
 		"marker supplies the only valid side and line",
 		"never join lines, insert escapes, normalize whitespace, interpolate text, or reconstruct source",
 		"Routine test-plan steps are not coverage gaps",
+		"absence of executed command, test, lint, or manual-probe output is expected",
 		"fully contained in one supplied changed_line_ranges entry",
 	} {
 		if !strings.Contains(system, required) {

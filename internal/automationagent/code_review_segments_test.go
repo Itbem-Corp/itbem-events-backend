@@ -218,6 +218,14 @@ func TestAggregateCodeReviewSegmentsPreservesSafeBlockingOutcomeWhenASiblingIsBl
 	if err != nil || aggregate["verdict"] != "blocked" || len(aggregate["findings"].([]any)) != 0 || len(aggregate["coverage_gaps"].([]any)) < 2 {
 		t.Fatalf("a blocked aggregate must not turn low-only sibling observations into conclusive findings: %#v / %v", aggregate, err)
 	}
+	emptyComment, err := ParseCodeReview(`{"summary":"The exact segment is consistent.","verdict":"comment","review_scope":["implementation"],"findings":[],"test_plan":["Run the targeted guard regression test."],"coverage_gaps":[]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aggregate, err = AggregateCodeReviewSegments(input, segments, []map[string]any{emptyComment, blockingFinding})
+	if err != nil || aggregate["verdict"] != "request_changes" || len(aggregate["findings"].([]any)) != 1 {
+		t.Fatalf("an evidence-free comment must not weaken a blocking sibling: %#v / %v", aggregate, err)
+	}
 }
 
 func TestBoundedCodeReviewSegmentContextIsFairAndStrictlyCapped(t *testing.T) {

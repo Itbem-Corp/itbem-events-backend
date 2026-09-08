@@ -188,6 +188,11 @@ func TestNormalizeCodeReviewCoveragePromotesAnEmptyCommentOnlyWhenNoCoverageGapI
 			review:   `{"summary":"The shell change needs one environment check.","verdict":"comment","review_scope":["qualification script"],"findings":[],"test_plan":["Run the isolated qualification."],"coverage_gaps":["Confirm the target Docker version."]}`,
 			want:     "comment",
 		},
+		"missing pre-CI output is not a code-review gap": {
+			boundary: CodeReviewInput{ChangedFiles: []string{"scripts/qualify.sh"}},
+			review:   `{"summary":"The shell change is internally consistent.","verdict":"comment","review_scope":["qualification script"],"findings":[],"test_plan":["Run the isolated qualification."],"coverage_gaps":["No executed test output was supplied with this review segment; verify the new test passes before approving."]}`,
+			want:     "approve",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			review, err := ParseCodeReview(fixture.review)
