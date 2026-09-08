@@ -36,26 +36,25 @@ trap cleanup EXIT INT TERM
 # Docker Desktop can expose its CLI pipe before the Linux engine is actually
 # ready. A bare `docker run` may then block for a long time and make a local
 # qualification look like a queue or provider failure. Probe the engine with
-# a bounded, local-only command before any container is created. The process
-# being terminated is only this probe; it never touches an existing container.
+# a bounded, local-only command before any container is created. GNU timeout
+# waits for and reaps this direct probe, including after its kill grace period;
+# it never touches an existing container.
 require_docker_engine() {
-  docker version --format '{{.Server.Version}}' >/dev/null 2>&1 &
-  probe_pid=$!
-  probe_seconds=0
-  while kill -0 "$probe_pid" 2>/dev/null; do
-    if [ "$probe_seconds" -ge 15 ]; then
-      kill "$probe_pid" 2>/dev/null || true
-      wait "$probe_pid" 2>/dev/null || true
-      echo "Docker engine did not become ready within 15 seconds; start Docker Desktop and retry the isolated qualification." >&2
-      exit 1
-    fi
-    sleep 1
-    probe_seconds=$((probe_seconds + 1))
-  done
-  if ! wait "$probe_pid"; then
-    echo "Docker engine is unavailable; start Docker Desktop and retry the isolated qualification." >&2
+  if ! command -v timeout >/dev/null 2>&1; then
+    echo "The Linux timeout utility is required for a bounded Docker engine probe." >&2
     exit 1
   fi
+  probe_status=0
+  timeout --kill-after=1s 15s docker version --format '{{.Server.Version}}' >/dev/null 2>&1 || probe_status=$?
+  if [ "$probe_status" -eq 0 ]; then
+    return 0
+  fi
+  if [ "$probe_status" -eq 124 ] || [ "$probe_status" -eq 137 ]; then
+    echo "Docker engine did not become ready within 15 seconds; start Docker Desktop and retry the isolated qualification." >&2
+  else
+    echo "Docker engine is unavailable; start Docker Desktop and retry the isolated qualification." >&2
+  fi
+  exit 1
 }
 
 require_docker_engine

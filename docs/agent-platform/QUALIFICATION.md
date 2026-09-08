@@ -70,8 +70,9 @@ sh scripts/qualify-agent-platform-live-aws.sh
 
 This temporary staging fixture binds only to loopback, has no Docker socket,
 drops Linux capabilities, uses a read-only image filesystem, and is removed
-when the command exits. The script needs only the Docker CLI and reads the
-image pinned by version and digest from
+when the command exits. The Linux script requires the Docker CLI and GNU
+coreutils `timeout` for its bounded engine probe, and reads the image pinned
+by version and digest from
 `deploy/staging/aws-emulator.compose.yml`; it is test infrastructure only and
 does not replace S3 or SQS in production.
 
