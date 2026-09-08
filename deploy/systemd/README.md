@@ -57,10 +57,15 @@ sudoedit /etc/itbem-ai-agent/roles/release.env
 for lane in orchestration engineering review qa release; do
   sudo install -d -m 0710 -o root -g "itbem-agent-${lane}" "/etc/itbem-ai-agent/secrets/${lane}"
   sudo install -m 0640 -o root -g "itbem-agent-${lane}" "/secure/source/bema-source-bot-${lane}.pem" "/etc/itbem-ai-agent/secrets/${lane}/source-github-app.pem"
+  sudo stat -c '%a %U %G %n' "/etc/itbem-ai-agent/secrets/${lane}"
 done
 sudo install -m 0640 -o root -g itbem-agent-review /secure/source/bema-review-bot.pem /etc/itbem-ai-agent/secrets/review/github-app.pem
 sudo install -m 0640 -o root -g itbem-agent-release /secure/source/bema-delivery-bot.pem /etc/itbem-ai-agent/secrets/release/github-app.pem
 ```
+
+Each `stat` line must report mode `710`, owner `root`, the matching
+`itbem-agent-<lane>` group, and that lane's secret directory. Stop if any lane
+differs; do not compensate by loosening permissions.
 
 The PEM does not encode its GitHub App ID. For every lane, set the matching
 `ITBEM_GITHUB_SOURCE_APP_ID`, installation allow-list and

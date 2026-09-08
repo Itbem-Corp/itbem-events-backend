@@ -46,7 +46,7 @@ for lane in orchestration engineering review qa release; do
   fi
   install -d -m 0700 -o "$account" -g "$account" "/var/lib/itbem-ai-agent/$lane"
   install -d -m 0700 -o "$account" -g "$account" "/srv/itbem-agent-workspaces/$lane"
-  install -d -m 0750 -o root -g "$account" "/etc/itbem-ai-agent/secrets/$lane"
+  install -d -m 0710 -o root -g "$account" "/etc/itbem-ai-agent/secrets/$lane"
   if [ ! -e "/etc/itbem-ai-agent/roles/$lane.env" ]; then
     install -m 0600 -o root -g root "$asset_dir/roles/$lane.env.example" "/etc/itbem-ai-agent/roles/$lane.env"
   fi

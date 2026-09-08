@@ -138,7 +138,7 @@ func TestSystemdRoleFilesBindExactLaneAndSeparatePublicationSecrets(t *testing.T
 
 func TestSystemdInstallerStagesButNeverActivatesServices(t *testing.T) {
 	installer := systemdAsset(t, "install.sh")
-	for _, required := range []string{"usage: install.sh <approved-sha256> /path/to/reviewed/itbem-ai-agent", "approved-sha256 must be a lowercase SHA-256 digest", "reviewed binary SHA-256 does not match the approved release digest", "useradd --system", "install -m 0600", "install -m 0644 \"$asset_dir/itbem-ai-agent-doctor@.service\"", "install -d -m 0711 -o root -g root /srv/itbem-agent-workspaces", "install -d -m 0700 -o \"$account\" -g \"$account\" \"/srv/itbem-agent-workspaces/$lane\"", "systemctl daemon-reload"} {
+	for _, required := range []string{"usage: install.sh <approved-sha256> /path/to/reviewed/itbem-ai-agent", "approved-sha256 must be a lowercase SHA-256 digest", "reviewed binary SHA-256 does not match the approved release digest", "useradd --system", "install -m 0600", "install -m 0644 \"$asset_dir/itbem-ai-agent-doctor@.service\"", "install -d -m 0711 -o root -g root /srv/itbem-agent-workspaces", "install -d -m 0700 -o \"$account\" -g \"$account\" \"/srv/itbem-agent-workspaces/$lane\"", "install -d -m 0710 -o root -g \"$account\" \"/etc/itbem-ai-agent/secrets/$lane\"", "systemctl daemon-reload"} {
 		if !strings.Contains(installer, required) {
 			t.Fatalf("installer lost %q", required)
 		}
@@ -146,6 +146,25 @@ func TestSystemdInstallerStagesButNeverActivatesServices(t *testing.T) {
 	for _, prohibited := range []string{"systemctl start", "systemctl enable", "enable --now", "chmod 777", "install -d -m 0770", "usermod -a -G itbem-agent-workspaces"} {
 		if strings.Contains(installer, prohibited) {
 			t.Fatalf("installer unexpectedly activates or weakens a service: %q", prohibited)
+		}
+	}
+}
+
+func TestSystemdSourceAppSecretInstallationMatchesDocumentedLaneBoundary(t *testing.T) {
+	installer := systemdAsset(t, "install.sh")
+	const secretDirectory = "install -d -m 0710 -o root -g \"$account\" \"/etc/itbem-ai-agent/secrets/$lane\""
+	if strings.Index(installer, "for lane in orchestration engineering review qa release; do") < 0 || !strings.Contains(installer, secretDirectory) {
+		t.Fatal("installer no longer creates every Source App secret directory with its exact lane group and non-listable mode")
+	}
+	readme := systemdAsset(t, "README.md")
+	for _, required := range []string{
+		"for lane in orchestration engineering review qa release; do",
+		"sudo install -d -m 0710 -o root -g \"itbem-agent-${lane}\" \"/etc/itbem-ai-agent/secrets/${lane}\"",
+		"sudo stat -c '%a %U %G %n' \"/etc/itbem-ai-agent/secrets/${lane}\"",
+		"Each `stat` line must report mode `710`, owner `root`, the matching",
+	} {
+		if !strings.Contains(readme, required) {
+			t.Fatalf("source-App installation guidance lost %q", required)
 		}
 	}
 }
