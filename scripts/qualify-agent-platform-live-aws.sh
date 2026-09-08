@@ -6,6 +6,7 @@ repository_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 compose_file="$repository_root/deploy/staging/aws-emulator.compose.yml"
 emulator_port=${ITBEM_AWS_EMULATOR_PORT:-14566}
 container_name="itbem-agent-qualification-$$"
+container_may_exist=0
 emulator_image=$(awk '$1 == "image:" { print $2; exit }' "$compose_file" | tr -d '\r')
 
 case "$emulator_port" in
@@ -27,10 +28,43 @@ case "$emulator_image" in
 esac
 
 cleanup() {
+  [ "$container_may_exist" -eq 1 ] || return 0
   docker rm -f "$container_name" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
 
+# Docker Desktop can expose its CLI pipe before the Linux engine is actually
+# ready. A bare `docker run` may then block for a long time and make a local
+# qualification look like a queue or provider failure. Probe the engine with
+# a bounded, local-only command before any container is created. The process
+# being terminated is only this probe; it never touches an existing container.
+require_docker_engine() {
+  docker version --format '{{.Server.Version}}' >/dev/null 2>&1 &
+  probe_pid=$!
+  probe_seconds=0
+  while kill -0 "$probe_pid" 2>/dev/null; do
+    if [ "$probe_seconds" -ge 15 ]; then
+      kill "$probe_pid" 2>/dev/null || true
+      wait "$probe_pid" 2>/dev/null || true
+      echo "Docker engine did not become ready within 15 seconds; start Docker Desktop and retry the isolated qualification." >&2
+      exit 1
+    fi
+    sleep 1
+    probe_seconds=$((probe_seconds + 1))
+  done
+  if ! wait "$probe_pid"; then
+    echo "Docker engine is unavailable; start Docker Desktop and retry the isolated qualification." >&2
+    exit 1
+  fi
+}
+
+require_docker_engine
+
+# Mark immediately before the create attempt, rather than after it succeeds:
+# Docker can create a named container and still return an error while setting
+# it up. The preflight above has already proven the engine responsive, so the
+# trap can safely remove that possible partial container.
+container_may_exist=1
 docker run -d \
   --name "$container_name" \
   --read-only \
