@@ -229,6 +229,7 @@ func validateReadOnlyFixturePaths(paths []string) error {
 }
 
 var gitBranchName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,126}$`)
+var workspaceSSHHostPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$`)
 
 func validateWorkspaceBase(repositoryURL, baseBranch string) error {
 	if strings.ContainsAny(repositoryURL, "\x00\r\n") {
@@ -884,7 +885,63 @@ func parseGitAheadBehind(raw string) (localAhead, remoteAhead int) {
 // by the delivery control plane when a registered workspace is attached to a
 // project. It never contacts a remote, fetches, pulls, or returns a diff.
 func ReadWorkspaceGitState(workspace Workspace) WorkspaceGitState {
-	return workspaceGitState(workspace.Root)
+	state := workspaceGitState(workspace.Root)
+	if !state.Available || state.GitHubRepository != "" {
+		return state
+	}
+	// A developer may use an SSH Host alias (for example github.com-work) in
+	// their local Git configuration. That alias is deliberately not accepted as
+	// proof that an arbitrary network endpoint is GitHub. It can, however, be
+	// bound to the operator-owned registry only when the actual origin is the
+	// exact registered remote. This restores the Vault identity used for local
+	// planning without widening publication: publication still requires the
+	// canonical GitHub App checkpoint and its independent remote validation.
+	if repository, err := operatorRegisteredGitHubRepository(workspace); err == nil {
+		state.GitHubRepository = repository.Owner + "/" + repository.Name
+	}
+	return state
+}
+
+func operatorRegisteredGitHubRepository(workspace Workspace) (githubRepository, error) {
+	registered := strings.TrimSpace(workspace.Config.RepositoryURL)
+	if registered == "" {
+		return githubRepository{}, fmt.Errorf("workspace has no operator-registered remote")
+	}
+	origin, err := runLocal(context.Background(), workspace.Root, 15*time.Second, "", "git", "remote", "get-url", "origin")
+	if err != nil || origin.ExitCode != 0 || !sameOperatorRegisteredRemote(origin.Output, registered) {
+		return githubRepository{}, fmt.Errorf("workspace origin does not match its operator-registered remote")
+	}
+	if repository, parseErr := parseGitHubRemote(registered); parseErr == nil {
+		return repository, nil
+	}
+	return parseOperatorSSHGitHubAlias(registered)
+}
+
+// sameOperatorRegisteredRemote intentionally does not canonicalize SSH aliases
+// to HTTPS URLs. The registry's remote is the operator's explicit trust
+// binding; accepting a different transport or host would let a task attach a
+// Vault identity to a checkout that the operator did not register.
+func sameOperatorRegisteredRemote(actual, registered string) bool {
+	canonical := func(value string) string {
+		return strings.TrimSuffix(strings.TrimSpace(value), "/")
+	}
+	return canonical(actual) != "" && canonical(actual) == canonical(registered)
+}
+
+// parseOperatorSSHGitHubAlias extracts only the owner/repository identity from
+// the standard git@host:owner/repository.git SSH form. The host can be an SSH
+// alias solely because repository_url is operator-owned and must exactly match
+// origin above. This function never authorizes a network request or a push.
+func parseOperatorSSHGitHubAlias(value string) (githubRepository, error) {
+	value = strings.TrimSpace(value)
+	if !strings.HasPrefix(value, "git@") {
+		return githubRepository{}, fmt.Errorf("operator remote is not a supported SSH alias")
+	}
+	parts := strings.SplitN(strings.TrimPrefix(value, "git@"), ":", 2)
+	if len(parts) != 2 || !workspaceSSHHostPattern.MatchString(parts[0]) || strings.ContainsAny(parts[1], "?#@\\\r\n") {
+		return githubRepository{}, fmt.Errorf("operator remote is not a safe SSH alias")
+	}
+	return parseGitHubRemote("https://github.com/" + parts[1])
 }
 
 // FetchWorkspaceRemote refreshes only origin's remote refs for a registered

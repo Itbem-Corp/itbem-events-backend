@@ -420,6 +420,49 @@ func TestWorkspaceGitStateIsSanitizedAndDetectsLocalChanges(t *testing.T) {
 	}
 }
 
+func TestReadWorkspaceGitStateBindsOnlyTheOperatorRegisteredSSHAlias(t *testing.T) {
+	root := t.TempDir()
+	for _, command := range [][]string{{"git", "init"}, {"git", "config", "user.email", "test@example.invalid"}, {"git", "config", "user.name", "ITBEM Test"}} {
+		result, err := runLocal(context.Background(), root, commandTimeout, "", command[0], command[1:]...)
+		if err != nil || result.ExitCode != 0 {
+			t.Fatalf("git setup failed: %#v / %v", result, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("initial"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range [][]string{{"git", "add", "README.md"}, {"git", "commit", "-m", "initial"}, {"git", "remote", "add", "origin", "git@github.com-work:Itbem-Corp/itbem-events-backend.git"}} {
+		result, err := runLocal(context.Background(), root, commandTimeout, "", command[0], command[1:]...)
+		if err != nil || result.ExitCode != 0 {
+			t.Fatalf("git setup failed: %#v / %v", result, err)
+		}
+	}
+	workspace := Workspace{ID: "demo", Root: root, Config: WorkspaceConfig{RepositoryURL: "git@github.com-work:Itbem-Corp/itbem-events-backend.git", BaseBranch: "main"}}
+	if state := ReadWorkspaceGitState(workspace); state.GitHubRepository != "Itbem-Corp/itbem-events-backend" {
+		t.Fatalf("operator-registered SSH alias was not bound safely: %#v", state)
+	}
+	changed, err := runLocal(context.Background(), root, commandTimeout, "", "git", "remote", "set-url", "origin", "git@github.com-work:Itbem-Corp/another-repository.git")
+	if err != nil || changed.ExitCode != 0 {
+		t.Fatalf("git remote update failed: %#v / %v", changed, err)
+	}
+	if state := ReadWorkspaceGitState(workspace); state.GitHubRepository != "" {
+		t.Fatalf("mismatched origin must not inherit operator repository identity: %#v", state)
+	}
+}
+
+func TestSameOperatorRegisteredRemoteRequiresTheExactConfiguredTransport(t *testing.T) {
+	alias := "git@github.com-work:Itbem-Corp/itbem-events-backend.git"
+	if !sameOperatorRegisteredRemote(alias, alias+"/") {
+		t.Fatal("a cosmetic trailing slash should not invalidate the operator remote binding")
+	}
+	if sameOperatorRegisteredRemote(alias, "https://github.com/Itbem-Corp/itbem-events-backend.git") {
+		t.Fatal("an SSH alias must not be treated as an unregistered HTTPS remote")
+	}
+	if sameOperatorRegisteredRemote(alias, "git@github.com-work:Itbem-Corp/another-repository.git") {
+		t.Fatal("a different registered repository must not inherit the Vault identity")
+	}
+}
+
 func TestFetchWorkspaceRemoteUpdatesRefsWithoutChangingCheckout(t *testing.T) {
 	remote := filepath.Join(t.TempDir(), "origin.git")
 	root := t.TempDir()
