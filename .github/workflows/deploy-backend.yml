@@ -101,6 +101,9 @@ jobs:
           PYTHONPATH: scripts
         run: python3 -m unittest scripts/tests/test_verify_alerting.py
 
+      - name: Test Linux agent release artifact contract
+        run: python3 -m unittest scripts/tests/test_agent_release_workflow.py
+
       # The Linux execution host never builds from an ambient checkout. Publish
       # a digest-bound binary only after this exact revision passed every
       # validation above; the host installer verifies this manifest before it
