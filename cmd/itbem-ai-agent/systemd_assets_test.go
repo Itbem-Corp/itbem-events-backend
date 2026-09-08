@@ -90,7 +90,10 @@ func TestSystemdRoleFilesBindExactLaneAndSeparatePublicationSecrets(t *testing.T
 	}
 	for file, identity := range roles {
 		body := systemdAsset(t, "roles", file+".env.example")
-		for _, required := range []string{"ITBEM_AI_ROLE=" + identity[0], "ITBEM_AI_QUEUE_LANE=" + identity[1], "ITBEM_AI_TRANSPORT=gateway", "ITBEM_AI_GATEWAY_TOKEN=", "ITBEM_AI_WORKSPACES_JSON={}"} {
+		for _, required := range []string{
+			"ITBEM_AI_ROLE=" + identity[0], "ITBEM_AI_QUEUE_LANE=" + identity[1], "ITBEM_AI_TRANSPORT=gateway", "ITBEM_AI_GATEWAY_TOKEN=", "ITBEM_AI_WORKSPACES_JSON={}",
+			"ITBEM_GITHUB_SOURCE_APP_ID=", "ITBEM_GITHUB_SOURCE_INSTALLATION_IDS=", "ITBEM_GITHUB_SOURCE_APP_PRIVATE_KEY_FILE=/etc/itbem-ai-agent/secrets/" + file + "/source-github-app.pem",
+		} {
 			if !strings.Contains(body, required) {
 				t.Fatalf("%s role file lost %q", file, required)
 			}

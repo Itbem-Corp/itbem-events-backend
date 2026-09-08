@@ -221,6 +221,7 @@ func TestCodeReviewPassesExactSHAGateAllowsOnlySafeIndependentOutcomes(t *testin
 		{"independent approval", map[string]any{"verdict": "approve"}, "APPROVE", "bema-review-bot[bot]", "engineer-bot[bot]", true},
 		{"low maintainability note", lowMaintainability, "COMMENT", "bema-review-bot[bot]", "engineer-bot[bot]", true},
 		{"blank reviewer cannot pass", map[string]any{"verdict": "approve"}, "APPROVE", "", "engineer-bot[bot]", false},
+		{"blank author cannot pass", map[string]any{"verdict": "approve"}, "APPROVE", "bema-review-bot[bot]", "", false},
 		{"author cannot pass own approval", map[string]any{"verdict": "approve"}, "APPROVE", "bema-review-bot[bot]", "bema-review-bot[bot]", false},
 		{"low security note remains a gate failure", map[string]any{"verdict": "comment", "coverage_gaps": []any{}, "findings": []any{map[string]any{"severity": "low", "category": "security"}}}, "COMMENT", "bema-review-bot[bot]", "engineer-bot[bot]", false},
 		{"low correctness note remains a gate failure", map[string]any{"verdict": "comment", "coverage_gaps": []any{}, "findings": []any{map[string]any{"severity": "low", "category": "correctness"}}}, "COMMENT", "bema-review-bot[bot]", "engineer-bot[bot]", false},

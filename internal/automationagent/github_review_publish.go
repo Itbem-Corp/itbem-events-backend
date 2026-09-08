@@ -254,7 +254,7 @@ func PublishGitHubCodeReview(ctx context.Context, boundary CodeReviewInput, revi
 // approval, or a concrete low maintainability comment with no evidence gap,
 // can pass. The low comment stays attached to the PR for follow-up.
 func codeReviewPassesExactSHAGate(review map[string]any, event, reviewerActor, authorActor string) bool {
-	if strings.TrimSpace(reviewerActor) == "" || strings.EqualFold(reviewerActor, authorActor) {
+	if strings.TrimSpace(reviewerActor) == "" || strings.TrimSpace(authorActor) == "" || strings.EqualFold(reviewerActor, authorActor) {
 		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(stringAny(review["verdict"]))) {

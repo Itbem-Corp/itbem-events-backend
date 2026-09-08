@@ -2368,7 +2368,7 @@ func codeReviewPublicationForTask(task *models.AutomationTask, raw json.RawMessa
 	}
 	switch event {
 	case "APPROVE":
-		if verdict != "approve" || author == "" || strings.EqualFold(actor, author) || checkConclusion != "success" {
+		if verdict != "approve" || !execution.ReviewGatePassed || author == "" || strings.EqualFold(actor, author) || checkConclusion != "success" {
 			return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review approval is not independent")
 		}
 	case "REQUEST_CHANGES":
@@ -2393,7 +2393,7 @@ func codeReviewPublicationForTask(task *models.AutomationTask, raw json.RawMessa
 	checkRunID, checkRunURL := execution.CheckRunID, strings.TrimSpace(execution.CheckRunURL)
 	return models.AutomationCodeReviewPublication{
 		Repository: repository, PullRequest: execution.PullRequest, HeadSHA: strings.ToLower(execution.HeadSHA), PatchSHA256: strings.ToLower(execution.PatchSHA256),
-		SubjectSHA256: strings.ToLower(execution.SubjectSHA256), PayloadSHA256: strings.ToLower(execution.PayloadSHA256), Verdict: verdict, Event: event,
+		SubjectSHA256: strings.ToLower(execution.SubjectSHA256), PayloadSHA256: strings.ToLower(execution.PayloadSHA256), Verdict: verdict, Event: event, ReviewGatePassed: execution.ReviewGatePassed,
 		ReviewID: execution.ReviewID, ReviewURL: strings.TrimSpace(execution.ReviewURL), ReviewerActor: actor, AuthorActor: author, PublishedAt: execution.PublishedAt,
 		CheckRunID: &checkRunID, CheckRunURL: &checkRunURL, CheckName: &checkName, CheckConclusion: &checkConclusion,
 	}, nil

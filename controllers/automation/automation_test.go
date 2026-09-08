@@ -219,7 +219,7 @@ func TestCodeReviewPublicationForTaskRequiresExactIndependentGitHubEvidence(t *t
 		return automationagent.GitHubCodeReviewPublication{
 			SchemaVersion: 2, Repository: "itbem/backend", PullRequest: 42, HeadSHA: strings.Repeat("b", 40),
 			PatchSHA256: strings.Repeat("c", 64), SubjectSHA256: subject, PayloadSHA256: strings.Repeat("d", 64),
-			Verdict: "approve", Event: "APPROVE", ReviewID: 77,
+			Verdict: "approve", Event: "APPROVE", ReviewGatePassed: true, ReviewID: 77,
 			ReviewURL:     "https://github.com/itbem/backend/pull/42#pullrequestreview-77",
 			ReviewerActor: "reviewer-bot[bot]", AuthorActor: "engineer-bot[bot]", PublishedAt: time.Now().UTC(),
 			CheckRunID: 88, CheckRunURL: "https://github.com/itbem/backend/runs/88", CheckName: "Bema Review / exact-sha", CheckConclusion: "success",
@@ -236,12 +236,12 @@ func TestCodeReviewPublicationForTaskRequiresExactIndependentGitHubEvidence(t *t
 	nonBlockingComment.ReviewGatePassed, nonBlockingComment.CheckConclusion = true, "success"
 	raw, _ = json.Marshal(nonBlockingComment)
 	commentPublication, err := codeReviewPublicationForTask(task, raw)
-	if err != nil || commentPublication.Verdict != "comment" || commentPublication.Event != "COMMENT" || commentPublication.CheckConclusion == nil || *commentPublication.CheckConclusion != "success" {
+	if err != nil || !commentPublication.ReviewGatePassed || commentPublication.Verdict != "comment" || commentPublication.Event != "COMMENT" || commentPublication.CheckConclusion == nil || *commentPublication.CheckConclusion != "success" {
 		t.Fatalf("independent non-blocking exact-SHA comment was not persisted explicitly: %#v / %v", commentPublication, err)
 	}
 	missingGateClassification := newExecution()
 	missingGateClassification.Verdict, missingGateClassification.Event = "comment", "COMMENT"
-	missingGateClassification.CheckConclusion = "success"
+	missingGateClassification.ReviewGatePassed, missingGateClassification.CheckConclusion = false, "success"
 	raw, _ = json.Marshal(missingGateClassification)
 	if _, err := codeReviewPublicationForTask(task, raw); err == nil {
 		t.Fatal("a successful comment without the reviewer gate classification was accepted")
@@ -259,6 +259,9 @@ func TestCodeReviewPublicationForTaskRequiresExactIndependentGitHubEvidence(t *t
 		},
 		"self approval": func(_ *models.AutomationTask, value *automationagent.GitHubCodeReviewPublication) {
 			value.AuthorActor = value.ReviewerActor
+		},
+		"approval missing gate classification": func(_ *models.AutomationTask, value *automationagent.GitHubCodeReviewPublication) {
+			value.ReviewGatePassed = false
 		},
 		"wrong PR": func(_ *models.AutomationTask, value *automationagent.GitHubCodeReviewPublication) {
 			value.PullRequest = 43
