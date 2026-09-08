@@ -604,7 +604,7 @@ func codeReviewCoverageIsOnlySegmentNarration(value string) bool {
 	if len(sentences) == 0 {
 		return false
 	}
-	hasExplicitNoGap := false
+	hasOnlyScopeNarration := false
 	for _, sentence := range sentences {
 		sentence = strings.Join(strings.Fields(sentence), " ")
 		if sentence == "" {
@@ -614,19 +614,21 @@ func codeReviewCoverageIsOnlySegmentNarration(value string) bool {
 			sentence == "no gap within this segment" || sentence == "no gap in this segment" ||
 			sentence == "no gap for this segment" || sentence == "no coverage gap within this segment" ||
 			sentence == "no coverage gap in this segment" || sentence == "no coverage gap for this segment" {
-			hasExplicitNoGap = true
+			hasOnlyScopeNarration = true
 			continue
 		}
 		// Keep scope narration narrow. Any sentence outside this exact shape
 		// remains an advisory gap rather than being interpreted optimistically.
 		if strings.Contains(sentence, "segment") && strings.Contains(sentence, "carries") &&
 			!strings.Contains(sentence, "missing") && !strings.Contains(sentence, "required") &&
-			!strings.Contains(sentence, "requires") && !strings.Contains(sentence, "unavailable") {
+			!strings.Contains(sentence, "requires") && !strings.Contains(sentence, "unavailable") &&
+			!strings.Contains(sentence, "absent") && !strings.Contains(sentence, "not attached") {
+			hasOnlyScopeNarration = true
 			continue
 		}
 		return false
 	}
-	return hasExplicitNoGap
+	return hasOnlyScopeNarration
 }
 
 func reviewNeedsCoverageGap(boundary CodeReviewInput) bool {
