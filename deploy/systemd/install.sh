@@ -5,14 +5,30 @@ if [ "$(id -u)" -ne 0 ]; then
   echo "install.sh must run as root" >&2
   exit 1
 fi
-if [ "$#" -ne 1 ] || [ ! -x "$1" ]; then
-  echo "usage: install.sh /path/to/reviewed/itbem-ai-agent" >&2
+if [ "$#" -ne 2 ] || [ ! -x "$2" ]; then
+  echo "usage: install.sh <approved-sha256> /path/to/reviewed/itbem-ai-agent" >&2
   exit 1
 fi
 
-source_binary=$1
+expected_revision=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+case "$expected_revision" in
+  *[!0-9a-f]*|'')
+    echo "approved-sha256 must be a lowercase SHA-256 digest" >&2
+    exit 1
+    ;;
+esac
+if [ "${#expected_revision}" -ne 64 ]; then
+  echo "approved-sha256 must be a lowercase SHA-256 digest" >&2
+  exit 1
+fi
+
+source_binary=$2
 asset_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 revision=$(sha256sum "$source_binary" | awk '{print $1}')
+if [ "$revision" != "$expected_revision" ]; then
+  echo "reviewed binary SHA-256 does not match the approved release digest" >&2
+  exit 1
+fi
 release_dir=/opt/itbem-ai-agent/releases/$revision
 
 install -d -m 0755 "$release_dir" /opt/itbem-ai-agent /etc/itbem-ai-agent/roles /etc/itbem-ai-agent/disabled
