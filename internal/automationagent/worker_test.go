@@ -8,6 +8,8 @@ import (
 	"events-stocks/internal/qaevidence"
 	"events-stocks/internal/releasegate"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -232,6 +234,83 @@ func TestWorkerWritesEncryptedPrivateResultAndCallbacks(t *testing.T) {
 	}
 	if !strings.Contains(callback.updates[1].OutputRef, "/runs/"+callback.updates[1].RunID+"/result.json") {
 		t.Fatalf("execution callback must retain its immutable run result: %#v", callback.updates[1])
+	}
+}
+
+func TestWorkerFailsBeforeProviderWhenManagedWorkspaceAdvanced(t *testing.T) {
+	remoteRoot := t.TempDir()
+	remote := filepath.Join(remoteRoot, "origin.git")
+	seed := filepath.Join(t.TempDir(), "seed")
+	if err := os.MkdirAll(seed, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, setup := range [][]string{
+		{"git", "init", "--bare", remote},
+		{"git", "init", "-b", "main"},
+		{"git", "config", "user.email", "test@example.invalid"},
+		{"git", "config", "user.name", "ITBEM Test"},
+	} {
+		directory := seed
+		if len(setup) == 4 && setup[1] == "init" && setup[2] == "--bare" {
+			directory = remoteRoot
+		}
+		result, err := runLocal(context.Background(), directory, commandTimeout, "", setup[0], setup[1:]...)
+		if err != nil || result.ExitCode != 0 {
+			t.Fatalf("git setup failed: %#v / %v", result, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("initial\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range [][]string{{"git", "add", "README.md"}, {"git", "commit", "-m", "initial"}, {"git", "remote", "add", "origin", remote}, {"git", "push", "-u", "origin", "main"}} {
+		result, err := runLocal(context.Background(), seed, commandTimeout, "", command[0], command[1:]...)
+		if err != nil || result.ExitCode != 0 {
+			t.Fatalf("initial managed workspace setup failed: %#v / %v", result, err)
+		}
+	}
+	frozen := workspaceGitState(seed).HeadSHA
+	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("advanced\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range [][]string{{"git", "add", "README.md"}, {"git", "commit", "-m", "advance"}, {"git", "push", "origin", "main"}} {
+		result, err := runLocal(context.Background(), seed, commandTimeout, "", command[0], command[1:]...)
+		if err != nil || result.ExitCode != 0 {
+			t.Fatalf("managed base advance failed: %#v / %v", result, err)
+		}
+	}
+	workspaceRoot := filepath.Join(t.TempDir(), "managed", "service")
+	if err := os.MkdirAll(filepath.Dir(workspaceRoot), 0700); err != nil {
+		t.Fatal(err)
+	}
+	clone, err := runLocal(context.Background(), filepath.Dir(workspaceRoot), commandTimeout, "", "git", "clone", "--branch", "main", remote, workspaceRoot)
+	if err != nil || clone.ExitCode != 0 {
+		t.Fatalf("managed workspace clone failed: %#v / %v", clone, err)
+	}
+	registry, err := json.Marshal(map[string]any{"managed": map[string]any{
+		"path": workspaceRoot, "repository_url": remote, "base_branch": "main",
+		"capabilities": []string{WorkspaceCapabilityReadRepository, WorkspaceCapabilityFetchRemote},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ITBEM_AI_WORKSPACES_JSON", string(registry))
+	input, err := json.Marshal(TaskInput{Prompt: "Plan the scoped change", Delivery: json.RawMessage(`{"context_sources":[{"kind":"repository","reference":"workspace://managed","revision":"` + frozen + `"}]}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, callback, provider := &fakeStore{input: input}, &fakeCallback{}, &sequenceProvider{}
+	worker, err := NewWorker(WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"}, store, callback, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Process(context.Background(), validMessage()); err != nil {
+		t.Fatal(err)
+	}
+	if provider.calls != 0 || len(store.writes) != 0 {
+		t.Fatalf("stale managed context reached inference or request storage: calls=%d writes=%#v", provider.calls, store.writes)
+	}
+	if len(callback.updates) != 2 || callback.updates[1].Status != "failed" || !strings.Contains(callback.updates[1].ErrorMessage, "fetched origin has advanced") {
+		t.Fatalf("stale managed base was not surfaced before inference: %#v", callback.updates)
 	}
 }
 
