@@ -132,6 +132,27 @@ func TestAutomationPortfolioReviewProjectionRejectsForgedOrMismatchedIdentity(t 
 	}
 }
 
+func TestAutomationPortfolioReviewQueueKeepsValidReviewsWhenHistoricalRowsAreUnsafe(t *testing.T) {
+	now := time.Now().UTC()
+	valid := automationPortfolioReviewRow{
+		TaskID: uuid.Must(uuid.NewV4()), CorrelationID: "github-pr:itbem/example:42:" + strings.Repeat("b", 40),
+		Status: "failed", AttemptCount: 1, CreatedAt: now.Add(-time.Hour), UpdatedAt: now,
+	}
+	unsafe := valid
+	unsafe.TaskID = uuid.Must(uuid.NewV4())
+	unsafe.CorrelationID = "github-pr:../private:42:" + strings.Repeat("b", 40)
+
+	input := automationPortfolioBuildInput{ReviewQueue: []automationPortfolioReview{}}
+	appendAutomationPortfolioReviews(&input, []automationPortfolioReviewRow{unsafe, valid, unsafe})
+
+	if len(input.ReviewQueue) != 1 || input.ReviewQueue[0].TaskID != valid.TaskID {
+		t.Fatalf("valid review was hidden by an unsafe historical row: %#v", input.ReviewQueue)
+	}
+	if len(input.SummarySourcesUnavailable) != 1 || input.SummarySourcesUnavailable[0] != "review_queue" {
+		t.Fatalf("partial review queue was not made explicit: %#v", input.SummarySourcesUnavailable)
+	}
+}
+
 func TestAutomationPortfolioMembershipRequiresDeliveryView(t *testing.T) {
 	ownerID := uuid.Must(uuid.NewV4())
 	viewerID := uuid.Must(uuid.NewV4())
