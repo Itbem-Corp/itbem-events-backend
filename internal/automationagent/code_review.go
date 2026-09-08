@@ -581,7 +581,9 @@ func normalizedCodeReviewCoverageGaps(value any) []any {
 		// A segmented reviewer sometimes restates that another segment owns a
 		// concern and then explicitly says there is no gap here. That is scope
 		// narration, not missing evidence, so it cannot block the aggregate.
-		if strings.Contains(normalized, "no gap") || strings.Contains(normalized, "no coverage gap") {
+		// Do not use a broad substring match: a sentence such as "no gap until
+		// the missing contract is supplied" is still an actionable gap.
+		if codeReviewCoverageIsOnlySegmentNarration(normalized) {
 			continue
 		}
 		mentionsExecution := strings.Contains(normalized, "executed") && (strings.Contains(normalized, "test") || strings.Contains(normalized, "command") || strings.Contains(normalized, "check"))
@@ -593,6 +595,38 @@ func normalizedCodeReviewCoverageGaps(value any) []any {
 		result = append(result, raw)
 	}
 	return result
+}
+
+func codeReviewCoverageIsOnlySegmentNarration(value string) bool {
+	sentences := strings.FieldsFunc(value, func(character rune) bool {
+		return character == '.' || character == '!' || character == '?'
+	})
+	if len(sentences) == 0 {
+		return false
+	}
+	hasExplicitNoGap := false
+	for _, sentence := range sentences {
+		sentence = strings.Join(strings.Fields(sentence), " ")
+		if sentence == "" {
+			continue
+		}
+		if sentence == "no gap" || sentence == "no coverage gap" ||
+			sentence == "no gap within this segment" || sentence == "no gap in this segment" ||
+			sentence == "no gap for this segment" || sentence == "no coverage gap within this segment" ||
+			sentence == "no coverage gap in this segment" || sentence == "no coverage gap for this segment" {
+			hasExplicitNoGap = true
+			continue
+		}
+		// Keep scope narration narrow. Any sentence outside this exact shape
+		// remains an advisory gap rather than being interpreted optimistically.
+		if strings.Contains(sentence, "segment") && strings.Contains(sentence, "carries") &&
+			!strings.Contains(sentence, "missing") && !strings.Contains(sentence, "required") &&
+			!strings.Contains(sentence, "requires") && !strings.Contains(sentence, "unavailable") {
+			continue
+		}
+		return false
+	}
+	return hasExplicitNoGap
 }
 
 func reviewNeedsCoverageGap(boundary CodeReviewInput) bool {
