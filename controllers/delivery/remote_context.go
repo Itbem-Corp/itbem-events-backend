@@ -205,7 +205,7 @@ func FetchLocalWorkspaceRemoteRefs(c echo.Context) error {
 	if err != nil {
 		return conflict(c, "Local remote fetch unavailable", "The workspace is no longer registered or available on this control-plane host")
 	}
-	gitState, err := automationagent.FetchWorkspaceRemote(c.Request().Context(), workspace)
+	gitState, err := automationagent.FetchAuthorizedWorkspaceRemote(c.Request().Context(), workspace, os.Getenv)
 	if err != nil {
 		return conflict(c, "Local remote fetch rejected", "The workspace is not granted repository:fetch or its origin could not be fetched without interaction")
 	}

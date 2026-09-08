@@ -132,26 +132,59 @@ func main() {
 type githubInstallationVerifier func(context.Context, automationagent.GitHubAppConfig) error
 
 func githubAuthProbeReport(ctx context.Context, runtimeConfig automationagent.RuntimeConfig, lookup func(string) string, verify githubInstallationVerifier) (map[string]any, error) {
-	if !githubPublicationRequired(runtimeConfig) {
-		return map[string]any{"ready": true, "status": "not_required", "network_checks_made": false, "provider": "github_app"}, nil
-	}
-	config, err := automationagent.LoadGitHubAppConfig(lookup)
+	sourceRequired, err := automationagent.GitHubSourceAccessRequired(lookup)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("GitHub source workspace registry is invalid")
+	}
+	publicationRequired := githubPublicationRequired(runtimeConfig)
+	if !publicationRequired && !sourceRequired {
+		return map[string]any{"ready": true, "status": "not_required", "network_checks_made": false, "provider": "github_app"}, nil
 	}
 	if verify == nil {
 		return nil, fmt.Errorf("GitHub App installation verifier is unavailable")
 	}
 	verifiedInstallations := 0
+	var sourceConfig automationagent.GitHubAppConfig
+	if sourceRequired {
+		config, sourceErr := automationagent.LoadGitHubSourceAppConfig(lookup)
+		if sourceErr != nil {
+			return nil, fmt.Errorf("GitHub Source App is not configured")
+		}
+		count, verifyErr := verifyGitHubAppInstallations(ctx, config, verify)
+		if verifyErr != nil {
+			return nil, verifyErr
+		}
+		verifiedInstallations += count
+		sourceConfig = config
+	}
+	if publicationRequired {
+		config, publicationErr := automationagent.LoadGitHubAppConfig(lookup)
+		if publicationErr != nil {
+			return nil, fmt.Errorf("GitHub publication App is not configured")
+		}
+		if sourceRequired && strings.TrimSpace(config.AppID) == strings.TrimSpace(sourceConfig.AppID) {
+			return nil, fmt.Errorf("GitHub Source and publication Apps must use distinct identities")
+		}
+		count, verifyErr := verifyGitHubAppInstallations(ctx, config, verify)
+		if verifyErr != nil {
+			return nil, verifyErr
+		}
+		verifiedInstallations += count
+	}
+	return map[string]any{"ready": true, "status": "authenticated", "network_checks_made": true, "provider": "github_app", "installation_count": verifiedInstallations, "source_required": sourceRequired}, nil
+}
+
+func verifyGitHubAppInstallations(ctx context.Context, config automationagent.GitHubAppConfig, verify githubInstallationVerifier) (int, error) {
+	verifiedInstallations := 0
 	for _, installationID := range config.InstallationIDs {
 		candidate := config
 		candidate.InstallationID = installationID
 		if err := verify(ctx, candidate); err != nil {
-			return nil, fmt.Errorf("GitHub App installation authentication failed")
+			return 0, fmt.Errorf("GitHub App installation authentication failed")
 		}
 		verifiedInstallations++
 	}
-	return map[string]any{"ready": true, "status": "authenticated", "network_checks_made": true, "provider": "github_app", "installation_count": verifiedInstallations}, nil
+	return verifiedInstallations, nil
 }
 
 // syncWorkspaceReport is a local, explicit maintenance command. It deliberately
@@ -169,7 +202,7 @@ func syncWorkspaceReport(ctx context.Context, lookup func(string) string) (map[s
 	sort.Strings(ids)
 	results := make([]map[string]any, 0, len(ids))
 	for _, id := range ids {
-		state, syncErr := automationagent.SyncManagedWorkspace(ctx, workspaces[id])
+		state, syncErr := automationagent.SyncAuthorizedManagedWorkspace(ctx, workspaces[id], lookup)
 		if syncErr != nil {
 			return nil, fmt.Errorf("workspace %s: %w", id, syncErr)
 		}
@@ -229,9 +262,10 @@ func doctorReport(lookup func(string) string) (map[string]any, bool, error) {
 			"message": "Remote publication remains disabled. Plan, implementation and QA stay available behind their human gates.",
 		}
 	}
+	sourceAccess, sourceReady := doctorSourceAccess(lookup)
 	reviewIngress := doctorReviewIngress(lookup, githubAppReady, runtimeReady)
 	publicationRequired := runtimeReady && githubPublicationRequired(runtimeConfig)
-	ready := doctorExecutionReady(workspacesReady, providerReady, runtimeReady, githubAppReady, runtimeConfig)
+	ready := doctorExecutionReady(workspacesReady, providerReady, runtimeReady, githubAppReady, runtimeConfig) && sourceReady
 	report := map[string]any{
 		"ready":                ready,
 		"workspaces_ready":     workspacesReady,
@@ -239,12 +273,31 @@ func doctorReport(lookup func(string) string) (map[string]any, bool, error) {
 		"provider":             provider,
 		"runtime":              runtime,
 		"publication":          publication,
+		"source_access":        sourceAccess,
 		"review_ingress":       reviewIngress,
 		"workspaces":           diagnostics,
 		"provider_billable":    false,
 		"network_checks_made":  false,
 	}
 	return report, ready, nil
+}
+
+// doctorSourceAccess is strictly local configuration validation. It prevents a
+// lane with a registered GitHub workspace from starting only to discover that
+// it would need a developer SSH key or personal token. It never contacts
+// GitHub and never serializes an App identity, installation, path or secret.
+func doctorSourceAccess(lookup func(string) string) (map[string]any, bool) {
+	required, err := automationagent.GitHubSourceAccessRequired(lookup)
+	if err != nil {
+		return map[string]any{"ready": false, "status": "invalid", "required": true, "message": "GitHub workspace registration is invalid."}, false
+	}
+	if !required {
+		return map[string]any{"ready": true, "status": "not_required", "required": false}, true
+	}
+	if _, err := automationagent.LoadGitHubSourceAppConfig(lookup); err != nil {
+		return map[string]any{"ready": false, "status": "not_configured", "required": true, "message": "GitHub source synchronization remains disabled until the dedicated read-only Source App is configured."}, false
+	}
+	return map[string]any{"ready": true, "status": "configured_unverified", "required": true, "message": "Authentication is verified by --github-auth-probe before worker activation."}, true
 }
 
 func doctorExecutionReady(workspacesReady, providerReady, runtimeReady, githubAppReady bool, runtimeConfig automationagent.RuntimeConfig) bool {

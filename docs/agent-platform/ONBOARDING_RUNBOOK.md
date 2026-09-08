@@ -1,15 +1,17 @@
 # Repository onboarding runbook
 
-This flow is generic for any GitHub repository accessible to a configured
-installation of the platform GitHub App.
+This flow is generic for any GitHub repository accessible to the configured
+installation of the platform's dedicated read-only Source App.
 
 ## Prerequisites
 
 - Create the Delivery project and grant the operator project `manage` access.
-- Configure the GitHub App ID, private key and explicit installation ID
-  allow-list in the backend secret provider.
-- Grant repository metadata and contents read access. Onboarding does not need
-  source write, merge or deployment permission.
+- Configure the Source App ID, private key and explicit installation ID
+  allow-list in the backend secret provider or the isolated Linux lane. Do not
+  reuse the Reviewer or Release App identity/key.
+- Grant the Source App repository metadata and contents read access only.
+  Onboarding does not need source write, pull-request, checks, merge or
+  deployment permission.
 
 ## Inspect
 

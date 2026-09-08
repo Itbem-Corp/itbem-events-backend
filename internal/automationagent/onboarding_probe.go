@@ -158,7 +158,7 @@ func RunOnboardingCapabilityProbes(ctx context.Context, taskID string, delivery 
 	if err != nil {
 		return nil, execution, err
 	}
-	worktree, err := prepareOnboardingProbeWorktree(ctx, workspace, taskID, spec.RepositoryReference, spec.DefaultBranch, spec.Revision)
+	worktree, err := prepareOnboardingProbeWorktree(ctx, workspace, taskID, spec.RepositoryReference, spec.DefaultBranch, spec.Revision, lookup)
 	if err != nil {
 		return nil, execution, err
 	}
@@ -260,7 +260,7 @@ func configuredOnboardingProbeCommands(config WorkspaceConfig) map[string]config
 	return result
 }
 
-func prepareOnboardingProbeWorktree(ctx context.Context, workspace Workspace, taskID, repositoryReference, defaultBranch, revision string) (string, error) {
+func prepareOnboardingProbeWorktree(ctx context.Context, workspace Workspace, taskID, repositoryReference, defaultBranch, revision string, lookup func(string) string) (string, error) {
 	if err := workspace.RequireCapability(WorkspaceCapabilityFetchRemote); err != nil {
 		return "", err
 	}
@@ -285,7 +285,7 @@ func prepareOnboardingProbeWorktree(ctx context.Context, workspace Workspace, ta
 	if err != nil || !strings.EqualFold("github://"+remote.Owner+"/"+remote.Name, repositoryReference) {
 		return "", fmt.Errorf("onboarding probe workspace origin does not match the inspected repository")
 	}
-	if _, err := FetchWorkspaceRemote(ctx, workspace); err != nil {
+	if _, err := FetchAuthorizedWorkspaceRemote(ctx, workspace, lookup); err != nil {
 		return "", err
 	}
 	remoteBase := "refs/remotes/origin/" + workspace.Config.BaseBranch

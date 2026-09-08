@@ -37,6 +37,19 @@ func TestLoadWorkspacesProvidesBoundedSecretFreeContext(t *testing.T) {
 	}
 }
 
+func TestGitHubInstallationWorkspaceCommandsDisableCredentialHelpers(t *testing.T) {
+	config := []string{"-c", "credential.helper=", "-c", "http.proxy=", "-c", "http.sslVerify=true", "-c", "http.extraHeader="}
+	if got, want := gitWorkspaceFetchArguments("https://github.com/acme/service.git", true), append(append([]string{}, config...), "fetch", "--prune", "--tags", "--no-recurse-submodules", "https://github.com/acme/service.git", "+refs/heads/*:refs/remotes/origin/*"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("authenticated fetch arguments = %#v, want %#v", got, want)
+	}
+	if got, want := gitWorkspaceCloneArguments("main", "https://github.com/acme/service.git", "/workspace/service", true), append(append([]string{}, config...), "clone", "--origin", "origin", "--branch", "main", "--no-recurse-submodules", "https://github.com/acme/service.git", "/workspace/service"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("authenticated clone arguments = %#v, want %#v", got, want)
+	}
+	if got := gitWorkspaceFetchArguments("origin", false); strings.Contains(strings.Join(got, "\x00"), "credential.helper=") {
+		t.Fatalf("legacy non-GitHub fetch unexpectedly changed credential policy: %#v", got)
+	}
+}
+
 func TestLoadWorkspaceRegistryRequiresExplicitManagedDefaultBranch(t *testing.T) {
 	root := filepath.ToSlash(filepath.Join(t.TempDir(), "managed"))
 	if err := os.MkdirAll(filepath.FromSlash(root), 0700); err != nil {

@@ -89,10 +89,12 @@ Vault reconciliation becomes a required gate before merge.
 | Gatekeeper | Evaluate structured policy and current evidence deterministically | Invoke a model to waive a failed/missing gate |
 
 Worker identities, system users, credentials, queues and workspaces are isolated
-per role. Reviewer and Release use distinct GitHub Apps and PEMs; their
-repository-scoped installation tokens are minted just in time. Production
-deployments use GitHub Actions OIDC and protected environments rather than a
-permanent local production credential.
+per role. A dedicated read-only Source App fetches only operator-registered
+GitHub repositories; it is distinct from the Reviewer and Release Apps and
+cannot approve, publish, merge or deploy. Reviewer and Release use distinct
+GitHub Apps and PEMs; all App tokens are repository-scoped and minted just in
+time. Production deployments use GitHub Actions OIDC and protected
+environments rather than a permanent local production credential.
 
 ## Merge/release predicate
 

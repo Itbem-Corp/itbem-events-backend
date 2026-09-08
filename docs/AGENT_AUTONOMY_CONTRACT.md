@@ -65,16 +65,18 @@ verificado, nunca autoridad para ampliar el scope ni saltar gates humanos.
 
 ## Credenciales y publicación
 
-La publicación debe usar un GitHub App o token de instalación de corta vida,
-con permisos de repositorio mínimos. Nunca se guarda un token personal en el
-prompt, el input de la tarea, evidencia, logs o variables de frontend.
+La lectura/sincronización de un workspace GitHub debe usar exclusivamente la
+Source App de sólo lectura; publicación usa una App Release independiente. Sus
+tokens de instalación son de corta vida y de repositorio mínimo. Nunca se usa
+una llave SSH, token personal o credential helper, ni se guarda un token en el
+prompt, input de tarea, evidencia, logs o variables de frontend.
 
-En local, `scripts/Start-LocalAIControlPlane.ps1` puede leer exclusivamente
-`ITBEM_GITHUB_APP_ID`, `ITBEM_GITHUB_INSTALLATION_ID` e
-`ITBEM_GITHUB_APP_PRIVATE_KEY` desde el archivo ignorado `.env.ai.local`. No
-hereda `MINIMAX_API_KEY` ni ninguna otra variable del agente; en servidores,
-esas tres variables llegan directamente desde el gestor de secretos del
-control plane.
+En local, `scripts/Start-LocalAIControlPlane.ps1` puede leer las variables de
+la App necesarias para la operación desde el archivo ignorado `.env.ai.local`,
+incluyendo el namespace independiente `ITBEM_GITHUB_SOURCE_*` cuando
+sincroniza un workspace. No hereda `MINIMAX_API_KEY` ni ninguna otra variable
+del agente; en servidores, esas variables llegan directamente desde el gestor
+de secretos del control plane.
 
 Un grant de publicación debe registrar: tarea, repositorio, capacidades,
 aprobador, caducidad, SHA/base branch y motivo. Cuando expire, el agente sólo

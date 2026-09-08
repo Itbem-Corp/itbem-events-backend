@@ -213,6 +213,7 @@ func TestAWSEmulatorRoleLaneIsolation(t *testing.T) {
 	config, runtime := requireAWSEmulator(t)
 	_, revision, lookup := testOnboardingProbeWorkspace(t, false)
 	t.Setenv("ITBEM_AI_WORKSPACES_JSON", lookup("ITBEM_AI_WORKSPACES_JSON"))
+	setOnboardingProbeSourceEnvironment(t, lookup)
 	probeDelivery, err := BuildOnboardingProbeDelivery("workspace://service", "github://acme/service", "trunk", revision, []string{"unit"})
 	if err != nil {
 		t.Fatal(err)

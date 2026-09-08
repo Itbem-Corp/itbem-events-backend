@@ -36,6 +36,9 @@ run "heterogeneous discovery and coordinated multi-repository worktrees" \
 run "configured non-main default branch" \
   go test ./internal/automationagent -run 'TestSyncManagedWorkspaceSupportsNonMainBranchAndRejectsDirtyCheckout$' -count=1
 
+run "GitHub source synchronization with a dedicated read-only App" \
+  go test ./cmd/itbem-ai-agent ./internal/automationagent -run 'Test(LoadGitHubSourceAppConfigRequiresItsDedicatedNamespace|FetchAuthorizedWorkspaceRemoteRequiresDedicatedSourceApp|GitHubInstallationWorkspaceCommandsDisableCredentialHelpers|RunOnboardingCapabilityProbesUsesExactSHAOperatorCommandsAndCleansUp|GitHubAuthProbeRequiresPublicationOrRegisteredGitHubSourceAndRedactsFailures)$' -count=1
+
 run "review-only and production release policies" \
   go test ./internal/deliverypolicy -run 'Test(ReviewOnlyRequiresAnExplicitEmptyTestPolicyAndNeverGrantsMerge|ReleasePolicyRequiresWorkflowEnvironmentReferencesHealthAndRecovery)$' -count=1
 
