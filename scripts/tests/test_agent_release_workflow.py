@@ -12,6 +12,8 @@ class AgentReleaseWorkflowContractTests(unittest.TestCase):
     def test_validated_artifact_is_bound_to_source_revision_and_digest(self) -> None:
         self.assertIn("id: agent_release", self.workflow)
         self.assertIn("GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -buildvcs=true", self.workflow)
+        self.assertIn("AGENT_RELEASE_DIR: ${{ runner.temp }}/itbem-ai-agent-release", self.workflow)
+        self.assertIn('release_dir="$AGENT_RELEASE_DIR"', self.workflow)
         self.assertIn('[[ "$embedded_revision" == "$REVISION" ]]', self.workflow)
         self.assertIn('"source_revision": "%s"', self.workflow)
         self.assertIn('"sha256": "%s"', self.workflow)
@@ -22,12 +24,14 @@ class AgentReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("permissions:\n  artifact-metadata: write\n  contents: read", self.workflow)
         self.assertIn("uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02", self.workflow)
         self.assertIn("name: itbem-ai-agent-release-${{ steps.revision.outputs.sha }}", self.workflow)
+        self.assertIn("path: ${{ env.AGENT_RELEASE_DIR }}", self.workflow)
         self.assertIn("if-no-files-found: error", self.workflow)
         self.assertIn("retention-days: 30", self.workflow)
         self.assertIn('[[ "$AGENT_RELEASE_SHA256" =~ ^[a-f0-9]{64}$ ]]', self.workflow)
 
     def test_operator_runbook_requires_manifest_verification(self) -> None:
         self.assertIn("release-manifest.json", self.runbook)
+        self.assertIn("Publish validated Linux agent release artifact", self.runbook)
         self.assertIn("source_revision", self.runbook)
         self.assertIn("itbem-ai-agent.sha256", self.runbook)
         self.assertIn("never calculate the expected digest", self.runbook)

@@ -33,6 +33,8 @@ jobs:
     outputs:
       revision: ${{ steps.revision.outputs.sha }}
       agent_release_sha256: ${{ steps.agent_release.outputs.sha256 }}
+    env:
+      AGENT_RELEASE_DIR: ${{ runner.temp }}/itbem-ai-agent-release
     steps:
       - name: Checkout code
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -114,7 +116,7 @@ jobs:
           REVISION: ${{ steps.revision.outputs.sha }}
         run: |
           set -euo pipefail
-          release_dir="${RUNNER_TEMP}/itbem-ai-agent-release"
+          release_dir="$AGENT_RELEASE_DIR"
           install -d -m 0700 "$release_dir"
           GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -buildvcs=true \
             -o "$release_dir/itbem-ai-agent" ./cmd/itbem-ai-agent
@@ -141,7 +143,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: itbem-ai-agent-release-${{ steps.revision.outputs.sha }}
-          path: ${{ runner.temp }}/itbem-ai-agent-release
+          path: ${{ env.AGENT_RELEASE_DIR }}
           if-no-files-found: error
           retention-days: 30
 
