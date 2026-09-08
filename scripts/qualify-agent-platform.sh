@@ -1,15 +1,28 @@
 #!/bin/sh
 set -eu
 
-# Deterministic, network-free qualification of the multi-agent control and
-# execution planes. Live GitHub/staging/production evidence remains a separate
-# operator-owned gate; this script never merges or deploys.
+# Deterministic qualification of the multi-agent control and execution planes.
+# A first run may fetch only the repository's pinned Git submodules; subsequent
+# checks are network-free after dependencies are present. Live
+# GitHub/staging/production evidence remains a separate operator-owned gate;
+# this script never merges or deploys.
 
 run() {
   printf '\n==> %s\n' "$1"
   shift
   "$@"
 }
+
+# A clean `git worktree` retains only each submodule's gitlink. Initialize the
+# exact pinned revisions before the complete regression suite so a local
+# qualification exercises the same source graph as CI. `protocol.file` stays
+# disabled: a repository cannot turn this bootstrap into a local-file read.
+prepare_pinned_submodules() {
+  test -f .gitmodules || return 0
+  git -c protocol.file.allow=never submodule update --init --recursive
+}
+
+run "pinned Git submodule checkout" prepare_pinned_submodules
 
 run "generic onboarding, monorepo discovery and prompt-injection boundary" \
   go test ./internal/projectvault -run 'Test(BuildCreatesDeterministicEvidenceBasedProposal|BuildEnvironmentTemplatesAreNameOnlyEvidence|BuildProposesCommandsPerMonorepoModule|BuildTreatsRepositoryTextAsData|ApplyCapabilityProbesRequiresExactSHAAndSealedSandboxEvidence|ReconcilePreservesChangedRemovedAndUnchangedVaultHistory|ReconcileRejectsCrossRepositoryOrMutableHistory)$' -count=1
