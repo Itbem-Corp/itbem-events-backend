@@ -85,8 +85,19 @@ func TestCodeReviewSegmentPromptRestrictsFindingsToTheSegmentFiles(t *testing.T)
 		t.Fatalf("expected one bounded segment: %#v / %v", segments, err)
 	}
 	prompt := codeReviewSegmentPrompt("review the exact diff", 1, 1, segments[0], boundary)
-	if !strings.Contains(prompt, "The only permitted values of findings[].file in this segment are exactly: controllers/orders.go") || !strings.Contains(prompt, "Never cite supporting context") {
+	if !strings.Contains(prompt, "The only permitted values of findings[].file in this segment are exactly: controllers/orders.go") || !strings.Contains(prompt, "Never cite supporting context") || !strings.Contains(prompt, "Do not require this segment to independently prove coverage") {
 		t.Fatalf("segment prompt must make the file boundary explicit: %s", prompt)
+	}
+}
+
+func TestSupportingCodeReviewTestPatchKeepsWholeTestDiffsOnly(t *testing.T) {
+	input, err := NewCodeReviewInput("github://example/service", strings.Repeat("a", 40), strings.Repeat("b", 40), "diff --git a/internal/service.go b/internal/service.go\n--- a/internal/service.go\n+++ b/internal/service.go\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/internal/service_test.go b/internal/service_test.go\n--- a/internal/service_test.go\n+++ b/internal/service_test.go\n@@ -1 +1 @@\n-old test\n+new test\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	patch := supportingCodeReviewTestPatch(input)
+	if !strings.Contains(patch, "diff --git a/internal/service_test.go") || strings.Contains(patch, "diff --git a/internal/service.go") || !strings.HasSuffix(patch, "new test\n") {
+		t.Fatalf("expected only the complete test-file diff: %q", patch)
 	}
 }
 
