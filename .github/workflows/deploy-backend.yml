@@ -20,6 +20,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
+  artifact-metadata: write
   contents: read
 
 env:
