@@ -640,10 +640,20 @@ func codeReviewCoverageIsOnlySegmentNarration(value string) bool {
 }
 
 func codeReviewCoverageIsCrossSegmentAggregationNarration(value string) bool {
-	if !strings.Contains(value, "segment") ||
-		(!strings.Contains(value, "cross-segment aggregate") && !strings.Contains(value, "cross segment aggregate")) ||
-		!strings.Contains(value, "test coverage") ||
-		(!strings.Contains(value, "later segment") && !strings.Contains(value, "another segment")) {
+	crossSegmentAggregate := strings.Contains(value, "segment") &&
+		(strings.Contains(value, "cross-segment aggregate") || strings.Contains(value, "cross segment aggregate")) &&
+		strings.Contains(value, "test coverage") &&
+		(strings.Contains(value, "later segment") || strings.Contains(value, "another segment"))
+	// The aggregate already receives every bounded segment of the same frozen
+	// diff. A model may note that an asset lives outside *its* supplied segment
+	// and ask the aggregate to cross-check it against a changed test in this PR.
+	// That is visibility narration, not a missing test or a defect. Keep the
+	// wording deliberately strict so a statement that a source is actually
+	// absent or untested remains an advisory gap.
+	sourceOutsideCurrentSegment := strings.Contains(value, "outside the supplied segment") &&
+		strings.Contains(value, "in this pr") &&
+		(strings.Contains(value, "cross-check") || strings.Contains(value, "crosscheck"))
+	if !crossSegmentAggregate && !sourceOutsideCurrentSegment {
 		return false
 	}
 	for _, actionable := range []string{

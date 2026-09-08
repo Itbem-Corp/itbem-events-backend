@@ -198,6 +198,11 @@ func TestNormalizeCodeReviewCoveragePromotesAnEmptyCommentOnlyWhenNoCoverageGapI
 			review:   `{"summary":"The segment is internally consistent.","verdict":"comment","review_scope":["qualification script"],"findings":[],"test_plan":["Run the isolated qualification."],"coverage_gaps":["Segment 2 carries the production-code obligations. No gap within this segment."]}`,
 			want:     "approve",
 		},
+		"an asset outside one segment is not a gap in the aggregate": {
+			boundary: CodeReviewInput{ChangedFiles: []string{"cmd/itbem-ai-agent/assets/install.sh", "cmd/itbem-ai-agent/systemd_assets_test.go"}},
+			review:   `{"summary":"The exact diff is internally consistent.","verdict":"comment","review_scope":["installer guard"],"findings":[],"test_plan":["Run the installer asset test."],"coverage_gaps":["The actual cmd/itbem-ai-agent/assets/install.sh content in this PR is outside the supplied segment; the new substring assertions must be cross-checked against the real production installer before trusting the guard."]}`,
+			want:     "approve",
+		},
 		"an actionable gap mentioning no gap remains advisory": {
 			boundary: CodeReviewInput{ChangedFiles: []string{"scripts/qualify.sh"}},
 			review:   `{"summary":"The segment needs contract context.","verdict":"comment","review_scope":["qualification script"],"findings":[],"test_plan":["Read the dependency contract."],"coverage_gaps":["No gap can be closed until the missing dependency contract is supplied."]}`,

@@ -83,6 +83,36 @@ func TestAggregateCodeReviewSegmentsCannotApprovePartialOrInvalidEvidence(t *tes
 	}
 }
 
+func TestAggregateCodeReviewSegmentsIgnoresOnlyCrossSegmentAssetNarration(t *testing.T) {
+	patch := ""
+	for index := 0; index < codeReviewSegmentMaxFiles; index++ {
+		file := fmt.Sprintf("cmd/agent/source_%d.go", index)
+		patch += fmt.Sprintf("diff --git a/%s b/%s\n--- a/%s\n+++ b/%s\n@@ -1 +1 @@\n-old\n+new\n", file, file, file, file)
+	}
+	patch += "diff --git a/cmd/agent/assets/install.sh b/cmd/agent/assets/install.sh\n--- a/cmd/agent/assets/install.sh\n+++ b/cmd/agent/assets/install.sh\n@@ -1 +1 @@\n-old\n+new\n" +
+		"diff --git a/cmd/agent/systemd_assets_test.go b/cmd/agent/systemd_assets_test.go\n--- a/cmd/agent/systemd_assets_test.go\n+++ b/cmd/agent/systemd_assets_test.go\n@@ -1 +1 @@\n-old\n+new\n"
+	input, err := NewCodeReviewInput("github://acme/agent", strings.Repeat("a", 40), strings.Repeat("b", 40), patch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	segments, err := SegmentCodeReviewInput(input)
+	if err != nil || len(segments) != 2 {
+		t.Fatalf("expected two exact-SHA segments: %#v / %v", segments, err)
+	}
+	narration, err := ParseCodeReview(`{"summary":"The segment is internally consistent.","verdict":"comment","review_scope":["installer guard"],"findings":[],"test_plan":["Run the installer asset test."],"coverage_gaps":["The actual cmd/agent/assets/install.sh content in this PR is outside the supplied segment; the new substring assertions must be cross-checked against the real production installer before trusting the guard."]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviews := make([]map[string]any, len(segments))
+	for index := range reviews {
+		reviews[index] = narration
+	}
+	aggregate, err := AggregateCodeReviewSegments(input, segments, reviews)
+	if err != nil || aggregate["verdict"] != "approve" || len(aggregate["coverage_gaps"].([]any)) != 0 {
+		t.Fatalf("cross-segment narration blocked a complete frozen review: %#v / %v", aggregate, err)
+	}
+}
+
 func TestCodeReviewSegmentPromptRestrictsFindingsToTheSegmentFiles(t *testing.T) {
 	boundary, err := ParseCodeReviewInput(validCodeReviewInput())
 	if err != nil {
