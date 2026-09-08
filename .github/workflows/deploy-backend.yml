@@ -20,6 +20,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
+  artifact-metadata: write
   contents: read
 
 env:
@@ -31,6 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       revision: ${{ steps.revision.outputs.sha }}
+      agent_release_sha256: ${{ steps.agent_release.outputs.sha256 }}
     steps:
       - name: Checkout code
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -99,6 +101,51 @@ jobs:
           PYTHONPATH: scripts
         run: python3 -m unittest scripts/tests/test_verify_alerting.py
 
+      - name: Test Linux agent release artifact contract
+        run: python3 -m unittest scripts/tests/test_agent_release_workflow.py
+
+      # The Linux execution host never builds from an ambient checkout. Publish
+      # a digest-bound binary only after this exact revision passed every
+      # validation above; the host installer verifies this manifest before it
+      # changes the active release symlink.
+      - name: Build Linux agent release artifact
+        id: agent_release
+        env:
+          REVISION: ${{ steps.revision.outputs.sha }}
+        run: |
+          set -euo pipefail
+          release_dir="${RUNNER_TEMP}/itbem-ai-agent-release"
+          install -d -m 0700 "$release_dir"
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -buildvcs=true \
+            -o "$release_dir/itbem-ai-agent" ./cmd/itbem-ai-agent
+
+          embedded_revision="$(go version -m "$release_dir/itbem-ai-agent" | \
+            awk '$1 == "build" && $2 ~ /^vcs.revision=/ { sub(/^vcs.revision=/, "", $2); print $2; exit }')"
+          [[ "$embedded_revision" == "$REVISION" ]] || {
+            echo "Linux agent binary does not identify the validated revision" >&2
+            exit 1
+          }
+
+          digest="$(sha256sum "$release_dir/itbem-ai-agent" | awk '{print $1}')"
+          [[ "$digest" =~ ^[a-f0-9]{64}$ ]] || {
+            echo "Linux agent release digest is invalid" >&2
+            exit 1
+          }
+          printf '%s\n' "$digest  itbem-ai-agent" > "$release_dir/itbem-ai-agent.sha256"
+          printf '{\n  "schema_version": 1,\n  "source_revision": "%s",\n  "sha256": "%s",\n  "target": "linux/amd64"\n}\n' \
+            "$REVISION" "$digest" > "$release_dir/release-manifest.json"
+          python3 -m json.tool "$release_dir/release-manifest.json" >/dev/null
+          echo "directory=$release_dir" >> "$GITHUB_OUTPUT"
+          echo "sha256=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Publish validated Linux agent release artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: itbem-ai-agent-release-${{ steps.revision.outputs.sha }}
+          path: ${{ steps.agent_release.outputs.directory }}
+          if-no-files-found: error
+          retention-days: 30
+
   deploy:
     name: Deploy candidate and promote
     needs: validate
@@ -138,6 +185,24 @@ jobs:
           ORGANIZATION_CONTEXT_SECRET_PREVIOUS: ${{ secrets.ORGANIZATION_CONTEXT_SECRET_PREVIOUS }}
           INTERNAL_API_SECRET_PREVIOUS: ${{ secrets.INTERNAL_API_SECRET_PREVIOUS }}
         run: go run ./cmd/security-preflight
+
+      - name: Record approved Linux agent release
+        env:
+          REVISION: ${{ needs.validate.outputs.revision }}
+          AGENT_RELEASE_SHA256: ${{ needs.validate.outputs.agent_release_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$AGENT_RELEASE_SHA256" =~ ^[a-f0-9]{64}$ ]] || {
+            echo 'Validated Linux agent digest is unavailable' >&2
+            exit 1
+          }
+          {
+            echo '### Validated Linux agent release'
+            echo
+            echo "- Source revision: \`$REVISION\`"
+            echo "- SHA-256: \`$AGENT_RELEASE_SHA256\`"
+            echo "- Artifact: \`itbem-ai-agent-release-$REVISION\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # Build the immutable image on the runner. The EC2 host no longer clones
       # the repository or persists a GitHub PAT in ~/.git-credentials.

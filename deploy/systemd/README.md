@@ -9,10 +9,16 @@ systemd services. The installer never enables or starts a service.
   independent review of that exact SHA.
 - Confirm the backend owns the configured role-lane SQS queues and private
   input/output buckets. The physical host does not receive those AWS outputs.
-- Build the binary from the exact reviewed backend commit and obtain its
-  SHA-256 from the approved release manifest before copying it to the Linux
-  host. The installer rejects a binary whose digest differs from that approved
-  value; never calculate the expected digest from the untrusted local copy.
+- Obtain the `itbem-ai-agent-release-<source-sha>` artifact published by the
+  **Publish validated Linux agent release artifact** step in the successful
+  `Deploy Backend to EC2` workflow run for the exact independently reviewed
+  backend revision.
+  It contains the Linux/amd64 binary, `release-manifest.json`, and
+  `itbem-ai-agent.sha256`. Confirm the manifest `source_revision` matches the
+  reviewed Git SHA and the manifest digest matches the checksum file before
+  copying the binary to the Linux host. The installer rejects a binary whose
+  digest differs from that approved value; never calculate the expected digest
+  from the untrusted local copy.
 - Provision outbound-only network access. No worker needs an inbound port.
 - Configure five distinct gateway tokens derived by the backend deployment
   from `AUTOMATION_CALLBACK_SECRET`, one for each exact role/lane. The Linux
