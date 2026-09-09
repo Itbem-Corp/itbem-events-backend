@@ -39,6 +39,8 @@ func TestSystemdUnitFailsClosedAndRunsUnprivileged(t *testing.T) {
 		"NoNewPrivileges=yes", "ProtectSystem=strict", "ProtectHome=yes",
 		"CapabilityBoundingSet=", "Restart=on-failure", "RestartSec=60s",
 		"StartLimitIntervalSec=0",
+		"ProtectHostname=yes", "RestrictNamespaces=yes", "RemoveIPC=yes",
+		"SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @privileged @raw-io @reboot @resources @swap",
 		"ReadWritePaths=/var/lib/itbem-ai-agent/%i /srv/itbem-agent-workspaces/%i",
 	} {
 		if !strings.Contains(unit, required) {
@@ -64,6 +66,8 @@ func TestSystemdDoctorIsReadOnlyAndCannotConsumeQueueWork(t *testing.T) {
 		"Type=oneshot", "User=itbem-agent-%i", "EnvironmentFile=/etc/itbem-ai-agent/roles/%i.env",
 		"ExecStart=/opt/itbem-ai-agent/current/itbem-ai-agent --doctor",
 		"ReadOnlyPaths=/srv/itbem-agent-workspaces/%i", "RestrictAddressFamilies=AF_UNIX", "NoNewPrivileges=yes", "ProtectSystem=strict",
+		"ProtectHostname=yes", "RestrictNamespaces=yes", "RemoveIPC=yes",
+		"SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @privileged @raw-io @reboot @resources @swap",
 	} {
 		if !strings.Contains(unit, required) {
 			t.Fatalf("doctor unit lost %q", required)
