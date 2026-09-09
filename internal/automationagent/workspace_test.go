@@ -581,6 +581,24 @@ func TestSyncManagedWorkspaceSupportsNonMainBranchAndRejectsDirtyCheckout(t *tes
 	if err != nil || !state.Available || state.Branch != baseBranch || state.HasLocalChanges {
 		t.Fatalf("managed clone was not ready: %#v / %v", state, err)
 	}
+	status, statusErr := runLocal(context.Background(), root, commandTimeout, "", "git", "status", "--porcelain", "--untracked-files=all")
+	if statusErr != nil || status.ExitCode != 0 || strings.TrimSpace(status.Output) != "" {
+		t.Fatalf("managed clone must be clean to ordinary Git tooling: %#v / %v", status, statusErr)
+	}
+	ignored, ignoredErr := runLocal(context.Background(), root, commandTimeout, "", "git", "check-ignore", "-q", managedWorkspaceRuntimeExclude)
+	if ignoredErr != nil || ignored.ExitCode != 0 {
+		t.Fatalf("managed task-worktree directory must be locally ignored: %#v / %v", ignored, ignoredErr)
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".itbem-agent-worktrees", "runtime-task"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".itbem-agent-worktrees", "runtime-task", "state.txt"), []byte("runtime state"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	status, statusErr = runLocal(context.Background(), root, commandTimeout, "", "git", "status", "--porcelain", "--untracked-files=all")
+	if statusErr != nil || status.ExitCode != 0 || strings.TrimSpace(status.Output) != "" {
+		t.Fatalf("managed runtime state must not make its base checkout dirty: %#v / %v", status, statusErr)
+	}
 	firstSHA := state.HeadSHA
 	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("two\n"), 0600); err != nil {
 		t.Fatal(err)

@@ -1094,6 +1094,16 @@ func syncManagedWorkspace(ctx context.Context, workspace Workspace, authenticate
 	} else if err != nil {
 		return WorkspaceGitState{}, fmt.Errorf("inspect managed workspace: %w", err)
 	}
+	// Implementation worktrees are runtime-owned children of the dedicated
+	// managed checkout.  Tell Git about that reserved directory as well as
+	// excluding it in workspaceGitState: command-line status, external tooling
+	// and a later agent restart must all see the base checkout as clean while
+	// the separately reviewable task worktree exists.  This is deliberately a
+	// local git-info exclude, never a repository .gitignore change, and it
+	// exempts no other local path from the dirty-check gate.
+	if err := ensureManagedWorkspaceRuntimeExclude(ctx, workspace.Root); err != nil {
+		return WorkspaceGitState{}, err
+	}
 	state := workspaceGitState(workspace.Root)
 	if !state.Available || strings.TrimSpace(state.HeadSHA) == "" {
 		return WorkspaceGitState{}, fmt.Errorf("managed workspace is not a readable Git repository")
@@ -1148,6 +1158,56 @@ func syncManagedWorkspace(ctx context.Context, workspace Workspace, authenticate
 		return WorkspaceGitState{}, fmt.Errorf("managed workspace base branch is not identical to fetched origin")
 	}
 	return workspaceGitState(workspace.Root), nil
+}
+
+const managedWorkspaceRuntimeExclude = ".itbem-agent-worktrees/"
+
+func ensureManagedWorkspaceRuntimeExclude(ctx context.Context, root string) error {
+	resolved, err := runLocal(ctx, root, 20*time.Second, "", "git", "rev-parse", "--path-format=absolute", "--git-path", "info/exclude")
+	if err != nil || resolved.ExitCode != 0 {
+		return fmt.Errorf("resolve managed workspace runtime exclude")
+	}
+	path := filepath.Clean(strings.TrimSpace(resolved.Output))
+	if path == "." || !filepath.IsAbs(path) {
+		return fmt.Errorf("managed workspace runtime exclude path is invalid")
+	}
+	common, commonErr := runLocal(ctx, root, 20*time.Second, "", "git", "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if commonErr != nil || common.ExitCode != 0 {
+		return fmt.Errorf("resolve managed workspace git directory")
+	}
+	gitDirectory := filepath.Clean(strings.TrimSpace(common.Output))
+	relative, relativeErr := filepath.Rel(gitDirectory, path)
+	if relativeErr != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("managed workspace runtime exclude is outside its Git directory")
+	}
+	if info, statErr := os.Lstat(path); statErr == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return fmt.Errorf("managed workspace runtime exclude is not a regular file")
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return fmt.Errorf("inspect managed workspace runtime exclude: %w", statErr)
+	}
+	contents, readErr := os.ReadFile(path)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return fmt.Errorf("read managed workspace runtime exclude: %w", readErr)
+	}
+	for _, line := range strings.Split(string(contents), "\n") {
+		if strings.TrimSpace(line) == managedWorkspaceRuntimeExclude {
+			return nil
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return fmt.Errorf("prepare managed workspace runtime exclude: %w", err)
+	}
+	entry := string(contents)
+	if entry != "" && !strings.HasSuffix(entry, "\n") {
+		entry += "\n"
+	}
+	entry += managedWorkspaceRuntimeExclude + "\n"
+	if err := os.WriteFile(path, []byte(entry), 0600); err != nil {
+		return fmt.Errorf("write managed workspace runtime exclude: %w", err)
+	}
+	return nil
 }
 
 func gitHubSourceWorkspaceRemote(workspace Workspace) (githubRepository, string, bool, error) {
