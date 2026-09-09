@@ -70,8 +70,16 @@ func ReadGitHubCodeReviewContext(ctx context.Context, config GitHubAppConfig, to
 		if status == http.StatusNotFound {
 			continue
 		}
-		if status != http.StatusOK || decodeErr != nil {
+		if status != http.StatusOK {
 			return nil, fmt.Errorf("GitHub code review source was rejected or invalid")
+		}
+		// The Contents API serializes a file as base64 JSON. An allowed-but-large
+		// changed artifact can therefore exceed the bounded response reader before
+		// its size field is available. It is not review context, but it must not
+		// prevent us from freezing a later, small changed source file. We still
+		// fail closed below if every candidate is skipped or unreadable.
+		if decodeErr != nil {
+			continue
 		}
 		if payload.Type != "file" || !strings.EqualFold(payload.Encoding, "base64") || payload.Size < 0 || payload.Size > maxCodeReviewSourceBytes {
 			continue

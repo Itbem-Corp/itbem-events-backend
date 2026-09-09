@@ -47,6 +47,33 @@ func TestReadGitHubCodeReviewContextFreezesExactRevisionAndDigest(t *testing.T) 
 	}
 }
 
+func TestReadGitHubCodeReviewContextSkipsOversizedResponseBeforeLaterSource(t *testing.T) {
+	baseSHA, headSHA := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	patch := "diff --git a/package-lock.json b/package-lock.json\n--- a/package-lock.json\n+++ b/package-lock.json\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/package.json b/package.json\n--- a/package.json\n+++ b/package.json\n@@ -1 +1 @@\n-old\n+new\n"
+	review, err := NewCodeReviewInput("github://itbem/example", baseSHA, headSHA, patch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/repos/itbem/example/contents/package-lock.json":
+			// This response exceeds the bounded JSON reader once base64 encoded.
+			_ = json.NewEncoder(response).Encode(map[string]any{"type": "file", "encoding": "base64", "content": base64.StdEncoding.EncodeToString([]byte(strings.Repeat("x", maxCodeReviewSourceBytes*2))), "size": maxCodeReviewSourceBytes * 2})
+		case "/repos/itbem/example/contents/package.json":
+			content := "{\"name\":\"example\"}\n"
+			_ = json.NewEncoder(response).Encode(map[string]any{"type": "file", "encoding": "base64", "content": base64.StdEncoding.EncodeToString([]byte(content)), "size": len(content)})
+		default:
+			t.Fatalf("unexpected source request: %s", request.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	excerpts, err := ReadGitHubCodeReviewContext(context.Background(), GitHubAppConfig{APIBaseURL: server.URL}, "ephemeral", review)
+	if err != nil || len(excerpts) != 2 || excerpts[0].File != "package.json" || excerpts[1].File != "package.json" || excerpts[0].Side != "base" || excerpts[1].Side != "head" || !strings.Contains(excerpts[0].Content, "example") || !strings.Contains(excerpts[1].Content, "example") {
+		t.Fatalf("oversized changed artifact prevented later source context: %#v / %v", excerpts, err)
+	}
+}
+
 func TestCodeReviewContextWindowsMergeNearbyRangesButKeepSidesSeparate(t *testing.T) {
 	windows := codeReviewContextWindows([]CodeReviewChangedLineRange{
 		{File: "a.go", Side: "head", Start: 10, End: 12},
