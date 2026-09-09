@@ -150,6 +150,22 @@ func TestLoadWorkspacesValidatesReadOnlyFixtureAllowlist(t *testing.T) {
 	}
 }
 
+func TestSafeContextFileAllowsSecurityWorkflowDescriptorsButNotCredentials(t *testing.T) {
+	if !safeContextFile(".github/workflows/secret-scan.yml") {
+		t.Fatal("a secret-scanner workflow descriptor must remain copyable")
+	}
+	for _, unsafe := range []string{
+		".github/workflows/secret.yml",
+		".github/workflows/api-token.yml",
+		"docs/secret-scan.yml",
+		"fixtures/credential-check.yaml",
+	} {
+		if safeContextFile(unsafe) {
+			t.Fatalf("credential-like path was accepted: %s", unsafe)
+		}
+	}
+}
+
 func TestDescribeWorkspaceExcludesCredentialLikeFilesAndDirectories(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Mkdir(filepath.Join(root, "secrets"), 0700); err != nil {

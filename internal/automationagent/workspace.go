@@ -1683,7 +1683,7 @@ func safeContextFile(relative string) bool {
 		return false
 	}
 	for _, sensitive := range []string{"credential", "secret", "private_key", "api_key", "apikey", "access_key", "token", "password", "service_account"} {
-		if strings.Contains(lowerPath, sensitive) {
+		if strings.Contains(lowerPath, sensitive) && !securityWorkflowDescriptor(lowerPath) {
 			return false
 		}
 	}
@@ -1692,6 +1692,38 @@ func safeContextFile(relative string) bool {
 		return false
 	}
 	return true
+}
+
+// securityWorkflowDescriptor permits the conventional names of secret-scanner
+// workflows, not secret-bearing files. A versioned contract can legitimately
+// contain .github/workflows/secret-scan.yml; treating that descriptor as a
+// credential makes an otherwise safe, operator-approved fixture impossible to
+// copy into an isolated worktree. The exception stays narrow: only YAML files
+// in GitHub's workflow directory, with both a sensitive topic and an explicit
+// scan/audit/check qualifier, may bypass the filename heuristic.
+func securityWorkflowDescriptor(relative string) bool {
+	parts := strings.Split(strings.Trim(strings.ToLower(filepath.ToSlash(relative)), "/"), "/")
+	if len(parts) < 3 || parts[len(parts)-3] != ".github" || parts[len(parts)-2] != "workflows" {
+		return false
+	}
+	base := parts[len(parts)-1]
+	extension := filepath.Ext(base)
+	if extension != ".yml" && extension != ".yaml" {
+		return false
+	}
+	words := strings.FieldsFunc(strings.TrimSuffix(base, extension), func(r rune) bool {
+		return r == '-' || r == '_'
+	})
+	hasSensitiveTopic, hasScannerQualifier := false, false
+	for _, word := range words {
+		switch word {
+		case "secret", "secrets", "credential", "credentials", "token", "tokens", "key", "keys":
+			hasSensitiveTopic = true
+		case "scan", "scanner", "audit", "check":
+			hasScannerQualifier = true
+		}
+	}
+	return hasSensitiveTopic && hasScannerQualifier
 }
 func preferredContextFile(relative string) bool {
 	switch strings.ToLower(filepath.Base(relative)) {

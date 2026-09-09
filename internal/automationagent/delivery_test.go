@@ -602,6 +602,13 @@ func TestIsolatedWorktreeCopiesPinnedContractFixture(t *testing.T) {
 	if err := os.WriteFile(contract, []byte(`{"version":1}`), 0600); err != nil {
 		t.Fatal(err)
 	}
+	workflow := filepath.Join(root, ".contracts", "itbem-product-contract", ".github", "workflows", "secret-scan.yml")
+	if err := os.MkdirAll(filepath.Dir(workflow), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(workflow, []byte("name: Secret scan\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	worktree, _, err := isolatedWorktree(context.Background(), Workspace{Root: root, Config: WorkspaceConfig{ReadOnlyFixturePaths: []string{".contracts/itbem-product-contract"}}}, "a4a4b837-2e18-43af-9f58-6d59629db2bb")
 	if err != nil {
 		t.Fatal(err)
@@ -609,6 +616,10 @@ func TestIsolatedWorktreeCopiesPinnedContractFixture(t *testing.T) {
 	copied, err := os.ReadFile(filepath.Join(worktree, ".contracts", "itbem-product-contract", "contract", "products.v1.json"))
 	if err != nil || string(copied) != `{"version":1}` {
 		t.Fatalf("pinned fixture was not copied safely: %q, %v", copied, err)
+	}
+	copiedWorkflow, err := os.ReadFile(filepath.Join(worktree, ".contracts", "itbem-product-contract", ".github", "workflows", "secret-scan.yml"))
+	if err != nil || string(copiedWorkflow) != "name: Secret scan\n" {
+		t.Fatalf("security workflow descriptor was not copied safely: %q, %v", copiedWorkflow, err)
 	}
 }
 
