@@ -66,6 +66,12 @@ not a hard-coded runtime assumption.
    then create task-specific branches/worktrees from the exact frozen remote
    SHA (never an ambient local `HEAD`) and implement the smallest coherent
    change-set.
+
+   An agent-managed base checkout reserves `.itbem-agent-worktrees/` only as
+   its local Git runtime directory. It is excluded through that checkout's
+   `git/info/exclude` (never through the repository's `.gitignore`), so normal
+   Git tooling remains clean while an independent task worktree is awaiting
+   review or QA. No other path is exempt from the dirty-check gate.
 4. Reconcile the Vault and execute configured local checks.
 5. Open or update one consolidated PR per affected repository and publish the
    cross-repository change-set matrix.
