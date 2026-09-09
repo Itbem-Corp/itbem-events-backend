@@ -234,7 +234,13 @@ Test-LocalPostgreSQL $composeFile $DatabaseUser $DatabaseName $DatabaseProbeCont
 $agentSettingsPath = Join-Path $repositoryRoot '.env.ai.local'
 if (Test-Path -LiteralPath $agentSettingsPath -PathType Leaf) {
     $agentSettings = Read-EnvironmentFile $agentSettingsPath
-    foreach ($name in @('ITBEM_GITHUB_APP_ID', 'ITBEM_GITHUB_INSTALLATION_ID', 'ITBEM_GITHUB_INSTALLATION_IDS', 'ITBEM_GITHUB_APP_PRIVATE_KEY', 'ITBEM_GITHUB_APP_PRIVATE_KEY_FILE', 'ITBEM_GITHUB_API_BASE_URL', 'GITHUB_REVIEW_WEBHOOK_SECRET', 'GITHUB_REVIEW_REPOSITORIES', 'ITBEM_AI_WORKSPACES_JSON')) {
+    foreach ($name in @(
+        'ITBEM_GITHUB_SOURCE_APP_ID', 'ITBEM_GITHUB_SOURCE_INSTALLATION_ID', 'ITBEM_GITHUB_SOURCE_INSTALLATION_IDS',
+        'ITBEM_GITHUB_SOURCE_APP_PRIVATE_KEY', 'ITBEM_GITHUB_SOURCE_APP_PRIVATE_KEY_FILE', 'ITBEM_GITHUB_SOURCE_API_BASE_URL',
+        'ITBEM_GITHUB_APP_ID', 'ITBEM_GITHUB_INSTALLATION_ID', 'ITBEM_GITHUB_INSTALLATION_IDS',
+        'ITBEM_GITHUB_APP_PRIVATE_KEY', 'ITBEM_GITHUB_APP_PRIVATE_KEY_FILE', 'ITBEM_GITHUB_API_BASE_URL',
+        'GITHUB_REVIEW_WEBHOOK_SECRET', 'GITHUB_REVIEW_REPOSITORIES', 'ITBEM_AI_WORKSPACES_JSON'
+    )) {
         if (-not [string]::IsNullOrWhiteSpace($agentSettings[$name])) {
             Set-Item -Path "Env:$name" -Value $agentSettings[$name]
         }
