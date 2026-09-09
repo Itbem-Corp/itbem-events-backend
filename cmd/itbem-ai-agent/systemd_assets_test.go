@@ -179,6 +179,8 @@ func TestLocalLaunchersSupportExplicitRoleLanesWithoutBreakingCombinedMode(t *te
 		"@('orchestration', 'engineering', 'review', 'qa', 'release')",
 		"SQS_AUTOMATION_QUEUE_LANES_JSON", "SQS_AUTOMATION_ROLE_DEAD_LETTER_QUEUE_URL",
 		"Set-LocalQueueRedrive $laneQueueURL $automationRoleDLQArn",
+		"ITBEM_GITHUB_SOURCE_APP_ID", "ITBEM_GITHUB_SOURCE_INSTALLATION_IDS",
+		"ITBEM_GITHUB_SOURCE_APP_PRIVATE_KEY_FILE", "ITBEM_GITHUB_SOURCE_API_BASE_URL",
 	} {
 		if !strings.Contains(controlPlane, required) {
 			t.Fatalf("local control plane lost role-lane contract %q", required)
