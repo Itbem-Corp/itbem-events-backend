@@ -65,6 +65,12 @@ not a hard-coded runtime assumption.
    default branch. Reject an advanced, divergent, dirty, or unpinned source;
    then create task-specific branches/worktrees from the exact frozen remote
    SHA (never an ambient local `HEAD`) and implement the smallest coherent
+
+   An agent-managed base checkout reserves `.itbem-agent-worktrees/` only as
+   its local Git runtime directory. It is excluded through that checkout's
+   `git/info/exclude` (never through the repository's `.gitignore`), so normal
+   Git tooling remains clean while an independent task worktree is awaiting
+   review or QA. No other path is exempt from the dirty-check gate.
    change-set.
 
    An agent-managed base checkout reserves `.itbem-agent-worktrees/` only as
