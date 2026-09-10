@@ -400,6 +400,12 @@ jobs:
           ITBEM_GITHUB_APP_ID: ${{ secrets.ITBEM_GITHUB_APP_ID }}
           ITBEM_GITHUB_INSTALLATION_IDS: ${{ secrets.ITBEM_GITHUB_INSTALLATION_IDS }}
           ITBEM_GITHUB_APP_PRIVATE_KEY: ${{ secrets.ITBEM_GITHUB_APP_PRIVATE_KEY }}
+          # Repository onboarding runs in the API control plane, not only on
+          # the Linux workers. Keep its contents-read identity separate from
+          # the Reviewer/Release App and block promotion when it is missing.
+          ITBEM_GITHUB_SOURCE_APP_ID: ${{ secrets.ITBEM_GITHUB_SOURCE_APP_ID }}
+          ITBEM_GITHUB_SOURCE_INSTALLATION_IDS: ${{ secrets.ITBEM_GITHUB_SOURCE_INSTALLATION_IDS }}
+          ITBEM_GITHUB_SOURCE_APP_PRIVATE_KEY: ${{ secrets.ITBEM_GITHUB_SOURCE_APP_PRIVATE_KEY }}
           GITHUB_REVIEW_WEBHOOK_SECRET: ${{ secrets.ITBEM_GITHUB_REVIEW_WEBHOOK_SECRET }}
           GITHUB_REVIEW_REPOSITORIES: ${{ secrets.ITBEM_GITHUB_REVIEW_REPOSITORIES }}
         run: |
@@ -452,6 +458,9 @@ jobs:
             --required ITBEM_GITHUB_APP_ID \
             --required ITBEM_GITHUB_INSTALLATION_IDS \
             --required ITBEM_GITHUB_APP_PRIVATE_KEY \
+            --required ITBEM_GITHUB_SOURCE_APP_ID \
+            --required ITBEM_GITHUB_SOURCE_INSTALLATION_IDS \
+            --required ITBEM_GITHUB_SOURCE_APP_PRIVATE_KEY \
             --required GITHUB_REVIEW_WEBHOOK_SECRET \
             --required GITHUB_REVIEW_REPOSITORIES
 
