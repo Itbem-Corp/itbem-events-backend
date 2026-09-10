@@ -164,6 +164,25 @@ func TestBuildProposesCommandsPerMonorepoModule(t *testing.T) {
 	}
 }
 
+func TestBuildRecognizesTestUnitAsTheUnitFallback(t *testing.T) {
+	proposal, err := Build(Input{
+		Repository: Repository{Reference: "github://acme/dashboard", DefaultBranch: "main", Revision: testSHA},
+		Files:      []string{"package.json", "package-lock.json"},
+		Excerpts:   []Excerpt{{Path: "package.json", Content: `{"scripts":{"test:unit":true,"test:e2e":true,"build":true}}`}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := [][]string{{"npm", "run", "build"}, {"npm", "run", "test:e2e"}, {"npm", "run", "test:unit"}}
+	got := make([][]string, 0, len(proposal.Commands))
+	for _, command := range proposal.Commands {
+		got = append(got, command.Command)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("commands = %#v, want %#v", got, want)
+	}
+}
+
 func TestBuildTreatsRepositoryTextAsData(t *testing.T) {
 	proposal, err := Build(Input{
 		Repository: Repository{Reference: "github://acme/service", DefaultBranch: "main", Revision: testSHA},
