@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +18,67 @@ import (
 type gatewayLeaseContextKey struct{}
 
 const gatewayMaxResponseBytes = ((maxInputBytes + 2) / 3 * 4) + (64 << 10)
+
+const (
+	gatewayRetryMinimumDelay = time.Second
+	gatewayRetryDefaultDelay = 5 * time.Second
+	gatewayRetryMaximumDelay = time.Minute
+)
+
+// gatewayRequestError preserves the status boundary between the local worker
+// and its control plane. Only transport failures and explicitly transient HTTP
+// responses return a positive RetryDelay; authentication, authorization and
+// request validation errors intentionally remain terminal to the worker
+// process.
+type gatewayRequestError struct {
+	statusCode int
+	cause      error
+	retryAfter time.Duration
+}
+
+func (e *gatewayRequestError) Error() string {
+	if e.statusCode != 0 {
+		return fmt.Sprintf("agent gateway rejected request (%d)", e.statusCode)
+	}
+	return fmt.Sprintf("agent gateway request failed: %v", e.cause)
+}
+
+func (e *gatewayRequestError) Unwrap() error { return e.cause }
+
+// RetryDelay is deliberately absent from permanent gateway errors. RunQueue
+// uses this small interface instead of treating every receive error as safe to
+// retry, so a revoked token or an invalid lane cannot spin silently forever.
+func (e *gatewayRequestError) RetryDelay() time.Duration {
+	if !gatewayResponseIsTransient(e.statusCode) {
+		return 0
+	}
+	if e.retryAfter < gatewayRetryMinimumDelay {
+		return gatewayRetryMinimumDelay
+	}
+	if e.retryAfter > gatewayRetryMaximumDelay {
+		return gatewayRetryMaximumDelay
+	}
+	return e.retryAfter
+}
+
+func gatewayResponseIsTransient(statusCode int) bool {
+	return statusCode == 0 || statusCode == http.StatusRequestTimeout || statusCode == http.StatusTooManyRequests || statusCode >= 500
+}
+
+func gatewayRetryAfter(headers http.Header, now time.Time) time.Duration {
+	delay := gatewayRetryDefaultDelay
+	raw := strings.TrimSpace(headers.Get("Retry-After"))
+	if raw == "" {
+		return delay
+	}
+	if seconds, err := strconv.Atoi(raw); err == nil {
+		return time.Duration(seconds) * time.Second
+	}
+	if deadline, err := http.ParseTime(raw); err == nil {
+		return deadline.Sub(now)
+	}
+	return delay
+}
 
 type HTTPGateway struct {
 	baseURL string
@@ -60,10 +122,16 @@ func (g *HTTPGateway) request(ctx context.Context, method, path string, input an
 	req.Header.Set("X-Agent-Lane", string(g.lane))
 	response, err := g.client.Do(req)
 	if err != nil {
+		if ctx.Err() == nil {
+			return &gatewayRequestError{cause: err, retryAfter: gatewayRetryDefaultDelay}
+		}
 		return fmt.Errorf("agent gateway request failed: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		if gatewayResponseIsTransient(response.StatusCode) {
+			return &gatewayRequestError{statusCode: response.StatusCode, retryAfter: gatewayRetryAfter(response.Header, time.Now().UTC())}
+		}
 		return fmt.Errorf("agent gateway rejected request (%d)", response.StatusCode)
 	}
 	if output == nil || response.StatusCode == http.StatusNoContent {
