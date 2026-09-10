@@ -72,6 +72,12 @@ func TestBuildCreatesDeterministicEvidenceBasedProposal(t *testing.T) {
 	if first.Capabilities[0].Name != "source" || first.Capabilities[0].State != "ready" {
 		t.Fatalf("source capability = %#v", first.Capabilities[0])
 	}
+	if first.PolicySuggestion == nil || first.PolicySuggestion.Mode != "review_only" || first.PolicySuggestion.Level != "repository" || first.PolicySuggestion.RepositoryReference != "github://acme/platform" || !reflect.DeepEqual(first.PolicySuggestion.AllowedTargetBranches, []string{"trunk"}) || !reflect.DeepEqual(first.PolicySuggestion.RequiredTestKinds, []string{"e2e", "unit"}) {
+		t.Fatalf("unsafe or incomplete policy suggestion = %#v", first.PolicySuggestion)
+	}
+	if first.PolicySuggestion.Reason != policySuggestionReason || len(first.PolicySuggestion.RequiredOperatorDecisions) == 0 {
+		t.Fatalf("policy suggestion omitted its safety boundary: %#v", first.PolicySuggestion)
+	}
 	for _, entry := range first.Vault.Entries {
 		encoded, _ := json.Marshal(entry)
 		if string(encoded) == "" || contains(string(encoded), "../secret") {
@@ -94,6 +100,40 @@ func TestBuildCreatesDeterministicEvidenceBasedProposal(t *testing.T) {
 	encodedVault, _ := json.Marshal(first.Vault)
 	if contains(string(encodedVault), ".env.production") || contains(string(encodedVault), "secrets/key.txt") {
 		t.Fatalf("secret-bearing inventory entered Vault: %s", encodedVault)
+	}
+}
+
+func TestValidateStoredProposalRejectsPolicySuggestionThatWouldGrantAuthority(t *testing.T) {
+	proposal, err := Build(Input{
+		Repository: Repository{Reference: "github://acme/service", DefaultBranch: "main", Revision: testSHA},
+		Files:      []string{"package.json", "package-lock.json"},
+		Excerpts:   []Excerpt{{Path: "package.json", Content: `{"scripts":{"test":"vitest"}}`}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(proposal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := ProposalSHA256(proposal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ValidateStoredProposal(string(raw), proposal.Repository.Reference, proposal.Repository.DefaultBranch, proposal.Repository.Revision, proposal.Readiness, digest, proposal.VaultSHA256); err != nil {
+		t.Fatalf("deterministic policy suggestion rejected: %v", err)
+	}
+	proposal.PolicySuggestion.Mode = "release"
+	raw, err = json.Marshal(proposal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err = ProposalSHA256(proposal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ValidateStoredProposal(string(raw), proposal.Repository.Reference, proposal.Repository.DefaultBranch, proposal.Repository.Revision, proposal.Readiness, digest, proposal.VaultSHA256); err == nil {
+		t.Fatal("stored onboarding proposal accepted an authority-granting policy suggestion")
 	}
 }
 

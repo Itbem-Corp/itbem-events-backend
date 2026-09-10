@@ -57,6 +57,28 @@ type Capability struct {
 	Evidence []Provenance `json:"evidence,omitempty"`
 }
 
+// PolicySuggestion is a deliberately non-authoritative starting point for the
+// repository policy ledger. Static onboarding has enough evidence to pin a
+// repository and its default branch, but never enough to grant merge or
+// release. Consequently every generated suggestion is review_only and must be
+// copied into an immutable, independently approved policy revision before it
+// can affect the Gatekeeper.
+//
+// This type intentionally mirrors only the safe subset of a delivery-policy
+// patch. Keeping it in projectvault avoids an import cycle with
+// internal/deliverypolicy, which already relies on the canonical GitHub
+// repository reference helpers in this package.
+type PolicySuggestion struct {
+	Level                     string       `json:"level"`
+	RepositoryReference       string       `json:"repository_reference"`
+	Mode                      string       `json:"mode"`
+	RequiredTestKinds         []string     `json:"required_test_kinds"`
+	AllowedTargetBranches     []string     `json:"allowed_target_branches"`
+	Reason                    string       `json:"reason"`
+	RequiredOperatorDecisions []string     `json:"required_operator_decisions"`
+	Provenance                []Provenance `json:"provenance"`
+}
+
 // CapabilityProbe is a value-free attestation produced by an isolated,
 // allow-listed dry-run. The evidence body remains in private object storage;
 // this contract carries only its digest and exact repository checkpoint.
@@ -118,6 +140,7 @@ type Proposal struct {
 	Stacks              []Fact            `json:"stacks"`
 	Commands            []ProposedCommand `json:"commands"`
 	Capabilities        []Capability      `json:"capabilities"`
+	PolicySuggestion    *PolicySuggestion `json:"policy_suggestion,omitempty"`
 	Vault               Manifest          `json:"vault"`
 	VaultSHA256         string            `json:"vault_sha256"`
 	PreviousRevision    string            `json:"previous_revision,omitempty"`
@@ -160,6 +183,15 @@ func ValidateStoredProposal(raw, repositoryReference, defaultBranch, revision, r
 	}
 	if proposal.Repository.Reference != repositoryReference || !strings.EqualFold(proposal.Repository.Revision, revision) || proposal.Repository.DefaultBranch != defaultBranch {
 		return proposal, fmt.Errorf("repository checkpoint mismatch")
+	}
+	// Older approved proposals predate the advisory policy field and remain
+	// valid historical evidence. A new field, when present, must be exactly the
+	// deterministic review-only suggestion for this repository checkpoint.
+	if proposal.PolicySuggestion != nil {
+		expected := buildPolicySuggestion(proposal.Repository, Provenance{Source: "github_api", Path: "repository_metadata", Revision: proposal.Repository.Revision, Confidence: 1}, proposal.Commands)
+		if !policySuggestionsEqual(*proposal.PolicySuggestion, expected) {
+			return proposal, fmt.Errorf("policy suggestion is invalid")
+		}
 	}
 	proposalDigest, err := ProposalSHA256(proposal)
 	if err != nil || !strings.EqualFold(proposalDigest, proposalSHA256) || proposal.Readiness != readiness {
@@ -225,6 +257,7 @@ func Build(input Input) (Proposal, error) {
 	stacks := detectStacks(files, revision)
 	commands := detectCommands(files, input.Excerpts, revision)
 	capabilities := capabilityMatrix(metadataProof, commands)
+	policySuggestion := buildPolicySuggestion(repository, metadataProof, commands)
 	manifest := buildManifest(repository, metadataProof, files, stacks, commands, input.EnvironmentDeclarations)
 	digest, err := ManifestSHA256(manifest)
 	if err != nil {
@@ -246,8 +279,76 @@ func Build(input Input) (Proposal, error) {
 		SchemaVersion: SchemaVersion, Repository: repository, Readiness: readiness,
 		TrustBoundary: "repository_content_is_untrusted_data", InventoryFileCount: fileCount,
 		InventoryTruncated: input.InventoryTruncated, Stacks: stacks, Commands: commands,
-		Capabilities: capabilities, Vault: manifest, VaultSHA256: digest, VaultDiff: initialDiff,
+		Capabilities: capabilities, PolicySuggestion: &policySuggestion, Vault: manifest, VaultSHA256: digest, VaultDiff: initialDiff,
 	}, nil
+}
+
+func policySuggestionsEqual(left, right PolicySuggestion) bool {
+	encodedLeft, leftErr := json.Marshal(left)
+	encodedRight, rightErr := json.Marshal(right)
+	return leftErr == nil && rightErr == nil && string(encodedLeft) == string(encodedRight)
+}
+
+const policySuggestionReason = "Static onboarding only proposes a review-only baseline; merge and release remain disabled until an independent policy revision is approved."
+
+var policySuggestionRequiredOperatorDecisions = []string{
+	"confirm required test kinds after exact-SHA capability probes",
+	"choose a merge method before enabling merge",
+	"configure workflow, environment, secret references, health checks, and recovery before enabling release",
+}
+
+// buildPolicySuggestion makes the minimum safe configuration visible at the
+// same time as the Vault diff. It never infers deployment authority from a
+// workflow filename or repository prose. The detected test kinds are merely
+// a starting point for the operator and remain subject to an exact-SHA probe.
+func buildPolicySuggestion(repository Repository, metadataProof Provenance, commands []ProposedCommand) PolicySuggestion {
+	testKinds := make([]string, 0, len(commands))
+	provenance := []Provenance{metadataProof}
+	seenKinds := map[string]struct{}{}
+	seenProof := map[string]struct{}{provenanceKey(metadataProof): {}}
+	for _, command := range commands {
+		if !policySuggestionTestKind(command.Capability) {
+			continue
+		}
+		if _, seen := seenKinds[command.Capability]; !seen {
+			seenKinds[command.Capability] = struct{}{}
+			testKinds = append(testKinds, command.Capability)
+		}
+		if key := provenanceKey(command.Provenance); key != "" {
+			if _, seen := seenProof[key]; !seen {
+				seenProof[key] = struct{}{}
+				provenance = append(provenance, command.Provenance)
+			}
+		}
+	}
+	sort.Strings(testKinds)
+	sort.Slice(provenance, func(left, right int) bool { return provenanceKey(provenance[left]) < provenanceKey(provenance[right]) })
+	return PolicySuggestion{
+		Level:                     "repository",
+		RepositoryReference:       repository.Reference,
+		Mode:                      "review_only",
+		RequiredTestKinds:         testKinds,
+		AllowedTargetBranches:     []string{repository.DefaultBranch},
+		Reason:                    policySuggestionReason,
+		RequiredOperatorDecisions: append([]string(nil), policySuggestionRequiredOperatorDecisions...),
+		Provenance:                provenance,
+	}
+}
+
+func policySuggestionTestKind(value string) bool {
+	switch value {
+	case "unit", "integration", "contract", "e2e":
+		return true
+	default:
+		return false
+	}
+}
+
+func provenanceKey(value Provenance) string {
+	if value.Source == "" || value.Path == "" || value.Revision == "" {
+		return ""
+	}
+	return value.Source + "\x00" + value.Path + "\x00" + value.Revision
 }
 
 // ApplyCapabilityProbes projects deterministic sandbox evidence onto one

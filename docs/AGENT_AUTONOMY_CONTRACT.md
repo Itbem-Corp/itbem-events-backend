@@ -63,6 +63,13 @@ aprobación y datos operativos permanecen privados; claves con apariencia de
 credencial se eliminan también dentro de valores anidados. El Vault es contexto
 verificado, nunca autoridad para ampliar el scope ni saltar gates humanos.
 
+La inspección estática puede acompañar el diff del Vault con una sugerencia de
+política por repositorio. Es estrictamente `review_only`, conserva la rama
+principal detectada y los tipos de prueba observados, y no es una capa de
+política efectiva. El operador debe convertirla en una revisión inmutable del
+ledger y otra identidad debe aprobarla; ningún agente puede usar esa
+sugerencia para inferir merge, release, workflow, secretos o recovery.
+
 ## Credenciales y publicación
 
 La lectura/sincronización de un workspace GitHub debe usar exclusivamente la
