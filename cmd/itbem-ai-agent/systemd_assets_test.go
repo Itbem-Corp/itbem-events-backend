@@ -37,6 +37,7 @@ func TestSystemdUnitFailsClosedAndRunsUnprivileged(t *testing.T) {
 		"ExecStartPre=/opt/itbem-ai-agent/current/itbem-ai-agent --provider-auth-probe", // gitleaks:allow -- inert systemd directive fixture, never a credential value
 		"ExecStartPre=/opt/itbem-ai-agent/current/itbem-ai-agent --github-auth-probe",   // gitleaks:allow -- inert systemd directive fixture, never an API key
 		"NoNewPrivileges=yes", "ProtectSystem=strict", "ProtectHome=yes",
+		"StateDirectory=itbem-ai-agent/%i", "StateDirectoryMode=0700",
 		"CapabilityBoundingSet=", "Restart=on-failure", "RestartSec=60s",
 		"StartLimitIntervalSec=0",
 		"ProtectHostname=yes", "RestrictNamespaces=yes", "RemoveIPC=yes",
@@ -64,6 +65,7 @@ func TestSystemdDoctorIsReadOnlyAndCannotConsumeQueueWork(t *testing.T) {
 	unit := systemdAsset(t, "itbem-ai-agent-doctor@.service")
 	for _, required := range []string{
 		"Type=oneshot", "User=itbem-agent-%i", "EnvironmentFile=/etc/itbem-ai-agent/roles/%i.env",
+		"StateDirectory=itbem-ai-agent/%i", "StateDirectoryMode=0700",
 		"ExecStart=/opt/itbem-ai-agent/current/itbem-ai-agent --doctor",
 		"ReadOnlyPaths=/srv/itbem-agent-workspaces/%i", "RestrictAddressFamilies=AF_UNIX", "NoNewPrivileges=yes", "ProtectSystem=strict",
 		"ProtectHostname=yes", "RestrictNamespaces=yes", "RemoveIPC=yes",
@@ -145,7 +147,7 @@ func TestSystemdRoleFilesBindExactLaneAndSeparatePublicationSecrets(t *testing.T
 
 func TestSystemdInstallerStagesButNeverActivatesServices(t *testing.T) {
 	installer := systemdAsset(t, "install.sh")
-	for _, required := range []string{"usage: install.sh <approved-sha256> /path/to/reviewed/itbem-ai-agent", "approved-sha256 must be a lowercase SHA-256 digest", "reviewed binary SHA-256 does not match the approved release digest", "useradd --system", "install -m 0600", "install -m 0644 \"$asset_dir/itbem-ai-agent-doctor@.service\"", "install -d -m 0711 -o root -g root /srv/itbem-agent-workspaces", "install -d -m 0700 -o \"$account\" -g \"$account\" \"/srv/itbem-agent-workspaces/$lane\"", "install -d -m 0710 -o root -g \"$account\" \"/etc/itbem-ai-agent/secrets/$lane\"", "systemctl daemon-reload"} {
+	for _, required := range []string{"usage: install.sh <approved-sha256> /path/to/reviewed/itbem-ai-agent", "approved-sha256 must be a lowercase SHA-256 digest", "reviewed binary SHA-256 does not match the approved release digest", "useradd --system", "install -m 0600", "install -m 0644 \"$asset_dir/itbem-ai-agent-doctor@.service\"", "install -d -m 0711 -o root -g root /srv/itbem-agent-workspaces", "install -d -m 0700 -o \"$account\" -g \"$account\" \"/var/lib/itbem-ai-agent/$lane\"", "install -d -m 0700 -o \"$account\" -g \"$account\" \"/srv/itbem-agent-workspaces/$lane\"", "install -d -m 0710 -o root -g \"$account\" \"/etc/itbem-ai-agent/secrets/$lane\"", "systemctl daemon-reload"} {
 		if !strings.Contains(installer, required) {
 			t.Fatalf("installer lost %q", required)
 		}

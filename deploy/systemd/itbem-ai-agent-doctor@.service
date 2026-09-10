@@ -10,6 +10,7 @@ Group=itbem-agent-%i
 UMask=0077
 WorkingDirectory=/var/lib/itbem-ai-agent/%i
 StateDirectory=itbem-ai-agent/%i
+StateDirectoryMode=0700
 Environment=ITBEM_AI_CONCURRENCY=1
 Environment=GIT_OPTIONAL_LOCKS=0
 EnvironmentFile=/etc/itbem-ai-agent/common.env
