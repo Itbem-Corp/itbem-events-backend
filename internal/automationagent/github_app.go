@@ -29,7 +29,10 @@ import (
 // GitHub App without falling back to a user's SSH key or personal token.
 var ErrGitHubAppNotConfigured = errors.New("GitHub App installation credentials are not configured")
 
-var githubRepositoryNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]*/[a-z0-9][a-z0-9_.-]*$`)
+var (
+	githubRepositoryNamePattern     = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]*/[a-z0-9][a-z0-9_.-]*$`)
+	githubManifestScriptNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9:_.-]{0,79}$`)
+)
 
 type GitHubAppConfig struct {
 	AppID          string
@@ -64,8 +67,13 @@ const (
 	maxGitHubRepositoryExcerpts     = 8
 	maxGitHubRepositoryExcerptBytes = 3 << 10
 	maxGitHubRepositoryContextBytes = 16 << 10
-	maxGitHubEnvironmentTemplates   = 8
-	maxGitHubEnvironmentBytes       = 16 << 10
+	// package.json is structured configuration rather than prose. It may be
+	// larger than an orientation excerpt, so we parse a slightly larger bounded
+	// document and persist only allow-listed script names--never script bodies.
+	maxGitHubRepositoryManifestBytes   = 16 << 10
+	maxGitHubRepositoryManifestScripts = 32
+	maxGitHubEnvironmentTemplates      = 8
+	maxGitHubEnvironmentBytes          = 16 << 10
 )
 
 const maxGitHubPullRequestPatchBytes = 512 << 10
@@ -356,20 +364,42 @@ func ReadGitHubRepositorySourceContext(ctx context.Context, config GitHubAppConf
 		if requestErr != nil {
 			return GitHubRepositorySourceContext{}, fmt.Errorf("read GitHub repository source")
 		}
+		manifest := isGitHubPackageManifest(sourcePath)
+		maximumSize := maxGitHubRepositoryExcerptBytes
+		responseLimit := int64(64 << 10)
+		if manifest {
+			maximumSize = maxGitHubRepositoryManifestBytes
+			// Base64 expands the bounded package manifest; the decoded document is
+			// still capped below and only script names survive the projection.
+			responseLimit = 128 << 10
+		}
 		var payload struct {
 			Type     string `json:"type"`
 			Encoding string `json:"encoding"`
 			Content  string `json:"content"`
 			Size     int    `json:"size"`
 		}
-		decodeErr := json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&payload)
+		decodeErr := json.NewDecoder(io.LimitReader(response.Body, responseLimit)).Decode(&payload)
 		status := response.StatusCode
 		response.Body.Close()
-		if status != http.StatusOK || decodeErr != nil || payload.Type != "file" || !strings.EqualFold(payload.Encoding, "base64") || payload.Size < 0 || payload.Size > maxGitHubRepositoryExcerptBytes {
+		if status != http.StatusOK || decodeErr != nil || payload.Type != "file" || !strings.EqualFold(payload.Encoding, "base64") || payload.Size < 0 || payload.Size > maximumSize {
 			continue
 		}
 		decoded, decodeErr := base64.StdEncoding.DecodeString(strings.ReplaceAll(payload.Content, "\n", ""))
-		if decodeErr != nil || len(decoded) == 0 || len(decoded) > maxGitHubRepositoryExcerptBytes || !validText(decoded) {
+		if decodeErr != nil || len(decoded) == 0 || len(decoded) > maximumSize || !validText(decoded) {
+			continue
+		}
+		if manifest {
+			sanitized, ok := githubPackageManifestMetadata(decoded)
+			if !ok {
+				continue
+			}
+			if len(sanitized) > remaining {
+				result.ContextTruncated = true
+				continue
+			}
+			result.Excerpts = append(result.Excerpts, GitHubRepositoryExcerpt{Path: sourcePath, Content: sanitized})
+			remaining -= len(sanitized)
 			continue
 		}
 		if len(decoded) > remaining {
@@ -382,6 +412,45 @@ func ReadGitHubRepositorySourceContext(ctx context.Context, config GitHubAppConf
 		remaining -= len(decoded)
 	}
 	return result, nil
+}
+
+func isGitHubPackageManifest(path string) bool {
+	path = strings.Trim(strings.ReplaceAll(strings.TrimSpace(path), `\`, "/"), "/")
+	return strings.EqualFold(path[strings.LastIndex(path, "/")+1:], "package.json")
+}
+
+// githubPackageManifestMetadata converts an untrusted package manifest into a
+// tiny structured marker. Script bodies are intentionally discarded: command
+// selection is based on an allow-listed script name in projectvault, while
+// execution remains a later, sandboxed QA decision.
+func githubPackageManifestMetadata(content []byte) (string, bool) {
+	var manifest struct {
+		Scripts map[string]json.RawMessage `json:"scripts"`
+	}
+	if json.Unmarshal(content, &manifest) != nil {
+		return "", false
+	}
+	names := make([]string, 0, len(manifest.Scripts))
+	for name := range manifest.Scripts {
+		if githubManifestScriptNamePattern.MatchString(name) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	if len(names) > maxGitHubRepositoryManifestScripts {
+		names = names[:maxGitHubRepositoryManifestScripts]
+	}
+	scripts := make(map[string]bool, len(names))
+	for _, name := range names {
+		scripts[name] = true
+	}
+	encoded, err := json.Marshal(struct {
+		Scripts map[string]bool `json:"scripts"`
+	}{Scripts: scripts})
+	if err != nil {
+		return "", false
+	}
+	return string(encoded), true
 }
 
 // ReadGitHubRepositoryEnvironmentDeclarations reads only allow-listed template

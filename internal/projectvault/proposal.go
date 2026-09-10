@@ -640,13 +640,18 @@ func detectCommands(files []string, excerpts []Excerpt, revision string) []Propo
 			continue
 		}
 		packageManager := packageManagerFor(path, fileSet)
-		for _, candidate := range []struct{ name, capability string }{{"test", "unit"}, {"test:integration", "integration"}, {"test:contract", "contract"}, {"test:e2e", "e2e"}, {"build", "build"}} {
+		proposedCapabilities := map[string]struct{}{}
+		for _, candidate := range []struct{ name, capability string }{{"test", "unit"}, {"test:unit", "unit"}, {"test:integration", "integration"}, {"test:contract", "contract"}, {"test:e2e", "e2e"}, {"build", "build"}} {
+			if _, alreadyProposed := proposedCapabilities[candidate.capability]; alreadyProposed {
+				continue
+			}
 			if _, exists := manifest.Scripts[candidate.name]; exists && scriptNamePattern.MatchString(candidate.name) {
 				args := []string{packageManager, "run", candidate.name}
 				if packageManager == "yarn" {
 					args = []string{"yarn", candidate.name}
 				}
 				commands = append(commands, command(candidate.capability, args, path, revision))
+				proposedCapabilities[candidate.capability] = struct{}{}
 			}
 		}
 	}
