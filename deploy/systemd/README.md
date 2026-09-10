@@ -81,6 +81,15 @@ installer makes the common root non-listable/non-writable (`0711`) and each
 lane root private to its Unix account (`0700`); do not weaken those modes or
 reuse a checkout across Engineer, Reviewer, QA and Release. This provides the
 independent checkout boundary required by review and exact-SHA evidence.
+
+The installed units also deny namespace creation, IPC persistence, hostname
+changes and syscall groups unrelated to an outbound HTTPS worker. These guards
+are deliberately shared by the long-running and doctor units. Keep the
+allow-listed socket families unchanged: the worker needs Unix sockets plus
+outbound IPv4/IPv6 HTTPS, while the doctor needs only Unix sockets. Any future
+runtime dependency that requires a denied syscall group must be explicitly
+reviewed, tested through every preflight, and documented before relaxing this
+boundary.
 When tests need pinned content that intentionally lives outside Git, declare
 its repository-relative directory in the workspace's
 `read_only_fixture_paths`. The worker copies only that operator-approved,
