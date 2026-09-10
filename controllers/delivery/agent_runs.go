@@ -125,6 +125,7 @@ type deliveryAgentGate struct {
 	ID                string   `json:"id"`
 	Kind              string   `json:"kind"`
 	Decision          string   `json:"decision"`
+	Authority         string   `json:"authority"`
 	Comment           string   `json:"comment,omitempty"`
 	EvidenceChecklist []string `json:"evidence_checklist,omitempty"`
 	DecidedAt         string   `json:"decided_at"`
@@ -355,6 +356,9 @@ func StartAgentRun(c echo.Context) error {
 			return lookup(c, "Delivery work item", err)
 		}
 		return utils.Error(c, http.StatusConflict, "Agent run rejected", err.Error())
+	}
+	if _, _, err := freezeWorkItemAutonomy(configuration.DB, item, project, snapshots, vaultRevisions, time.Now().UTC()); err != nil {
+		return utils.Error(c, http.StatusConflict, "Autonomy authority rejected", err.Error())
 	}
 
 	maxCompletionTokens := automationagent.CompletionTokensForOperation(spec.operation)
@@ -650,7 +654,11 @@ func buildDeliveryAgentInput(item models.DeliveryWorkItem, project models.Delive
 		input.Delivery.Evidence = append(input.Delivery.Evidence, value)
 	}
 	for _, gate := range gates {
-		value := deliveryAgentGate{ID: gate.ID.String(), Kind: strings.TrimSpace(gate.Kind), Decision: strings.TrimSpace(gate.Decision), DecidedAt: gate.DecidedAt.UTC().Format(time.RFC3339)}
+		authority := strings.ToLower(strings.TrimSpace(gate.Authority))
+		if authority == "" {
+			authority = "human"
+		}
+		value := deliveryAgentGate{ID: gate.ID.String(), Kind: strings.TrimSpace(gate.Kind), Decision: strings.TrimSpace(gate.Decision), Authority: authority, DecidedAt: gate.DecidedAt.UTC().Format(time.RFC3339)}
 		if value.ID == "" || value.Kind == "" || value.Decision == "" || value.DecidedAt == "" {
 			continue
 		}

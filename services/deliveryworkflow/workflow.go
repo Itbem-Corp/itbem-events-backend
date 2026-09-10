@@ -137,7 +137,16 @@ func validateGate(item *models.DeliveryWorkItem, gate *models.DeliveryGate, rule
 		return fmt.Errorf("transition requires %s gate with %s decision", rule.gateKind, rule.decision)
 	}
 	if strings.TrimSpace(gate.DecidedBy) == "" {
-		return errors.New("human gate decider is required")
+		return errors.New("gate decider is required")
+	}
+	authority := strings.ToLower(strings.TrimSpace(gate.Authority))
+	if authority == "" {
+		// Historic rows predate authority provenance and retain their original
+		// semantics. New controller-created rows write this value explicitly.
+		authority, gate.Authority = "human", "human"
+	}
+	if authority != "human" && authority != "delegated" {
+		return errors.New("gate authority is invalid")
 	}
 	if gate.DecidedAt.IsZero() {
 		gate.DecidedAt = now.UTC()

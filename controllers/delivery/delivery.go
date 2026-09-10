@@ -1443,7 +1443,7 @@ func lookup(c echo.Context, kind string, err error) error {
 }
 
 func gate(action deliveryworkflow.Action, workItemID uuid.UUID, decidedBy, comment, checklist string) *models.DeliveryGate {
-	value := &models.DeliveryGate{WorkItemID: workItemID, DecidedBy: decidedBy, Comment: comment, EvidenceChecklist: checklist}
+	value := &models.DeliveryGate{WorkItemID: workItemID, DecidedBy: decidedBy, Authority: "human", Comment: comment, EvidenceChecklist: checklist}
 	switch action {
 	case deliveryworkflow.ActionApprovePlan:
 		value.Kind, value.Decision = deliveryworkflow.GatePlan, deliveryworkflow.DecisionApproved

@@ -70,3 +70,21 @@ This package performs no database, GitHub, queue, merge, or deployment action.
 Persistence and the project configuration UI are subsequent incremental PRs;
 they must store immutable revisions and pass only approved matching layers to
 this resolver.
+
+## Frozen task authority
+
+When a work item first starts, the control plane records one private,
+append-only `delivery.autonomy.snapshot.v1` event for every repository in its
+frozen context. It binds the source SHA, approved Vault revision and digest,
+resolved policy digest and complete resolved policy. Retrying with a different
+policy, Vault or source SHA is rejected; later policy edits therefore cannot
+change an in-flight task. The execution graph exposes only a verified summary
+(`Autoridad congelada`, repository count and human/delegated mode), never the
+policy content or approver identity.
+
+An incomplete policy remains manual-only. It does not create a partial
+snapshot, and no coordinator may infer delegated authority from a missing or
+invalid event. Gates record `authority: human` by default; an internal
+coordinator may record `authority: delegated` only after it has verified this
+snapshot and the independent exact-SHA evidence. A Principal Engineer never
+records either approval for its own implementation.
