@@ -26,23 +26,24 @@ type effectivePolicySource struct {
 }
 
 type effectivePolicyProjection struct {
-	SchemaVersion              int                         `json:"schema_version"`
-	Mode                       deliverypolicy.DeliveryMode `json:"mode,omitempty"`
-	RequiredTestKinds          []string                    `json:"required_test_kinds"`
-	AllowedTargetBranches      []string                    `json:"allowed_target_branches"`
-	MergeMethod                string                      `json:"merge_method,omitempty"`
-	DeploymentWorkflow         string                      `json:"deployment_workflow,omitempty"`
-	DeploymentEnvironment      string                      `json:"deployment_environment,omitempty"`
-	RequiredSecretReferences   []string                    `json:"required_secret_references"`
-	RequiredVariableReferences []string                    `json:"required_variable_references"`
-	RequiredHealthChecks       []string                    `json:"required_health_checks"`
-	RequiredPostMergeChecks    []string                    `json:"required_post_merge_checks"`
-	RecoveryDefault            string                      `json:"recovery_default,omitempty"`
-	Safety                     deliverypolicy.SafetyFloor  `json:"safety"`
-	Sources                    []effectivePolicySource     `json:"sources"`
-	Resolved                   bool                        `json:"resolved"`
-	Missing                    []string                    `json:"missing"`
-	Digest                     string                      `json:"digest"`
+	SchemaVersion              int                             `json:"schema_version"`
+	Mode                       deliverypolicy.DeliveryMode     `json:"mode,omitempty"`
+	GateApprovalMode           deliverypolicy.GateApprovalMode `json:"gate_approval_mode"`
+	RequiredTestKinds          []string                        `json:"required_test_kinds"`
+	AllowedTargetBranches      []string                        `json:"allowed_target_branches"`
+	MergeMethod                string                          `json:"merge_method,omitempty"`
+	DeploymentWorkflow         string                          `json:"deployment_workflow,omitempty"`
+	DeploymentEnvironment      string                          `json:"deployment_environment,omitempty"`
+	RequiredSecretReferences   []string                        `json:"required_secret_references"`
+	RequiredVariableReferences []string                        `json:"required_variable_references"`
+	RequiredHealthChecks       []string                        `json:"required_health_checks"`
+	RequiredPostMergeChecks    []string                        `json:"required_post_merge_checks"`
+	RecoveryDefault            string                          `json:"recovery_default,omitempty"`
+	Safety                     deliverypolicy.SafetyFloor      `json:"safety"`
+	Sources                    []effectivePolicySource         `json:"sources"`
+	Resolved                   bool                            `json:"resolved"`
+	Missing                    []string                        `json:"missing"`
+	Digest                     string                          `json:"digest"`
 }
 
 type effectivePolicyVaultEvidence struct {
@@ -146,7 +147,7 @@ func buildEffectivePolicySnapshot(projectID uuid.UUID, repository, changeSetID s
 		sources = append(sources, effectivePolicySource{Level: source.Level, RevisionID: source.RevisionID, Digest: source.Digest, ApprovedAt: source.ApprovedAt})
 	}
 	projection := effectivePolicyProjection{
-		SchemaVersion: policy.SchemaVersion, Mode: policy.Mode,
+		SchemaVersion: policy.SchemaVersion, Mode: policy.Mode, GateApprovalMode: policy.GateApprovalMode,
 		RequiredTestKinds: append([]string{}, policy.RequiredTestKinds...), AllowedTargetBranches: append([]string{}, policy.AllowedTargetBranches...),
 		MergeMethod: policy.MergeMethod, DeploymentWorkflow: policy.DeploymentWorkflow, DeploymentEnvironment: policy.DeploymentEnvironment,
 		RequiredSecretReferences: append([]string{}, policy.RequiredSecretReferences...), RequiredVariableReferences: append([]string{}, policy.RequiredVariableReferences...),

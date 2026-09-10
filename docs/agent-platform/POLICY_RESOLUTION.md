@@ -38,6 +38,14 @@ accepted. Deployment workflow identity is restricted to a concrete
 reapplied by the later exact-SHA action adapter immediately before it requests
 any merge or deployment capability.
 
+`gate_approval_mode` is `human` by default. A project may set it to
+`delegated` only in a durable approved platform, organization, project or
+repository policy; an expiring change-set override cannot elevate this
+authority. Delegation is a one-time human decision about the operating model,
+not an authority for an engineer to approve its own change: implementation,
+independent review, QA and the deterministic release Gatekeeper still require
+their separate exact-SHA evidence before the control plane can advance work.
+
 Secret and variable references contain names only, never values. They are
 canonical uppercase identifiers, unique case-insensitively, limited to 64 per
 list and cannot use GitHub's reserved `GITHUB_` prefix. They are operator-owned
@@ -48,7 +56,10 @@ GitHub environment and remains unable to read secret values.
 Safety floors are code, not configuration. No layer can disable exact-SHA
 evidence, independent review, Vault reconciliation, secret scanning, zero
 high/critical findings, compatibility, migrations, dependency order,
-environment/recovery evaluation, human approval, or the force-merge ban.
+environment/recovery evaluation, durable human policy authorization, or the
+force-merge ban. A delegated project changes only who records an already
+proven work-item gate; it never removes the evidence or lets a role approve
+its own implementation.
 
 The final digest binds the resolved values and every source revision,
 approver, and approval time. `GatePolicyFor` returns an unresolved Gatekeeper
