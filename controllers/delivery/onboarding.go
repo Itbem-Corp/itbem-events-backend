@@ -116,7 +116,31 @@ func InspectRepositoryOnboarding(c echo.Context) error {
 	var existing models.DeliveryRepositoryOnboarding
 	find := configuration.DB.Where("project_id = ? AND repository_reference = ? AND revision = ?", projectID, proposal.Repository.Reference, proposal.Repository.Revision).First(&existing)
 	if find.Error == nil {
-		return success(c, "Repository onboarding already inspected", existing)
+		if strings.EqualFold(existing.ProposalSHA256, proposalSHA256) {
+			return success(c, "Repository onboarding already inspected", existing)
+		}
+		// An unapproved inspection is a mutable workflow record, not published
+		// authority. Recompute it at the same immutable repository SHA when the
+		// bounded inspector learns more, but lock it first so a stale approval or
+		// capability probe cannot race the new digest into effect.
+		var refreshed models.DeliveryRepositoryOnboarding
+		var changed bool
+		if err := configuration.DB.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND project_id = ?", existing.ID, projectID).First(&refreshed).Error; err != nil {
+				return err
+			}
+			changed = refreshProposedOnboarding(&refreshed, proposal, string(proposalJSON), proposalSHA256)
+			if !changed {
+				return nil
+			}
+			return tx.Save(&refreshed).Error
+		}); err != nil {
+			return utilsError(c, err)
+		}
+		if changed {
+			return success(c, "Repository onboarding refreshed at the same immutable SHA", refreshed)
+		}
+		return success(c, "Repository onboarding already inspected", refreshed)
 	}
 	if find.Error != gorm.ErrRecordNotFound {
 		return utilsError(c, find.Error)
@@ -137,6 +161,21 @@ func InspectRepositoryOnboarding(c echo.Context) error {
 		return utilsError(c, err)
 	}
 	return created(c, "Repository onboarding proposed", onboarding)
+}
+
+// refreshProposedOnboarding replaces only an unapproved proposal at the same
+// repository checkpoint. A changed digest invalidates any stale review or
+// queued capability probe; an approved Vault is never rewritten.
+func refreshProposedOnboarding(existing *models.DeliveryRepositoryOnboarding, proposal projectvault.Proposal, proposalJSON, proposalSHA256 string) bool {
+	if existing == nil || existing.Status != "proposed" || strings.EqualFold(existing.ProposalSHA256, proposalSHA256) {
+		return false
+	}
+	existing.DefaultBranch = proposal.Repository.DefaultBranch
+	existing.Readiness = proposal.Readiness
+	existing.ProposalJSON = proposalJSON
+	existing.ProposalSHA256 = proposalSHA256
+	existing.VaultSHA256 = proposal.VaultSHA256
+	return true
 }
 
 func inspectGitHubRepositoryForOnboarding(ctx context.Context, config automationagent.GitHubAppConfig, reference, expectedRevision string, now time.Time) (projectvault.Proposal, error) {

@@ -89,6 +89,43 @@ func TestValidateStoredOnboardingProposalPinsDigestAndCheckpoint(t *testing.T) {
 	}
 }
 
+func TestRefreshProposedOnboardingOnlyReplacesUnapprovedDigest(t *testing.T) {
+	proposal, err := projectvault.Build(projectvault.Input{
+		Repository: projectvault.Repository{Reference: "github://acme/dashboard", DefaultBranch: "main", Revision: "0123456789abcdef0123456789abcdef01234567"},
+		Files:      []string{"package.json", "package-lock.json"},
+		Excerpts:   []projectvault.Excerpt{{Path: "package.json", Content: `{"scripts":{"test:unit":true,"test:e2e":true}}`}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(proposal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := projectvault.ProposalSHA256(proposal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	existing := models.DeliveryRepositoryOnboarding{
+		Status: "proposed", DefaultBranch: "main", Readiness: "partially_ready",
+		ProposalJSON: `{"old":true}`, ProposalSHA256: strings.Repeat("a", 64), VaultSHA256: strings.Repeat("b", 64),
+	}
+	if !refreshProposedOnboarding(&existing, proposal, string(encoded), digest) {
+		t.Fatal("changed proposed inspection was not refreshed")
+	}
+	if existing.ProposalSHA256 != digest || existing.VaultSHA256 != proposal.VaultSHA256 || existing.ProposalJSON != string(encoded) {
+		t.Fatalf("refreshed proposal does not match exact replacement: %#v", existing)
+	}
+	if refreshProposedOnboarding(&existing, proposal, string(encoded), digest) {
+		t.Fatal("identical proposal must not churn its digest")
+	}
+	existing.Status = "approved"
+	existing.ProposalSHA256 = strings.Repeat("c", 64)
+	if refreshProposedOnboarding(&existing, proposal, string(encoded), digest) {
+		t.Fatal("approved onboarding must never be refreshed")
+	}
+}
+
 func TestValidateStoredOnboardingProposalRejectsTamperedVault(t *testing.T) {
 	proposal, err := projectvault.Build(projectvault.Input{
 		Repository: projectvault.Repository{Reference: "github://acme/service", DefaultBranch: "main", Revision: "0123456789abcdef0123456789abcdef01234567"},
