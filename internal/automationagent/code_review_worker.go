@@ -76,7 +76,14 @@ func (w *Worker) processSegmentedCodeReview(ctx context.Context, message TaskMes
 		completion, callErr := w.provider.Complete(ctx, call.Messages, call.MaxTokens)
 		if callErr != nil {
 			var retryable *RetryableError
-			if errors.As(callErr, &retryable) && len(completions) == 0 {
+			// No GitHub review or check is published until every exact segment has
+			// been parsed and aggregated below. A transport/rate-limit failure is
+			// therefore safe to retry even when an earlier segment completed: the
+			// queue retains the immutable task, and a later lease recomputes the
+			// private review before any external side effect occurs. Treating this
+			// as terminal would strand otherwise healthy PRs after a transient
+			// provider outage.
+			if errors.As(callErr, &retryable) {
 				return retryable
 			}
 			var providerResponse *ProviderResponseError
@@ -121,6 +128,13 @@ func (w *Worker) processSegmentedCodeReview(ctx context.Context, message TaskMes
 			repair, repairErr := w.provider.Complete(ctx, repairMessages, codeReviewRepairCompletionLimit)
 			segmentCalls := []Completion{completion}
 			if repairErr != nil {
+				var retryable *RetryableError
+				// A repair is still part of the private, pre-publication analysis.
+				// Keep the queue message for another bounded lease rather than
+				// persisting a permanent failure caused only by provider reachability.
+				if errors.As(repairErr, &retryable) {
+					return retryable
+				}
 				var providerResponse *ProviderResponseError
 				if errors.As(repairErr, &providerResponse) {
 					repair = providerResponse.Completion

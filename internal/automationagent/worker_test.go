@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gofrs/uuid"
 )
@@ -399,6 +400,64 @@ func TestWorkerSegmentsLargeCodeReviewAndAccountsForEveryCall(t *testing.T) {
 	result := store.writes["itbem-ai-outputs-local/automation/task/runs/"+callback.updates[1].RunID+"/result.json"]
 	if strings.Count(string(result), `"patch_sha256"`) < 2 || !strings.Contains(string(result), `"review_segments"`) || !strings.Contains(string(result), `"verdict":"comment"`) {
 		t.Fatalf("segmented result lost private calls or conservative aggregate: %s", result)
+	}
+}
+
+func TestWorkerRetainsSegmentedReviewAfterTransientLaterProviderFailure(t *testing.T) {
+	patch := ""
+	for index := 0; index < codeReviewSegmentMaxFiles+1; index++ {
+		file := fmt.Sprintf("src/file_%02d.go", index)
+		patch += fmt.Sprintf("diff --git a/%s b/%s\n--- a/%s\n+++ b/%s\n@@ -1 +1 @@\n-old%d\n+new%d\n", file, file, file, file, index, index)
+	}
+	boundary, err := NewCodeReviewInput("github://acme/service", strings.Repeat("a", 40), strings.Repeat("b", 40), patch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivery, _ := json.Marshal(boundary)
+	input, _ := json.Marshal(TaskInput{Prompt: "Review every exact segment.", Delivery: delivery})
+	approved := `{"summary":"The exact segment is consistent.","verdict":"approve","review_scope":["changed files"],"findings":[],"test_plan":["Run go test ./..."],"coverage_gaps":[]}`
+	provider := &sequenceProvider{
+		completions: []Completion{{Provider: ProviderMiniMax, Model: "MiniMax-M3", ResponseID: "segment-one", Content: approved, Usage: map[string]any{"total_tokens": float64(100)}}, {}},
+		errors:      []error{nil, &RetryableError{Message: "provider network request failed", RetryAfter: time.Minute}},
+	}
+	store, callback := &fakeStore{input: input}, &fakeCallback{}
+	worker, err := NewWorker(WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"}, store, callback, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := validMessage()
+	message.Payload.Operation = "code.review"
+	err = worker.Process(context.Background(), message)
+	var retryable *RetryableError
+	if !errors.As(err, &retryable) {
+		t.Fatalf("later transient segment failure must retain the review, got %v", err)
+	}
+	if provider.calls != 2 || len(callback.updates) != 1 || callback.updates[0].Status != "running" {
+		t.Fatalf("transient review failure must not publish a terminal result: calls=%d updates=%#v", provider.calls, callback.updates)
+	}
+}
+
+func TestWorkerRetainsReviewAfterTransientRepairFailure(t *testing.T) {
+	input, _ := json.Marshal(TaskInput{Prompt: "Review the frozen pull request.", Delivery: json.RawMessage(validCodeReviewInput())})
+	truncated := `{"summary":"Checked the change.","verdict":"approve"`
+	provider := &sequenceProvider{
+		completions: []Completion{{Provider: ProviderMiniMax, Model: "MiniMax-M3", ResponseID: "candidate", Content: truncated, Usage: map[string]any{"total_tokens": float64(20)}}, {}},
+		errors:      []error{nil, &RetryableError{Message: "provider temporarily unavailable (503)", RetryAfter: time.Minute}},
+	}
+	store, callback := &fakeStore{input: input}, &fakeCallback{}
+	worker, err := NewWorker(WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"}, store, callback, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := validMessage()
+	message.Payload.Operation = "code.review"
+	err = worker.Process(context.Background(), message)
+	var retryable *RetryableError
+	if !errors.As(err, &retryable) {
+		t.Fatalf("transient repair failure must retain the review, got %v", err)
+	}
+	if provider.calls != 2 || len(callback.updates) != 1 || callback.updates[0].Status != "running" {
+		t.Fatalf("transient repair failure must not publish a terminal result: calls=%d updates=%#v", provider.calls, callback.updates)
 	}
 }
 
