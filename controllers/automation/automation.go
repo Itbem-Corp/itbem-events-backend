@@ -873,24 +873,38 @@ type automationWorkspaceHealth struct {
 // task-scoped inspector. Workers contains only current, anonymous runtime
 // metadata so that readiness claims remain auditable in the dashboard.
 type automationHealth struct {
-	Queued                        int64                                 `json:"queued"`
-	Running                       int64                                 `json:"running"`
-	FailedLastDay                 int64                                 `json:"failed_last_day"`
-	ExpiredLeases                 int64                                 `json:"expired_leases"`
-	SpendLastDay                  int64                                 `json:"spend_last_day_microusd"`
-	ActiveWorkers                 int64                                 `json:"active_workers"`
-	WorkerCapacity                int64                                 `json:"worker_capacity"`
-	QueueTelemetry                bool                                  `json:"queue_telemetry_available"`
-	QueueLanes                    map[string]automationqueue.LaneHealth `json:"queue_lanes,omitempty"`
-	QueueVisible                  int64                                 `json:"queue_visible_approximate"`
-	QueueInFlight                 int64                                 `json:"queue_in_flight_approximate"`
-	QueueDelayed                  int64                                 `json:"queue_delayed_approximate"`
-	DeadLetterTelemetry           bool                                  `json:"dead_letter_telemetry_available"`
-	DeadLetterVisible             int64                                 `json:"dead_letter_visible_approximate"`
-	OperationalTelemetryAvailable bool                                  `json:"operational_telemetry_available"`
-	LastWorkerSeenAt              *time.Time                            `json:"last_worker_seen_at,omitempty"`
-	Workers                       []automationWorkerHealth              `json:"workers"`
-	ReviewIngress                 automationReviewIngressHealth         `json:"review_ingress"`
+	Queued              int64                                 `json:"queued"`
+	Running             int64                                 `json:"running"`
+	FailedLastDay       int64                                 `json:"failed_last_day"`
+	ExpiredLeases       int64                                 `json:"expired_leases"`
+	SpendLastDay        int64                                 `json:"spend_last_day_microusd"`
+	ActiveWorkers       int64                                 `json:"active_workers"`
+	WorkerCapacity      int64                                 `json:"worker_capacity"`
+	QueueTelemetry      bool                                  `json:"queue_telemetry_available"`
+	QueueLanes          map[string]automationqueue.LaneHealth `json:"queue_lanes,omitempty"`
+	QueueVisible        int64                                 `json:"queue_visible_approximate"`
+	QueueInFlight       int64                                 `json:"queue_in_flight_approximate"`
+	QueueDelayed        int64                                 `json:"queue_delayed_approximate"`
+	DeadLetterTelemetry bool                                  `json:"dead_letter_telemetry_available"`
+	DeadLetterVisible   int64                                 `json:"dead_letter_visible_approximate"`
+	// Outbox is the durable boundary before a task reaches a lane. It is
+	// intentionally aggregate-only: task IDs, payloads, queue URLs and delivery
+	// errors remain private to the task inspector and server logs.
+	OutboxTelemetryAvailable      bool                          `json:"outbox_telemetry_available"`
+	OutboxPending                 int64                         `json:"outbox_pending"`
+	OutboxProcessing              int64                         `json:"outbox_processing"`
+	OutboxRetrying                int64                         `json:"outbox_retrying"`
+	OutboxOldestPendingAt         *time.Time                    `json:"outbox_oldest_pending_at,omitempty"`
+	OperationalTelemetryAvailable bool                          `json:"operational_telemetry_available"`
+	LastWorkerSeenAt              *time.Time                    `json:"last_worker_seen_at,omitempty"`
+	Workers                       []automationWorkerHealth      `json:"workers"`
+	ReviewIngress                 automationReviewIngressHealth `json:"review_ingress"`
+}
+
+type automationOutboxStateCount struct {
+	State    string `gorm:"column:state"`
+	Count    int64  `gorm:"column:count"`
+	Retrying int64  `gorm:"column:retrying"`
 }
 
 // automationReviewIngressHealth makes automatic PR review operationally
@@ -1837,6 +1851,7 @@ func Health(c echo.Context) error {
 		result.QueueLanes = queueHealth.Lanes
 		result.QueueVisible, result.QueueInFlight, result.QueueDelayed = queueHealth.Visible, queueHealth.InFlight, queueHealth.Delayed
 		result.DeadLetterTelemetry, result.DeadLetterVisible = queueHealth.DeadLetterAvailable, queueHealth.DeadLetterVisible
+		populateAutomationOutboxHealth(configuration.DB, &result)
 	}
 	// Health must use the same schema-compatible accounting projection as the
 	// cost screen. Otherwise an optional tool-ledger migration can make a
@@ -1891,6 +1906,46 @@ func Health(c echo.Context) error {
 		result.ReviewIngress = automationReviewIngressStatus(cfg, reviewWorkers)
 	}
 	return utils.Success(c, http.StatusOK, "Automation health", result)
+}
+
+// populateAutomationOutboxHealth keeps the control-plane handoff observable
+// without turning a temporarily unavailable optional projection into a false
+// claim that no work is pending. The dispatcher remains the only component
+// that can publish an event; this read model never retries, edits, or exposes
+// a durable payload.
+func populateAutomationOutboxHealth(db *gorm.DB, health *automationHealth) {
+	if db == nil || health == nil {
+		return
+	}
+	var rows []automationOutboxStateCount
+	if err := db.Model(&models.OutboxEvent{}).
+		Select("state, COUNT(*) AS count, COALESCE(SUM(CASE WHEN attempts > 0 THEN 1 ELSE 0 END), 0) AS retrying").
+		Where("target_runtime = ?", string(outboxService.RuntimeLocalAgent)).
+		Group("state").
+		Scan(&rows).Error; err != nil {
+		return
+	}
+	var oldest sql.NullTime
+	if err := db.Model(&models.OutboxEvent{}).
+		Select("MIN(created_at)").
+		Where("target_runtime = ? AND state = ?", string(outboxService.RuntimeLocalAgent), "pending").
+		Scan(&oldest).Error; err != nil {
+		return
+	}
+	health.OutboxTelemetryAvailable = true
+	for _, row := range rows {
+		health.OutboxRetrying += row.Retrying
+		switch row.State {
+		case "pending":
+			health.OutboxPending = row.Count
+		case "processing":
+			health.OutboxProcessing = row.Count
+		}
+	}
+	if oldest.Valid {
+		value := oldest.Time.UTC()
+		health.OutboxOldestPendingAt = &value
+	}
 }
 
 func automationReviewIngressStatus(cfg *models.Config, activeWorkers int64) automationReviewIngressHealth {

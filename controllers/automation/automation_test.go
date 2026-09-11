@@ -479,6 +479,58 @@ func TestAutomationHealthExposesLaneTelemetryWithoutInventingIt(t *testing.T) {
 	}
 }
 
+func TestPopulateAutomationOutboxHealthKeepsTheHandoffAggregateOnly(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqlDB.Close()
+	db, err := gorm.Open(postgres.New(postgres.Config{Conn: sqlDB, PreferSimpleProtocol: true}), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldest := time.Date(2026, time.September, 11, 15, 4, 5, 0, time.UTC)
+	mock.ExpectQuery(`SELECT.*COUNT.*FROM "outbox_events".*`).
+		WithArgs("local-ai-agent").
+		WillReturnRows(sqlmock.NewRows([]string{"state", "count", "retrying"}).
+			AddRow("pending", 2, 1).
+			AddRow("processing", 1, 3).
+			AddRow("completed", 9, 0))
+	mock.ExpectQuery(`SELECT MIN\(created_at\).*FROM "outbox_events".*`).
+		WithArgs("local-ai-agent", "pending").
+		WillReturnRows(sqlmock.NewRows([]string{"min"}).AddRow(oldest))
+
+	health := automationHealth{}
+	populateAutomationOutboxHealth(db, &health)
+	if !health.OutboxTelemetryAvailable || health.OutboxPending != 2 || health.OutboxProcessing != 1 || health.OutboxRetrying != 4 || health.OutboxOldestPendingAt == nil || !health.OutboxOldestPendingAt.Equal(oldest) {
+		t.Fatalf("unexpected safe outbox health projection: %#v", health)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPopulateAutomationOutboxHealthKeepsUnknownTelemetryAbsent(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqlDB.Close()
+	db, err := gorm.Open(postgres.New(postgres.Config{Conn: sqlDB, PreferSimpleProtocol: true}), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectQuery(`SELECT.*COUNT.*FROM "outbox_events".*`).WithArgs("local-ai-agent").WillReturnError(errors.New("outbox migration pending"))
+	health := automationHealth{}
+	populateAutomationOutboxHealth(db, &health)
+	if health.OutboxTelemetryAvailable || health.OutboxPending != 0 || health.OutboxProcessing != 0 || health.OutboxRetrying != 0 || health.OutboxOldestPendingAt != nil {
+		t.Fatalf("unavailable telemetry must remain unknown: %#v", health)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestValidCallbackSecretSupportsRotation(t *testing.T) {
 	t.Setenv("AUTOMATION_CALLBACK_SECRET", "current")
 	t.Setenv("AUTOMATION_CALLBACK_SECRET_PREVIOUS", "previous")
