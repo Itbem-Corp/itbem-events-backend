@@ -51,7 +51,25 @@ func TestHTTPGatewayClassifiesOnlyTransientResponsesForQueueRetry(t *testing.T) 
 			if sample.wantRetry && gatewayErr.RetryDelay() != sample.wantDelay {
 				t.Fatalf("retry delay = %s, want %s", gatewayErr.RetryDelay(), sample.wantDelay)
 			}
+			if sample.wantRetry && gatewayErr.operation != "lease" {
+				t.Fatalf("gateway operation = %q, want lease", gatewayErr.operation)
+			}
 		})
+	}
+}
+
+func TestGatewayOperationAllowsOnlyStableDiagnosticLabels(t *testing.T) {
+	for path, want := range map[string]string{
+		"/api/internal/automation/gateway/probe":                      "probe",
+		"/api/internal/automation/gateway/leases":                     "lease",
+		"/api/internal/automation/gateway/leases/visibility":          "lease visibility",
+		"/api/internal/automation/gateway/objects/read":               "object read",
+		"/api/internal/automation/gateway/objects/write":              "object write",
+		"/api/internal/automation/gateway/objects/read/untrusted-key": "request",
+	} {
+		if got := gatewayOperation(path); got != want {
+			t.Errorf("gatewayOperation(%q) = %q, want %q", path, got, want)
+		}
 	}
 }
 
