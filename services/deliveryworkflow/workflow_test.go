@@ -71,6 +71,19 @@ func TestAdvanceRejectsSkippedOrMismatchedGate(t *testing.T) {
 	}
 }
 
+func TestReadOnlyAssessmentTerminatesWithoutEnteringRelease(t *testing.T) {
+	item := &models.DeliveryWorkItem{ID: uuid.Must(uuid.NewV4()), State: StateImplementation}
+	if err := Advance(item, ActionSubmitAssessment, nil, time.Now().UTC()); err != nil {
+		t.Fatalf("submit read-only assessment: %v", err)
+	}
+	if item.State != StateAssessed || !isTerminal(item.State) {
+		t.Fatalf("assessment must be terminal and distinct from release: %#v", item)
+	}
+	if err := Advance(item, ActionApproveRelease, &models.DeliveryGate{WorkItemID: item.ID, Kind: GateRelease, Decision: DecisionApproved, DecidedBy: "reviewer"}, time.Now().UTC()); err == nil {
+		t.Fatal("assessed delivery must not reach release")
+	}
+}
+
 func TestAdvanceRecordsGateAuthorityAndRejectsUnknownAuthority(t *testing.T) {
 	now := time.Now().UTC()
 	item := &models.DeliveryWorkItem{ID: uuid.Must(uuid.NewV4()), State: StatePlanReview}

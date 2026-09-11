@@ -42,6 +42,10 @@ type agentRunSpec struct {
 var agentRunSpecs = map[string]agentRunSpec{
 	"plan":           {operation: "delivery.plan", states: stateSet(deliveryworkflow.StatePlanning)},
 	"implementation": {operation: "delivery.implementation", states: stateSet(deliveryworkflow.StateImplementation)},
+	// Assessment is intentionally available only for an approved plan that
+	// explicitly declares no repository changes. It gives review-only projects
+	// a useful, auditable terminal result without creating a worktree or PR.
+	"assessment": {operation: "delivery.assessment", states: stateSet(deliveryworkflow.StateImplementation)},
 	// Publication is deliberately a deterministic operation. It creates only a
 	// narrow branch and pull request from an already validated worktree. That
 	// PR is the immutable subject an independent reviewer must inspect before
@@ -377,6 +381,11 @@ func StartAgentRun(c echo.Context) error {
 	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Agent run rejected", err.Error())
 	}
+	if phase == "assessment" {
+		if err := requireReadOnlyAssessmentPlan(input.Delivery.ApprovedPlan); err != nil {
+			return utils.Error(c, http.StatusConflict, "Agent run rejected", err.Error())
+		}
+	}
 	applyFrozenAutonomyPolicy(&input, autonomySnapshot)
 	if err := attachExactProjectVaults(&input, snapshots, vaultRevisions); err != nil {
 		return utils.Error(c, http.StatusConflict, "Vault-first agent run rejected", err.Error())
@@ -464,6 +473,39 @@ func StartAgentRun(c echo.Context) error {
 		return utils.Error(c, http.StatusInternalServerError, "Agent run failed", "Could not persist agent run delivery")
 	}
 	return utils.Success(c, http.StatusAccepted, "Agent run queued", task)
+}
+
+// requireReadOnlyAssessmentPlan keeps the mode selection deterministic. A
+// missing or malformed matrix is not assumed to be read-only; legacy plans
+// must use the normal implementation path and therefore fail closed if they
+// cannot supply a patch.
+func requireReadOnlyAssessmentPlan(plan map[string]any) error {
+	raw, present := plan["repository_impact"]
+	if !present {
+		return fmt.Errorf("read-only assessment requires an explicit repository impact matrix")
+	}
+	entries, ok := raw.([]any)
+	if !ok || len(entries) == 0 {
+		return fmt.Errorf("read-only assessment requires a non-empty repository impact matrix")
+	}
+	for _, rawEntry := range entries {
+		entry, ok := rawEntry.(map[string]any)
+		if !ok {
+			return fmt.Errorf("read-only assessment repository impact is invalid")
+		}
+		reference, _ := entry["reference"].(string)
+		impact, _ := entry["impact"].(string)
+		if !strings.HasPrefix(strings.TrimSpace(reference), "workspace://") || strings.TrimSpace(impact) == "" {
+			return fmt.Errorf("read-only assessment repository impact is invalid")
+		}
+		if strings.EqualFold(strings.TrimSpace(impact), "changes") {
+			return fmt.Errorf("read-only assessment is unavailable because the approved plan requires repository changes")
+		}
+		if !strings.EqualFold(strings.TrimSpace(impact), "consulted") && !strings.EqualFold(strings.TrimSpace(impact), "untouched") {
+			return fmt.Errorf("read-only assessment repository impact is invalid")
+		}
+	}
+	return nil
 }
 
 // validatePublicationGrantReviewBinding rechecks every immutable review

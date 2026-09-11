@@ -68,6 +68,7 @@ var allowedOperations = map[string]struct{}{
 	"product.ideate":            {},
 	"delivery.plan":             {},
 	"delivery.implementation":   {},
+	"delivery.assessment":       {},
 	"delivery.onboarding_probe": {},
 	"delivery.publish":          {},
 	"delivery.release_gate":     {},
@@ -2228,7 +2229,7 @@ func Complete(c echo.Context) error {
 		if task.Operation == "delivery.release_gate" {
 			limit = 256 * 1024
 		}
-		if request.Status != "completed" || (task.Operation != "code.review" && task.Operation != "delivery.implementation" && task.Operation != "delivery.onboarding_probe" && task.Operation != "delivery.publish" && task.Operation != "delivery.release_gate" && task.Operation != "delivery.qa") || len(request.Execution) > limit || !json.Valid(request.Execution) {
+		if request.Status != "completed" || (task.Operation != "code.review" && task.Operation != "delivery.implementation" && task.Operation != "delivery.assessment" && task.Operation != "delivery.onboarding_probe" && task.Operation != "delivery.publish" && task.Operation != "delivery.release_gate" && task.Operation != "delivery.qa") || len(request.Execution) > limit || !json.Valid(request.Execution) {
 			return utils.Error(c, http.StatusBadRequest, "Invalid automation execution", "only a bounded completed review or delivery execution may register execution metadata")
 		}
 	}
@@ -2447,6 +2448,8 @@ func delegatedSubmissionAction(operation string) (deliveryworkflow.Action, strin
 	switch strings.TrimSpace(operation) {
 	case "delivery.implementation":
 		return deliveryworkflow.ActionSubmitCodeReview, "implementation"
+	case "delivery.assessment":
+		return deliveryworkflow.ActionSubmitAssessment, "assessment"
 	case "delivery.qa":
 		return deliveryworkflow.ActionSubmitQA, "qa"
 	default:
@@ -2457,6 +2460,8 @@ func delegatedSubmissionAction(operation string) (deliveryworkflow.Action, strin
 func delegatedSubmissionStateMatches(state string, action deliveryworkflow.Action) bool {
 	switch action {
 	case deliveryworkflow.ActionSubmitCodeReview:
+		return strings.TrimSpace(state) == deliveryworkflow.StateImplementation
+	case deliveryworkflow.ActionSubmitAssessment:
 		return strings.TrimSpace(state) == deliveryworkflow.StateImplementation
 	case deliveryworkflow.ActionSubmitQA:
 		return strings.TrimSpace(state) == deliveryworkflow.StateQARunning
