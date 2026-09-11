@@ -1,6 +1,7 @@
 package automation
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -167,12 +168,6 @@ func GitHubPullRequestReviewWebhook(c echo.Context) error {
 	if taskID == uuid.Nil {
 		return utils.Error(c, http.StatusInternalServerError, "GitHub review failed", "")
 	}
-	var existing models.AutomationTask
-	if err := configuration.DB.First(&existing, taskID).Error; err == nil {
-		return utils.Success(c, http.StatusAccepted, "GitHub review already queued", githubReviewTaskProjection(existing))
-	} else if err != gorm.ErrRecordNotFound {
-		return utils.Error(c, http.StatusServiceUnavailable, "GitHub review unavailable", "")
-	}
 	appConfig, err := automationagent.LoadGitHubAppConfig(os.Getenv)
 	if err != nil {
 		return utils.Error(c, http.StatusServiceUnavailable, "GitHub review unavailable", "")
@@ -191,6 +186,19 @@ func GitHubPullRequestReviewWebhook(c echo.Context) error {
 	}
 	if !currentPR.Open || currentPR.Draft || currentPR.Merged || subtle.ConstantTimeCompare([]byte(currentPR.HeadSHA), []byte(strings.ToLower(event.PullRequest.Head.SHA))) != 1 {
 		return utils.Success(c, http.StatusAccepted, "GitHub review ignored", map[string]string{"status": "stale_delivery"})
+	}
+	var existing models.AutomationTask
+	if err := configuration.DB.First(&existing, taskID).Error; err == nil {
+		recovered, recoveryErr := recoverStrandedGitHubReview(c.Request().Context(), &existing, time.Now().UTC())
+		if recoveryErr != nil {
+			return utils.Error(c, http.StatusServiceUnavailable, "GitHub review unavailable", "")
+		}
+		if recovered != nil {
+			return utils.Success(c, http.StatusAccepted, "GitHub pull request review recovery queued", githubReviewTaskProjection(*recovered))
+		}
+		return utils.Success(c, http.StatusAccepted, "GitHub review already queued", githubReviewTaskProjection(existing))
+	} else if err != gorm.ErrRecordNotFound {
+		return utils.Error(c, http.StatusServiceUnavailable, "GitHub review unavailable", "")
 	}
 	patch, err := automationagent.ReadGitHubPullRequestPatch(c.Request().Context(), appConfig, installation.Token, repository, event.PullRequest.Base.SHA, event.PullRequest.Head.SHA)
 	if err != nil {
@@ -418,6 +426,12 @@ func genericTaskOperationAllowed(operation string) bool {
 }
 
 const automationRunLeaseDuration = 20 * time.Minute
+
+// githubReviewRecoveryDelay is deliberately longer than the normal outbox
+// dispatch and worker-poll intervals. A signed GitHub redelivery may recover
+// only a task that was never claimed, so it cannot create a second provider
+// call for a live reviewer execution.
+const githubReviewRecoveryDelay = 15 * time.Minute
 
 // retryReservationHeader is deliberately an internal, response-only signal.
 // It distinguishes a recoverable expired budget hold from ordinary callback
@@ -3402,6 +3416,99 @@ func mayCancelTask(c echo.Context, task *models.AutomationTask, requestedBy stri
 
 func retryableCodeReviewTask(task *models.AutomationTask) bool {
 	return task != nil && task.Operation == "code.review" && task.Status == "failed" && strings.TrimSpace(task.InputRef) != "" && artifactDigestPattern.MatchString(strings.ToLower(strings.TrimSpace(task.EvidenceSubjectDigest)))
+}
+
+// recoverableQueuedGitHubReview is intentionally narrower than a normal
+// retry. It describes a durable handoff that was accepted by the control
+// plane but was never claimed by any worker. A lease or an execution attempt
+// makes recovery ineligible, leaving the task to the normal at-least-once
+// worker protocol instead.
+func recoverableQueuedGitHubReview(task *models.AutomationTask, now time.Time) bool {
+	if task == nil || task.ID == uuid.Nil || task.JobID == uuid.Nil || task.Operation != "code.review" || task.RequestedBy != "github-app-review" || task.Status != "queued" || task.AttemptCount != 0 || strings.TrimSpace(task.InputRef) == "" || !artifactDigestPattern.MatchString(strings.ToLower(strings.TrimSpace(task.EvidenceSubjectDigest))) || task.CreatedAt.IsZero() {
+		return false
+	}
+	return !task.CreatedAt.After(now.UTC().Add(-githubReviewRecoveryDelay))
+}
+
+// newStrandedGitHubReviewRecovery preserves the immutable review boundary but
+// deliberately has a new task and job identity. The original has no worker
+// attempt, so it is retained as cancelled audit evidence instead of being
+// relabelled as a failed provider execution. RetryOfTaskID stays empty: this
+// recovery must never authorize replacing a prior Reviewer check.
+func newStrandedGitHubReviewRecovery(original *models.AutomationTask, now time.Time) (*models.AutomationTask, error) {
+	if !recoverableQueuedGitHubReview(original, now) {
+		return nil, fmt.Errorf("queued GitHub review recovery boundary is invalid")
+	}
+	return &models.AutomationTask{
+		ID:                    uuid.Must(uuid.NewV4()),
+		JobID:                 uuid.Must(uuid.NewV4()),
+		RequestedBy:           original.RequestedBy,
+		DeliveryWorkItemID:    original.DeliveryWorkItemID,
+		DeliveryOnboardingID:  original.DeliveryOnboardingID,
+		CorrelationID:         original.CorrelationID,
+		Operation:             original.Operation,
+		EvidenceSubjectDigest: strings.ToLower(strings.TrimSpace(original.EvidenceSubjectDigest)),
+		MaxCompletionTokens:   original.MaxCompletionTokens,
+		InputRef:              original.InputRef,
+		Status:                "queued",
+	}, nil
+}
+
+// recoverStrandedGitHubReview gives an authenticated, current-head GitHub
+// redelivery one bounded repair path for a lost queue handoff. The transaction
+// re-reads and locks the source task, so a concurrent worker claim or another
+// redelivery cannot create duplicate provider work.
+func recoverStrandedGitHubReview(ctx context.Context, original *models.AutomationTask, now time.Time) (*models.AutomationTask, error) {
+	if configuration.DB == nil || original == nil || original.ID == uuid.Nil {
+		return nil, fmt.Errorf("queued GitHub review recovery is unavailable")
+	}
+	var recovered *models.AutomationTask
+	err := configuration.DB.Transaction(func(tx *gorm.DB) error {
+		var current models.AutomationTask
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&current, original.ID).Error; err != nil {
+			return err
+		}
+		if !recoverableQueuedGitHubReview(&current, now) {
+			return nil
+		}
+		next, err := newStrandedGitHubReviewRecovery(&current, now)
+		if err != nil {
+			return err
+		}
+		cancelledAt := now.UTC()
+		result := tx.Model(&models.AutomationTask{}).
+			Where("id = ? AND status = ? AND attempt_count = ?", current.ID, "queued", 0).
+			Updates(map[string]any{
+				"status":                        "cancelled",
+				"completed_at":                  cancelledAt,
+				"budget_reservation_expires_at": nil,
+				"error_message":                 "Recovered after an authenticated GitHub redelivery found no worker execution attempt",
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return nil
+		}
+		if err := tx.Create(next).Error; err != nil {
+			return err
+		}
+		message := automationqueue.Message{SchemaVersion: 1, JobID: next.JobID.String(), TenantCode: "itbem", CorrelationID: next.CorrelationID, Type: "ai.local.process"}
+		message.Payload.TaskID, message.Payload.Operation, message.Payload.MaxCompletionTokens, message.Payload.InputRef, message.Payload.Attempt = next.ID.String(), next.Operation, next.MaxCompletionTokens, next.InputRef, 1
+		queued, enqueueErr := outboxService.EnqueueAutomationProcess(ctx, tx, message)
+		if enqueueErr != nil {
+			return enqueueErr
+		}
+		if !queued {
+			return fmt.Errorf("GitHub review recovery delivery was not enqueued")
+		}
+		recovered = next
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return recovered, nil
 }
 
 // newCodeReviewRetryTask preserves the frozen input and its evidence subject.
