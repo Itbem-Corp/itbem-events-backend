@@ -17,7 +17,7 @@ func TestProviderConfigDefaultsToMiniMaxM3AndRejectsUnsafeEndpoints(t *testing.T
 		}
 		return ""
 	})
-	if err != nil || config.Provider != ProviderMiniMax || config.Model != "MiniMax-M3" || config.requestTimeout != providerRequestTimeout {
+	if err != nil || config.Provider != ProviderMiniMax || config.Model != "MiniMax-M3" || config.Endpoint != miniMaxDirectCompletionEndpoint || config.requestTimeout != providerRequestTimeout {
 		t.Fatalf("unexpected config: %#v, %v", config, err)
 	}
 	configured, err := LoadProviderConfig(func(name string) string {
@@ -58,6 +58,23 @@ func TestProviderConfigDefaultsToMiniMaxM3AndRejectsUnsafeEndpoints(t *testing.T
 	})
 	if err == nil {
 		t.Fatal("expected insecure endpoint to be rejected")
+	}
+}
+
+func TestMiniMaxDirectM3PayloadOmitsCompatibilityOnlyControls(t *testing.T) {
+	client := &httpProviderClient{config: ProviderConfig{Provider: ProviderMiniMax, Model: "MiniMax-M3", Endpoint: miniMaxDirectCompletionEndpoint, secret: "test-key"}}
+	payload, _ := client.payload([]Message{{Role: "user", Content: "work"}}, 1)
+	if _, exists := payload["reasoning_split"]; exists {
+		t.Fatalf("MiniMax direct payload unexpectedly used compatibility reasoning_split: %#v", payload)
+	}
+	if _, exists := payload["thinking"]; exists {
+		t.Fatalf("MiniMax direct payload unexpectedly used compatibility thinking control: %#v", payload)
+	}
+	if payload["model"] != "MiniMax-M3" || payload["max_completion_tokens"] != 1 {
+		t.Fatalf("MiniMax direct payload lost bounded portable fields: %#v", payload)
+	}
+	if !usesMiniMaxDirectCompletionEndpoint(miniMaxDirectCompletionEndpoint) || usesMiniMaxDirectCompletionEndpoint("https://api.minimax.io/v1/chat/completions") {
+		t.Fatalf("MiniMax completion endpoint classification is incorrect")
 	}
 }
 
