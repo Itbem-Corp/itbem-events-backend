@@ -3,12 +3,19 @@ package automationagent
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
+
+type providerRoundTripper func(*http.Request) (*http.Response, error)
+
+func (fn providerRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	return fn(request)
+}
 
 func TestProviderConfigDefaultsToMiniMaxM3AndRejectsUnsafeEndpoints(t *testing.T) {
 	config, err := LoadProviderConfig(func(name string) string {
@@ -75,6 +82,43 @@ func TestMiniMaxDirectM3PayloadOmitsCompatibilityOnlyControls(t *testing.T) {
 	}
 	if !usesMiniMaxDirectCompletionEndpoint(miniMaxDirectCompletionEndpoint) || usesMiniMaxDirectCompletionEndpoint("https://api.minimax.io/v1/chat/completions") {
 		t.Fatalf("MiniMax completion endpoint classification is incorrect")
+	}
+}
+
+func TestProviderClientUsesMiniMaxDirectM3TokenPlanContract(t *testing.T) {
+	client := &http.Client{Transport: providerRoundTripper(func(request *http.Request) (*http.Response, error) {
+		if request.Method != http.MethodPost || request.URL.String() != miniMaxDirectCompletionEndpoint {
+			t.Fatalf("MiniMax direct request = %s %s", request.Method, request.URL)
+		}
+		if request.Header.Get("Authorization") != "Bearer private-test-key" || request.Header.Get("x-api-key") != "" {
+			t.Fatalf("MiniMax direct authorization contract is incorrect")
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode MiniMax direct payload: %v", err)
+		}
+		if payload["model"] != "MiniMax-M3" || payload["max_completion_tokens"] != float64(7) {
+			t.Fatalf("MiniMax direct payload lost bounded model fields: %#v", payload)
+		}
+		if _, present := payload["reasoning_split"]; present {
+			t.Fatalf("MiniMax direct request included a compatibility-only control: %#v", payload)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"id":"direct-response","model":"MiniMax-M3","usage":{"total_tokens":7},"base_resp":{"status_code":0},"choices":[{"finish_reason":"stop","message":{"content":"ok"}}]}`)),
+			Request:    request,
+		}, nil
+	})}
+
+	completion, err := NewProviderClient(ProviderConfig{
+		Provider: ProviderMiniMax,
+		Model:    "MiniMax-M3",
+		Endpoint: miniMaxDirectCompletionEndpoint,
+		secret:   "private-test-key",
+	}, client).Complete(context.Background(), []Message{{Role: "user", Content: "test"}}, 7)
+	if err != nil || completion.Content != "ok" || completion.ResponseID != "direct-response" {
+		t.Fatalf("MiniMax direct completion = %#v, %v", completion, err)
 	}
 }
 
