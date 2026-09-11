@@ -23,6 +23,11 @@ const codeReviewSupportingTestPatchBytes = 24 << 10
 
 var codeReviewSupportIdentifier = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]{4,}`)
 
+var (
+	errCodeReviewProgressFrozenPatch            = errors.New("code review checkpoint does not match the frozen patch")
+	errCodeReviewProgressInvalidRepairReference = errors.New("code review checkpoint has an invalid repair reference")
+)
+
 const codeReviewSupportContextBytes = 16 << 10
 const codeReviewSupportContextExcerpts = 8
 
@@ -66,9 +71,14 @@ type codeReviewPendingRepair struct {
 	ValidationError string `json:"validation_error"`
 }
 
-type codeReviewProgressInvalidError struct{ message string }
+type codeReviewProgressInvalidError struct {
+	message string
+	cause   error
+}
 
 func (e *codeReviewProgressInvalidError) Error() string { return e.message }
+
+func (e *codeReviewProgressInvalidError) Unwrap() error { return e.cause }
 
 func (w *Worker) processSegmentedCodeReview(ctx context.Context, message TaskMessage, runID string, input TaskInput, boundary CodeReviewInput) error {
 	retryOfTaskID := strings.ToLower(strings.TrimSpace(message.Payload.RetryOfTaskID))
@@ -352,7 +362,7 @@ func (w *Worker) loadCodeReviewProgress(ctx context.Context, taskID string, call
 		return codeReviewProgress{}, false, &codeReviewProgressInvalidError{message: "code review checkpoint is not a single valid JSON object"}
 	}
 	if err := w.validateCodeReviewProgress(progress, taskID, calls, boundary); err != nil {
-		return codeReviewProgress{}, false, &codeReviewProgressInvalidError{message: "code review checkpoint is invalid: " + boundedRepairError(err)}
+		return codeReviewProgress{}, false, &codeReviewProgressInvalidError{message: "code review checkpoint is invalid: " + boundedRepairError(err), cause: err}
 	}
 	return progress, true, nil
 }
@@ -380,7 +390,7 @@ func (w *Worker) validateCodeReviewProgress(progress codeReviewProgress, taskID 
 	for index, segment := range progress.Segments {
 		call := calls[index]
 		if segment.Index != call.Index || segment.PatchSHA256 != call.PatchDigest {
-			return fmt.Errorf("checkpoint segment %d does not match the frozen patch", index+1)
+			return fmt.Errorf("%w: segment %d", errCodeReviewProgressFrozenPatch, index+1)
 		}
 		if !providerConfigured(segment.Completion.Provider) || strings.TrimSpace(segment.Completion.Model) == "" || strings.TrimSpace(segment.Completion.Content) == "" || segment.Completion.Usage == nil {
 			return fmt.Errorf("checkpoint segment %d lacks a valid provider completion", call.Index)
@@ -390,7 +400,7 @@ func (w *Worker) validateCodeReviewProgress(progress codeReviewProgress, taskID 
 				return fmt.Errorf("checkpoint segment %d has an invalid pending repair state", call.Index)
 			}
 			if len(strings.TrimSpace(segment.PendingRepair.ValidationError)) == 0 || len(segment.PendingRepair.ValidationError) > 400 || !w.codeReviewProgressReferenceMatches(segment.PendingRepair.RequestRef, codeReviewRepairRequestKey(taskID, runID, call.Index)) {
-				return fmt.Errorf("checkpoint segment %d has an invalid repair reference", call.Index)
+				return fmt.Errorf("%w: segment %d", errCodeReviewProgressInvalidRepairReference, call.Index)
 			}
 			continue
 		}

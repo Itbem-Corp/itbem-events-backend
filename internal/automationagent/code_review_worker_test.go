@@ -57,7 +57,7 @@ func TestCodeReviewProgressRoundTripsOnlyItsExactValidatedSegment(t *testing.T) 
 	store.existing = map[string][]byte{"itbem-ai-outputs-local/" + codeReviewProgressKey(taskID): encoded}
 	_, _, err = worker.loadCodeReviewProgress(context.Background(), taskID, calls, boundary)
 	var invalid *codeReviewProgressInvalidError
-	if !errors.As(err, &invalid) || !strings.Contains(invalid.Error(), "does not match the frozen patch") {
+	if !errors.As(err, &invalid) || !errors.Is(err, errCodeReviewProgressFrozenPatch) {
 		t.Fatalf("checkpoint for another segment must be rejected before inference: %v", err)
 	}
 }
@@ -87,7 +87,7 @@ func TestCodeReviewProgressRejectsRepairFromAnotherRun(t *testing.T) {
 		}},
 	}
 	calls := []codeReviewProviderCall{{Index: 1, Boundary: segments[0], PatchDigest: segments[0].PatchSHA256}}
-	if err := worker.validateCodeReviewProgress(progress, taskID, calls, boundary); err == nil || !strings.Contains(err.Error(), "invalid repair reference") {
+	if err := worker.validateCodeReviewProgress(progress, taskID, calls, boundary); err == nil || !errors.Is(err, errCodeReviewProgressInvalidRepairReference) {
 		t.Fatalf("repair checkpoint from another run must be rejected: %v", err)
 	}
 }
