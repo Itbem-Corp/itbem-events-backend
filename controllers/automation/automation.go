@@ -2440,6 +2440,9 @@ func advanceDelegatedDeliverySubmission(tx *gorm.DB, task *models.AutomationTask
 	return tx.Save(&item).Error
 }
 
+// delegatedSubmissionAction maps an eligible delegated operation to its
+// transition and its immutable delivery phase label. An empty result means the
+// operation is not allowed to advance a delivery work item.
 func delegatedSubmissionAction(operation string) (deliveryworkflow.Action, string) {
 	switch strings.TrimSpace(operation) {
 	case "delivery.implementation":
