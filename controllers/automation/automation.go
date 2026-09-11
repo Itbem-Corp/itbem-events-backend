@@ -433,6 +433,12 @@ const automationRunLeaseDuration = 20 * time.Minute
 // call for a live reviewer execution.
 const githubReviewRecoveryDelay = 15 * time.Minute
 
+// githubReviewLeaseRecoveryMaximumAttempts is deliberately small. A current
+// signed GitHub redelivery may repair one abandoned reviewer execution, but a
+// repeated worker outage must become visible to an operator rather than spend
+// an unbounded number of provider calls against the same immutable SHA.
+const githubReviewLeaseRecoveryMaximumAttempts = 2
+
 // retryReservationHeader is deliberately an internal, response-only signal.
 // It distinguishes a recoverable expired budget hold from ordinary callback
 // conflicts such as a newer worker owning the task. The worker retains only
@@ -3485,6 +3491,18 @@ func recoverableQueuedGitHubReview(task *models.AutomationTask, now time.Time) b
 	return !task.CreatedAt.After(now.UTC().Add(-githubReviewRecoveryDelay))
 }
 
+// recoverableExpiredGitHubReviewLease is the second, narrower recovery path.
+// The task was claimed, but its worker lease has expired and no terminal
+// callback was recorded. A fresh task is necessary because the original
+// outbox event is already deduplicated; the new task carries RetryOfTaskID so
+// publication remains bound to the same immutable review subject.
+func recoverableExpiredGitHubReviewLease(task *models.AutomationTask, now time.Time) bool {
+	if task == nil || task.ID == uuid.Nil || task.JobID == uuid.Nil || task.Operation != "code.review" || task.RequestedBy != "github-app-review" || task.Status != "running" || task.AttemptCount < 1 || task.AttemptCount >= githubReviewLeaseRecoveryMaximumAttempts || strings.TrimSpace(task.InputRef) == "" || !artifactDigestPattern.MatchString(strings.ToLower(strings.TrimSpace(task.EvidenceSubjectDigest))) || task.LeaseExpiresAt == nil || task.LeaseExpiresAt.After(now.UTC()) || task.CompletedAt != nil {
+		return false
+	}
+	return true
+}
+
 // newStrandedGitHubReviewRecovery preserves the immutable review boundary but
 // deliberately has a new task and job identity. The original has no worker
 // attempt, so it is retained as cancelled audit evidence instead of being
@@ -3509,6 +3527,17 @@ func newStrandedGitHubReviewRecovery(original *models.AutomationTask, now time.T
 	}, nil
 }
 
+func newExpiredGitHubReviewLeaseRecovery(original *models.AutomationTask, now time.Time) (*models.AutomationTask, error) {
+	if !recoverableExpiredGitHubReviewLease(original, now) {
+		return nil, fmt.Errorf("expired GitHub review lease recovery boundary is invalid")
+	}
+	// Reuse the existing retry contract so the worker is explicitly told that
+	// this task can supersede only the prior, same-subject reviewer attempt.
+	failed := *original
+	failed.Status = "failed"
+	return newCodeReviewRetryTask(&failed)
+}
+
 // recoverStrandedGitHubReview gives an authenticated, current-head GitHub
 // redelivery one bounded repair path for a lost queue handoff. The transaction
 // re-reads and locks the source task, so a concurrent worker claim or another
@@ -3523,22 +3552,55 @@ func recoverStrandedGitHubReview(ctx context.Context, original *models.Automatio
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&current, original.ID).Error; err != nil {
 			return err
 		}
-		if !recoverableQueuedGitHubReview(&current, now) {
-			return nil
-		}
-		next, err := newStrandedGitHubReviewRecovery(&current, now)
-		if err != nil {
-			return err
-		}
-		cancelledAt := now.UTC()
-		result := tx.Model(&models.AutomationTask{}).
-			Where("id = ? AND status = ? AND attempt_count = ?", current.ID, "queued", 0).
-			Updates(map[string]any{
+		var next *models.AutomationTask
+		var message automationqueue.Message
+		var updates map[string]any
+		var where string
+		var args []any
+		switch {
+		case recoverableQueuedGitHubReview(&current, now):
+			var recoveryErr error
+			next, recoveryErr = newStrandedGitHubReviewRecovery(&current, now)
+			if recoveryErr != nil {
+				return recoveryErr
+			}
+			updates = map[string]any{
 				"status":                        "cancelled",
-				"completed_at":                  cancelledAt,
+				"completed_at":                  now.UTC(),
 				"budget_reservation_expires_at": nil,
 				"error_message":                 "Recovered after an authenticated GitHub redelivery found no worker execution attempt",
-			})
+			}
+			where, args = "id = ? AND status = ? AND attempt_count = ?", []any{current.ID, "queued", 0}
+			message = automationqueue.Message{SchemaVersion: 1, JobID: next.JobID.String(), TenantCode: "itbem", CorrelationID: next.CorrelationID, Type: "ai.local.process"}
+			message.Payload.TaskID, message.Payload.Operation, message.Payload.MaxCompletionTokens, message.Payload.InputRef, message.Payload.Attempt = next.ID.String(), next.Operation, next.MaxCompletionTokens, next.InputRef, 1
+		case recoverableExpiredGitHubReviewLease(&current, now):
+			// A published reviewer result is terminal even if a late callback
+			// failed to update its task row. Never publish or infer a duplicate.
+			var publications int64
+			if err := tx.Model(&models.AutomationCodeReviewPublication{}).Where("automation_task_id = ?", current.ID).Count(&publications).Error; err != nil {
+				return err
+			}
+			if publications != 0 {
+				return nil
+			}
+			var recoveryErr error
+			next, recoveryErr = newExpiredGitHubReviewLeaseRecovery(&current, now)
+			if recoveryErr != nil {
+				return recoveryErr
+			}
+			updates = map[string]any{
+				"status":                        "failed",
+				"completed_at":                  now.UTC(),
+				"lease_expires_at":              nil,
+				"budget_reservation_expires_at": nil,
+				"error_message":                 "Recovered after an authenticated GitHub redelivery found an expired reviewer execution lease without a publication",
+			}
+			where, args = "id = ? AND status = ? AND lease_expires_at <= ?", []any{current.ID, "running", now.UTC()}
+			message = codeReviewRetryQueueMessage(&current, next)
+		default:
+			return nil
+		}
+		result := tx.Model(&models.AutomationTask{}).Where(where, args...).Updates(updates)
 		if result.Error != nil {
 			return result.Error
 		}
@@ -3548,8 +3610,6 @@ func recoverStrandedGitHubReview(ctx context.Context, original *models.Automatio
 		if err := tx.Create(next).Error; err != nil {
 			return err
 		}
-		message := automationqueue.Message{SchemaVersion: 1, JobID: next.JobID.String(), TenantCode: "itbem", CorrelationID: next.CorrelationID, Type: "ai.local.process"}
-		message.Payload.TaskID, message.Payload.Operation, message.Payload.MaxCompletionTokens, message.Payload.InputRef, message.Payload.Attempt = next.ID.String(), next.Operation, next.MaxCompletionTokens, next.InputRef, 1
 		queued, enqueueErr := outboxService.EnqueueAutomationProcess(ctx, tx, message)
 		if enqueueErr != nil {
 			return enqueueErr
@@ -3588,10 +3648,11 @@ func newCodeReviewRetryTask(original *models.AutomationTask) (*models.Automation
 	}, nil
 }
 
-// codeReviewRetryQueueMessage carries the sole authorization for a Reviewer
-// retry to supersede its earlier failed exact-SHA check. It is emitted only by
-// RetryCodeReview after that endpoint verified both the original task and the
-// caller; ordinary queue delivery and redelivery leave RetryOfTaskID empty.
+// codeReviewRetryQueueMessage carries the explicit authorization for a Reviewer
+// retry to supersede its earlier failed exact-SHA check. It is emitted by a
+// manually authorized retry, or by the bounded authenticated-redelivery repair
+// of an expired, unpublished GitHub review lease; ordinary delivery leaves
+// RetryOfTaskID empty.
 func codeReviewRetryQueueMessage(original, retry *models.AutomationTask) automationqueue.Message {
 	message := automationqueue.Message{SchemaVersion: 1, JobID: retry.JobID.String(), TenantCode: "itbem", CorrelationID: retry.CorrelationID, Type: "ai.local.process"}
 	message.Payload.TaskID = retry.ID.String()
