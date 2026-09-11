@@ -121,8 +121,8 @@ func CreatePublicationGrant(c echo.Context) error {
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&lockedItem, item.ID).Error; err != nil {
 			return err
 		}
-		if lockedItem.State != deliveryworkflow.StateCodeReview {
-			return fmt.Errorf("a publication grant can only be issued while code review is pending")
+		if err := publicationGrantPrecondition(lockedItem); err != nil {
+			return err
 		}
 		var snapshots []models.DeliveryContextSnapshot
 		if err := tx.Where("work_item_id = ?", lockedItem.ID).Find(&snapshots).Error; err != nil {
@@ -174,6 +174,18 @@ func CreatePublicationGrant(c echo.Context) error {
 		return conflict(c, "Publication grant rejected", err.Error())
 	}
 	return success(c, "Delivery publication grant created", grant)
+}
+
+// publicationGrantPrecondition is deliberately narrow: issuing a one-shot
+// publication grant is allowed only while the immutable local worktree is
+// awaiting its independent code review. The grant itself is not a review
+// approval and does not advance the workflow, so no prior approved gate may
+// be inferred here.
+func publicationGrantPrecondition(item models.DeliveryWorkItem) error {
+	if strings.TrimSpace(item.State) != deliveryworkflow.StateCodeReview {
+		return fmt.Errorf("a publication grant can only be issued while code review is pending")
+	}
+	return nil
 }
 
 // grantRepositoryReference requires an explicit repository for a project with

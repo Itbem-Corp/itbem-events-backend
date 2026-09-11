@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"events-stocks/models"
+	"events-stocks/services/deliveryworkflow"
 
 	"github.com/gofrs/uuid"
 )
@@ -22,6 +23,21 @@ func TestNormalizedPublicationCapabilitiesRequiresSafePublishingChain(t *testing
 	}
 	if _, err := normalizedPublicationCapabilities([]string{"commit:stage", "branch:publish", "merge:main"}); err == nil {
 		t.Fatal("unsupported publishing capabilities must be rejected")
+	}
+}
+
+func TestPublicationGrantPreconditionAllowsPendingCodeReviewWithoutAnApprovalGate(t *testing.T) {
+	// A grant binds a reviewed local worktree for later publication; it is not
+	// itself a code-review decision. Keep this test at the controller boundary
+	// so a future refactor cannot accidentally restore an "approved gate"
+	// prerequisite and make the publication/review ordering impossible.
+	if err := publicationGrantPrecondition(models.DeliveryWorkItem{State: " " + deliveryworkflow.StateCodeReview + " "}); err != nil {
+		t.Fatalf("pending code review must allow a publication grant without a prior approval gate: %v", err)
+	}
+	for _, state := range []string{"", deliveryworkflow.StateImplementation, deliveryworkflow.StatePreviewPending, deliveryworkflow.StateQARunning} {
+		if err := publicationGrantPrecondition(models.DeliveryWorkItem{State: state}); err == nil {
+			t.Fatalf("publication grant unexpectedly allowed outside pending code review: %q", state)
+		}
 	}
 }
 

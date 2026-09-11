@@ -1,11 +1,15 @@
 package delivery
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
+	"events-stocks/internal/deliveryledger"
+	"events-stocks/internal/deliverypolicy"
 	"events-stocks/models"
 
 	"github.com/gofrs/uuid"
@@ -157,6 +161,38 @@ func TestExecutionGraphShowsActivePRPublicationAsRunning(t *testing.T) {
 	}
 }
 
+func TestBuildExecutionGraphProjectsVerifiedAuthorityAndFailsClosedOnTampering(t *testing.T) {
+	workItemID, projectID, eventID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
+	occurredAt := time.Date(2026, time.September, 11, 7, 0, 0, 0, time.UTC)
+	valid := executionGraphAutonomySnapshotEvent(t, workItemID, projectID, eventID, occurredAt)
+	input := executionGraphBuildInput{
+		WorkItem:    models.DeliveryWorkItem{ID: workItemID, Title: "Autoridad congelada", State: "implementation", CreatedAt: occurredAt, UpdatedAt: occurredAt},
+		Events:      []models.DeliveryEvent{valid},
+		GeneratedAt: occurredAt.Add(time.Minute),
+	}
+
+	snapshot := buildExecutionGraph(input)
+	authority := executionGraphFindNode(t, snapshot.Nodes, executionGraphAuthorityNodeID(eventID))
+	if authority.Status != "completed" || authority.Detail != "Gates delegados con evidencia independiente obligatoria" || authority.Metadata["verified"] != true || authority.Metadata["delegated"] != true || authority.Metadata["repositories"] != 1 {
+		t.Fatalf("verified authority projection lost its safe status: %#v", authority)
+	}
+	if edge := executionGraphFindEdge(t, snapshot.Edges, executionGraphEdgeID(executionGraphWorkItemNodeID(workItemID), authority.ID, "freezes_authority")); edge.Kind != "freezes_authority" || edge.Status != "completed" {
+		t.Fatalf("authority provenance edge is missing or unsafe: %#v", edge)
+	}
+
+	tampered := valid
+	tampered.PayloadDigest = strings.Repeat("0", 64)
+	input.Events = []models.DeliveryEvent{tampered}
+	failed := buildExecutionGraph(input)
+	blockedAuthority := executionGraphFindNode(t, failed.Nodes, executionGraphAuthorityNodeID(eventID))
+	if blockedAuthority.Status != "attention" || blockedAuthority.Metadata["verified"] != false || blockedAuthority.Detail != "La evidencia de autoridad no pasó la verificación" {
+		t.Fatalf("invalid authority evidence must fail closed in the graph: %#v", blockedAuthority)
+	}
+	if edge := executionGraphFindEdge(t, failed.Edges, executionGraphEdgeID(executionGraphWorkItemNodeID(workItemID), blockedAuthority.ID, "freezes_authority")); edge.Status != "attention" {
+		t.Fatalf("invalid authority edge must remain visibly blocked: %#v", edge)
+	}
+}
+
 func TestExecutionGraphEvidenceLinkingAndTextSanitizationFailClosed(t *testing.T) {
 	taskID := uuid.Must(uuid.NewV4())
 	if linked, ok := executionGraphEvidenceTaskID(`{"automation_task_id":"` + taskID.String() + `"}`); !ok || linked != taskID {
@@ -181,6 +217,49 @@ func executionGraphFindNode(t *testing.T, nodes []executionGraphNode, id string)
 	}
 	t.Fatalf("node %q not found in %#v", id, nodes)
 	return executionGraphNode{}
+}
+
+func executionGraphFindEdge(t *testing.T, edges []executionGraphEdge, id string) executionGraphEdge {
+	t.Helper()
+	for _, edge := range edges {
+		if edge.ID == id {
+			return edge
+		}
+	}
+	t.Fatalf("edge %q not found in %#v", id, edges)
+	return executionGraphEdge{}
+}
+
+func executionGraphAutonomySnapshotEvent(t *testing.T, workItemID, projectID, eventID uuid.UUID, occurredAt time.Time) models.DeliveryEvent {
+	t.Helper()
+	changeSetID := "11111111-1111-4111-8111-111111111111"
+	repository := "github://itbem/service"
+	policyDigest := strings.Repeat("c", 64)
+	input := deliveryledger.AutonomySnapshotInput{
+		ProjectID: projectID, ChangeSetID: changeSetID,
+		Repositories: []deliveryledger.AutonomyRepository{{
+			Repository: repository, SourceReference: "workspace://service", SourceRevision: strings.Repeat("a", 40),
+			VaultRevisionID: uuid.Must(uuid.NewV4()).String(), VaultVersion: 1, VaultRevision: strings.Repeat("b", 40), VaultDigest: strings.Repeat("d", 64),
+			Policy: deliverypolicy.ResolvedPolicy{
+				Context:  deliverypolicy.Context{ProjectID: projectID.String(), Repository: repository, ChangeSetID: changeSetID},
+				Resolved: true, GateApprovalMode: deliverypolicy.GateApprovalDelegated, Digest: policyDigest,
+			},
+		}},
+	}
+	payload, err := json.Marshal(struct {
+		SchemaVersion int                                  `json:"schema_version"`
+		Input         deliveryledger.AutonomySnapshotInput `json:"input"`
+	}{SchemaVersion: 1, Input: input})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payloadSum := sha256.Sum256(payload)
+	subjectSum := sha256.Sum256([]byte(strings.ToLower(repository) + "|" + strings.Repeat("a", 40) + "|" + strings.Repeat("d", 64) + "|" + policyDigest))
+	return models.DeliveryEvent{
+		ID: eventID, WorkItemID: workItemID, Sequence: 1, EventType: deliveryledger.EventTypeAutonomySnapshot,
+		SubjectDigest: hex.EncodeToString(subjectSum[:]), PayloadJSON: string(payload), PayloadDigest: hex.EncodeToString(payloadSum[:]),
+		OccurredAt: occurredAt, CreatedAt: occurredAt,
+	}
 }
 
 func executionGraphHasAction(actions []executionGraphAction, id string) bool {
