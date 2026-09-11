@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"events-stocks/configuration"
 	"events-stocks/internal/automationagent"
+	"events-stocks/internal/deliveryledger"
 	"events-stocks/internal/projectvault"
 	"events-stocks/internal/releasegate"
 	"events-stocks/internal/releasegatecontrol"
@@ -231,11 +232,18 @@ type deliveryAgentMessage struct {
 // Enforcement does not rely on this object: state checks, capability checks
 // and the worker's command boundary remain the authority.
 type deliveryAgentAutonomyPolicy struct {
-	Phase                string   `json:"phase"`
-	Allowed              []string `json:"allowed"`
-	Prohibited           []string `json:"prohibited"`
-	HumanGateRequiredFor []string `json:"human_gate_required_for"`
-	RequiredEvidence     []string `json:"required_evidence"`
+	Phase string `json:"phase"`
+	// GateAuthority is derived only from the immutable task-scoped autonomy
+	// snapshot. It tells the worker whether an eventual transition is owned by
+	// a human or by the control-plane coordinator; it never authorizes the
+	// model to create a gate or to perform a remote side effect.
+	GateAuthority          string   `json:"gate_authority"`
+	AuthoritySnapshotID    string   `json:"authority_snapshot_id,omitempty"`
+	Allowed                []string `json:"allowed"`
+	Prohibited             []string `json:"prohibited"`
+	HumanGateRequiredFor   []string `json:"human_gate_required_for"`
+	CoordinatorRequiredFor []string `json:"coordinator_required_for,omitempty"`
+	RequiredEvidence       []string `json:"required_evidence"`
 }
 
 // StartAgentRun prepares a bounded, private task input and sends it through
@@ -357,7 +365,8 @@ func StartAgentRun(c echo.Context) error {
 		}
 		return utils.Error(c, http.StatusConflict, "Agent run rejected", err.Error())
 	}
-	if _, _, err := freezeWorkItemAutonomy(configuration.DB, item, project, snapshots, vaultRevisions, time.Now().UTC()); err != nil {
+	autonomySnapshot, _, err := freezeWorkItemAutonomy(configuration.DB, item, project, snapshots, vaultRevisions, time.Now().UTC())
+	if err != nil {
 		return utils.Error(c, http.StatusConflict, "Autonomy authority rejected", err.Error())
 	}
 
@@ -366,6 +375,7 @@ func StartAgentRun(c echo.Context) error {
 	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Agent run rejected", err.Error())
 	}
+	applyFrozenAutonomyPolicy(&input, autonomySnapshot)
 	if err := attachExactProjectVaults(&input, snapshots, vaultRevisions); err != nil {
 		return utils.Error(c, http.StatusConflict, "Vault-first agent run rejected", err.Error())
 	}
@@ -1136,7 +1146,8 @@ func metadataStringList(value any) []string {
 
 func deliveryAutonomyPolicy(phase string) deliveryAgentAutonomyPolicy {
 	policy := deliveryAgentAutonomyPolicy{
-		Phase: phase,
+		Phase:         phase,
+		GateAuthority: "human",
 		Prohibited: []string{
 			"advance or approve a human gate",
 			"deploy, merge, push, or publish remotely",
@@ -1179,6 +1190,26 @@ func deliveryAutonomyPolicy(phase string) deliveryAgentAutonomyPolicy {
 		policy.HumanGateRequiredFor = []string{"human clarification before any action"}
 	}
 	return policy
+}
+
+// applyFrozenAutonomyPolicy projects only the verified task authority that a
+// worker needs. In delegated mode, the coordinator still advances gates only
+// after it independently validates required evidence. This function therefore
+// deliberately does not add "approve" to Allowed and keeps every remote
+// action prohibited except the separately scoped publication phase.
+func applyFrozenAutonomyPolicy(input *deliveryAgentInput, snapshot deliveryledger.AutonomySnapshot) {
+	if input == nil || !snapshot.Delegated || snapshot.EventID == uuid.Nil {
+		return
+	}
+	policy := &input.Delivery.AutonomyPolicy
+	policy.GateAuthority = "delegated"
+	policy.AuthoritySnapshotID = snapshot.EventID.String()
+	policy.CoordinatorRequiredFor = append([]string(nil), policy.HumanGateRequiredFor...)
+	policy.HumanGateRequiredFor = nil
+	policy.RequiredEvidence = append(policy.RequiredEvidence,
+		"frozen delegated authority snapshot",
+		"independent role evidence validated by the control-plane coordinator",
+	)
 }
 
 func stateSet(states ...string) map[string]struct{} {
