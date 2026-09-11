@@ -443,6 +443,57 @@ func TestStrandedGitHubReviewRecoveryPreservesOnlyAnUnclaimedImmutableBoundary(t
 	}
 }
 
+func TestExpiredGitHubReviewLeaseRecoveryIsBoundedAndPreservesExactReviewSubject(t *testing.T) {
+	now := time.Now().UTC()
+	digest := strings.Repeat("a", 64)
+	expiredLease := now.Add(-time.Second)
+	original := &models.AutomationTask{
+		ID:                    uuid.Must(uuid.NewV4()),
+		JobID:                 uuid.Must(uuid.NewV4()),
+		RequestedBy:           "github-app-review",
+		CorrelationID:         "github-pr:subject:head",
+		Operation:             "code.review",
+		Status:                "running",
+		AttemptCount:          1,
+		EvidenceSubjectDigest: digest,
+		MaxCompletionTokens:   4096,
+		InputRef:              "s3://itbem-ai-inputs-local/automation/inputs/original/input.json",
+		LeaseExpiresAt:        &expiredLease,
+	}
+	if !recoverableExpiredGitHubReviewLease(original, now) {
+		t.Fatal("an expired, claimed GitHub review with no completion should be recoverable once")
+	}
+	recovery, err := newExpiredGitHubReviewLeaseRecovery(original, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovery.ID == original.ID || recovery.JobID == original.JobID || recovery.Status != "queued" || recovery.InputRef != original.InputRef || recovery.EvidenceSubjectDigest != digest || recovery.CorrelationID != original.CorrelationID || recovery.RequestedBy != original.RequestedBy || recovery.MaxCompletionTokens != original.MaxCompletionTokens {
+		t.Fatalf("lease recovery did not preserve the immutable review boundary: %#v", recovery)
+	}
+	message := codeReviewRetryQueueMessage(original, recovery)
+	if message.Payload.RetryOfTaskID != original.ID.String() || message.Payload.TaskID != recovery.ID.String() || message.Payload.InputRef != original.InputRef || message.Payload.Operation != "code.review" {
+		t.Fatalf("lease recovery queue message was not bounded to its original review: %#v", message)
+	}
+	for _, mutate := range []func(*models.AutomationTask){
+		func(task *models.AutomationTask) { task.Status = "queued" },
+		func(task *models.AutomationTask) { task.LeaseExpiresAt = nil },
+		func(task *models.AutomationTask) { future := now.Add(time.Second); task.LeaseExpiresAt = &future },
+		func(task *models.AutomationTask) { task.AttemptCount = githubReviewLeaseRecoveryMaximumAttempts },
+		func(task *models.AutomationTask) { completed := now; task.CompletedAt = &completed },
+		func(task *models.AutomationTask) { task.RequestedBy = "operator" },
+		func(task *models.AutomationTask) { task.EvidenceSubjectDigest = "invalid" },
+	} {
+		candidate := *original
+		mutate(&candidate)
+		if recoverableExpiredGitHubReviewLease(&candidate, now) {
+			t.Fatalf("unexpected expired-lease recovery eligibility: %#v", candidate)
+		}
+		if _, err := newExpiredGitHubReviewLeaseRecovery(&candidate, now); err == nil {
+			t.Fatalf("invalid expired-lease recovery boundary was accepted: %#v", candidate)
+		}
+	}
+}
+
 func TestAutomationReviewIngressStatusReportsOnlySafeReadiness(t *testing.T) {
 	t.Setenv("ITBEM_GITHUB_APP_ID", "")
 	t.Setenv("ITBEM_GITHUB_INSTALLATION_ID", "")
