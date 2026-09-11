@@ -404,6 +404,45 @@ func TestRetryCodeReviewIsNarrowAndPreservesTheFrozenInputBoundary(t *testing.T)
 	}
 }
 
+func TestStrandedGitHubReviewRecoveryPreservesOnlyAnUnclaimedImmutableBoundary(t *testing.T) {
+	now := time.Now().UTC()
+	digest := strings.Repeat("a", 64)
+	original := &models.AutomationTask{
+		ID: uuid.Must(uuid.NewV4()), JobID: uuid.Must(uuid.NewV4()), RequestedBy: "github-app-review",
+		CorrelationID: "github-pr:subject:head", Operation: "code.review", Status: "queued", EvidenceSubjectDigest: digest,
+		MaxCompletionTokens: 4096, InputRef: "s3://itbem-ai-inputs-local/automation/inputs/original/input.json",
+		CreatedAt: now.Add(-githubReviewRecoveryDelay),
+	}
+	if !recoverableQueuedGitHubReview(original, now) {
+		t.Fatal("an aged, unclaimed GitHub review should be recoverable")
+	}
+	recovery, err := newStrandedGitHubReviewRecovery(original, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovery.ID == original.ID || recovery.JobID == original.JobID || recovery.Status != "queued" || recovery.InputRef != original.InputRef || recovery.EvidenceSubjectDigest != digest || recovery.CorrelationID != original.CorrelationID || recovery.RequestedBy != original.RequestedBy || recovery.MaxCompletionTokens != original.MaxCompletionTokens {
+		t.Fatalf("recovery did not preserve the immutable review boundary: %#v", recovery)
+	}
+	for _, mutate := range []func(*models.AutomationTask){
+		func(task *models.AutomationTask) { task.AttemptCount = 1 },
+		func(task *models.AutomationTask) { task.Status = "running" },
+		func(task *models.AutomationTask) {
+			task.CreatedAt = now.Add(-githubReviewRecoveryDelay + time.Nanosecond)
+		},
+		func(task *models.AutomationTask) { task.RequestedBy = "operator" },
+		func(task *models.AutomationTask) { task.EvidenceSubjectDigest = "invalid" },
+	} {
+		candidate := *original
+		mutate(&candidate)
+		if recoverableQueuedGitHubReview(&candidate, now) {
+			t.Fatalf("unexpected recovery eligibility: %#v", candidate)
+		}
+		if _, err := newStrandedGitHubReviewRecovery(&candidate, now); err == nil {
+			t.Fatalf("invalid recovery boundary was accepted: %#v", candidate)
+		}
+	}
+}
+
 func TestAutomationReviewIngressStatusReportsOnlySafeReadiness(t *testing.T) {
 	t.Setenv("ITBEM_GITHUB_APP_ID", "")
 	t.Setenv("ITBEM_GITHUB_INSTALLATION_ID", "")
