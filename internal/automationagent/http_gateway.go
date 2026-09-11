@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -129,7 +130,7 @@ func (g *HTTPGateway) request(ctx context.Context, method, path string, input an
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		if gatewayResponseIsTransient(response.StatusCode) {
+		if gatewayResponseIsTransient(response.StatusCode) || response.StatusCode == http.StatusNotFound {
 			return &gatewayRequestError{statusCode: response.StatusCode, retryAfter: gatewayRetryAfter(response.Header, time.Now().UTC())}
 		}
 		return fmt.Errorf("agent gateway rejected request (%d)", response.StatusCode)
@@ -205,6 +206,10 @@ func (g *HTTPGateway) Get(ctx context.Context, bucket, key string) ([]byte, erro
 		} `json:"data"`
 	}
 	if err := g.request(ctx, http.MethodPost, "/api/internal/automation/gateway/objects/read", map[string]any{"lease_token": lease, "reference": "s3://" + bucket + "/" + key}, &response); err != nil {
+		var gatewayErr *gatewayRequestError
+		if errors.As(err, &gatewayErr) && gatewayErr.statusCode == http.StatusNotFound {
+			return nil, ErrObjectNotFound
+		}
 		return nil, err
 	}
 	body, err := base64.StdEncoding.DecodeString(response.Data.Body)

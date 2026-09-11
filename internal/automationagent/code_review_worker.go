@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gofrs/uuid"
 )
@@ -31,6 +33,42 @@ type codeReviewProviderCall struct {
 	MaxTokens   int
 	PatchDigest string
 }
+
+// codeReviewProgress is a task-scoped, encrypted checkpoint. It is not a
+// result and is intentionally stored under a distinct key, so an at-least-once
+// retry can continue a segmented review without making a completed segment
+// billable twice or confusing partial analysis for a publishable verdict.
+const codeReviewProgressSchemaVersion = 1
+
+type codeReviewProgress struct {
+	SchemaVersion int                         `json:"schema_version"`
+	TaskID        string                      `json:"task_id"`
+	BaseSHA       string                      `json:"base_sha"`
+	HeadSHA       string                      `json:"head_sha"`
+	PatchSHA256   string                      `json:"patch_sha256"`
+	RequestRef    string                      `json:"request_ref"`
+	Segments      []codeReviewProgressSegment `json:"segments"`
+	CreatedAt     string                      `json:"created_at"`
+	UpdatedAt     string                      `json:"updated_at"`
+}
+
+type codeReviewProgressSegment struct {
+	Index           int                      `json:"index"`
+	PatchSHA256     string                   `json:"patch_sha256"`
+	Completion      Completion               `json:"completion"`
+	Review          map[string]any           `json:"review,omitempty"`
+	PendingRepair   *codeReviewPendingRepair `json:"pending_repair,omitempty"`
+	RepairAttempted bool                     `json:"repair_attempted"`
+}
+
+type codeReviewPendingRepair struct {
+	RequestRef      string `json:"request_ref"`
+	ValidationError string `json:"validation_error"`
+}
+
+type codeReviewProgressInvalidError struct{ message string }
+
+func (e *codeReviewProgressInvalidError) Error() string { return e.message }
 
 func (w *Worker) processSegmentedCodeReview(ctx context.Context, message TaskMessage, runID string, input TaskInput, boundary CodeReviewInput) error {
 	retryOfTaskID := strings.ToLower(strings.TrimSpace(message.Payload.RetryOfTaskID))
@@ -65,48 +103,101 @@ func (w *Worker) processSegmentedCodeReview(ctx context.Context, message TaskMes
 	for index := range calls {
 		calls[index].MaxTokens = allocations[index]
 	}
-	requestRef, err := w.storeCodeReviewExecutionRequest(ctx, message.Payload.TaskID, runID, calls, boundary)
+	progress, exists, err := w.loadCodeReviewProgress(ctx, message.Payload.TaskID, calls, boundary)
 	if err != nil {
+		var invalidProgress *codeReviewProgressInvalidError
+		if errors.As(err, &invalidProgress) {
+			return w.fail(ctx, message.Payload.TaskID, runID, invalidProgress)
+		}
 		return err
 	}
+	if !exists {
+		requestRef, storeErr := w.storeCodeReviewExecutionRequest(ctx, message.Payload.TaskID, runID, calls, boundary)
+		if storeErr != nil {
+			return storeErr
+		}
+		progress = codeReviewProgress{
+			SchemaVersion: codeReviewProgressSchemaVersion,
+			TaskID:        message.Payload.TaskID,
+			BaseSHA:       boundary.BaseSHA,
+			HeadSHA:       boundary.HeadSHA,
+			PatchSHA256:   boundary.PatchSHA256,
+			RequestRef:    requestRef,
+			Segments:      []codeReviewProgressSegment{},
+			CreatedAt:     w.now().UTC().Format(time.RFC3339Nano),
+		}
+		if storeErr := w.storeCodeReviewProgress(ctx, progress); storeErr != nil {
+			return storeErr
+		}
+	}
+	requestRef := progress.RequestRef
 	completions := make([]Completion, 0, len(calls))
 	reviews := make([]map[string]any, 0, len(calls))
-	repairsUsed := 0
 	for _, call := range calls {
-		completion, callErr := w.provider.Complete(ctx, call.Messages, call.MaxTokens)
-		if callErr != nil {
-			var retryable *RetryableError
-			// No GitHub review or check is published until every exact segment has
-			// been parsed and aggregated below. A transport/rate-limit failure is
-			// therefore safe to retry even when an earlier segment completed: the
-			// queue retains the immutable task, and a later lease recomputes the
-			// private review before any external side effect occurs. Treating this
-			// as terminal would strand otherwise healthy PRs after a transient
-			// provider outage.
-			if errors.As(callErr, &retryable) {
-				return retryable
+		if len(progress.Segments) >= call.Index && progress.Segments[call.Index-1].PendingRepair == nil {
+			// A complete, validated segment was stored before the last lease ended.
+			// Reuse that exact provider evidence; never spend a second inference on
+			// a segment that already has an immutable completion.
+			completions = append(completions, progress.Segments[call.Index-1].Completion)
+			reviews = append(reviews, progress.Segments[call.Index-1].Review)
+			continue
+		}
+
+		var completion Completion
+		var parseErr error
+		var repairRef string
+		if len(progress.Segments) >= call.Index {
+			pending := progress.Segments[call.Index-1].PendingRepair
+			completion = progress.Segments[call.Index-1].Completion
+			parseErr = errors.New(pending.ValidationError)
+			repairRef = pending.RequestRef
+		} else {
+			var callErr error
+			completion, callErr = w.provider.Complete(ctx, call.Messages, call.MaxTokens)
+			if callErr != nil {
+				var retryable *RetryableError
+				if errors.As(callErr, &retryable) {
+					return retryable
+				}
+				var providerResponse *ProviderResponseError
+				if errors.As(callErr, &providerResponse) {
+					failedCalls := append(append([]Completion(nil), completions...), providerResponse.Completion)
+					audit, auditErr := aggregateCodeReviewCompletions(failedCalls, nil)
+					if auditErr != nil {
+						return w.fail(ctx, message.Payload.TaskID, runID, auditErr)
+					}
+					return w.failWithProviderResult(ctx, message.Payload.TaskID, runID, requestRef, message.Payload.Operation, audit, fmt.Errorf("code review segment %d provider call failed: %w", call.Index, callErr))
+				}
+				if len(completions) == 0 {
+					return w.fail(ctx, message.Payload.TaskID, runID, callErr)
+				}
+				audit, auditErr := aggregateCodeReviewCompletions(completions, nil)
+				if auditErr != nil {
+					return w.fail(ctx, message.Payload.TaskID, runID, auditErr)
+				}
+				return w.failWithProviderResult(ctx, message.Payload.TaskID, runID, requestRef, message.Payload.Operation, audit, fmt.Errorf("code review segment %d provider call failed: %w", call.Index, callErr))
 			}
-			var providerResponse *ProviderResponseError
-			if errors.As(callErr, &providerResponse) {
-				completion = providerResponse.Completion
+			review, validationErr := ParseCodeReview(completion.Content)
+			if validationErr == nil {
+				repairCodeReviewEvidenceQuotes(review, call.Boundary)
+				validationErr = ValidateCodeReviewBoundary(review, call.Boundary)
+			}
+			if validationErr == nil {
+				progress.Segments = append(progress.Segments, codeReviewProgressSegment{Index: call.Index, PatchSHA256: call.PatchDigest, Completion: completion, Review: review})
+				if storeErr := w.storeCodeReviewProgress(ctx, progress); storeErr != nil {
+					failedCalls := append(append([]Completion(nil), completions...), completion)
+					audit, auditErr := aggregateCodeReviewCompletions(failedCalls, nil)
+					if auditErr != nil {
+						return w.fail(ctx, message.Payload.TaskID, runID, auditErr)
+					}
+					return w.failWithProviderResult(ctx, message.Payload.TaskID, runID, requestRef, message.Payload.Operation, audit, fmt.Errorf("code review segment %d completion checkpoint could not be stored", call.Index))
+				}
 				completions = append(completions, completion)
+				reviews = append(reviews, review)
+				continue
 			}
-			if len(completions) == 0 {
-				return w.fail(ctx, message.Payload.TaskID, runID, callErr)
-			}
-			audit, auditErr := aggregateCodeReviewCompletions(completions, nil)
-			if auditErr != nil {
-				return w.fail(ctx, message.Payload.TaskID, runID, auditErr)
-			}
-			return w.failWithProviderResult(ctx, message.Payload.TaskID, runID, requestRef, message.Payload.Operation, audit, fmt.Errorf("code review segment %d provider call failed: %w", call.Index, callErr))
-		}
-		review, parseErr := ParseCodeReview(completion.Content)
-		if parseErr == nil {
-			repairCodeReviewEvidenceQuotes(review, call.Boundary)
-			parseErr = ValidateCodeReviewBoundary(review, call.Boundary)
-		}
-		if parseErr != nil {
-			if repairsUsed >= maxCodeReviewRepairs {
+			parseErr = validationErr
+			if codeReviewProgressRepairCount(progress) >= maxCodeReviewRepairs {
 				failedCalls := append(append([]Completion(nil), completions...), completion)
 				audit, auditErr := aggregateCodeReviewCompletions(failedCalls, nil)
 				if auditErr != nil {
@@ -114,9 +205,9 @@ func (w *Worker) processSegmentedCodeReview(ctx context.Context, message TaskMes
 				}
 				return w.failWithProviderResult(ctx, message.Payload.TaskID, runID, requestRef, message.Payload.Operation, audit, fmt.Errorf("code review segment %d failed validation after the bounded repair allowance was exhausted: %w", call.Index, parseErr))
 			}
-			repairsUsed++
 			repairMessages := codeReviewRepairMessages(call.Messages, completion.Content, parseErr, call.Boundary)
-			repairRef, repairStoreErr := w.storeCodeReviewRepairRequest(ctx, message.Payload.TaskID, runID, call.Index, repairMessages, codeReviewRepairCompletionLimit, parseErr)
+			var repairStoreErr error
+			repairRef, repairStoreErr = w.storeCodeReviewRepairRequest(ctx, message.Payload.TaskID, runID, call.Index, repairMessages, codeReviewRepairCompletionLimit, parseErr)
 			if repairStoreErr != nil {
 				failedCalls := append(append([]Completion(nil), completions...), completion)
 				audit, auditErr := aggregateCodeReviewCompletions(failedCalls, nil)
@@ -125,63 +216,75 @@ func (w *Worker) processSegmentedCodeReview(ctx context.Context, message TaskMes
 				}
 				return w.failWithProviderResult(ctx, message.Payload.TaskID, runID, requestRef, message.Payload.Operation, audit, fmt.Errorf("code review segment %d failed validation and its compact repair request could not be stored", call.Index))
 			}
-			repair, repairErr := w.provider.Complete(ctx, repairMessages, codeReviewRepairCompletionLimit)
-			segmentCalls := []Completion{completion}
-			if repairErr != nil {
-				var retryable *RetryableError
-				// A repair is still part of the private, pre-publication analysis.
-				// Keep the queue message for another bounded lease rather than
-				// persisting a permanent failure caused only by provider reachability.
-				if errors.As(repairErr, &retryable) {
-					return retryable
-				}
-				var providerResponse *ProviderResponseError
-				if errors.As(repairErr, &providerResponse) {
-					repair = providerResponse.Completion
-					segmentCalls = append(segmentCalls, repair)
-				}
-				audit, auditErr := aggregateCodeReviewCompletions(append(append([]Completion(nil), completions...), segmentCalls...), nil)
+			progress.Segments = append(progress.Segments, codeReviewProgressSegment{Index: call.Index, PatchSHA256: call.PatchDigest, Completion: completion, PendingRepair: &codeReviewPendingRepair{RequestRef: repairRef, ValidationError: boundedRepairError(parseErr)}, RepairAttempted: true})
+			if storeErr := w.storeCodeReviewProgress(ctx, progress); storeErr != nil {
+				failedCalls := append(append([]Completion(nil), completions...), completion)
+				audit, auditErr := aggregateCodeReviewCompletions(failedCalls, nil)
 				if auditErr != nil {
 					return w.fail(ctx, message.Payload.TaskID, runID, auditErr)
 				}
-				return w.failWithProviderResult(ctx, message.Payload.TaskID, runID, requestRef, message.Payload.Operation, audit, fmt.Errorf("code review segment %d failed validation; compact repair provider call failed: %w", call.Index, repairErr))
+				return w.failWithProviderResult(ctx, message.Payload.TaskID, runID, requestRef, message.Payload.Operation, audit, fmt.Errorf("code review segment %d repair checkpoint could not be stored", call.Index))
 			}
-			segmentCalls = append(segmentCalls, repair)
-			repairedReview, repairValidationErr := ParseCodeReview(repair.Content)
-			if repairValidationErr == nil {
-				repairCodeReviewEvidenceQuotes(repairedReview, call.Boundary)
-				repairValidationErr = ValidateCodeReviewBoundary(repairedReview, call.Boundary)
-				if repairValidationErr != nil {
-					if sanitized, dropped, sanitizeErr := discardUngroundedCodeReviewFindings(repairedReview, call.Boundary); sanitizeErr == nil && dropped {
-						repairedReview = sanitized
-						repairValidationErr = nil
-					}
-				}
+		}
+
+		repairMessages := codeReviewRepairMessages(call.Messages, completion.Content, parseErr, call.Boundary)
+		repair, repairErr := w.provider.Complete(ctx, repairMessages, codeReviewRepairCompletionLimit)
+		segmentCalls := []Completion{completion}
+		if repairErr != nil {
+			var retryable *RetryableError
+			if errors.As(repairErr, &retryable) {
+				return retryable
 			}
-			segmentAudit, auditErr := aggregateCodeReviewCompletions(segmentCalls, repairedReview)
+			var providerResponse *ProviderResponseError
+			if errors.As(repairErr, &providerResponse) {
+				repair = providerResponse.Completion
+				segmentCalls = append(segmentCalls, repair)
+			}
+			audit, auditErr := aggregateCodeReviewCompletions(append(append([]Completion(nil), completions...), segmentCalls...), nil)
 			if auditErr != nil {
 				return w.fail(ctx, message.Payload.TaskID, runID, auditErr)
 			}
-			segmentAudit.Usage["_itbem_repair"] = map[string]any{"attempted": true, "request_ref": repairRef, "provider_call_count": 2}
-			if repairValidationErr != nil {
-				if boundary.Remote != nil {
-					completion = segmentAudit
-					review = blockedRemoteCodeReview(call.Index, repairValidationErr)
-					completions = append(completions, completion)
-					reviews = append(reviews, review)
-					continue
-				}
-				failedCalls := append(append([]Completion(nil), completions...), segmentAudit)
-				audit, aggregateErr := aggregateCodeReviewCompletions(failedCalls, nil)
-				if aggregateErr != nil {
-					return w.fail(ctx, message.Payload.TaskID, runID, aggregateErr)
-				}
-				return w.failWithProviderResult(ctx, message.Payload.TaskID, runID, requestRef, message.Payload.Operation, audit, fmt.Errorf("code review segment %d compact repair failed validation: %w", call.Index, repairValidationErr))
-			}
-			completion, review = segmentAudit, repairedReview
+			return w.failWithProviderResult(ctx, message.Payload.TaskID, runID, requestRef, message.Payload.Operation, audit, fmt.Errorf("code review segment %d failed validation; compact repair provider call failed: %w", call.Index, repairErr))
 		}
-		completions = append(completions, completion)
-		reviews = append(reviews, review)
+		segmentCalls = append(segmentCalls, repair)
+		repairedReview, repairValidationErr := ParseCodeReview(repair.Content)
+		if repairValidationErr == nil {
+			repairCodeReviewEvidenceQuotes(repairedReview, call.Boundary)
+			repairValidationErr = ValidateCodeReviewBoundary(repairedReview, call.Boundary)
+			if repairValidationErr != nil {
+				if sanitized, dropped, sanitizeErr := discardUngroundedCodeReviewFindings(repairedReview, call.Boundary); sanitizeErr == nil && dropped {
+					repairedReview = sanitized
+					repairValidationErr = nil
+				}
+			}
+		}
+		segmentAudit, auditErr := aggregateCodeReviewCompletions(segmentCalls, repairedReview)
+		if auditErr != nil {
+			return w.fail(ctx, message.Payload.TaskID, runID, auditErr)
+		}
+		segmentAudit.Usage["_itbem_repair"] = map[string]any{"attempted": true, "request_ref": repairRef, "provider_call_count": 2}
+		if repairValidationErr != nil && boundary.Remote == nil {
+			failedCalls := append(append([]Completion(nil), completions...), segmentAudit)
+			audit, aggregateErr := aggregateCodeReviewCompletions(failedCalls, nil)
+			if aggregateErr != nil {
+				return w.fail(ctx, message.Payload.TaskID, runID, aggregateErr)
+			}
+			return w.failWithProviderResult(ctx, message.Payload.TaskID, runID, requestRef, message.Payload.Operation, audit, fmt.Errorf("code review segment %d compact repair failed validation: %w", call.Index, repairValidationErr))
+		}
+		if repairValidationErr != nil {
+			repairedReview = blockedRemoteCodeReview(call.Index, repairValidationErr)
+		}
+		progress.Segments[call.Index-1] = codeReviewProgressSegment{Index: call.Index, PatchSHA256: call.PatchDigest, Completion: segmentAudit, Review: repairedReview, RepairAttempted: true}
+		if storeErr := w.storeCodeReviewProgress(ctx, progress); storeErr != nil {
+			failedCalls := append(append([]Completion(nil), completions...), segmentAudit)
+			audit, aggregateErr := aggregateCodeReviewCompletions(failedCalls, nil)
+			if aggregateErr != nil {
+				return w.fail(ctx, message.Payload.TaskID, runID, aggregateErr)
+			}
+			return w.failWithProviderResult(ctx, message.Payload.TaskID, runID, requestRef, message.Payload.Operation, audit, fmt.Errorf("code review segment %d repair completion checkpoint could not be stored", call.Index))
+		}
+		completions = append(completions, segmentAudit)
+		reviews = append(reviews, repairedReview)
 	}
 	aggregate, err := AggregateCodeReviewSegments(boundary, segments, reviews)
 	if err != nil {
@@ -225,6 +328,97 @@ func (w *Worker) processSegmentedCodeReview(ctx context.Context, message TaskMes
 	}
 	_, err = w.callback.Update(ctx, message.Payload.TaskID, TaskUpdate{Status: "completed", RunID: runID, RequestRef: requestRef, OutputRef: outputRef, Provider: completion.Provider, Model: completion.Model, Usage: completion.Usage, ResponseID: completion.ResponseID, Execution: execution})
 	return err
+}
+
+func codeReviewProgressKey(taskID string) string {
+	return "automation/" + taskID + "/code-review-progress.json"
+}
+
+func (w *Worker) loadCodeReviewProgress(ctx context.Context, taskID string, calls []codeReviewProviderCall, boundary CodeReviewInput) (codeReviewProgress, bool, error) {
+	raw, err := w.store.Get(ctx, w.config.OutputBucket, codeReviewProgressKey(taskID))
+	if errors.Is(err, ErrObjectNotFound) {
+		return codeReviewProgress{}, false, nil
+	}
+	if err != nil {
+		return codeReviewProgress{}, false, err
+	}
+	if len(raw) == 0 || len(raw) > maxInputBytes {
+		return codeReviewProgress{}, false, &codeReviewProgressInvalidError{message: "code review checkpoint is empty or exceeds the private object limit"}
+	}
+	var progress codeReviewProgress
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&progress) != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		return codeReviewProgress{}, false, &codeReviewProgressInvalidError{message: "code review checkpoint is not a single valid JSON object"}
+	}
+	if err := w.validateCodeReviewProgress(progress, taskID, calls, boundary); err != nil {
+		return codeReviewProgress{}, false, &codeReviewProgressInvalidError{message: "code review checkpoint is invalid: " + boundedRepairError(err)}
+	}
+	return progress, true, nil
+}
+
+func (w *Worker) storeCodeReviewProgress(ctx context.Context, progress codeReviewProgress) error {
+	progress.UpdatedAt = w.now().UTC().Format(time.RFC3339Nano)
+	body, err := json.Marshal(progress)
+	if err != nil {
+		return fmt.Errorf("code review checkpoint could not be encoded")
+	}
+	return w.store.PutEncryptedJSON(ctx, w.config.OutputBucket, codeReviewProgressKey(progress.TaskID), body)
+}
+
+func (w *Worker) validateCodeReviewProgress(progress codeReviewProgress, taskID string, calls []codeReviewProviderCall, boundary CodeReviewInput) error {
+	if progress.SchemaVersion != codeReviewProgressSchemaVersion || progress.TaskID != taskID || progress.BaseSHA != boundary.BaseSHA || progress.HeadSHA != boundary.HeadSHA || progress.PatchSHA256 != boundary.PatchSHA256 {
+		return fmt.Errorf("checkpoint subject does not match the immutable review")
+	}
+	if len(progress.Segments) > len(calls) {
+		return fmt.Errorf("checkpoint has too many segments")
+	}
+	if !w.validCodeReviewProgressReference(progress.RequestRef, taskID, "/request.json") {
+		return fmt.Errorf("checkpoint request reference is outside this task")
+	}
+	for index, segment := range progress.Segments {
+		call := calls[index]
+		if segment.Index != call.Index || segment.PatchSHA256 != call.PatchDigest {
+			return fmt.Errorf("checkpoint segment %d does not match the frozen patch", index+1)
+		}
+		if !providerConfigured(segment.Completion.Provider) || strings.TrimSpace(segment.Completion.Model) == "" || strings.TrimSpace(segment.Completion.Content) == "" || segment.Completion.Usage == nil {
+			return fmt.Errorf("checkpoint segment %d lacks a valid provider completion", call.Index)
+		}
+		if segment.PendingRepair != nil {
+			if index != len(progress.Segments)-1 || segment.Review != nil || !segment.RepairAttempted {
+				return fmt.Errorf("checkpoint segment %d has an invalid pending repair state", call.Index)
+			}
+			if len(strings.TrimSpace(segment.PendingRepair.ValidationError)) == 0 || len(segment.PendingRepair.ValidationError) > 400 || !w.validCodeReviewProgressReference(segment.PendingRepair.RequestRef, taskID, fmt.Sprintf("/repairs/segment-%02d/request.json", call.Index)) {
+				return fmt.Errorf("checkpoint segment %d has an invalid repair reference", call.Index)
+			}
+			continue
+		}
+		if segment.Review == nil {
+			return fmt.Errorf("checkpoint segment %d has no validated review", call.Index)
+		}
+		if err := ValidateCodeReviewBoundary(segment.Review, call.Boundary); err != nil {
+			return fmt.Errorf("checkpoint segment %d review does not satisfy its exact boundary", call.Index)
+		}
+	}
+	return nil
+}
+
+func (w *Worker) validCodeReviewProgressReference(reference, taskID, suffix string) bool {
+	bucket, key, err := ParsePrivateReference(reference)
+	if err != nil || bucket != w.config.OutputBucket || !strings.HasPrefix(key, "automation/"+taskID+"/runs/") || !strings.HasSuffix(key, suffix) || strings.Contains(key, "..") {
+		return false
+	}
+	return true
+}
+
+func codeReviewProgressRepairCount(progress codeReviewProgress) int {
+	count := 0
+	for _, segment := range progress.Segments {
+		if segment.RepairAttempted {
+			count++
+		}
+	}
+	return count
 }
 
 func blockedRemoteCodeReview(segment int, cause error) map[string]any {

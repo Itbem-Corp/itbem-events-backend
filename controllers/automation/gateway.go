@@ -10,6 +10,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,6 +28,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 	"github.com/gofrs/uuid"
 	"github.com/labstack/echo/v4"
 )
@@ -301,6 +303,9 @@ func GatewayReadObject(c echo.Context) error {
 	}
 	response, err := client.GetObject(c.Request().Context(), &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
 	if err != nil {
+		if gatewayObjectMissing(err) {
+			return utils.Error(c, http.StatusNotFound, "Object not found", "")
+		}
 		return utils.Error(c, http.StatusServiceUnavailable, "Storage unavailable", "")
 	}
 	defer response.Body.Close()
@@ -309,6 +314,22 @@ func GatewayReadObject(c echo.Context) error {
 		return utils.Error(c, http.StatusRequestEntityTooLarge, "Object unavailable", "")
 	}
 	return utils.Success(c, http.StatusOK, "Automation object read", map[string]any{"body": base64.StdEncoding.EncodeToString(body)})
+}
+
+func gatewayObjectMissing(err error) bool {
+	var noSuchKey *s3types.NoSuchKey
+	if errors.As(err, &noSuchKey) {
+		return true
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		switch strings.ToLower(strings.TrimSpace(apiErr.ErrorCode())) {
+		case "notfound", "nosuchkey", "nosuchobject":
+			return true
+		}
+	}
+	var statusErr interface{ HTTPStatusCode() int }
+	return errors.As(err, &statusErr) && statusErr.HTTPStatusCode() == http.StatusNotFound
 }
 
 func GatewayWriteObject(c echo.Context) error {
