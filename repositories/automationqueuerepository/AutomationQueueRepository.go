@@ -208,7 +208,13 @@ func ReceiveLane(ctx context.Context, lane agentwork.Lane, limit int) ([]LeasedM
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, leaseTimeout)
 	defer cancel()
-	response, err := client.ReceiveMessage(requestCtx, &sqs.ReceiveMessageInput{QueueUrl: aws.String(queueURL), MaxNumberOfMessages: int32(limit), WaitTimeSeconds: 20, VisibilityTimeout: 900})
+	// This call is made through the HTTPS gateway, not by a process with a
+	// direct SQS connection.  Do not hold an inbound HTTP request open for the
+	// queue's 20-second long-poll interval: an intermediary timeout would turn
+	// an otherwise healthy empty queue into a retryable 5xx and strand review
+	// work.  The local worker owns paced polling/backoff, so a short receive
+	// here preserves queue semantics without coupling them to proxy timeouts.
+	response, err := client.ReceiveMessage(requestCtx, &sqs.ReceiveMessageInput{QueueUrl: aws.String(queueURL), MaxNumberOfMessages: int32(limit), WaitTimeSeconds: 0, VisibilityTimeout: 900})
 	if err != nil {
 		return nil, fmt.Errorf("lease automation message: %w", err)
 	}
