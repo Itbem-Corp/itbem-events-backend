@@ -22,6 +22,7 @@ import (
 	automationqueue "events-stocks/repositories/automationqueuerepository"
 	awsrepository "events-stocks/repositories/awsrepository"
 	"events-stocks/services/automationcost"
+	"events-stocks/services/deliveryworkflow"
 	outboxService "events-stocks/services/outbox"
 	"events-stocks/utils"
 	"fmt"
@@ -2372,6 +2373,11 @@ func Complete(c echo.Context) error {
 				}
 			}
 		}
+		if !cancellationRequested && request.Status == "completed" && len(request.Execution) > 0 {
+			if err := advanceDelegatedDeliverySubmission(tx, &task, completedAt); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	if err != nil {
@@ -2381,6 +2387,103 @@ func Complete(c echo.Context) error {
 		return utils.Error(c, http.StatusConflict, "Automation result ignored", "Task is not awaiting a result")
 	}
 	return c.NoContent(http.StatusNoContent)
+}
+
+// advanceDelegatedDeliverySubmission advances only non-decision workflow
+// transitions after the authenticated worker has already persisted its strict
+// handoff in this transaction. It is intentionally not a model decision: a
+// frozen delegated policy merely allows the control plane to move completed
+// implementation and QA work into their independent review states. Human
+// mode, plan approval, code approval, QA approval, release approval, merge
+// and deployment all remain outside this helper.
+func advanceDelegatedDeliverySubmission(tx *gorm.DB, task *models.AutomationTask, completedAt time.Time) error {
+	if tx == nil || task == nil || task.ID == uuid.Nil || task.DeliveryWorkItemID == nil || completedAt.IsZero() {
+		return nil
+	}
+	action, phase := delegatedSubmissionAction(task.Operation)
+	if action == "" {
+		return nil
+	}
+	var item models.DeliveryWorkItem
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&item, *task.DeliveryWorkItemID).Error; err != nil {
+		return err
+	}
+	if !delegatedSubmissionStateMatches(item.State, action) {
+		// A human or an earlier idempotent callback already moved this item. The
+		// task result remains valid evidence, but it must not move a newer state.
+		return nil
+	}
+	var event models.DeliveryEvent
+	err := tx.Where("work_item_id = ? AND event_type = ?", item.ID, deliveryledger.EventTypeAutonomySnapshot).Order("sequence ASC").First(&event).Error
+	if err == gorm.ErrRecordNotFound {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	snapshot, err := deliveryledger.ProjectAutonomySnapshot(event)
+	if err != nil || snapshot.ProjectID != item.ProjectID || !snapshot.Delegated {
+		// A malformed or manual-only snapshot never becomes a reason to advance
+		// a task. The callback is still durable; a malformed immutable event is
+		// surfaced as a retryable control-plane integrity fault.
+		if err != nil {
+			return fmt.Errorf("delegated delivery authority is invalid: %w", err)
+		}
+		return nil
+	}
+	if err := recordDelegatedSubmissionEvidence(tx, *task, item.ID, phase, completedAt); err != nil {
+		return err
+	}
+	if err := deliveryworkflow.Advance(&item, action, nil, completedAt); err != nil {
+		return err
+	}
+	return tx.Save(&item).Error
+}
+
+func delegatedSubmissionAction(operation string) (deliveryworkflow.Action, string) {
+	switch strings.TrimSpace(operation) {
+	case "delivery.implementation":
+		return deliveryworkflow.ActionSubmitCodeReview, "implementation"
+	case "delivery.qa":
+		return deliveryworkflow.ActionSubmitQA, "qa"
+	default:
+		return "", ""
+	}
+}
+
+func delegatedSubmissionStateMatches(state string, action deliveryworkflow.Action) bool {
+	switch action {
+	case deliveryworkflow.ActionSubmitCodeReview:
+		return strings.TrimSpace(state) == deliveryworkflow.StateImplementation
+	case deliveryworkflow.ActionSubmitQA:
+		return strings.TrimSpace(state) == deliveryworkflow.StateQARunning
+	default:
+		return false
+	}
+}
+
+// recordDelegatedSubmissionEvidence is the same bounded report provenance the
+// manual submission route records. It deliberately stores a reference only:
+// private output is never copied into the ledger or exposed to the dashboard.
+func recordDelegatedSubmissionEvidence(tx *gorm.DB, task models.AutomationTask, workItemID uuid.UUID, phase string, completedAt time.Time) error {
+	if strings.TrimSpace(task.OutputRef) == "" {
+		return fmt.Errorf("delegated %s submission has no private result reference", phase)
+	}
+	var existing models.DeliveryEvidence
+	err := tx.Where("work_item_id = ? AND reference = ?", workItemID, task.OutputRef).First(&existing).Error
+	if err == nil {
+		return nil
+	}
+	if err != gorm.ErrRecordNotFound {
+		return err
+	}
+	evidence := models.DeliveryEvidence{
+		WorkItemID: workItemID, Kind: "report", Phase: phase,
+		Title: "Resultado del agente: " + phase, Reference: task.OutputRef,
+		MetadataJSON: fmt.Sprintf(`{"automation_task_id":%q,"operation":%q,"provider":%q,"model":%q,"submission_authority":"delegated"}`, task.ID.String(), task.Operation, task.Provider, task.Model),
+		CapturedBy:   "itbem-control-plane", CapturedAt: &completedAt,
+	}
+	return tx.Create(&evidence).Error
 }
 
 func persistCodeReviewPublication(tx *gorm.DB, task *models.AutomationTask, raw json.RawMessage, completedAt time.Time) error {

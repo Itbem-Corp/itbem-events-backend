@@ -148,6 +148,15 @@ func TestExecutionGraphStatusesAndOperatorActionsAreBounded(t *testing.T) {
 	}
 }
 
+func TestExecutionGraphShowsActivePRPublicationAsRunning(t *testing.T) {
+	if got := executionGraphWorkItemStatus("code_review", true); got != "running" {
+		t.Fatalf("active bounded publication should be running, got %q", got)
+	}
+	if got := executionGraphWorkItemStatus("code_review", false); got != "decision" {
+		t.Fatalf("code review without active publication should await a decision, got %q", got)
+	}
+}
+
 func TestExecutionGraphEvidenceLinkingAndTextSanitizationFailClosed(t *testing.T) {
 	taskID := uuid.Must(uuid.NewV4())
 	if linked, ok := executionGraphEvidenceTaskID(`{"automation_task_id":"` + taskID.String() + `"}`); !ok || linked != taskID {

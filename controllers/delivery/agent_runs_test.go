@@ -22,7 +22,7 @@ func TestAgentRunSpecsAreBoundToDeliveryStates(t *testing.T) {
 	}{
 		{"plan", "delivery.plan", deliveryworkflow.StatePlanning},
 		{"implementation", "delivery.implementation", deliveryworkflow.StateImplementation},
-		{"publish", "delivery.publish", deliveryworkflow.StatePreviewPending},
+		{"publish", "delivery.publish", deliveryworkflow.StateCodeReview},
 		{"release_gate", "delivery.release_gate", deliveryworkflow.StateReleaseReview},
 		{"qa", "delivery.qa", deliveryworkflow.StateQARunning},
 		{"summary", "delivery.summary", deliveryworkflow.StateReleaseReview},
@@ -320,7 +320,7 @@ func TestDeliveryAutonomyPolicyKeepsPublicationHumanControlled(t *testing.T) {
 func TestDeliveryAutonomyPolicyNamesTheImmediateHumanGateForEveryPhase(t *testing.T) {
 	checks := map[string]string{
 		"plan":           "before implementation",
-		"implementation": "before a publication grant",
+		"implementation": "publication grant",
 		"publish":        "before QA can begin",
 		"qa":             "before release review",
 		"summary":        "before marking the delivery released",

@@ -66,9 +66,11 @@ func ListPublicationGrants(c echo.Context) error {
 	return success(c, "Delivery publication grants", grants)
 }
 
-// CreatePublicationGrant creates a narrow authorization only after a human
-// approved the code review. It cannot create a token or publish anything; the
-// eventual GitHub App adapter must independently verify this exact scope.
+// CreatePublicationGrant creates a narrow authorization after a locally
+// validated implementation and before remote review. It cannot create a token
+// or publish anything; the eventual GitHub App adapter independently verifies
+// this exact scope. A branch/PR is not a merge or deployment authority: the
+// later exact-SHA code-review gate remains mandatory before preview.
 func CreatePublicationGrant(c echo.Context) error {
 	workItemID, err := id(c, "work item")
 	if err != nil {
@@ -119,8 +121,8 @@ func CreatePublicationGrant(c echo.Context) error {
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&lockedItem, item.ID).Error; err != nil {
 			return err
 		}
-		if lockedItem.State != deliveryworkflow.StatePreviewPending {
-			return fmt.Errorf("a publication grant can only be issued after code review approval")
+		if lockedItem.State != deliveryworkflow.StateCodeReview {
+			return fmt.Errorf("a publication grant can only be issued while code review is pending")
 		}
 		var snapshots []models.DeliveryContextSnapshot
 		if err := tx.Where("work_item_id = ?", lockedItem.ID).Find(&snapshots).Error; err != nil {
@@ -160,13 +162,6 @@ func CreatePublicationGrant(c echo.Context) error {
 		}
 		githubRepository, err := reviewedChangeSetGitHubRepository(reviewedChange)
 		if err != nil {
-			return err
-		}
-		var approvedGate models.DeliveryGate
-		if err := tx.Where("work_item_id = ? AND kind = ? AND decision = ?", lockedItem.ID, deliveryworkflow.GateCodeReview, deliveryworkflow.DecisionApproved).Order("decided_at DESC").First(&approvedGate).Error; err != nil {
-			if err == gorm.ErrRecordNotFound {
-				return fmt.Errorf("an approved code review gate is required")
-			}
 			return err
 		}
 		grant = models.DeliveryPublicationGrant{

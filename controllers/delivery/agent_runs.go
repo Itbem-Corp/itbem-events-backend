@@ -42,10 +42,12 @@ type agentRunSpec struct {
 var agentRunSpecs = map[string]agentRunSpec{
 	"plan":           {operation: "delivery.plan", states: stateSet(deliveryworkflow.StatePlanning)},
 	"implementation": {operation: "delivery.implementation", states: stateSet(deliveryworkflow.StateImplementation)},
-	// Publication is deliberately a deterministic operation. It can run only
-	// after code review has been approved and an operator has issued a short
-	// lived grant for the exact reviewed worktree branch.
-	"publish":      {operation: "delivery.publish", states: stateSet(deliveryworkflow.StatePreviewPending)},
+	// Publication is deliberately a deterministic operation. It creates only a
+	// narrow branch and pull request from an already validated worktree. That
+	// PR is the immutable subject an independent reviewer must inspect before
+	// code review can advance to preview; publication never authorizes merge or
+	// deployment.
+	"publish":      {operation: "delivery.publish", states: stateSet(deliveryworkflow.StateCodeReview)},
 	"qa":           {operation: "delivery.qa", states: stateSet(deliveryworkflow.StateQARunning)},
 	"release_gate": {operation: "delivery.release_gate", states: stateSet(deliveryworkflow.StateReleaseReview)},
 	"summary":      {operation: "delivery.summary", states: stateSet(deliveryworkflow.StateReleaseReview)},
@@ -339,7 +341,7 @@ func StartAgentRun(c echo.Context) error {
 			var grant models.DeliveryPublicationGrant
 			if err := tx.Where("id = ? AND work_item_id = ? AND revoked_at IS NULL AND expires_at > ?", requestedPublicationGrantID, item.ID, time.Now().UTC()).First(&grant).Error; err != nil {
 				if err == gorm.ErrRecordNotFound {
-					return fmt.Errorf("publication requires the selected active human grant")
+					return fmt.Errorf("publication requires the selected active grant")
 				}
 				return err
 			}
@@ -1163,14 +1165,14 @@ func deliveryAutonomyPolicy(phase string) deliveryAgentAutonomyPolicy {
 	case "implementation":
 		policy.Allowed = []string{"prepare a patch in an isolated registered worktree", "run allowlisted local validations", "report diff and validation evidence"}
 		policy.RequiredEvidence = []string{"approved plan used", "worktree reference", "diff check", "validation output"}
-		policy.HumanGateRequiredFor = []string{"approve or request changes to code before a publication grant can be issued"}
+		policy.HumanGateRequiredFor = []string{"issue a bounded publication grant for the validated worktree; an independent exact-SHA code review is still required before preview"}
 	case "publish":
 		policy.Prohibited = []string{
 			"advance or approve a human gate", "deploy or merge remotely",
 			"read secrets or use unlisted context sources", "invent evidence, files, approvals, or test results",
 		}
 		policy.Allowed = []string{"stage and commit the reviewed isolated worktree", "publish only the granted branch", "create the granted pull request", "report immutable publication references"}
-		policy.RequiredEvidence = []string{"human publication grant", "commit SHA", "branch reference", "pull request URL when granted"}
+		policy.RequiredEvidence = []string{"approved publication grant", "commit SHA", "branch reference", "pull request URL when granted"}
 		policy.HumanGateRequiredFor = []string{"record a ready preview before QA can begin", "approve a separate QA gate before release"}
 	case "qa":
 		policy.Allowed = []string{"run the approved QA plan", "collect bounded artifacts", "report defects and coverage gaps"}

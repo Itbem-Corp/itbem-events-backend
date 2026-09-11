@@ -619,7 +619,16 @@ func executionGraphWorkItemStatus(state string, live bool) string {
 		return "blocked"
 	case "cancelled":
 		return "cancelled"
-	case "plan_review", "code_review", "qa_review", "release_review":
+	case "code_review":
+		// A branch/PR publication is intentionally performed while the item is
+		// in code_review: the resulting immutable head is what the independent
+		// reviewer evaluates. Do not show that bounded operation as a stale
+		// decision while its worker is still active.
+		if live {
+			return "running"
+		}
+		return "decision"
+	case "plan_review", "qa_review", "release_review":
 		return "decision"
 	case "planning", "implementation", "preview_pending", "qa_running":
 		if live {
