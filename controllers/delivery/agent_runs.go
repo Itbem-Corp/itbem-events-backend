@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"events-stocks/configuration"
 	"events-stocks/internal/automationagent"
+	"events-stocks/internal/deliveryledger"
 	"events-stocks/internal/projectvault"
 	"events-stocks/internal/releasegate"
 	"events-stocks/internal/releasegatecontrol"
@@ -41,10 +42,12 @@ type agentRunSpec struct {
 var agentRunSpecs = map[string]agentRunSpec{
 	"plan":           {operation: "delivery.plan", states: stateSet(deliveryworkflow.StatePlanning)},
 	"implementation": {operation: "delivery.implementation", states: stateSet(deliveryworkflow.StateImplementation)},
-	// Publication is deliberately a deterministic operation. It can run only
-	// after code review has been approved and an operator has issued a short
-	// lived grant for the exact reviewed worktree branch.
-	"publish":      {operation: "delivery.publish", states: stateSet(deliveryworkflow.StatePreviewPending)},
+	// Publication is deliberately a deterministic operation. It creates only a
+	// narrow branch and pull request from an already validated worktree. That
+	// PR is the immutable subject an independent reviewer must inspect before
+	// code review can advance to preview; publication never authorizes merge or
+	// deployment.
+	"publish":      {operation: "delivery.publish", states: stateSet(deliveryworkflow.StateCodeReview)},
 	"qa":           {operation: "delivery.qa", states: stateSet(deliveryworkflow.StateQARunning)},
 	"release_gate": {operation: "delivery.release_gate", states: stateSet(deliveryworkflow.StateReleaseReview)},
 	"summary":      {operation: "delivery.summary", states: stateSet(deliveryworkflow.StateReleaseReview)},
@@ -125,6 +128,7 @@ type deliveryAgentGate struct {
 	ID                string   `json:"id"`
 	Kind              string   `json:"kind"`
 	Decision          string   `json:"decision"`
+	Authority         string   `json:"authority"`
 	Comment           string   `json:"comment,omitempty"`
 	EvidenceChecklist []string `json:"evidence_checklist,omitempty"`
 	DecidedAt         string   `json:"decided_at"`
@@ -230,11 +234,18 @@ type deliveryAgentMessage struct {
 // Enforcement does not rely on this object: state checks, capability checks
 // and the worker's command boundary remain the authority.
 type deliveryAgentAutonomyPolicy struct {
-	Phase                string   `json:"phase"`
-	Allowed              []string `json:"allowed"`
-	Prohibited           []string `json:"prohibited"`
-	HumanGateRequiredFor []string `json:"human_gate_required_for"`
-	RequiredEvidence     []string `json:"required_evidence"`
+	Phase string `json:"phase"`
+	// GateAuthority is derived only from the immutable task-scoped autonomy
+	// snapshot. It tells the worker whether an eventual transition is owned by
+	// a human or by the control-plane coordinator; it never authorizes the
+	// model to create a gate or to perform a remote side effect.
+	GateAuthority          string   `json:"gate_authority"`
+	AuthoritySnapshotID    string   `json:"authority_snapshot_id,omitempty"`
+	Allowed                []string `json:"allowed"`
+	Prohibited             []string `json:"prohibited"`
+	HumanGateRequiredFor   []string `json:"human_gate_required_for"`
+	CoordinatorRequiredFor []string `json:"coordinator_required_for,omitempty"`
+	RequiredEvidence       []string `json:"required_evidence"`
 }
 
 // StartAgentRun prepares a bounded, private task input and sends it through
@@ -330,7 +341,7 @@ func StartAgentRun(c echo.Context) error {
 			var grant models.DeliveryPublicationGrant
 			if err := tx.Where("id = ? AND work_item_id = ? AND revoked_at IS NULL AND expires_at > ?", requestedPublicationGrantID, item.ID, time.Now().UTC()).First(&grant).Error; err != nil {
 				if err == gorm.ErrRecordNotFound {
-					return fmt.Errorf("publication requires the selected active human grant")
+					return fmt.Errorf("publication requires the selected active grant")
 				}
 				return err
 			}
@@ -356,12 +367,17 @@ func StartAgentRun(c echo.Context) error {
 		}
 		return utils.Error(c, http.StatusConflict, "Agent run rejected", err.Error())
 	}
+	autonomySnapshot, _, err := freezeWorkItemAutonomy(configuration.DB, item, project, snapshots, vaultRevisions, time.Now().UTC())
+	if err != nil {
+		return utils.Error(c, http.StatusConflict, "Autonomy authority rejected", err.Error())
+	}
 
 	maxCompletionTokens := automationagent.CompletionTokensForOperation(spec.operation)
 	input, err := buildDeliveryAgentInput(item, project, snapshots, changeSets, evidence, gates, messages, strings.TrimSpace(request.Instructions), phase, publicationGrant)
 	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Agent run rejected", err.Error())
 	}
+	applyFrozenAutonomyPolicy(&input, autonomySnapshot)
 	if err := attachExactProjectVaults(&input, snapshots, vaultRevisions); err != nil {
 		return utils.Error(c, http.StatusConflict, "Vault-first agent run rejected", err.Error())
 	}
@@ -650,7 +666,11 @@ func buildDeliveryAgentInput(item models.DeliveryWorkItem, project models.Delive
 		input.Delivery.Evidence = append(input.Delivery.Evidence, value)
 	}
 	for _, gate := range gates {
-		value := deliveryAgentGate{ID: gate.ID.String(), Kind: strings.TrimSpace(gate.Kind), Decision: strings.TrimSpace(gate.Decision), DecidedAt: gate.DecidedAt.UTC().Format(time.RFC3339)}
+		authority := strings.ToLower(strings.TrimSpace(gate.Authority))
+		if authority == "" {
+			authority = "human"
+		}
+		value := deliveryAgentGate{ID: gate.ID.String(), Kind: strings.TrimSpace(gate.Kind), Decision: strings.TrimSpace(gate.Decision), Authority: authority, DecidedAt: gate.DecidedAt.UTC().Format(time.RFC3339)}
 		if value.ID == "" || value.Kind == "" || value.Decision == "" || value.DecidedAt == "" {
 			continue
 		}
@@ -1128,7 +1148,8 @@ func metadataStringList(value any) []string {
 
 func deliveryAutonomyPolicy(phase string) deliveryAgentAutonomyPolicy {
 	policy := deliveryAgentAutonomyPolicy{
-		Phase: phase,
+		Phase:         phase,
+		GateAuthority: "human",
 		Prohibited: []string{
 			"advance or approve a human gate",
 			"deploy, merge, push, or publish remotely",
@@ -1144,14 +1165,14 @@ func deliveryAutonomyPolicy(phase string) deliveryAgentAutonomyPolicy {
 	case "implementation":
 		policy.Allowed = []string{"prepare a patch in an isolated registered worktree", "run allowlisted local validations", "report diff and validation evidence"}
 		policy.RequiredEvidence = []string{"approved plan used", "worktree reference", "diff check", "validation output"}
-		policy.HumanGateRequiredFor = []string{"approve or request changes to code before a publication grant can be issued"}
+		policy.HumanGateRequiredFor = []string{"issue a bounded publication grant for the validated worktree; an independent exact-SHA code review is still required before preview"}
 	case "publish":
 		policy.Prohibited = []string{
 			"advance or approve a human gate", "deploy or merge remotely",
 			"read secrets or use unlisted context sources", "invent evidence, files, approvals, or test results",
 		}
 		policy.Allowed = []string{"stage and commit the reviewed isolated worktree", "publish only the granted branch", "create the granted pull request", "report immutable publication references"}
-		policy.RequiredEvidence = []string{"human publication grant", "commit SHA", "branch reference", "pull request URL when granted"}
+		policy.RequiredEvidence = []string{"approved publication grant", "commit SHA", "branch reference", "pull request URL when granted"}
 		policy.HumanGateRequiredFor = []string{"record a ready preview before QA can begin", "approve a separate QA gate before release"}
 	case "qa":
 		policy.Allowed = []string{"run the approved QA plan", "collect bounded artifacts", "report defects and coverage gaps"}
@@ -1171,6 +1192,26 @@ func deliveryAutonomyPolicy(phase string) deliveryAgentAutonomyPolicy {
 		policy.HumanGateRequiredFor = []string{"human clarification before any action"}
 	}
 	return policy
+}
+
+// applyFrozenAutonomyPolicy projects only the verified task authority that a
+// worker needs. In delegated mode, the coordinator still advances gates only
+// after it independently validates required evidence. This function therefore
+// deliberately does not add "approve" to Allowed and keeps every remote
+// action prohibited except the separately scoped publication phase.
+func applyFrozenAutonomyPolicy(input *deliveryAgentInput, snapshot deliveryledger.AutonomySnapshot) {
+	if input == nil || !snapshot.Delegated || snapshot.EventID == uuid.Nil {
+		return
+	}
+	policy := &input.Delivery.AutonomyPolicy
+	policy.GateAuthority = "delegated"
+	policy.AuthoritySnapshotID = snapshot.EventID.String()
+	policy.CoordinatorRequiredFor = append([]string(nil), policy.HumanGateRequiredFor...)
+	policy.HumanGateRequiredFor = nil
+	policy.RequiredEvidence = append(policy.RequiredEvidence,
+		"frozen delegated authority snapshot",
+		"independent role evidence validated by the control-plane coordinator",
+	)
 }
 
 func stateSet(states ...string) map[string]struct{} {

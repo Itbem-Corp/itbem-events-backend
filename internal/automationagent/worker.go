@@ -60,6 +60,12 @@ type ObjectStore interface {
 	PutEncryptedJSON(context.Context, string, string, []byte) error
 }
 
+// ErrObjectNotFound is the only storage read error that means an optional
+// immutable artifact has not been written yet. Callers must not collapse an
+// authorization, integrity, or transport failure into this value: doing so
+// could make a worker restart inference without its prior evidence.
+var ErrObjectNotFound = errors.New("automation object not found")
+
 type ArtifactStore interface {
 	PutEncryptedObject(context.Context, string, string, []byte, string) error
 }

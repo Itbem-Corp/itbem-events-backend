@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gofrs/uuid"
 )
@@ -31,7 +32,13 @@ func (s *fakeStore) Get(_ context.Context, bucket, key string) ([]byte, error) {
 	if value, ok := s.existing[bucket+"/"+key]; ok {
 		return value, nil
 	}
-	return s.input, nil
+	if value, ok := s.writes[bucket+"/"+key]; ok {
+		return value, nil
+	}
+	if strings.HasPrefix(key, "automation/inputs/") && strings.HasSuffix(key, "/input.json") {
+		return s.input, nil
+	}
+	return nil, ErrObjectNotFound
 }
 func (s *fakeStore) PutEncryptedJSON(_ context.Context, bucket, key string, body []byte) error {
 	s.mu.Lock()
@@ -399,6 +406,115 @@ func TestWorkerSegmentsLargeCodeReviewAndAccountsForEveryCall(t *testing.T) {
 	result := store.writes["itbem-ai-outputs-local/automation/task/runs/"+callback.updates[1].RunID+"/result.json"]
 	if strings.Count(string(result), `"patch_sha256"`) < 2 || !strings.Contains(string(result), `"review_segments"`) || !strings.Contains(string(result), `"verdict":"comment"`) {
 		t.Fatalf("segmented result lost private calls or conservative aggregate: %s", result)
+	}
+}
+
+func TestWorkerRetainsSegmentedReviewAfterTransientLaterProviderFailure(t *testing.T) {
+	patch := ""
+	for index := 0; index < codeReviewSegmentMaxFiles+1; index++ {
+		file := fmt.Sprintf("src/file_%02d.go", index)
+		patch += fmt.Sprintf("diff --git a/%s b/%s\n--- a/%s\n+++ b/%s\n@@ -1 +1 @@\n-old%d\n+new%d\n", file, file, file, file, index, index)
+	}
+	boundary, err := NewCodeReviewInput("github://acme/service", strings.Repeat("a", 40), strings.Repeat("b", 40), patch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivery, _ := json.Marshal(boundary)
+	input, _ := json.Marshal(TaskInput{Prompt: "Review every exact segment.", Delivery: delivery})
+	approved := `{"summary":"The exact segment is consistent.","verdict":"approve","review_scope":["changed files"],"findings":[],"test_plan":["Run go test ./..."],"coverage_gaps":[]}`
+	firstProvider := &sequenceProvider{
+		completions: []Completion{{Provider: ProviderMiniMax, Model: "MiniMax-M3", ResponseID: "segment-one", Content: approved, Usage: map[string]any{"total_tokens": float64(100)}}, {}},
+		errors:      []error{nil, &RetryableError{Message: "provider network request failed", RetryAfter: time.Minute}},
+	}
+	store, callback := &fakeStore{input: input}, &fakeCallback{}
+	worker, err := NewWorker(WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"}, store, callback, firstProvider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := validMessage()
+	message.Payload.Operation = "code.review"
+	err = worker.Process(context.Background(), message)
+	var retryable *RetryableError
+	if !errors.As(err, &retryable) {
+		t.Fatalf("later transient segment failure must retain the review, got %v", err)
+	}
+	if firstProvider.calls != 2 || len(callback.updates) != 1 || callback.updates[0].Status != "running" {
+		t.Fatalf("transient review failure must not publish a terminal result: calls=%d updates=%#v", firstProvider.calls, callback.updates)
+	}
+	checkpoint := store.writes["itbem-ai-outputs-local/automation/task/code-review-progress.json"]
+	if !strings.Contains(string(checkpoint), "segment-one") || strings.Contains(string(checkpoint), "segment-two") {
+		t.Fatalf("completed first segment was not durably checkpointed: %s", checkpoint)
+	}
+	secondProvider := &sequenceProvider{completions: []Completion{{Provider: ProviderMiniMax, Model: "MiniMax-M3", ResponseID: "segment-two", Content: approved, Usage: map[string]any{"total_tokens": float64(80)}}}}
+	worker, err = NewWorker(WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"}, store, callback, secondProvider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Process(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	if secondProvider.calls != 1 || len(callback.updates) != 3 || callback.updates[2].Status != "completed" || callback.updates[2].Usage["total_tokens"] != float64(180) {
+		t.Fatalf("retry must resume at only the missing segment with cumulative accounting: calls=%d updates=%#v", secondProvider.calls, callback.updates)
+	}
+}
+
+func TestWorkerRetainsReviewAfterTransientRepairFailure(t *testing.T) {
+	input, _ := json.Marshal(TaskInput{Prompt: "Review the frozen pull request.", Delivery: json.RawMessage(validCodeReviewInput())})
+	truncated := `{"summary":"Checked the change.","verdict":"approve"`
+	firstProvider := &sequenceProvider{
+		completions: []Completion{{Provider: ProviderMiniMax, Model: "MiniMax-M3", ResponseID: "candidate", Content: truncated, Usage: map[string]any{"total_tokens": float64(20)}}, {}},
+		errors:      []error{nil, &RetryableError{Message: "provider temporarily unavailable (503)", RetryAfter: time.Minute}},
+	}
+	store, callback := &fakeStore{input: input}, &fakeCallback{}
+	worker, err := NewWorker(WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"}, store, callback, firstProvider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := validMessage()
+	message.Payload.Operation = "code.review"
+	err = worker.Process(context.Background(), message)
+	var retryable *RetryableError
+	if !errors.As(err, &retryable) {
+		t.Fatalf("transient repair failure must retain the review, got %v", err)
+	}
+	if firstProvider.calls != 2 || len(callback.updates) != 1 || callback.updates[0].Status != "running" {
+		t.Fatalf("transient repair failure must not publish a terminal result: calls=%d updates=%#v", firstProvider.calls, callback.updates)
+	}
+	checkpoint := store.writes["itbem-ai-outputs-local/automation/task/code-review-progress.json"]
+	if !strings.Contains(string(checkpoint), "candidate") || !strings.Contains(string(checkpoint), "pending_repair") {
+		t.Fatalf("candidate and pending repair were not durably checkpointed: %s", checkpoint)
+	}
+	repaired := `{"summary":"The exact changed line is consistent.","verdict":"approve","review_scope":["handler"],"findings":[],"test_plan":["Run the handler tests"],"coverage_gaps":[]}`
+	secondProvider := &sequenceProvider{completions: []Completion{{Provider: ProviderMiniMax, Model: "MiniMax-M3", ResponseID: "repaired", Content: repaired, Usage: map[string]any{"total_tokens": float64(10)}}}}
+	worker, err = NewWorker(WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"}, store, callback, secondProvider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Process(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	if secondProvider.calls != 1 || secondProvider.maxTokens[0] != codeReviewRepairCompletionLimit || len(callback.updates) != 3 || callback.updates[2].Status != "completed" || callback.updates[2].Usage["total_tokens"] != float64(30) {
+		t.Fatalf("retry must resume at only the repair with cumulative accounting: calls=%d max=%#v updates=%#v", secondProvider.calls, secondProvider.maxTokens, callback.updates)
+	}
+}
+
+func TestWorkerFailsClosedBeforeInferenceForMismatchedCodeReviewCheckpoint(t *testing.T) {
+	input, _ := json.Marshal(TaskInput{Prompt: "Review the frozen pull request.", Delivery: json.RawMessage(validCodeReviewInput())})
+	store := &fakeStore{input: input, existing: map[string][]byte{
+		"itbem-ai-outputs-local/automation/task/code-review-progress.json": []byte(`{"schema_version":1,"task_id":"task","base_sha":"` + strings.Repeat("a", 40) + `","head_sha":"` + strings.Repeat("b", 40) + `","patch_sha256":"` + strings.Repeat("0", 64) + `","request_ref":"s3://itbem-ai-outputs-local/automation/task/runs/not-a-uuid/request.json","segments":[]}`),
+	}}
+	callback, provider := &fakeCallback{}, &sequenceProvider{}
+	worker, err := NewWorker(WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"}, store, callback, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := validMessage()
+	message.Payload.Operation = "code.review"
+	if err := worker.Process(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	if provider.calls != 0 || len(callback.updates) != 2 || callback.updates[1].Status != "failed" || !strings.Contains(callback.updates[1].ErrorMessage, "checkpoint is invalid") {
+		t.Fatalf("mismatched checkpoint reached inference or was not terminally rejected: calls=%d updates=%#v", provider.calls, callback.updates)
 	}
 }
 

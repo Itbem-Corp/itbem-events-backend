@@ -41,6 +41,14 @@ not loop forever. During an orderly worker shutdown, the bounded visibility
 update is detached from the cancelled task context so the lane cannot remain
 blocked for the queue's full default visibility timeout.
 
+Segmented exact-SHA reviews additionally keep their encrypted continuation
+inside the same task output namespace. The gateway reports an absent optional
+object as `404`, while authorization, lease, integrity and storage failures
+remain distinct errors; this prevents a worker from mistaking a denied read
+for a fresh task. A continuation is validated against the frozen review
+subject before it can reuse a provider response, and it never produces a
+GitHub side effect until every segment has been aggregated normally.
+
 The runtime probe checks authentication, a non-consuming attribute read on the
 exact lane, and bucket-location access for both private automation buckets. It
 does not receive work. This preflight must fail closed when the deployed IAM

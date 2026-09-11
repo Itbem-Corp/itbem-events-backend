@@ -1,11 +1,14 @@
 package automation
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"events-stocks/internal/agentwork"
+
+	"github.com/aws/smithy-go"
 )
 
 func TestGatewayTokensAreLaneBoundAndDoNotExposeRoot(t *testing.T) {
@@ -42,5 +45,14 @@ func TestGatewayLeaseIsConfidentialTamperEvidentAndIdentityBound(t *testing.T) {
 	tampered := token[:len(token)-1] + replacement
 	if _, err := openGatewayLease(tampered, identity); err == nil {
 		t.Fatal("tampered lease was accepted")
+	}
+}
+
+func TestGatewayObjectMissingDoesNotTreatStorageFailuresAsAbsence(t *testing.T) {
+	if !gatewayObjectMissing(&smithy.GenericAPIError{Code: "NoSuchKey"}) {
+		t.Fatal("confirmed missing object was not classified as absent")
+	}
+	if gatewayObjectMissing(&smithy.GenericAPIError{Code: "AccessDenied"}) || gatewayObjectMissing(errors.New("network unavailable")) {
+		t.Fatal("storage authorization or network failures must not look like an absent checkpoint")
 	}
 }

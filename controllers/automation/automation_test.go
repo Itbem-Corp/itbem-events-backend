@@ -12,6 +12,7 @@ import (
 	"events-stocks/internal/releasegate"
 	"events-stocks/models"
 	"events-stocks/repositories/automationqueuerepository"
+	"events-stocks/services/deliveryworkflow"
 	"fmt"
 	"io"
 	"net/http"
@@ -1289,6 +1290,29 @@ func TestDeliveryQAEvidenceTitlesDescribeResponsiveScreenshots(t *testing.T) {
 	}
 	if key, role := deliveryQAEvidenceComparison("dashboard-semantic-qa-case-untrusted-before.png"); key != "" || role != "" {
 		t.Fatalf("unbounded evidence name must not become a comparison pair: %q / %q", key, role)
+	}
+}
+
+func TestDelegatedSubmissionOnlyAdvancesCompletedRoleHandoffs(t *testing.T) {
+	cases := []struct {
+		operation string
+		state     string
+		action    deliveryworkflow.Action
+		phase     string
+		allowed   bool
+	}{
+		{"delivery.implementation", deliveryworkflow.StateImplementation, deliveryworkflow.ActionSubmitCodeReview, "implementation", true},
+		{"delivery.qa", deliveryworkflow.StateQARunning, deliveryworkflow.ActionSubmitQA, "qa", true},
+		{"delivery.plan", deliveryworkflow.StatePlanning, "", "", false},
+		{"delivery.release_gate", deliveryworkflow.StateReleaseReview, "", "", false},
+		{"delivery.implementation", deliveryworkflow.StateCodeReview, deliveryworkflow.ActionSubmitCodeReview, "implementation", false},
+	}
+	for _, check := range cases {
+		action, phase := delegatedSubmissionAction(check.operation)
+		allowed := action != "" && delegatedSubmissionStateMatches(check.state, action)
+		if action != check.action || phase != check.phase || allowed != check.allowed {
+			t.Fatalf("delegated submission for %q/%q = (%q, %q, %t), want (%q, %q, %t)", check.operation, check.state, action, phase, allowed, check.action, check.phase, check.allowed)
+		}
 	}
 }
 

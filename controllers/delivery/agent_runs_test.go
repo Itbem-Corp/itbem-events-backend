@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"events-stocks/internal/deliveryledger"
 	"events-stocks/internal/projectvault"
 	"events-stocks/internal/releasegate"
 	"events-stocks/models"
@@ -21,7 +22,7 @@ func TestAgentRunSpecsAreBoundToDeliveryStates(t *testing.T) {
 	}{
 		{"plan", "delivery.plan", deliveryworkflow.StatePlanning},
 		{"implementation", "delivery.implementation", deliveryworkflow.StateImplementation},
-		{"publish", "delivery.publish", deliveryworkflow.StatePreviewPending},
+		{"publish", "delivery.publish", deliveryworkflow.StateCodeReview},
 		{"release_gate", "delivery.release_gate", deliveryworkflow.StateReleaseReview},
 		{"qa", "delivery.qa", deliveryworkflow.StateQARunning},
 		{"summary", "delivery.summary", deliveryworkflow.StateReleaseReview},
@@ -319,7 +320,7 @@ func TestDeliveryAutonomyPolicyKeepsPublicationHumanControlled(t *testing.T) {
 func TestDeliveryAutonomyPolicyNamesTheImmediateHumanGateForEveryPhase(t *testing.T) {
 	checks := map[string]string{
 		"plan":           "before implementation",
-		"implementation": "before a publication grant",
+		"implementation": "publication grant",
 		"publish":        "before QA can begin",
 		"qa":             "before release review",
 		"summary":        "before marking the delivery released",
@@ -329,6 +330,38 @@ func TestDeliveryAutonomyPolicyNamesTheImmediateHumanGateForEveryPhase(t *testin
 		if len(policy.HumanGateRequiredFor) == 0 || !strings.Contains(strings.Join(policy.HumanGateRequiredFor, " "), expected) {
 			t.Fatalf("%s policy must name its immediate human gate: %#v", phase, policy.HumanGateRequiredFor)
 		}
+	}
+}
+
+func TestApplyFrozenAutonomyPolicyKeepsModelUnprivileged(t *testing.T) {
+	eventID := uuid.Must(uuid.NewV4())
+	input := deliveryAgentInput{}
+	input.Delivery.AutonomyPolicy = deliveryAutonomyPolicy("qa")
+	originalProhibited := append([]string(nil), input.Delivery.AutonomyPolicy.Prohibited...)
+	originalAllowed := append([]string(nil), input.Delivery.AutonomyPolicy.Allowed...)
+
+	applyFrozenAutonomyPolicy(&input, deliveryledger.AutonomySnapshot{EventID: eventID, Delegated: true})
+	policy := input.Delivery.AutonomyPolicy
+	if policy.GateAuthority != "delegated" || policy.AuthoritySnapshotID != eventID.String() {
+		t.Fatalf("delegated snapshot must be projected into the task policy: %#v", policy)
+	}
+	if len(policy.HumanGateRequiredFor) != 0 || len(policy.CoordinatorRequiredFor) == 0 {
+		t.Fatalf("delegated policy must name the coordinator instead of a human gate: %#v", policy)
+	}
+	if !strings.Contains(strings.Join(policy.RequiredEvidence, " "), "independent role evidence") {
+		t.Fatalf("delegated policy must require independently validated evidence: %#v", policy.RequiredEvidence)
+	}
+	if strings.Join(policy.Prohibited, "\n") != strings.Join(originalProhibited, "\n") || strings.Join(policy.Allowed, "\n") != strings.Join(originalAllowed, "\n") {
+		t.Fatalf("a delegated policy must not give a model approval or remote authority: %#v", policy)
+	}
+}
+
+func TestApplyFrozenAutonomyPolicyLeavesManualModeUntouched(t *testing.T) {
+	input := deliveryAgentInput{}
+	input.Delivery.AutonomyPolicy = deliveryAutonomyPolicy("plan")
+	applyFrozenAutonomyPolicy(&input, deliveryledger.AutonomySnapshot{EventID: uuid.Must(uuid.NewV4())})
+	if input.Delivery.AutonomyPolicy.GateAuthority != "human" || len(input.Delivery.AutonomyPolicy.HumanGateRequiredFor) == 0 || input.Delivery.AutonomyPolicy.AuthoritySnapshotID != "" {
+		t.Fatalf("manual policy must remain the default: %#v", input.Delivery.AutonomyPolicy)
 	}
 }
 

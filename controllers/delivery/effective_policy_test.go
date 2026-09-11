@@ -16,7 +16,7 @@ func TestBuildEffectivePolicySnapshotOmitsPrivateActorIdentity(t *testing.T) {
 	now := time.Date(2026, time.August, 30, 15, 0, 0, 0, time.UTC)
 	projectID, vaultID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
 	policy := deliverypolicy.ResolvedPolicy{
-		SchemaVersion: 1, Mode: deliverypolicy.ModeMerge, RequiredTestKinds: []string{"unit"}, AllowedTargetBranches: []string{"trunk"},
+		SchemaVersion: 1, Mode: deliverypolicy.ModeMerge, GateApprovalMode: deliverypolicy.GateApprovalDelegated, RequiredTestKinds: []string{"unit"}, AllowedTargetBranches: []string{"trunk"},
 		RequiredHealthChecks: []string{}, RequiredPostMergeChecks: []string{}, Missing: []string{}, Resolved: true,
 		Digest: strings.Repeat("a", 64), Safety: deliverypolicy.SafetyFloor{IndependentReview: true},
 		Sources: []deliverypolicy.Source{{Level: deliverypolicy.LevelProject, RevisionID: "revision-1", Digest: strings.Repeat("b", 64), ApprovedBy: "private-cognito-sub", ApprovedAt: now.Add(-time.Hour)}},
@@ -33,7 +33,7 @@ func TestBuildEffectivePolicySnapshotOmitsPrivateActorIdentity(t *testing.T) {
 			t.Fatalf("effective policy projection exposed %q: %s", private, value)
 		}
 	}
-	if !strings.Contains(value, `"overrides_considered":true`) || !strings.Contains(value, `"repository_sha":"`+vault.Revision+`"`) || !strings.Contains(value, `"sources":[{"level":"project"`) {
+	if !strings.Contains(value, `"overrides_considered":true`) || !strings.Contains(value, `"repository_sha":"`+vault.Revision+`"`) || !strings.Contains(value, `"gate_approval_mode":"delegated"`) || !strings.Contains(value, `"sources":[{"level":"project"`) {
 		t.Fatalf("effective policy projection omitted safe evidence: %s", value)
 	}
 }

@@ -324,14 +324,16 @@ func (snapshot DeliveryContextSnapshot) MarshalJSON() ([]byte, error) {
 	})
 }
 
-// DeliveryGate records the human decision that authorizes a sensitive
-// transition. It is append-only in the domain: a requested change is a new
-// decision, never an overwritten approval.
+// DeliveryGate records the authorized decision that unlocks a sensitive
+// transition. Authority is human by default; delegated gates are produced
+// only by the internal coordinator after it verifies frozen authority and
+// independent evidence. The record is append-only in the domain.
 type DeliveryGate struct {
 	ID                uuid.UUID `gorm:"type:uuid;default:uuid_generate_v4();primaryKey" json:"id"`
 	WorkItemID        uuid.UUID `gorm:"type:uuid;not null;index" json:"work_item_id"`
 	Kind              string    `gorm:"type:varchar(32);not null;index" json:"kind"`
 	Decision          string    `gorm:"type:varchar(32);not null;index" json:"decision"`
+	Authority         string    `gorm:"type:varchar(24);not null;default:'human';index" json:"authority"`
 	DecidedBy         string    `gorm:"type:varchar(128);not null;index" json:"decided_by"`
 	Comment           string    `gorm:"type:text;not null;default:''" json:"comment,omitempty"`
 	EvidenceChecklist string    `gorm:"type:jsonb;not null;default:'[]'" json:"evidence_checklist,omitempty"`
