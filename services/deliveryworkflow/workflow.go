@@ -22,8 +22,11 @@ const (
 	StateQAReview       = "qa_review"
 	StateReleaseReview  = "release_review"
 	StateReleased       = "released"
-	StateBlocked        = "blocked"
-	StateCancelled      = "cancelled"
+	// StateAssessed is a terminal result for a deliberately read-only delivery.
+	// It is not a release: no branch, PR, preview, merge, or deploy exists.
+	StateAssessed  = "assessed"
+	StateBlocked   = "blocked"
+	StateCancelled = "cancelled"
 
 	GatePlan       = "plan"
 	GateCodeReview = "code_review"
@@ -48,6 +51,7 @@ const (
 	ActionApproveQA          Action = "approve_qa"
 	ActionRequestQAChanges   Action = "request_qa_changes"
 	ActionApproveRelease     Action = "approve_release"
+	ActionSubmitAssessment   Action = "submit_assessment"
 	ActionBlock              Action = "block"
 	ActionCancel             Action = "cancel"
 )
@@ -74,6 +78,10 @@ var transitions = map[Action]transition{
 	ActionApproveQA:          {from: StateQAReview, to: StateReleaseReview, gateKind: GateQAReview, decision: DecisionApproved},
 	ActionRequestQAChanges:   {from: StateQAReview, to: StateImplementation, gateKind: GateQAReview, decision: DecisionChangesRequested},
 	ActionApproveRelease:     {from: StateReleaseReview, to: StateReleased, gateKind: GateRelease, decision: DecisionApproved},
+	// A plan that explicitly declares zero repositories with impact=changes may
+	// be completed as a bounded assessment. This must never enter code review or
+	// the release path, which are reserved for an actual immutable change-set.
+	ActionSubmitAssessment: {from: StateImplementation, to: StateAssessed},
 }
 
 // Advance applies one permitted transition. Gates are required for every
@@ -117,7 +125,7 @@ func Advance(item *models.DeliveryWorkItem, action Action, gate *models.Delivery
 }
 
 func isTerminal(state string) bool {
-	return state == StateReleased || state == StateCancelled
+	return state == StateReleased || state == StateAssessed || state == StateCancelled
 }
 
 func validateGate(item *models.DeliveryWorkItem, gate *models.DeliveryGate, rule transition, now time.Time) error {

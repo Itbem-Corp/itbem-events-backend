@@ -22,6 +22,7 @@ func TestAgentRunSpecsAreBoundToDeliveryStates(t *testing.T) {
 	}{
 		{"plan", "delivery.plan", deliveryworkflow.StatePlanning},
 		{"implementation", "delivery.implementation", deliveryworkflow.StateImplementation},
+		{"assessment", "delivery.assessment", deliveryworkflow.StateImplementation},
 		{"publish", "delivery.publish", deliveryworkflow.StateCodeReview},
 		{"release_gate", "delivery.release_gate", deliveryworkflow.StateReleaseReview},
 		{"qa", "delivery.qa", deliveryworkflow.StateQARunning},
@@ -375,6 +376,23 @@ func TestPostPlanAgentInputRequiresPersistedApprovedPlan(t *testing.T) {
 	snapshots := []models.DeliveryContextSnapshot{{WorkItemID: workItemID, SourceID: sourceID, Kind: "repository", Name: "Backend", Reference: "workspace://backend", Revision: "abc123"}}
 	if _, err := buildDeliveryAgentInput(item, project, snapshots, nil, nil, nil, nil, "", "implementation"); err == nil || !strings.Contains(err.Error(), "human-approved plan") {
 		t.Fatalf("expected an implementation run without an approved plan to be rejected, got %v", err)
+	}
+}
+
+func TestReadOnlyAssessmentRequiresAnExplicitZeroChangeMatrix(t *testing.T) {
+	valid := map[string]any{"repository_impact": []any{map[string]any{"reference": "workspace://backend", "impact": "consulted"}}}
+	if err := requireReadOnlyAssessmentPlan(valid); err != nil {
+		t.Fatalf("expected bounded read-only assessment plan: %v", err)
+	}
+	for _, plan := range []map[string]any{
+		{},
+		{"repository_impact": []any{}},
+		{"repository_impact": []any{map[string]any{"reference": "workspace://backend", "impact": "changes"}}},
+		{"repository_impact": []any{map[string]any{"reference": "workspace://backend", "impact": "unknown"}}},
+	} {
+		if err := requireReadOnlyAssessmentPlan(plan); err == nil {
+			t.Fatalf("invalid read-only assessment plan was accepted: %#v", plan)
+		}
 	}
 }
 

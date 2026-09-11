@@ -194,6 +194,9 @@ func unsafePatchPath(line string) bool {
 }
 
 func RunImplementation(ctx context.Context, taskID string, delivery json.RawMessage, modelContent string, lookup func(string) string) (map[string]any, error) {
+	if required, declared := approvedChangedRepositoryReferences(delivery); declared && len(required) == 0 {
+		return nil, fmt.Errorf("approved plan declares no repository changes; implementation must not create a worktree")
+	}
 	proposal, err := ParseChangeProposal(modelContent)
 	if err != nil {
 		return nil, err
