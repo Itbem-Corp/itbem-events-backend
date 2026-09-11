@@ -84,3 +84,27 @@ func TestHTTPGatewayMapsOnlyMissingOptionalObjectToNotFound(t *testing.T) {
 		})
 	}
 }
+
+func TestHTTPGatewayPreservesForbiddenStatusWithoutMakingItRetryable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	gateway, err := NewHTTPGateway(server.URL, "test-token", agentwork.RoleReviewer, agentwork.LaneReview, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.WithValue(context.Background(), gatewayLeaseContextKey{}, "sealed-test-lease")
+	_, err = gateway.Get(ctx, "itbem-ai-outputs-local", "automation/task/code-review-progress.json")
+	if err == nil {
+		t.Fatal("expected forbidden gateway read")
+	}
+	var retryable *gatewayRequestError
+	if errors.As(err, &retryable) {
+		t.Fatalf("forbidden gateway read became retryable: %v", err)
+	}
+	if status, ok := gatewayResponseStatus(err); !ok || status != http.StatusForbidden {
+		t.Fatalf("forbidden status = (%d, %t), want (403, true)", status, ok)
+	}
+}

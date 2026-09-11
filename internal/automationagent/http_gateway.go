@@ -46,6 +46,30 @@ func (e *gatewayRequestError) Error() string {
 
 func (e *gatewayRequestError) Unwrap() error { return e.cause }
 
+// gatewayRejectedError preserves a non-retryable HTTP status for callers that
+// must make a narrowly scoped decision about a denied capability. It is kept
+// separate from gatewayRequestError so an authorization or validation failure
+// can never enter the queue retry path.
+type gatewayRejectedError struct{ statusCode int }
+
+func (e *gatewayRejectedError) Error() string {
+	return fmt.Sprintf("agent gateway rejected request (%d)", e.statusCode)
+}
+
+type gatewayStatusError interface{ GatewayStatusCode() int }
+
+func (e *gatewayRequestError) GatewayStatusCode() int { return e.statusCode }
+
+func (e *gatewayRejectedError) GatewayStatusCode() int { return e.statusCode }
+
+func gatewayResponseStatus(err error) (int, bool) {
+	var statusError gatewayStatusError
+	if !errors.As(err, &statusError) || statusError.GatewayStatusCode() < 100 {
+		return 0, false
+	}
+	return statusError.GatewayStatusCode(), true
+}
+
 // RetryDelay is deliberately absent from permanent gateway errors. RunQueue
 // uses this small interface instead of treating every receive error as safe to
 // retry, so a revoked token or an invalid lane cannot spin silently forever.
@@ -133,7 +157,7 @@ func (g *HTTPGateway) request(ctx context.Context, method, path string, input an
 		if gatewayResponseIsTransient(response.StatusCode) || response.StatusCode == http.StatusNotFound {
 			return &gatewayRequestError{statusCode: response.StatusCode, retryAfter: gatewayRetryAfter(response.Header, time.Now().UTC())}
 		}
-		return fmt.Errorf("agent gateway rejected request (%d)", response.StatusCode)
+		return &gatewayRejectedError{statusCode: response.StatusCode}
 	}
 	if output == nil || response.StatusCode == http.StatusNoContent {
 		return nil
