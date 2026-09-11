@@ -61,3 +61,33 @@ func TestCodeReviewProgressRoundTripsOnlyItsExactValidatedSegment(t *testing.T) 
 		t.Fatalf("checkpoint for another segment must be rejected before inference: %v", err)
 	}
 }
+
+func TestCodeReviewProgressRejectsRepairFromAnotherRun(t *testing.T) {
+	boundary, err := ParseCodeReviewInput(validCodeReviewInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	segments, err := SegmentCodeReviewInput(boundary)
+	if err != nil || len(segments) != 1 {
+		t.Fatalf("expected one bounded segment: %#v / %v", segments, err)
+	}
+	taskID := "checkpoint-task"
+	runID, otherRunID := uuid.Must(uuid.NewV4()).String(), uuid.Must(uuid.NewV4()).String()
+	worker, err := NewWorker(WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"}, &fakeStore{}, &fakeCallback{}, &sequenceProvider{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	progress := codeReviewProgress{
+		SchemaVersion: codeReviewProgressSchemaVersion, TaskID: taskID, BaseSHA: boundary.BaseSHA, HeadSHA: boundary.HeadSHA, PatchSHA256: boundary.PatchSHA256,
+		RequestRef: "s3://itbem-ai-outputs-local/automation/" + taskID + "/runs/" + runID + "/request.json",
+		Segments: []codeReviewProgressSegment{{
+			Index: 1, PatchSHA256: segments[0].PatchSHA256, RepairAttempted: true,
+			Completion:    Completion{Provider: ProviderMiniMax, Model: "MiniMax-M3", Content: `{"verdict":"comment"}`, Usage: map[string]any{"total_tokens": float64(12)}},
+			PendingRepair: &codeReviewPendingRepair{RequestRef: "s3://itbem-ai-outputs-local/" + codeReviewRepairRequestKey(taskID, otherRunID, 1), ValidationError: "invalid response"},
+		}},
+	}
+	calls := []codeReviewProviderCall{{Index: 1, Boundary: segments[0], PatchDigest: segments[0].PatchSHA256}}
+	if err := worker.validateCodeReviewProgress(progress, taskID, calls, boundary); err == nil || !strings.Contains(err.Error(), "invalid repair reference") {
+		t.Fatalf("repair checkpoint from another run must be rejected: %v", err)
+	}
+}

@@ -182,7 +182,7 @@ func CreatePublicationGrant(c echo.Context) error {
 // approval and does not advance the workflow, so no prior approved gate may
 // be inferred here.
 func publicationGrantPrecondition(item models.DeliveryWorkItem) error {
-	if strings.TrimSpace(item.State) != deliveryworkflow.StateCodeReview {
+	if !strings.EqualFold(strings.TrimSpace(item.State), deliveryworkflow.StateCodeReview) {
 		return fmt.Errorf("a publication grant can only be issued while code review is pending")
 	}
 	return nil

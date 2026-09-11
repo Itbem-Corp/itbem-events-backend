@@ -184,12 +184,28 @@ func TestBuildExecutionGraphProjectsVerifiedAuthorityAndFailsClosedOnTampering(t
 	tampered.PayloadDigest = strings.Repeat("0", 64)
 	input.Events = []models.DeliveryEvent{tampered}
 	failed := buildExecutionGraph(input)
-	blockedAuthority := executionGraphFindNode(t, failed.Nodes, executionGraphAuthorityNodeID(eventID))
-	if blockedAuthority.Status != "attention" || blockedAuthority.Metadata["verified"] != false || blockedAuthority.Detail != "La evidencia de autoridad no pasó la verificación" {
-		t.Fatalf("invalid authority evidence must fail closed in the graph: %#v", blockedAuthority)
+	for _, node := range failed.Nodes {
+		if node.ID == executionGraphAuthorityNodeID(eventID) {
+			t.Fatalf("invalid authority evidence must not project an authority node: %#v", node)
+		}
 	}
-	if edge := executionGraphFindEdge(t, failed.Edges, executionGraphEdgeID(executionGraphWorkItemNodeID(workItemID), blockedAuthority.ID, "freezes_authority")); edge.Status != "attention" {
-		t.Fatalf("invalid authority edge must remain visibly blocked: %#v", edge)
+	for _, edge := range failed.Edges {
+		if edge.ID == executionGraphEdgeID(executionGraphWorkItemNodeID(workItemID), executionGraphAuthorityNodeID(eventID), "freezes_authority") {
+			t.Fatalf("invalid authority evidence must not project a provenance edge: %#v", edge)
+		}
+	}
+}
+
+func TestExecutionGraphGateAuthorityDoesNotInventHumanProvenance(t *testing.T) {
+	for authority, want := range map[string]string{
+		"delegated": "delegated",
+		" HUMAN ":   "human",
+		"":          "unknown",
+		"machine":   "unknown",
+	} {
+		if got := executionGraphGateAuthority(authority); got != want {
+			t.Fatalf("authority %q = %q, want %q", authority, got, want)
+		}
 	}
 }
 

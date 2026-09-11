@@ -373,7 +373,8 @@ func (w *Worker) validateCodeReviewProgress(progress codeReviewProgress, taskID 
 	if len(progress.Segments) > len(calls) {
 		return fmt.Errorf("checkpoint has too many segments")
 	}
-	if !w.validCodeReviewProgressReference(progress.RequestRef, taskID, "/request.json") {
+	runID, ok := w.codeReviewProgressRunID(progress.RequestRef, taskID)
+	if !ok {
 		return fmt.Errorf("checkpoint request reference is outside this task")
 	}
 	for index, segment := range progress.Segments {
@@ -388,7 +389,7 @@ func (w *Worker) validateCodeReviewProgress(progress codeReviewProgress, taskID 
 			if index != len(progress.Segments)-1 || segment.Review != nil || !segment.RepairAttempted {
 				return fmt.Errorf("checkpoint segment %d has an invalid pending repair state", call.Index)
 			}
-			if len(strings.TrimSpace(segment.PendingRepair.ValidationError)) == 0 || len(segment.PendingRepair.ValidationError) > 400 || !w.validCodeReviewProgressReference(segment.PendingRepair.RequestRef, taskID, fmt.Sprintf("/repairs/segment-%02d/request.json", call.Index)) {
+			if len(strings.TrimSpace(segment.PendingRepair.ValidationError)) == 0 || len(segment.PendingRepair.ValidationError) > 400 || !w.codeReviewProgressReferenceMatches(segment.PendingRepair.RequestRef, codeReviewRepairRequestKey(taskID, runID, call.Index)) {
 				return fmt.Errorf("checkpoint segment %d has an invalid repair reference", call.Index)
 			}
 			continue
@@ -403,12 +404,25 @@ func (w *Worker) validateCodeReviewProgress(progress codeReviewProgress, taskID 
 	return nil
 }
 
-func (w *Worker) validCodeReviewProgressReference(reference, taskID, suffix string) bool {
+func (w *Worker) codeReviewProgressRunID(reference, taskID string) (string, bool) {
 	bucket, key, err := ParsePrivateReference(reference)
-	if err != nil || bucket != w.config.OutputBucket || !strings.HasPrefix(key, "automation/"+taskID+"/runs/") || !strings.HasSuffix(key, suffix) || strings.Contains(key, "..") {
-		return false
+	prefix := "automation/" + taskID + "/runs/"
+	if err != nil || bucket != w.config.OutputBucket || !strings.HasPrefix(key, prefix) || !strings.HasSuffix(key, "/request.json") || strings.Contains(key, "..") {
+		return "", false
 	}
-	return true
+	runID := strings.TrimSuffix(strings.TrimPrefix(key, prefix), "/request.json")
+	if strings.Contains(runID, "/") {
+		return "", false
+	}
+	if _, err := uuid.FromString(runID); err != nil {
+		return "", false
+	}
+	return runID, true
+}
+
+func (w *Worker) codeReviewProgressReferenceMatches(reference, expectedKey string) bool {
+	bucket, key, err := ParsePrivateReference(reference)
+	return err == nil && bucket == w.config.OutputBucket && key == expectedKey
 }
 
 func codeReviewProgressRepairCount(progress codeReviewProgress) int {
@@ -679,11 +693,15 @@ func (w *Worker) storeCodeReviewRepairRequest(ctx context.Context, taskID, runID
 	if err != nil {
 		return "", fmt.Errorf("code review repair request could not be encoded")
 	}
-	key := fmt.Sprintf("automation/%s/runs/%s/repairs/segment-%02d/request.json", taskID, runID, segment)
+	key := codeReviewRepairRequestKey(taskID, runID, segment)
 	if err := w.store.PutEncryptedJSON(ctx, w.config.OutputBucket, key, body); err != nil {
 		return "", err
 	}
 	return "s3://" + w.config.OutputBucket + "/" + key, nil
+}
+
+func codeReviewRepairRequestKey(taskID, runID string, segment int) string {
+	return fmt.Sprintf("automation/%s/runs/%s/repairs/segment-%02d/request.json", taskID, runID, segment)
 }
 
 func aggregateCodeReviewCompletions(completions []Completion, aggregate map[string]any) (Completion, error) {

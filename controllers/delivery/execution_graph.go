@@ -459,14 +459,17 @@ func buildExecutionGraph(input executionGraphBuildInput) executionGraphSnapshot 
 			continue
 		}
 		projection, projectionErr := deliveryledger.ProjectAutonomySnapshot(event)
-		status, detail, metadata := "attention", "La evidencia de autoridad no pasó la verificación", map[string]any{"verified": false}
-		if projectionErr == nil {
-			status, detail = "completed", "Gates humanos por defecto"
-			if projection.Delegated {
-				detail = "Gates delegados con evidencia independiente obligatoria"
-			}
-			metadata = map[string]any{"verified": true, "delegated": projection.Delegated, "repositories": len(projection.Repositories)}
+		// An invalid immutable snapshot is not authority evidence. Omitting it is
+		// deliberately fail-closed: rendering an "attention" authority node would
+		// still make unverified provenance look like usable workflow state.
+		if projectionErr != nil {
+			continue
 		}
+		status, detail := "completed", "Gates humanos por defecto"
+		if projection.Delegated {
+			detail = "Gates delegados con evidencia independiente obligatoria"
+		}
+		metadata := map[string]any{"verified": true, "delegated": projection.Delegated, "repositories": len(projection.Repositories)}
 		nodeID := executionGraphAuthorityNodeID(event.ID)
 		nodes = append(nodes, executionGraphNode{
 			ID: nodeID, Kind: "authority", Status: status,
@@ -592,10 +595,16 @@ func executionGraphGateStatus(decision string) string {
 }
 
 func executionGraphGateAuthority(authority string) string {
-	if strings.EqualFold(strings.TrimSpace(authority), "delegated") {
+	switch strings.ToLower(strings.TrimSpace(authority)) {
+	case "delegated":
 		return "delegated"
+	case "human":
+		return "human"
+	default:
+		// Graph records can include historic rows that predate the explicit
+		// authority field. Do not present missing provenance as a human decision.
+		return "unknown"
 	}
-	return "human"
 }
 
 func executionGraphDependencyStatus(state string) string {

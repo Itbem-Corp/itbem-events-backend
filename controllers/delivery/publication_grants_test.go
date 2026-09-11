@@ -31,7 +31,7 @@ func TestPublicationGrantPreconditionAllowsPendingCodeReviewWithoutAnApprovalGat
 	// itself a code-review decision. Keep this test at the controller boundary
 	// so a future refactor cannot accidentally restore an "approved gate"
 	// prerequisite and make the publication/review ordering impossible.
-	if err := publicationGrantPrecondition(models.DeliveryWorkItem{State: " " + deliveryworkflow.StateCodeReview + " "}); err != nil {
+	if err := publicationGrantPrecondition(models.DeliveryWorkItem{State: " " + strings.ToUpper(deliveryworkflow.StateCodeReview) + " "}); err != nil {
 		t.Fatalf("pending code review must allow a publication grant without a prior approval gate: %v", err)
 	}
 	for _, state := range []string{"", deliveryworkflow.StateImplementation, deliveryworkflow.StatePreviewPending, deliveryworkflow.StateQARunning} {
