@@ -33,13 +33,20 @@ const (
 // process.
 type gatewayRequestError struct {
 	statusCode int
+	operation  string
 	cause      error
 	retryAfter time.Duration
 }
 
 func (e *gatewayRequestError) Error() string {
 	if e.statusCode != 0 {
+		if e.operation != "" {
+			return fmt.Sprintf("agent gateway rejected %s (%d)", e.operation, e.statusCode)
+		}
 		return fmt.Sprintf("agent gateway rejected request (%d)", e.statusCode)
+	}
+	if e.operation != "" {
+		return fmt.Sprintf("agent gateway %s request failed: %v", e.operation, e.cause)
 	}
 	return fmt.Sprintf("agent gateway request failed: %v", e.cause)
 }
@@ -127,6 +134,7 @@ func NewHTTPGateway(baseURL, token string, role agentwork.Role, lane agentwork.L
 }
 
 func (g *HTTPGateway) request(ctx context.Context, method, path string, input any, output any) error {
+	operation := gatewayOperation(path)
 	var body io.Reader
 	if input != nil {
 		encoded, err := json.Marshal(input)
@@ -148,14 +156,14 @@ func (g *HTTPGateway) request(ctx context.Context, method, path string, input an
 	response, err := g.client.Do(req)
 	if err != nil {
 		if ctx.Err() == nil {
-			return &gatewayRequestError{cause: err, retryAfter: gatewayRetryDefaultDelay}
+			return &gatewayRequestError{operation: operation, cause: err, retryAfter: gatewayRetryDefaultDelay}
 		}
 		return fmt.Errorf("agent gateway request failed: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		if gatewayResponseIsTransient(response.StatusCode) || response.StatusCode == http.StatusNotFound {
-			return &gatewayRequestError{statusCode: response.StatusCode, retryAfter: gatewayRetryAfter(response.Header, time.Now().UTC())}
+			return &gatewayRequestError{statusCode: response.StatusCode, operation: operation, retryAfter: gatewayRetryAfter(response.Header, time.Now().UTC())}
 		}
 		return &gatewayRejectedError{statusCode: response.StatusCode}
 	}
@@ -166,6 +174,27 @@ func (g *HTTPGateway) request(ctx context.Context, method, path string, input an
 		return fmt.Errorf("decode agent gateway response: %w", err)
 	}
 	return nil
+}
+
+// gatewayOperation returns a stable, non-sensitive operation label.  It is
+// intended for local worker diagnostics: paths contain no caller-controlled
+// data, but keeping a small allow-list ensures neither object references nor
+// sealed lease tokens can ever be echoed into a journal.
+func gatewayOperation(path string) string {
+	switch path {
+	case "/api/internal/automation/gateway/probe":
+		return "probe"
+	case "/api/internal/automation/gateway/leases":
+		return "lease"
+	case "/api/internal/automation/gateway/leases/visibility":
+		return "lease visibility"
+	case "/api/internal/automation/gateway/objects/read":
+		return "object read"
+	case "/api/internal/automation/gateway/objects/write":
+		return "object write"
+	default:
+		return "request"
+	}
 }
 
 func (g *HTTPGateway) Probe(ctx context.Context) error {
