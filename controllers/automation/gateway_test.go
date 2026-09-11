@@ -58,6 +58,22 @@ func TestGatewayObjectMissingDoesNotTreatStorageFailuresAsAbsence(t *testing.T) 
 	}
 }
 
+func TestGatewayStorageFailureCodeKeepsDiagnosticsNonSensitive(t *testing.T) {
+	for _, sample := range []struct {
+		errorCode string
+		want      string
+	}{
+		{errorCode: "AccessDenied", want: "authorization"},
+		{errorCode: "PermanentRedirect", want: "region"},
+		{errorCode: "SlowDown", want: "transient"},
+		{errorCode: "ArbitraryPrivateAWSFailure", want: "unclassified"},
+	} {
+		if got := gatewayStorageFailureCode(&smithy.GenericAPIError{Code: sample.errorCode}); got != sample.want {
+			t.Fatalf("gatewayStorageFailureCode(%q) = %q, want %q", sample.errorCode, got, sample.want)
+		}
+	}
+}
+
 func TestValidateGatewayObjectBindsReadsAndWritesToTheExactTask(t *testing.T) {
 	const taskID = "11111111-1111-4111-8111-111111111111"
 	inputBucket := "itbem-ai-inputs-test"

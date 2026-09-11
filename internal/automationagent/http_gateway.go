@@ -34,6 +34,7 @@ const (
 type gatewayRequestError struct {
 	statusCode int
 	operation  string
+	diagnostic string
 	cause      error
 	retryAfter time.Duration
 }
@@ -41,6 +42,9 @@ type gatewayRequestError struct {
 func (e *gatewayRequestError) Error() string {
 	if e.statusCode != 0 {
 		if e.operation != "" {
+			if e.diagnostic != "" {
+				return fmt.Sprintf("agent gateway rejected %s (%d; %s)", e.operation, e.statusCode, e.diagnostic)
+			}
 			return fmt.Sprintf("agent gateway rejected %s (%d)", e.operation, e.statusCode)
 		}
 		return fmt.Sprintf("agent gateway rejected request (%d)", e.statusCode)
@@ -163,7 +167,7 @@ func (g *HTTPGateway) request(ctx context.Context, method, path string, input an
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		if gatewayResponseIsTransient(response.StatusCode) || response.StatusCode == http.StatusNotFound {
-			return &gatewayRequestError{statusCode: response.StatusCode, operation: operation, retryAfter: gatewayRetryAfter(response.Header, time.Now().UTC())}
+			return &gatewayRequestError{statusCode: response.StatusCode, operation: operation, diagnostic: gatewayDiagnostic(response.Header), retryAfter: gatewayRetryAfter(response.Header, time.Now().UTC())}
 		}
 		return &gatewayRejectedError{statusCode: response.StatusCode}
 	}
@@ -174,6 +178,17 @@ func (g *HTTPGateway) request(ctx context.Context, method, path string, input an
 		return fmt.Errorf("decode agent gateway response: %w", err)
 	}
 	return nil
+}
+
+func gatewayDiagnostic(headers http.Header) string {
+	// This must match the server allow-list. Refusing unrecognized values keeps
+	// an intermediary from reflecting a sensitive diagnostic into local logs.
+	switch value := strings.TrimSpace(headers.Get("X-ITBEM-Gateway-Storage-Failure")); value {
+	case "authorization", "region", "transient", "unclassified":
+		return "storage=" + value
+	default:
+		return ""
+	}
 }
 
 // gatewayOperation returns a stable, non-sensitive operation label.  It is
