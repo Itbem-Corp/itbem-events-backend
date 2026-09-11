@@ -73,6 +73,34 @@ func TestGatewayOperationAllowsOnlyStableDiagnosticLabels(t *testing.T) {
 	}
 }
 
+func TestHTTPGatewayAllowsOnlyStorageDiagnosticAllowList(t *testing.T) {
+	for _, sample := range []struct {
+		header string
+		want   string
+	}{
+		{header: "authorization", want: "storage=authorization"},
+		{header: "region", want: "storage=region"},
+		{header: "untrusted value containing a private object ref", want: ""},
+	} {
+		t.Run(sample.header, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				writer.Header().Set("X-ITBEM-Gateway-Storage-Failure", sample.header)
+				writer.WriteHeader(http.StatusServiceUnavailable)
+			}))
+			defer server.Close()
+			gateway, err := NewHTTPGateway(server.URL, "test-token", agentwork.RoleReviewer, agentwork.LaneReview, server.Client())
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = gateway.Receive(context.Background(), 1)
+			var gatewayErr *gatewayRequestError
+			if !errors.As(err, &gatewayErr) || gatewayErr.diagnostic != sample.want {
+				t.Fatalf("gateway diagnostic = %q, want %q (error: %v)", gatewayErr.diagnostic, sample.want, err)
+			}
+		})
+	}
+}
+
 func TestHTTPGatewayMapsOnlyMissingOptionalObjectToNotFound(t *testing.T) {
 	for _, sample := range []struct {
 		name    string

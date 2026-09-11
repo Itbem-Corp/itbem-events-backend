@@ -38,6 +38,11 @@ const (
 	// prevents a sealed lease copied from worker memory becoming permanent.
 	gatewayLeaseLifetime  = 13 * time.Hour
 	gatewayMaxObjectBytes = 10 << 20
+	// gatewayStorageFailureHeader is deliberately a small, stable diagnostic
+	// surface. It lets a locally operated worker distinguish a recoverable
+	// control-plane storage failure from a broken task without disclosing an
+	// object key, bucket, AWS request id, credential, or provider response.
+	gatewayStorageFailureHeader = "X-ITBEM-Gateway-Storage-Failure"
 )
 
 type gatewayIdentity struct {
@@ -311,6 +316,7 @@ func GatewayReadObject(c echo.Context) error {
 		if gatewayObjectMissing(err) {
 			return utils.Error(c, http.StatusNotFound, "Object not found", "")
 		}
+		c.Response().Header().Set(gatewayStorageFailureHeader, gatewayStorageFailureCode(err))
 		return utils.Error(c, http.StatusServiceUnavailable, "Storage unavailable", "")
 	}
 	defer response.Body.Close()
@@ -335,6 +341,28 @@ func gatewayObjectMissing(err error) bool {
 	}
 	var statusErr interface{ HTTPStatusCode() int }
 	return errors.As(err, &statusErr) && statusErr.HTTPStatusCode() == http.StatusNotFound
+}
+
+// gatewayStorageFailureCode normalizes only operator-actionable storage error
+// classes. It must never return a raw SDK error because this response is
+// consumed outside the trusted backend process.
+func gatewayStorageFailureCode(err error) string {
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		switch strings.ToLower(strings.TrimSpace(apiErr.ErrorCode())) {
+		case "accessdenied", "invalidaccesskeyid", "signaturedoesnotmatch", "expiredtoken":
+			return "authorization"
+		case "authorizationheadermalformed", "permanentredirect", "incorrectendpoint":
+			return "region"
+		case "requesttimeout", "slowdown", "serviceunavailable", "internalerror":
+			return "transient"
+		}
+	}
+	var statusErr interface{ HTTPStatusCode() int }
+	if errors.As(err, &statusErr) && statusErr.HTTPStatusCode() >= http.StatusInternalServerError {
+		return "transient"
+	}
+	return "unclassified"
 }
 
 func GatewayWriteObject(c echo.Context) error {
