@@ -267,9 +267,14 @@ func validateGatewayObject(lease gatewayLease, cfg *models.Config, reference str
 	if err != nil {
 		return "", "", false
 	}
-	if !write {
-		return bucket, key, subtle.ConstantTimeCompare([]byte(reference), []byte(lease.InputRef)) == 1 && inputReferenceMatches(cfg, reference)
+	if !write && subtle.ConstantTimeCompare([]byte(reference), []byte(lease.InputRef)) == 1 && inputReferenceMatches(cfg, reference) {
+		return bucket, key, true
 	}
+	// A worker may resume or deduplicate work only from evidence already scoped
+	// to the exact task in its sealed lease.  In particular, code review reads
+	// its checkpoint before it can decide whether to call the provider again.
+	// Keep the input immutable and exact, while allowing neither reads nor
+	// writes to escape this task's private output namespace.
 	taskID, err := uuid.FromString(lease.TaskID)
 	if err != nil || cfg == nil || subtle.ConstantTimeCompare([]byte(bucket), []byte(strings.TrimSpace(cfg.AutomationOutputBucket))) != 1 {
 		return "", "", false
