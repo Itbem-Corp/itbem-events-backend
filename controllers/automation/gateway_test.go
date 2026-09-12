@@ -1,6 +1,7 @@
 package automation
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -71,6 +72,12 @@ func TestGatewayStorageFailureCodeKeepsDiagnosticsNonSensitive(t *testing.T) {
 		if got := gatewayStorageFailureCode(&smithy.GenericAPIError{Code: sample.errorCode}); got != sample.want {
 			t.Fatalf("gatewayStorageFailureCode(%q) = %q, want %q", sample.errorCode, got, sample.want)
 		}
+	}
+}
+
+func TestGatewayObjectClientRequiresAConfiguredBucket(t *testing.T) {
+	if _, err := gatewayObjectClient(context.Background(), &models.Config{AwsRegion: "us-east-2"}, ""); err == nil {
+		t.Fatal("gateway object client must reject an empty validated bucket")
 	}
 }
 

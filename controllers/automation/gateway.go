@@ -48,6 +48,7 @@ const (
 	// control-plane storage failure from a broken task without disclosing an
 	// object key, bucket, AWS request id, credential, or provider response.
 	gatewayStorageFailureHeader = "X-ITBEM-Gateway-Storage-Failure"
+	gatewayObjectClientTimeout  = 10 * time.Second
 )
 
 type gatewayIdentity struct {
@@ -72,6 +73,18 @@ type gatewayLeaseRequest struct {
 type gatewayLeaseMessage struct {
 	Body       string `json:"body"`
 	LeaseToken string `json:"lease_token"`
+}
+
+// gatewayObjectClient is deliberately scoped to the validated target bucket.
+// Media storage and private automation storage may be in separate AWS regions;
+// using the media client's signing region here can make a valid sealed task
+// look like a storage outage. The gateway still validates the lease, bucket
+// and task prefix before this helper is reached.
+func gatewayObjectClient(ctx context.Context, cfg *models.Config, bucket string) (*s3.Client, error) {
+	ctx, cancel := context.WithTimeout(ctx, gatewayObjectClientTimeout)
+	defer cancel()
+	client, _, err := configuration.BuildS3ClientForBucket(ctx, cfg, bucket)
+	return client, err
 }
 
 type gatewayVisibilityRequest struct {
@@ -324,8 +337,8 @@ func GatewayReadObject(c echo.Context) error {
 	if !valid {
 		return utils.Error(c, http.StatusForbidden, "Object outside task lease", "")
 	}
-	client := configuration.GetS3Client(nil)
-	if client == nil {
+	client, err := gatewayObjectClient(c.Request().Context(), cfg, bucket)
+	if err != nil || client == nil {
 		return utils.Error(c, http.StatusServiceUnavailable, "Storage unavailable", "")
 	}
 	response, err := client.GetObject(c.Request().Context(), &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
@@ -409,8 +422,8 @@ func GatewayWriteObject(c echo.Context) error {
 	if contentType == "" || len(contentType) > 128 || strings.ContainsAny(contentType, "\r\n") {
 		contentType = "application/octet-stream"
 	}
-	client := configuration.GetS3Client(nil)
-	if client == nil {
+	client, err := gatewayObjectClient(c.Request().Context(), cfg, bucket)
+	if err != nil || client == nil {
 		return utils.Error(c, http.StatusServiceUnavailable, "Storage unavailable", "")
 	}
 	_, err = client.PutObject(c.Request().Context(), &s3.PutObjectInput{Bucket: aws.String(bucket), Key: aws.String(key), Body: bytes.NewReader(body), ContentLength: aws.Int64(int64(len(body))), ContentType: aws.String(contentType), ServerSideEncryption: s3types.ServerSideEncryptionAes256})

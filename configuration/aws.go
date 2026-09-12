@@ -103,6 +103,25 @@ func BuildS3Client(ctx context.Context, cfg *models.Config) (*s3.Client, string,
 	return client, region, nil
 }
 
+// BuildS3ClientForBucket resolves a client against the actual target bucket.
+// The primary media bucket and the private automation buckets may live in
+// different regions, so reusing the process-global media client for a sealed
+// automation object can produce a redirect or a failed signature. This helper
+// preserves the same credential chain and endpoint policy while discovering
+// the region for the exact bucket being accessed.
+func BuildS3ClientForBucket(ctx context.Context, cfg *models.Config, bucket string) (*s3.Client, string, error) {
+	if cfg == nil {
+		return nil, "", fmt.Errorf("S3 config is required")
+	}
+	bucket = strings.TrimSpace(bucket)
+	if bucket == "" {
+		return nil, "", fmt.Errorf("S3 bucket is required")
+	}
+	scoped := *cfg
+	scoped.AwsBucketName = bucket
+	return BuildS3Client(ctx, &scoped)
+}
+
 func configureS3Transport(cfg *aws.Config) {
 	cfg.Retryer = func() aws.Retryer {
 		return retry.NewStandard(func(options *retry.StandardOptions) {

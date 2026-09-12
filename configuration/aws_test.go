@@ -107,6 +107,26 @@ func TestBuildS3ClientCorrectsExplicitS3RegionFromBucketDiscovery(t *testing.T) 
 	assert.Equal(t, "us-east-2", region)
 }
 
+func TestBuildS3ClientForBucketDiscoversTheTargetBucketRegion(t *testing.T) {
+	previous := discoverS3BucketRegion
+	t.Cleanup(func() { discoverS3BucketRegion = previous })
+	seen := ""
+	discoverS3BucketRegion = func(_ context.Context, _ *s3.Client, bucket string) (string, error) {
+		seen = bucket
+		return "us-east-2", nil
+	}
+	_, region, err := BuildS3ClientForBucket(context.Background(), &models.Config{
+		AwsRegion:     "us-east-1",
+		AwsBucketName: "primary-media-bucket",
+	}, "itbem-ai-outputs-prod-752279076974-us-east-2")
+	if err != nil {
+		t.Fatalf("BuildS3ClientForBucket returned error: %v", err)
+	}
+	if seen != "itbem-ai-outputs-prod-752279076974-us-east-2" || region != "us-east-2" {
+		t.Fatalf("target bucket region = (%q, %q), want automation bucket in us-east-2", seen, region)
+	}
+}
+
 func TestBuildS3ClientSkipsAWSDiscoveryForCustomEndpoint(t *testing.T) {
 	previous := discoverS3BucketRegion
 	t.Cleanup(func() { discoverS3BucketRegion = previous })

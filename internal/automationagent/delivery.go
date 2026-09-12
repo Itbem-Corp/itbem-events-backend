@@ -603,8 +603,9 @@ func contextSourceMap(sources []struct {
 
 // normalizeFrozenContextReference recognizes only an exact decorated form
 // emitted by the planner: reference@revision optionally followed by the exact
-// frozen snapshot timestamp. It never accepts arbitrary prose or a revision
-// prefix, so it cannot make unfrozen context look reviewed.
+// frozen snapshot timestamp or the fixed "(repository)" source-kind marker.
+// It never accepts arbitrary prose or a revision prefix, so it cannot make
+// unfrozen context look reviewed.
 func normalizeFrozenContextReference(value string, expected map[string]struct {
 	revision   string
 	snapshotAt string
@@ -621,7 +622,7 @@ func normalizeFrozenContextReference(value string, expected map[string]struct {
 			continue
 		}
 		rest := strings.TrimSpace(strings.TrimPrefix(suffix, source.revision))
-		if rest == "" || (source.snapshotAt != "" && rest == "(snapshot_at "+source.snapshotAt+")") {
+		if rest == "" || (rest == "(repository)" && strings.HasPrefix(reference, "github://")) || (source.snapshotAt != "" && rest == "(snapshot_at "+source.snapshotAt+")") {
 			return reference, true
 		}
 	}
