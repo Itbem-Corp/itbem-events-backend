@@ -129,7 +129,7 @@ func TestBuildS3ClientForBucketDiscoversTheTargetBucketRegion(t *testing.T) {
 	}
 }
 
-func TestBuildS3ClientForWorkloadIdentityBucketIgnoresLegacyStaticCredentials(t *testing.T) {
+func TestBuildS3ClientForWorkloadIdentityBucketUsesBackendCredentialChain(t *testing.T) {
 	previous := discoverS3BucketRegion
 	t.Cleanup(func() { discoverS3BucketRegion = previous })
 	discoverS3BucketRegion = func(_ context.Context, _ *s3.Client, bucket string) (string, error) {
@@ -139,19 +139,11 @@ func TestBuildS3ClientForWorkloadIdentityBucketIgnoresLegacyStaticCredentials(t 
 		return "us-east-2", nil
 	}
 
-	// Environment credentials are intentionally present. Gateway storage must
-	// select the EC2 workload provider instead of either environment or legacy
-	// configuration credentials.
-	t.Setenv("AWS_ACCESS_KEY_ID", "workload-identity-test-access-key")
-	t.Setenv("AWS_SECRET_ACCESS_KEY", "workload-identity-test-secret-key")
 	cfg := &models.Config{
 		AwsRegion:      "us-east-1",
 		S3ClientId:     "legacy-media-access-key",
 		S3ClientSecret: "legacy-media-secret-key",
 		AwsBucketName:  "primary-media-bucket",
-	}
-	if scoped := workloadIdentityS3Config(cfg); scoped == cfg || scoped.S3ClientId != "" || scoped.S3ClientSecret != "" || cfg.S3ClientId == "" || cfg.S3ClientSecret == "" {
-		t.Fatal("workload identity configuration must clear only the copied legacy S3 credentials")
 	}
 	client, _, err := BuildS3ClientForWorkloadIdentityBucket(context.Background(), cfg, "itbem-ai-outputs-prod-752279076974-us-east-2")
 	if err != nil || client == nil {

@@ -140,31 +140,28 @@ func BuildS3ClientForBucket(ctx context.Context, cfg *models.Config, bucket stri
 }
 
 // BuildS3ClientForWorkloadIdentityBucket is for server-mediated private
-// automation objects. It deliberately ignores legacy static S3 credentials
-// from application configuration so this narrow gateway surface uses the
-// workload identity attached to the production host. That role is the audited
-// authority for the dedicated automation bucket; leaving a historical media
-// credential in the environment must not silently override it.
+// automation objects. "Workload identity" means the credential chain of the
+// backend process, never the physical Linux worker. The gateway validates the
+// exact bucket, sealed lease and task prefix before creating this client, so
+// allowing the server's configured chain here does not give a worker ambient
+// S3 access.
+//
+// Some established deployments use a server-scoped S3 credential through
+// S3_CLIENT_ID/S3_CLIENT_SECRET while their EC2 instance role is being
+// migrated. Forcing IMDS in the gateway made those otherwise working control
+// planes unable to read their own private inputs from inside a container. Use
+// the same backend credential chain used to persist the input, while keeping
+// the worker on the HTTPS gateway with no AWS credentials.
 func BuildS3ClientForWorkloadIdentityBucket(ctx context.Context, cfg *models.Config, bucket string) (*s3.Client, string, error) {
-	scoped := workloadIdentityS3Config(cfg)
-	if scoped == nil {
+	if cfg == nil {
 		return nil, "", fmt.Errorf("S3 config is required")
 	}
+	scoped := *cfg
 	scoped.AwsBucketName = strings.TrimSpace(bucket)
 	if scoped.AwsBucketName == "" {
 		return nil, "", fmt.Errorf("S3 bucket is required")
 	}
-	return buildS3Client(ctx, scoped, LoadEC2InstanceRoleConfig)
-}
-
-func workloadIdentityS3Config(cfg *models.Config) *models.Config {
-	if cfg == nil {
-		return nil
-	}
-	scoped := *cfg
-	scoped.S3ClientId = ""
-	scoped.S3ClientSecret = ""
-	return &scoped
+	return BuildS3Client(ctx, &scoped)
 }
 
 func configureS3Transport(cfg *aws.Config) {
