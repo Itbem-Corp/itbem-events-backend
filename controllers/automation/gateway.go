@@ -203,6 +203,14 @@ func GatewayLease(c echo.Context) error {
 	if request.Limit < 1 || request.Limit > 10 {
 		return utils.Error(c, http.StatusBadRequest, "Invalid lease request", "")
 	}
+	if identity.Role == agentwork.RoleReviewer && identity.Lane == agentwork.LaneReview {
+		// Lost worker leases are repaired only after revalidating the immutable
+		// GitHub subject. Keep this best-effort maintenance separate from the
+		// normal lease path: a transient GitHub or storage outage must never
+		// prevent a healthy Reviewer from processing already-queued work.
+		cfg, _ := c.Get("config").(*models.Config)
+		_, _ = reconcileOneExpiredGitHubReviewLease(c.Request().Context(), cfg, time.Now().UTC())
+	}
 	messages, err := automationqueue.ReceiveLane(c.Request().Context(), identity.Lane, request.Limit)
 	if err != nil {
 		return utils.Error(c, http.StatusServiceUnavailable, "Automation queue unavailable", "")

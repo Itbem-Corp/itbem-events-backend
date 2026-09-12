@@ -433,6 +433,17 @@ const automationRunLeaseDuration = 20 * time.Minute
 // call for a live reviewer execution.
 const githubReviewRecoveryDelay = 15 * time.Minute
 
+// githubReviewLeaseReconciliationBatchSize deliberately limits the amount of
+// historical work a polling Reviewer can repair. A live webhook remains the
+// normal ingress; this is only the narrowly-scoped escape hatch for a worker
+// lease that was lost after GitHub successfully delivered that webhook.
+const githubReviewLeaseReconciliationBatchSize = 1
+
+// The webhook's patch and bounded source context are stored together in this
+// immutable input. Keep the reconciliation read bounded as well: a corrupt
+// object must never turn a reviewer poll into an unbounded S3 download.
+const maxGitHubReviewRecoveryInputBytes = 2 << 20
+
 // githubReviewLeaseRecoveryMaximumAttempts is deliberately small. A current
 // signed GitHub redelivery may repair one abandoned reviewer execution, but a
 // repeated worker outage must become visible to an operator rather than spend
@@ -3503,6 +3514,192 @@ func recoverableExpiredGitHubReviewLease(task *models.AutomationTask, now time.T
 	return true
 }
 
+func exhaustedExpiredGitHubReviewLease(task *models.AutomationTask, now time.Time) bool {
+	if task == nil || task.ID == uuid.Nil || task.JobID == uuid.Nil || task.Operation != "code.review" || task.RequestedBy != "github-app-review" || task.Status != "running" || task.AttemptCount < githubReviewLeaseRecoveryMaximumAttempts || strings.TrimSpace(task.InputRef) == "" || !artifactDigestPattern.MatchString(strings.ToLower(strings.TrimSpace(task.EvidenceSubjectDigest))) || task.LeaseExpiresAt == nil || task.LeaseExpiresAt.After(now.UTC()) || task.CompletedAt != nil {
+		return false
+	}
+	return true
+}
+
+type githubReviewRecoverySubject struct {
+	Repository     string
+	PullRequest    int
+	InstallationID int64
+	HeadSHA        string
+}
+
+// parseGitHubReviewRecoverySubject re-establishes every side-effect boundary
+// from the encrypted, immutable input before a stale task may be retried. In
+// particular, neither a database correlation id nor a worker-provided value
+// is enough to select a GitHub PR for a recovery.
+func parseGitHubReviewRecoverySubject(task *models.AutomationTask, cfg *models.Config, raw []byte, now time.Time) (githubReviewRecoverySubject, error) {
+	if !recoverableExpiredGitHubReviewLease(task, now) || !inputReferenceMatches(cfg, task.InputRef) || len(raw) == 0 || len(raw) > maxGitHubReviewRecoveryInputBytes {
+		return githubReviewRecoverySubject{}, fmt.Errorf("GitHub review recovery input boundary is invalid")
+	}
+	var input automationagent.TaskInput
+	if err := json.Unmarshal(raw, &input); err != nil {
+		return githubReviewRecoverySubject{}, fmt.Errorf("GitHub review recovery input is invalid")
+	}
+	review, err := automationagent.ParseCodeReviewInput(input.Delivery)
+	if err != nil || review.Remote == nil {
+		return githubReviewRecoverySubject{}, fmt.Errorf("GitHub review recovery subject is invalid")
+	}
+	digest, err := automationagent.CodeReviewPublicationSubjectSHA256(review)
+	if err != nil || subtle.ConstantTimeCompare([]byte(strings.ToLower(strings.TrimSpace(task.EvidenceSubjectDigest))), []byte(digest)) != 1 {
+		return githubReviewRecoverySubject{}, fmt.Errorf("GitHub review recovery subject digest is invalid")
+	}
+	repository := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(review.RepositoryRef), "github://"))
+	if !githubRepositoryPattern.MatchString(repository) {
+		return githubReviewRecoverySubject{}, fmt.Errorf("GitHub review recovery repository is invalid")
+	}
+	expectedCorrelationID, err := githubReviewCorrelationID(repository, review.Remote.PullRequestNumber, review.HeadSHA)
+	if err != nil || subtle.ConstantTimeCompare([]byte(task.CorrelationID), []byte(expectedCorrelationID)) != 1 {
+		return githubReviewRecoverySubject{}, fmt.Errorf("GitHub review recovery correlation is invalid")
+	}
+	return githubReviewRecoverySubject{Repository: repository, PullRequest: review.Remote.PullRequestNumber, InstallationID: review.Remote.InstallationID, HeadSHA: review.HeadSHA}, nil
+}
+
+func loadGitHubReviewRecoverySubject(ctx context.Context, task *models.AutomationTask, cfg *models.Config, now time.Time) (githubReviewRecoverySubject, error) {
+	if task == nil || !inputReferenceMatches(cfg, task.InputRef) {
+		return githubReviewRecoverySubject{}, fmt.Errorf("GitHub review recovery input reference is invalid")
+	}
+	bucket, key, err := privateReference(task.InputRef)
+	if err != nil {
+		return githubReviewRecoverySubject{}, err
+	}
+	body, err := awsrepository.GetS3Object(ctx, key, bucket)
+	if err != nil {
+		return githubReviewRecoverySubject{}, err
+	}
+	defer body.Close()
+	raw, err := io.ReadAll(io.LimitReader(body, maxGitHubReviewRecoveryInputBytes+1))
+	if err != nil {
+		return githubReviewRecoverySubject{}, err
+	}
+	return parseGitHubReviewRecoverySubject(task, cfg, raw, now)
+}
+
+// cancelObsoleteExpiredGitHubReviewLease retires a historical attempt only
+// after GitHub has positively reported that its sealed revision is no longer
+// reviewable. A transport failure deliberately does not enter this path. A
+// publication is always terminal, even if its callback raced a worker crash.
+func cancelObsoleteExpiredGitHubReviewLease(original *models.AutomationTask, now time.Time) error {
+	if configuration.DB == nil || original == nil || original.ID == uuid.Nil {
+		return fmt.Errorf("GitHub review recovery is unavailable")
+	}
+	return configuration.DB.Transaction(func(tx *gorm.DB) error {
+		var current models.AutomationTask
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&current, original.ID).Error; err != nil {
+			return err
+		}
+		if !recoverableExpiredGitHubReviewLease(&current, now) {
+			return nil
+		}
+		var publications int64
+		if err := tx.Model(&models.AutomationCodeReviewPublication{}).Where("automation_task_id = ?", current.ID).Count(&publications).Error; err != nil {
+			return err
+		}
+		if publications != 0 {
+			return nil
+		}
+		return tx.Model(&models.AutomationTask{}).
+			Where("id = ? AND status = ? AND lease_expires_at <= ?", current.ID, "running", now.UTC()).
+			Updates(map[string]any{
+				"status":                        "cancelled",
+				"completed_at":                  now.UTC(),
+				"lease_expires_at":              nil,
+				"budget_reservation_expires_at": nil,
+				"error_message":                 "Cancelled during reviewer lease reconciliation because GitHub no longer exposes the sealed pull-request revision",
+			}).Error
+	})
+}
+
+// failExhaustedExpiredGitHubReviewLease makes a bounded recovery policy
+// observable. It never retries or publishes: after the one permitted repair
+// path has itself expired, the only safe action is to release the stale lease
+// and preserve the failure for an operator.
+func failExhaustedExpiredGitHubReviewLease(original *models.AutomationTask, now time.Time) error {
+	if configuration.DB == nil || original == nil || original.ID == uuid.Nil {
+		return fmt.Errorf("GitHub review recovery is unavailable")
+	}
+	return configuration.DB.Transaction(func(tx *gorm.DB) error {
+		var current models.AutomationTask
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&current, original.ID).Error; err != nil {
+			return err
+		}
+		if !exhaustedExpiredGitHubReviewLease(&current, now) {
+			return nil
+		}
+		var publications int64
+		if err := tx.Model(&models.AutomationCodeReviewPublication{}).Where("automation_task_id = ?", current.ID).Count(&publications).Error; err != nil {
+			return err
+		}
+		if publications != 0 {
+			return nil
+		}
+		return tx.Model(&models.AutomationTask{}).
+			Where("id = ? AND status = ? AND lease_expires_at <= ?", current.ID, "running", now.UTC()).
+			Updates(map[string]any{
+				"status":                        "failed",
+				"completed_at":                  now.UTC(),
+				"lease_expires_at":              nil,
+				"budget_reservation_expires_at": nil,
+				"error_message":                 "Reviewer lease expired after the maximum permitted recovery attempts; no additional provider retry was created",
+			}).Error
+	})
+}
+
+// reconcileOneExpiredGitHubReviewLease is invoked only by the authenticated
+// Review lane before it asks SQS for more work. It does not block ordinary
+// queue delivery: any storage, GitHub or configuration failure simply leaves
+// the historical task untouched for a later poll. At most one exact stale
+// task is inspected, and it can be requeued only after a fresh GitHub App
+// read proves the same open PR head still exists.
+func reconcileOneExpiredGitHubReviewLease(ctx context.Context, cfg *models.Config, now time.Time) (bool, error) {
+	if configuration.DB == nil || cfg == nil || !githubReviewWebhookConfigured(cfg) {
+		return false, nil
+	}
+	var candidates []models.AutomationTask
+	if err := configuration.DB.Where("operation = ? AND requested_by = ? AND status = ? AND attempt_count >= ? AND lease_expires_at <= ? AND completed_at IS NULL", "code.review", "github-app-review", "running", 1, now.UTC()).Order("lease_expires_at ASC").Limit(githubReviewLeaseReconciliationBatchSize).Find(&candidates).Error; err != nil {
+		return false, err
+	}
+	if len(candidates) == 0 {
+		return false, nil
+	}
+	candidate := &candidates[0]
+	subject, err := loadGitHubReviewRecoverySubject(ctx, candidate, cfg, now)
+	if err != nil {
+		return false, nil
+	}
+	if exhaustedExpiredGitHubReviewLease(candidate, now) {
+		return false, failExhaustedExpiredGitHubReviewLease(candidate, now)
+	}
+	appConfig, err := automationagent.LoadGitHubAppConfig(os.Getenv)
+	if err != nil {
+		return false, nil
+	}
+	appConfig, err = appConfig.WithInstallationID(subject.InstallationID)
+	if err != nil {
+		return false, nil
+	}
+	installation, err := automationagent.MintGitHubInstallationToken(ctx, appConfig, nil, now.UTC())
+	if err != nil {
+		return false, nil
+	}
+	currentPR, err := automationagent.ReadGitHubPullRequestState(ctx, appConfig, installation.Token, subject.Repository, subject.PullRequest)
+	if err != nil {
+		return false, nil
+	}
+	if !currentPR.Open || currentPR.Draft || currentPR.Merged || subtle.ConstantTimeCompare([]byte(currentPR.HeadSHA), []byte(subject.HeadSHA)) != 1 {
+		return false, cancelObsoleteExpiredGitHubReviewLease(candidate, now)
+	}
+	recovered, err := recoverStrandedGitHubReview(ctx, candidate, now)
+	if err != nil {
+		return false, err
+	}
+	return recovered != nil, nil
+}
+
 // newStrandedGitHubReviewRecovery preserves the immutable review boundary but
 // deliberately has a new task and job identity. The original has no worker
 // attempt, so it is retained as cancelled audit evidence instead of being
@@ -3535,7 +3732,15 @@ func newExpiredGitHubReviewLeaseRecovery(original *models.AutomationTask, now ti
 	// this task can supersede only the prior, same-subject reviewer attempt.
 	failed := *original
 	failed.Status = "failed"
-	return newCodeReviewRetryTask(&failed)
+	next, err := newCodeReviewRetryTask(&failed)
+	if err != nil {
+		return nil, err
+	}
+	// A retry is a new task identity, not a new retry budget. Carry the number
+	// of completed claims forward so its next lease becomes the final allowed
+	// attempt instead of opening an unbounded chain of fresh task rows.
+	next.AttemptCount = original.AttemptCount
+	return next, nil
 }
 
 // recoverStrandedGitHubReview gives an authenticated, current-head GitHub
@@ -3659,7 +3864,7 @@ func codeReviewRetryQueueMessage(original, retry *models.AutomationTask) automat
 	message.Payload.Operation = retry.Operation
 	message.Payload.MaxCompletionTokens = retry.MaxCompletionTokens
 	message.Payload.InputRef = retry.InputRef
-	message.Payload.Attempt = 1
+	message.Payload.Attempt = retry.AttemptCount + 1
 	message.Payload.RetryOfTaskID = original.ID.String()
 	return message
 }

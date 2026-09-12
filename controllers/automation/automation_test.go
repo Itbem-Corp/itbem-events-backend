@@ -467,11 +467,11 @@ func TestExpiredGitHubReviewLeaseRecoveryIsBoundedAndPreservesExactReviewSubject
 	if err != nil {
 		t.Fatal(err)
 	}
-	if recovery.ID == original.ID || recovery.JobID == original.JobID || recovery.Status != "queued" || recovery.InputRef != original.InputRef || recovery.EvidenceSubjectDigest != digest || recovery.CorrelationID != original.CorrelationID || recovery.RequestedBy != original.RequestedBy || recovery.MaxCompletionTokens != original.MaxCompletionTokens {
+	if recovery.ID == original.ID || recovery.JobID == original.JobID || recovery.Status != "queued" || recovery.AttemptCount != original.AttemptCount || recovery.InputRef != original.InputRef || recovery.EvidenceSubjectDigest != digest || recovery.CorrelationID != original.CorrelationID || recovery.RequestedBy != original.RequestedBy || recovery.MaxCompletionTokens != original.MaxCompletionTokens {
 		t.Fatalf("lease recovery did not preserve the immutable review boundary: %#v", recovery)
 	}
 	message := codeReviewRetryQueueMessage(original, recovery)
-	if message.Payload.RetryOfTaskID != original.ID.String() || message.Payload.TaskID != recovery.ID.String() || message.Payload.InputRef != original.InputRef || message.Payload.Operation != "code.review" {
+	if message.Payload.RetryOfTaskID != original.ID.String() || message.Payload.TaskID != recovery.ID.String() || message.Payload.InputRef != original.InputRef || message.Payload.Operation != "code.review" || message.Payload.Attempt != original.AttemptCount+1 {
 		t.Fatalf("lease recovery queue message was not bounded to its original review: %#v", message)
 	}
 	for _, mutate := range []func(*models.AutomationTask){
@@ -490,6 +490,70 @@ func TestExpiredGitHubReviewLeaseRecoveryIsBoundedAndPreservesExactReviewSubject
 		}
 		if _, err := newExpiredGitHubReviewLeaseRecovery(&candidate, now); err == nil {
 			t.Fatalf("invalid expired-lease recovery boundary was accepted: %#v", candidate)
+		}
+	}
+	exhausted := *original
+	exhausted.AttemptCount = githubReviewLeaseRecoveryMaximumAttempts
+	if recoverableExpiredGitHubReviewLease(&exhausted, now) || !exhaustedExpiredGitHubReviewLease(&exhausted, now) {
+		t.Fatalf("maximum-attempt reviewer lease must be terminal-only, got %#v", exhausted)
+	}
+	exhausted.Status = "failed"
+	if exhaustedExpiredGitHubReviewLease(&exhausted, now) {
+		t.Fatalf("terminal reviewer task must not be reconciled: %#v", exhausted)
+	}
+}
+
+func TestParseGitHubReviewRecoverySubjectRequiresFrozenCurrentReviewIdentity(t *testing.T) {
+	now := time.Now().UTC()
+	base, head := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	patch := "diff --git a/controllers/orders.go b/controllers/orders.go\nindex abc..def 100644\n--- a/controllers/orders.go\n+++ b/controllers/orders.go\n@@ -1 +1 @@\n-old\n+new\n"
+	review, err := automationagent.NewCodeReviewInput("github://itbem/backend", base, head, patch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	review, err = automationagent.BindCodeReviewRemoteTarget(review, 42, 67890)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := automationagent.CodeReviewPublicationSubjectSHA256(review)
+	if err != nil {
+		t.Fatal(err)
+	}
+	correlation, err := githubReviewCorrelationID("itbem/backend", 42, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(automationagent.TaskInput{Prompt: "Review only the frozen patch.", Delivery: mustJSON(review)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expired := now.Add(-time.Second)
+	task := &models.AutomationTask{
+		ID:                    uuid.Must(uuid.NewV4()),
+		JobID:                 uuid.Must(uuid.NewV4()),
+		RequestedBy:           "github-app-review",
+		CorrelationID:         correlation,
+		Operation:             "code.review",
+		Status:                "running",
+		AttemptCount:          1,
+		EvidenceSubjectDigest: digest,
+		InputRef:              "s3://itbem-ai-inputs-test/automation/inputs/task/input.json",
+		LeaseExpiresAt:        &expired,
+	}
+	cfg := &models.Config{AutomationInputBucket: "itbem-ai-inputs-test"}
+	subject, err := parseGitHubReviewRecoverySubject(task, cfg, raw, now)
+	if err != nil || subject.Repository != "itbem/backend" || subject.PullRequest != 42 || subject.InstallationID != 67890 || subject.HeadSHA != head {
+		t.Fatalf("frozen recovery subject rejected or changed: %#v / %v", subject, err)
+	}
+	for _, mutate := range []func(*models.AutomationTask){
+		func(value *models.AutomationTask) { value.EvidenceSubjectDigest = strings.Repeat("c", 64) },
+		func(value *models.AutomationTask) { value.CorrelationID = "github-pr:wrong" },
+		func(value *models.AutomationTask) { value.Status = "failed" },
+	} {
+		candidate := *task
+		mutate(&candidate)
+		if _, err := parseGitHubReviewRecoverySubject(&candidate, cfg, raw, now); err == nil {
+			t.Fatalf("mutated recovery task was accepted: %#v", candidate)
 		}
 	}
 }
