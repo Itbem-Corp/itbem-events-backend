@@ -804,8 +804,11 @@ func TestWorkerRetainsInvalidDeliveryPlanForAuthorizedInspectionAndLedger(t *tes
 		t.Fatalf("expected failed callback with private result: %#v", callback.updates)
 	}
 	failed := callback.updates[1]
-	if failed.Provider != ProviderMiniMax || failed.Model != "MiniMax-M3" || failed.ResponseID != "response-1" || failed.Usage["total_tokens"] != 7 {
+	if got, ok := numericReviewUsage(failed.Usage["total_tokens"]); failed.Provider != ProviderMiniMax || failed.Model != "MiniMax-M3" || failed.ResponseID != "response-1" || !ok || got != 14 {
 		t.Fatalf("provider accounting metadata was not retained: %#v", failed)
+	}
+	if repair, ok := failed.Usage["_itbem_repair"].(map[string]any); !ok || repair["provider_call_count"] != 2 {
+		t.Fatalf("failed repair accounting metadata was not retained: %#v", failed.Usage)
 	}
 	result := store.writes["itbem-ai-outputs-local/automation/task/result.json"]
 	if !strings.Contains(string(result), "not a JSON plan") || !strings.Contains(string(result), "validation_error") {
@@ -816,6 +819,49 @@ func TestWorkerRetainsInvalidDeliveryPlanForAuthorizedInspectionAndLedger(t *tes
 	}
 	if !strings.Contains(failed.RequestRef, "/runs/"+failed.RunID+"/request.json") {
 		t.Fatalf("failed provider result must retain its immutable request reference: %#v", failed)
+	}
+}
+
+func TestWorkerRepairsDeliveryPlanContextCoverageOnceWithoutWeakeningTheGate(t *testing.T) {
+	input, err := json.Marshal(TaskInput{Prompt: "Plan the scoped read-only validation", Delivery: json.RawMessage(`{"context_sources":[{"kind":"repository","reference":"github://Itbem-Corp/itbem-events-backend","revision":"17bc9ee0ef9436cb77e00e40fb57ce2a43b32a73"}]}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	missingContext := `{"summary":"bounded","goal_interpretation":"read-only validation","confidence":0.9,"autonomy_boundary":"wait for gates","context_reviewed":[],"context_gaps":[],"assumptions":[],"human_decisions":[],"implementation_steps":["inspect"],"risks":[],"qa_plan":["validate"],"evidence_plan":["record result"],"acceptance_criteria":["plan is bounded"],"repository_impact":[],"files_impacted":[],"rollback_plan":["no mutation"],"estimate":"0 minutes","questions":[]}`
+	repaired := `{"summary":"bounded","goal_interpretation":"read-only validation","confidence":0.9,"autonomy_boundary":"wait for gates","context_reviewed":["github://Itbem-Corp/itbem-events-backend"],"context_gaps":[],"assumptions":[],"human_decisions":[],"implementation_steps":["inspect"],"risks":[],"qa_plan":["validate"],"evidence_plan":["record result"],"acceptance_criteria":["plan is bounded"],"repository_impact":[],"files_impacted":[],"rollback_plan":["no mutation"],"estimate":"0 minutes","questions":[]}`
+	store, callback := &fakeStore{input: input}, &fakeCallback{}
+	provider := &sequenceProvider{completions: []Completion{
+		{Provider: ProviderMiniMax, Model: "MiniMax-M3", Content: missingContext, ResponseID: "candidate", Usage: map[string]any{"total_tokens": 7}},
+		{Provider: ProviderMiniMax, Model: "MiniMax-M3", Content: repaired, ResponseID: "repair", Usage: map[string]any{"total_tokens": 9}},
+	}}
+	worker, err := NewWorker(WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"}, store, callback, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Process(context.Background(), validMessage()); err != nil {
+		t.Fatal(err)
+	}
+	if provider.calls != 2 || len(provider.maxTokens) != 2 || provider.maxTokens[1] != deliveryPlanRepairCompletionLimit {
+		t.Fatalf("expected one bounded repair call, got calls=%d limits=%#v", provider.calls, provider.maxTokens)
+	}
+	if len(callback.updates) != 2 || callback.updates[1].Status != "completed" || callback.updates[1].ResponseID != "repair" {
+		t.Fatalf("expected completed repair result, got %#v", callback.updates)
+	}
+	if got, ok := numericReviewUsage(callback.updates[1].Usage["total_tokens"]); !ok || got != 16 {
+		t.Fatalf("combined provider accounting was not retained: %#v", callback.updates[1].Usage)
+	}
+	repairMeta, ok := callback.updates[1].Usage["_itbem_repair"].(map[string]any)
+	if !ok || repairMeta["provider_call_count"] != 2 {
+		t.Fatalf("repair audit metadata missing: %#v", callback.updates[1].Usage)
+	}
+	repairRequestFound := false
+	for key, body := range store.writes {
+		if strings.HasSuffix(key, "/repairs/delivery-plan/request.json") {
+			repairRequestFound = strings.Contains(string(body), "context_reviewed") && strings.Contains(string(body), "candidate")
+		}
+	}
+	if !repairRequestFound {
+		t.Fatal("the rejected candidate and compact repair request were not retained privately")
 	}
 }
 
