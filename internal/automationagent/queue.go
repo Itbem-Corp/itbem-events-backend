@@ -111,7 +111,15 @@ func retryableDeliveryError(err error) *RetryableError {
 	if delay <= 0 {
 		return nil
 	}
-	return &RetryableError{Message: "temporary automation gateway failure", RetryAfter: delay}
+	// gatewayRequestError.Operation is an allow-listed, fixed label (for
+	// example "lease" or "object read"). Retain it in the local journal so an
+	// operator can distinguish a queue lease outage from storage I/O without
+	// logging a URL, object reference, sealed lease, credential, or payload.
+	message := "temporary automation gateway failure"
+	if gatewayErr, ok := err.(*gatewayRequestError); ok && gatewayErr.operation != "" {
+		message += " during " + gatewayErr.operation
+	}
+	return &RetryableError{Message: message, RetryAfter: delay}
 }
 
 type scheduledQueueMessage struct {

@@ -2,6 +2,7 @@ package automation
 
 import (
 	"bytes"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
@@ -38,6 +39,10 @@ const (
 	// prevents a sealed lease copied from worker memory becoming permanent.
 	gatewayLeaseLifetime  = 13 * time.Hour
 	gatewayMaxObjectBytes = 10 << 20
+	// Keep review-lease repair below the agent's gateway timeout. The normal
+	// lease call also long-polls SQS, so an unbounded GitHub/S3 repair here can
+	// make a healthy reviewer time out before it receives queued work.
+	gatewayReviewLeaseReconciliationTimeout = 5 * time.Second
 	// gatewayStorageFailureHeader is deliberately a small, stable diagnostic
 	// surface. It lets a locally operated worker distinguish a recoverable
 	// control-plane storage failure from a broken task without disclosing an
@@ -207,9 +212,13 @@ func GatewayLease(c echo.Context) error {
 		// Lost worker leases are repaired only after revalidating the immutable
 		// GitHub subject. Keep this best-effort maintenance separate from the
 		// normal lease path: a transient GitHub or storage outage must never
-		// prevent a healthy Reviewer from processing already-queued work.
+		// prevent a healthy Reviewer from processing already-queued work. The
+		// bounded child context leaves enough of the request budget for SQS's
+		// long poll, while preserving best-effort expired-lease recovery.
 		cfg, _ := c.Get("config").(*models.Config)
-		_, _ = reconcileOneExpiredGitHubReviewLease(c.Request().Context(), cfg, time.Now().UTC())
+		reconcileCtx, cancel := context.WithTimeout(c.Request().Context(), gatewayReviewLeaseReconciliationTimeout)
+		_, _ = reconcileOneExpiredGitHubReviewLease(reconcileCtx, cfg, time.Now().UTC())
+		cancel()
 	}
 	messages, err := automationqueue.ReceiveLane(c.Request().Context(), identity.Lane, request.Limit)
 	if err != nil {

@@ -223,9 +223,12 @@ func TestRetryVisibilitySecondsIsBoundedAndHonorsProviderDelay(t *testing.T) {
 }
 
 func TestRetryableDeliveryErrorAllowsOnlyExplicitTransientGatewayFailures(t *testing.T) {
-	transient := retryableDeliveryError(&gatewayRequestError{statusCode: 503, retryAfter: 7 * time.Second})
+	transient := retryableDeliveryError(&gatewayRequestError{statusCode: 503, operation: "object read", retryAfter: 7 * time.Second})
 	if transient == nil || transient.RetryAfter != 7*time.Second {
 		t.Fatalf("expected temporary gateway failure to use the short retry path: %#v", transient)
+	}
+	if transient.Message != "temporary automation gateway failure during object read" {
+		t.Fatalf("gateway retry message = %q", transient.Message)
 	}
 	if retryableDeliveryError(&gatewayRequestError{statusCode: 403, retryAfter: 7 * time.Second}) != nil {
 		t.Fatal("authorization failure must remain terminal")
