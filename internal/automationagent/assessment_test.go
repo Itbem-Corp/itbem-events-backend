@@ -21,3 +21,11 @@ func TestParseReadOnlyAssessmentAllowsARecordedBlocker(t *testing.T) {
 		t.Fatalf("expected the worker to retain an auditable blocker: %#v / %v", assessment, err)
 	}
 }
+
+func TestParseReadOnlyAssessmentRejectsAnOversizedEvidenceList(t *testing.T) {
+	evidence := `"evidence":["one","two","three","four","five","six","seven","eight","nine","ten","eleven","twelve","thirteen"]`
+	oversized := `{"summary":"The result is bounded.","verdict":"assessed",` + evidence + `,"risks":[],"limitations":[],"recommended_next_steps":[]}`
+	if _, err := ParseReadOnlyAssessment(oversized); err == nil {
+		t.Fatal("oversized evidence must fail closed so the worker cannot persist an unbounded assessment")
+	}
+}
