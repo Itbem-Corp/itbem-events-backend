@@ -122,6 +122,26 @@ func BuildS3ClientForBucket(ctx context.Context, cfg *models.Config, bucket stri
 	return BuildS3Client(ctx, &scoped)
 }
 
+// BuildS3ClientForWorkloadIdentityBucket is for server-mediated private
+// automation objects. It deliberately ignores legacy static S3 credentials
+// from application configuration so this narrow gateway surface uses the
+// workload identity attached to the production host. That role is the audited
+// authority for the dedicated automation bucket; leaving a historical media
+// credential in the environment must not silently override it.
+func BuildS3ClientForWorkloadIdentityBucket(ctx context.Context, cfg *models.Config, bucket string) (*s3.Client, string, error) {
+	return BuildS3ClientForBucket(ctx, workloadIdentityS3Config(cfg), bucket)
+}
+
+func workloadIdentityS3Config(cfg *models.Config) *models.Config {
+	if cfg == nil {
+		return nil
+	}
+	scoped := *cfg
+	scoped.S3ClientId = ""
+	scoped.S3ClientSecret = ""
+	return &scoped
+}
+
 func configureS3Transport(cfg *aws.Config) {
 	cfg.Retryer = func() aws.Retryer {
 		return retry.NewStandard(func(options *retry.StandardOptions) {
