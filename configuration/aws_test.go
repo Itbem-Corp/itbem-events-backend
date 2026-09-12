@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"events-stocks/models"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -137,9 +139,9 @@ func TestBuildS3ClientForWorkloadIdentityBucketIgnoresLegacyStaticCredentials(t 
 		return "us-east-2", nil
 	}
 
-	// The default SDK chain is intentionally supplied through environment
-	// credentials in this isolated test. The configured legacy pair must be
-	// ignored by the workload-identity constructor.
+	// Environment credentials are intentionally present. Gateway storage must
+	// select the EC2 workload provider instead of either environment or legacy
+	// configuration credentials.
 	t.Setenv("AWS_ACCESS_KEY_ID", "workload-identity-test-access-key")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "workload-identity-test-secret-key")
 	cfg := &models.Config{
@@ -155,6 +157,23 @@ func TestBuildS3ClientForWorkloadIdentityBucketIgnoresLegacyStaticCredentials(t 
 	if err != nil || client == nil {
 		t.Fatalf("workload identity bucket client = (%v, %v), want client without legacy credentials", client, err)
 	}
+}
+
+func TestLoadEC2InstanceRoleConfigOverridesAmbientEnvironmentCredentials(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "ambient-access-key")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "ambient-secret-key")
+
+	previous := newEC2WorkloadCredentials
+	t.Cleanup(func() { newEC2WorkloadCredentials = previous })
+	newEC2WorkloadCredentials = func(aws.Config) aws.CredentialsProvider {
+		return credentials.NewStaticCredentialsProvider("instance-profile-access-key", "instance-profile-secret-key", "")
+	}
+
+	cfg, err := LoadEC2InstanceRoleConfig(context.Background(), "us-east-2", "legacy-access-key", "legacy-secret-key")
+	require.NoError(t, err)
+	resolved, err := cfg.Credentials.Retrieve(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "instance-profile-access-key", resolved.AccessKeyID)
 }
 
 func TestBuildS3ClientSkipsAWSDiscoveryForCustomEndpoint(t *testing.T) {
