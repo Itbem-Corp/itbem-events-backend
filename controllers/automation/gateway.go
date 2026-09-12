@@ -83,7 +83,7 @@ type gatewayLeaseMessage struct {
 func gatewayObjectClient(ctx context.Context, cfg *models.Config, bucket string) (*s3.Client, error) {
 	ctx, cancel := context.WithTimeout(ctx, gatewayObjectClientTimeout)
 	defer cancel()
-	client, _, err := configuration.BuildS3ClientForBucket(ctx, cfg, bucket)
+	client, _, err := configuration.BuildS3ClientForWorkloadIdentityBucket(ctx, cfg, bucket)
 	return client, err
 }
 
