@@ -22,10 +22,18 @@ func TestParseReadOnlyAssessmentAllowsARecordedBlocker(t *testing.T) {
 	}
 }
 
-func TestParseReadOnlyAssessmentRejectsAnOversizedEvidenceList(t *testing.T) {
+func TestParseReadOnlyAssessmentBoundsAnOversizedEvidenceList(t *testing.T) {
 	evidence := `"evidence":["one","two","three","four","five","six","seven","eight","nine","ten","eleven","twelve","thirteen"]`
 	oversized := `{"summary":"The result is bounded.","verdict":"assessed",` + evidence + `,"risks":[],"limitations":[],"recommended_next_steps":[]}`
-	if _, err := ParseReadOnlyAssessment(oversized); err == nil {
-		t.Fatal("oversized evidence must fail closed so the worker cannot persist an unbounded assessment")
+	assessment, err := ParseReadOnlyAssessment(oversized)
+	if err != nil {
+		t.Fatalf("oversized evidence should be normalized into the bounded contract: %v", err)
+	}
+	entries, ok := assessment["evidence"].([]any)
+	if !ok || len(entries) != 12 {
+		t.Fatalf("evidence was not bounded to the contract: %#v", assessment["evidence"])
+	}
+	if entries[0] != "one" || entries[11] != "twelve" {
+		t.Fatalf("normalization did not retain the strongest first evidence: %#v", entries)
 	}
 }
