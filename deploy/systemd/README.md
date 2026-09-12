@@ -153,6 +153,23 @@ for lane in orchestration engineering review qa release; do
 done
 ```
 
+Before starting or restarting a lane after its registered repository has moved,
+synchronize its private base checkout with the separate, bounded sync unit:
+
+```bash
+for lane in orchestration engineering review qa release; do
+  sudo systemctl start "itbem-ai-agent-sync@${lane}.service"
+  sudo journalctl -u "itbem-ai-agent-sync@${lane}.service" -n 20 --no-pager
+done
+```
+
+The sync unit runs the same non-billable identity preflights and then only
+fast-forwards the lane's operator-registered base checkout using its dedicated
+read-only Source App. It cannot lease work, call a model, publish a review, or
+release a change. A stale, divergent, dirty, or unpinned checkout fails closed;
+do not use `git pull`, reset, or a developer checkout as a workaround. Start
+the long-running lane only after its matching sync unit succeeds.
+
 The doctor unit runs only the local, non-billable `--doctor` command and cannot
 lease work or mutate a workspace. Before every worker start, the service then
 runs `--runtime-auth-probe`, which authenticates to the backend gateway and

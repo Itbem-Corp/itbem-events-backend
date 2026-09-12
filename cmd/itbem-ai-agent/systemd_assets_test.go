@@ -86,6 +86,30 @@ func TestSystemdDoctorIsReadOnlyAndCannotConsumeQueueWork(t *testing.T) {
 	}
 }
 
+func TestSystemdWorkspaceSyncIsBoundedAndCannotConsumeOrPublish(t *testing.T) {
+	unit := systemdAsset(t, "itbem-ai-agent-sync@.service")
+	for _, required := range []string{
+		"Type=oneshot", "User=itbem-agent-%i", "EnvironmentFile=/etc/itbem-ai-agent/roles/%i.env",
+		"ExecCondition=/usr/bin/test ! -e /etc/itbem-ai-agent/disabled/all",
+		"ExecCondition=/usr/bin/test ! -e /etc/itbem-ai-agent/disabled/%i",
+		"ExecStartPre=/opt/itbem-ai-agent/current/itbem-ai-agent --doctor",
+		"ExecStartPre=/opt/itbem-ai-agent/current/itbem-ai-agent --runtime-auth-probe",
+		"ExecStartPre=/opt/itbem-ai-agent/current/itbem-ai-agent --github-auth-probe",
+		"ExecStart=/opt/itbem-ai-agent/current/itbem-ai-agent --sync-workspaces",
+		"ReadWritePaths=/var/lib/itbem-ai-agent/%i /srv/itbem-agent-workspaces/%i",
+		"NoNewPrivileges=yes", "ProtectSystem=strict", "ProtectHome=yes", "CapabilityBoundingSet=",
+	} {
+		if !strings.Contains(unit, required) {
+			t.Fatalf("sync unit lost %q", required)
+		}
+	}
+	for _, prohibited := range []string{"Restart=", "WantedBy=", "ExecStart=/opt/itbem-ai-agent/current/itbem-ai-agent\n", "Environment=MINIMAX_API_KEY", "Environment=ITBEM_GITHUB_APP_PRIVATE_KEY"} {
+		if strings.Contains(unit, prohibited) {
+			t.Fatalf("sync unit can become a worker or embeds a secret: %q", prohibited)
+		}
+	}
+}
+
 func TestSystemdRoleFilesBindExactLaneAndSeparatePublicationSecrets(t *testing.T) {
 	roles := map[string][2]string{
 		"orchestration": {"orchestrator", "orchestration"},
@@ -147,7 +171,7 @@ func TestSystemdRoleFilesBindExactLaneAndSeparatePublicationSecrets(t *testing.T
 
 func TestSystemdInstallerStagesButNeverActivatesServices(t *testing.T) {
 	installer := systemdAsset(t, "install.sh")
-	for _, required := range []string{"usage: install.sh <approved-sha256> /path/to/reviewed/itbem-ai-agent", "approved-sha256 must be a lowercase SHA-256 digest", "reviewed binary SHA-256 does not match the approved release digest", "useradd --system", "install -m 0600", "install -m 0644 \"$asset_dir/itbem-ai-agent-doctor@.service\"", "install -d -m 0711 -o root -g root /srv/itbem-agent-workspaces", "install -d -m 0700 -o \"$account\" -g \"$account\" \"/var/lib/itbem-ai-agent/$lane\"", "install -d -m 0700 -o \"$account\" -g \"$account\" \"/srv/itbem-agent-workspaces/$lane\"", "install -d -m 0710 -o root -g \"$account\" \"/etc/itbem-ai-agent/secrets/$lane\"", "systemctl daemon-reload"} {
+	for _, required := range []string{"usage: install.sh <approved-sha256> /path/to/reviewed/itbem-ai-agent", "approved-sha256 must be a lowercase SHA-256 digest", "reviewed binary SHA-256 does not match the approved release digest", "useradd --system", "install -m 0600", "install -m 0644 \"$asset_dir/itbem-ai-agent-doctor@.service\"", "install -m 0644 \"$asset_dir/itbem-ai-agent-sync@.service\"", "install -d -m 0711 -o root -g root /srv/itbem-agent-workspaces", "install -d -m 0700 -o \"$account\" -g \"$account\" \"/var/lib/itbem-ai-agent/$lane\"", "install -d -m 0700 -o \"$account\" -g \"$account\" \"/srv/itbem-agent-workspaces/$lane\"", "install -d -m 0710 -o root -g \"$account\" \"/etc/itbem-ai-agent/secrets/$lane\"", "systemctl daemon-reload"} {
 		if !strings.Contains(installer, required) {
 			t.Fatalf("installer lost %q", required)
 		}
