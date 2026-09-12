@@ -252,6 +252,17 @@ func (w *Worker) Process(ctx context.Context, message TaskMessage) error {
 			return fmt.Errorf("automation operation is outside this worker role and queue lane")
 		}
 	}
+	// Read the immutable input before creating the backend execution lease. A
+	// transient gateway/S3 failure is retried by the queue; claiming the task
+	// first would leave it "running" until that lease expires even though no
+	// provider call, state change, or result write has happened.
+	inputRef := message.Payload.InputRef
+	bucket, key, _ := ParsePrivateReference(inputRef)
+	raw, err := w.store.Get(ctx, bucket, key)
+	if err != nil {
+		return err
+	}
+
 	runID := uuid.Must(uuid.NewV4()).String()
 	accepted, err := w.callback.Update(ctx, message.Payload.TaskID, TaskUpdate{Status: "running", RunID: runID})
 	if err != nil {
@@ -261,12 +272,6 @@ func (w *Worker) Process(ctx context.Context, message TaskMessage) error {
 		return nil
 	}
 	if reused, err := w.completeFromExistingResult(ctx, message.Payload.TaskID, runID); reused || err != nil {
-		return err
-	}
-	inputRef := message.Payload.InputRef
-	bucket, key, _ := ParsePrivateReference(inputRef)
-	raw, err := w.store.Get(ctx, bucket, key)
-	if err != nil {
 		return err
 	}
 	if len(raw) > maxInputBytes {

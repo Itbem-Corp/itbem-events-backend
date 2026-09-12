@@ -55,6 +55,19 @@ type fakeCallback struct {
 	updates []TaskUpdate
 }
 
+type failingInputStore struct{ err error }
+
+func (s failingInputStore) Get(_ context.Context, _ string, key string) ([]byte, error) {
+	if strings.HasPrefix(key, "automation/inputs/") && strings.HasSuffix(key, "/input.json") {
+		return nil, s.err
+	}
+	return nil, ErrObjectNotFound
+}
+
+func (failingInputStore) PutEncryptedJSON(_ context.Context, _ string, _ string, _ []byte) error {
+	return errors.New("input storage is unavailable")
+}
+
 func (c *fakeCallback) Update(_ context.Context, _ string, update TaskUpdate) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -241,6 +254,25 @@ func TestWorkerWritesEncryptedPrivateResultAndCallbacks(t *testing.T) {
 	}
 	if !strings.Contains(callback.updates[1].OutputRef, "/runs/"+callback.updates[1].RunID+"/result.json") {
 		t.Fatalf("execution callback must retain its immutable run result: %#v", callback.updates[1])
+	}
+}
+
+func TestWorkerDoesNotAcquireExecutionLeaseBeforeTransientInputRead(t *testing.T) {
+	callback := &fakeCallback{}
+	storageErr := errors.New("temporary automation gateway failure during object read (storage=authorization)")
+	worker, err := NewWorker(
+		WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"},
+		failingInputStore{err: storageErr}, callback,
+		fakeProvider{err: errors.New("provider must not run before input is readable")},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Process(context.Background(), validMessage()); !errors.Is(err, storageErr) {
+		t.Fatalf("input read error = %v, want the retryable storage failure", err)
+	}
+	if len(callback.updates) != 0 {
+		t.Fatalf("unreadable input must not create a running lease: %#v", callback.updates)
 	}
 }
 
