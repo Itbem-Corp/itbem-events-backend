@@ -495,7 +495,13 @@ func requireReadOnlyAssessmentPlan(plan map[string]any) error {
 		}
 		reference, _ := entry["reference"].(string)
 		impact, _ := entry["impact"].(string)
-		if !strings.HasPrefix(strings.TrimSpace(reference), "workspace://") || strings.TrimSpace(impact) == "" {
+		reference = strings.TrimSpace(reference)
+		// A plan is created from the immutable repository snapshot and therefore
+		// names repositories with their GitHub reference. A local workspace
+		// reference is also valid for an offline-only project. Both forms remain
+		// read-only here; the impact value still determines whether this bounded
+		// assessment may run.
+		if (!strings.HasPrefix(reference, "workspace://") && !strings.HasPrefix(reference, "github://")) || strings.TrimSpace(impact) == "" {
 			return fmt.Errorf("read-only assessment repository impact is invalid")
 		}
 		if strings.EqualFold(strings.TrimSpace(impact), "changes") {
