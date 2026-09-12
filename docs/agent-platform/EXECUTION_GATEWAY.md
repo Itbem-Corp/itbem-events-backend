@@ -21,10 +21,13 @@ over HTTPS with a distinct derived token.
   and `automation/<task-id>/` namespace.
 - ACK, defer and visibility renewal require the same sealed lease and lane
   token. Messages are deleted only after terminal worker processing.
-- The backend runtime role, not the Linux host, has receive, visibility,
+- The backend process, not the Linux host, has receive, visibility,
   acknowledgement and attribute-read authority only on the five agent lane
-  queues. Its object authority is restricted to automation inputs and outputs;
-  it has no general SQS or S3 wildcard.
+  queues. Its private-object client uses the backend's configured server
+  credential chain (an instance role where available, or the existing
+  server-scoped S3 credential during migration); workers never receive AWS
+  credentials. Its object authority must be restricted to automation inputs
+  and outputs; it has no general SQS or S3 wildcard.
 
 ## Availability and recovery
 
