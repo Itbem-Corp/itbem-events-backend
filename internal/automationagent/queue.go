@@ -116,8 +116,16 @@ func retryableDeliveryError(err error) *RetryableError {
 	// operator can distinguish a queue lease outage from storage I/O without
 	// logging a URL, object reference, sealed lease, credential, or payload.
 	message := "temporary automation gateway failure"
-	if gatewayErr, ok := err.(*gatewayRequestError); ok && gatewayErr.operation != "" {
-		message += " during " + gatewayErr.operation
+	if gatewayErr, ok := err.(*gatewayRequestError); ok {
+		if gatewayErr.operation != "" {
+			message += " during " + gatewayErr.operation
+		}
+		// diagnostic is normalized from a server allow-list. It is useful to
+		// distinguish a backend storage credential or region fault without
+		// logging object references, lease tokens, credentials, or SDK details.
+		if gatewayErr.diagnostic != "" {
+			message += " (" + gatewayErr.diagnostic + ")"
+		}
 	}
 	return &RetryableError{Message: message, RetryAfter: delay}
 }
