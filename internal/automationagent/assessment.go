@@ -23,13 +23,13 @@ func ParseReadOnlyAssessment(content string) (map[string]any, error) {
 		if !present || !isList {
 			return nil, fmt.Errorf("read-only assessment %s is invalid", key)
 		}
-		// This payload can only record a read-only assessment: it cannot carry a
-		// patch, a remote action, or an execution handoff. Keep its persisted
-		// representation bounded even when a provider redundantly enumerates more
-		// than the contract permits. We retain the strongest, first items (the
-		// prompt explicitly orders the provider to put those first) rather than
-		// discarding an otherwise valid, no-change assessment and needlessly
-		// requiring another billable inference.
+		// This operation always produces a read-only handoff downstream; patch
+		// fields remain rejected below. Keep its persisted representation bounded
+		// even when a provider redundantly enumerates more than the contract
+		// permits. We retain the strongest, first items (the prompt explicitly
+		// orders the provider to put those first) rather than discarding an
+		// otherwise valid, no-change assessment and needlessly requiring another
+		// billable inference.
 		if len(entries) > 12 {
 			entries = entries[:12]
 			value[key] = entries
