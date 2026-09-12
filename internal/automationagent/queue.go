@@ -94,6 +94,26 @@ func queueReceiveRetryDelay(err error) (time.Duration, bool) {
 	return delay, true
 }
 
+// retryableDeliveryError translates only explicitly retryable gateway
+// responses into the queue's bounded retry contract. In particular, a 401,
+// 403, malformed task, or arbitrary worker failure remains terminal and keeps
+// the existing fail-closed behavior.
+func retryableDeliveryError(err error) *RetryableError {
+	var providerRetry *RetryableError
+	if errors.As(err, &providerRetry) {
+		return providerRetry
+	}
+	var gatewayRetry retryableQueueReceiveError
+	if !errors.As(err, &gatewayRetry) {
+		return nil
+	}
+	delay := gatewayRetry.RetryDelay()
+	if delay <= 0 {
+		return nil
+	}
+	return &RetryableError{Message: "temporary automation gateway failure", RetryAfter: delay}
+}
+
 type scheduledQueueMessage struct {
 	raw       QueueMessage
 	review    bool
@@ -226,8 +246,7 @@ func RunQueue(ctx context.Context, worker *Worker, queue Queue, concurrency int,
 					if err == nil {
 						return
 					}
-					var retryable *RetryableError
-					if errors.As(err, &retryable) {
+					if retryable := retryableDeliveryError(err); retryable != nil {
 						if extender, ok := queue.(VisibilityExtendingQueue); ok {
 							if visibilityErr := extendRetryVisibility(ctx, extender, scheduled.raw, retryVisibilitySeconds(retryable)); visibilityErr != nil {
 								logger.Warn("automation retry delay could not be applied; SQS default visibility remains active", "error", visibilityErr)
