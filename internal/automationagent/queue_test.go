@@ -3,6 +3,7 @@ package automationagent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -218,6 +219,19 @@ func TestRetryVisibilitySecondsIsBoundedAndHonorsProviderDelay(t *testing.T) {
 	}
 	if got := retryVisibilitySeconds(&RetryableError{RetryAfter: time.Hour}); got != 900 {
 		t.Fatalf("maximum retry visibility = %d, want 900", got)
+	}
+}
+
+func TestRetryableDeliveryErrorAllowsOnlyExplicitTransientGatewayFailures(t *testing.T) {
+	transient := retryableDeliveryError(&gatewayRequestError{statusCode: 503, retryAfter: 7 * time.Second})
+	if transient == nil || transient.RetryAfter != 7*time.Second {
+		t.Fatalf("expected temporary gateway failure to use the short retry path: %#v", transient)
+	}
+	if retryableDeliveryError(&gatewayRequestError{statusCode: 403, retryAfter: 7 * time.Second}) != nil {
+		t.Fatal("authorization failure must remain terminal")
+	}
+	if retryableDeliveryError(errors.New("arbitrary worker failure")) != nil {
+		t.Fatal("arbitrary worker failure must remain terminal")
 	}
 }
 
