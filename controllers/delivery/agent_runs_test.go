@@ -384,6 +384,10 @@ func TestReadOnlyAssessmentRequiresAnExplicitZeroChangeMatrix(t *testing.T) {
 	if err := requireReadOnlyAssessmentPlan(valid); err != nil {
 		t.Fatalf("expected bounded read-only assessment plan: %v", err)
 	}
+	githubSnapshot := map[string]any{"repository_impact": []any{map[string]any{"reference": "github://Itbem-Corp/itbem-events-backend", "impact": "consulted"}}}
+	if err := requireReadOnlyAssessmentPlan(githubSnapshot); err != nil {
+		t.Fatalf("expected immutable GitHub repository snapshot to be accepted: %v", err)
+	}
 	for _, plan := range []map[string]any{
 		{},
 		{"repository_impact": []any{}},
