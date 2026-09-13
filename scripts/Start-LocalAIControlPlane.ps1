@@ -143,6 +143,76 @@ function Test-LocalPostgreSQL([string]$ComposeFile, [string]$DatabaseUser, [stri
     throw "Local PostgreSQL did not pass a read-only SELECT 1 query for '$DatabaseName'. The API was not started. Inspect 'docker compose logs postgres' and docs/LOCAL_DATABASE_RECOVERY.md; no data was changed."
 }
 
+function Initialize-ComposeLocalPostgreSQLDatabase([string]$ComposeFile, [string]$DatabaseUser, [string]$DatabaseName, [string]$DatabaseProbeContainer) {
+    # The repository compose cluster owns its disposable local databases.  The
+    # control plane intentionally uses a sibling database rather than events_db
+    # so agent migrations and test data cannot contaminate regular local API
+    # work.  Never bootstrap an explicitly supplied container: that path can
+    # point at a developer's existing integration database and remains
+    # read-only in Test-LocalPostgreSQL.
+    if (-not [string]::IsNullOrWhiteSpace($DatabaseProbeContainer)) {
+        return
+    }
+    if ($DatabaseName -notmatch '^[a-z][a-z0-9_]{0,62}$') {
+        throw 'DatabaseName for the repository local control plane must be a lowercase PostgreSQL identifier (letters, numbers, underscores; max 63 characters).'
+    }
+
+    $previousErrorAction = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $existsOutput = @(& docker compose -f $ComposeFile exec -T postgres psql -U $DatabaseUser -d postgres -v ON_ERROR_STOP=1 -Atqc "SELECT 1 FROM pg_database WHERE datname = '$DatabaseName'" 2>&1)
+        $existsExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorAction
+    }
+    if ($existsExitCode -ne 0) {
+        throw "The local PostgreSQL catalog could not be inspected before bootstrapping '$DatabaseName'. The API was not started; inspect 'docker compose logs postgres'."
+    }
+    if ((($existsOutput -join [Environment]::NewLine).Trim()) -eq '1') {
+        return
+    }
+
+    # createdb receives the validated name as an argument rather than building
+    # SQL from it.  A concurrent local launcher may create the same sibling DB;
+    # re-check after an unsuccessful create before deciding that bootstrap
+    # failed.
+    $ErrorActionPreference = 'Continue'
+    try {
+        & docker compose -f $ComposeFile exec -T postgres createdb -U $DatabaseUser $DatabaseName 2>$null
+        $createExitCode = $LASTEXITCODE
+        $verifyOutput = @(& docker compose -f $ComposeFile exec -T postgres psql -U $DatabaseUser -d postgres -v ON_ERROR_STOP=1 -Atqc "SELECT 1 FROM pg_database WHERE datname = '$DatabaseName'" 2>&1)
+        $verifyExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorAction
+    }
+    if ($verifyExitCode -ne 0 -or (($verifyOutput -join [Environment]::NewLine).Trim()) -ne '1') {
+        throw "The isolated local database '$DatabaseName' could not be bootstrapped. The API was not started; inspect 'docker compose logs postgres'."
+    }
+    if ($createExitCode -ne 0) {
+        Write-Verbose "Local database '$DatabaseName' was created concurrently and is ready."
+    }
+}
+
+function Test-LocalAwsEmulator([string]$Endpoint) {
+    # The automation control plane creates its disposable buckets and queues
+    # immediately after this preflight. Fail before any bootstrap write when
+    # Docker, the service, or its loopback mapping is absent.
+    $previousErrorAction = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $probeOutput = @(& aws s3api list-buckets --endpoint-url $Endpoint --output json 2>&1)
+        $probeExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorAction
+    }
+    if ($probeExitCode -ne 0) {
+        throw "Local AWS emulator is unavailable at $Endpoint. Run 'docker compose up -d --wait' from the backend repository, then retry. No local automation buckets or queues were changed."
+    }
+}
+
 function Ensure-LocalBucket([string]$Bucket) {
     # A missing bucket is the normal first-run condition. PowerShell 5.1 turns
     # an expected non-zero native exit into a terminating NativeCommandError
@@ -224,6 +294,7 @@ $composeFile = Join-Path $repositoryRoot 'docker-compose.yml'
 if (-not (Test-Path -LiteralPath $composeFile -PathType Leaf)) {
     throw "Local Docker Compose file was not found: $composeFile"
 }
+Initialize-ComposeLocalPostgreSQLDatabase $composeFile $DatabaseUser $DatabaseName $DatabaseProbeContainer
 Test-LocalPostgreSQL $composeFile $DatabaseUser $DatabaseName $DatabaseProbeContainer $DatabaseProbeInWSL.IsPresent $WSLDistribution
 # The control plane owns remote context synchronization and publication grants,
 # while the local agent owns model execution. Keep their development setup
@@ -287,6 +358,7 @@ $env:AWS_ACCESS_KEY_ID = 'test'
 $env:AWS_SECRET_ACCESS_KEY = 'test'
 $env:AWS_REGION = $cognitoRegion
 $env:AWS_DEFAULT_REGION = $cognitoRegion
+Test-LocalAwsEmulator $AwsEmulatorEndpoint
 $inputBucket = 'itbem-ai-inputs-local'
 $outputBucket = 'itbem-ai-outputs-local'
 Ensure-LocalBucket $inputBucket

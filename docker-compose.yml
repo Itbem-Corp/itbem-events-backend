@@ -1,4 +1,4 @@
-# Local development infrastructure — PostgreSQL + Redis/Valkey
+# Local development infrastructure — PostgreSQL + Redis/Valkey + loopback S3/SQS emulator
 # Does NOT run the backend binary (run that with: go run ./cmd/api)
 #
 # Usage:
@@ -38,6 +38,35 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  aws-emulator:
+    # Local, disposable S3/SQS endpoint for the ITBEM automation control plane.
+    # Moto is pinned by immutable digest and bound only to loopback; production
+    # continues to use native AWS and never reads this service configuration.
+    image: ghcr.io/getmoto/motoserver:5.2.2@sha256:0349ef6ecb9cd041293026accda0ea71bfa09925dffae3d76d120d15ecc76971
+    container_name: itbem-aws-emulator
+    restart: unless-stopped
+    environment:
+      MOTO_PORT: "4566"
+    ports:
+      - "127.0.0.1:4566:4566"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:4566/', timeout=2).read()
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
 
 volumes:
   postgres_data:

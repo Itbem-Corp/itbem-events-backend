@@ -3,10 +3,17 @@
 ## Why the control-plane starter stops early
 
 Docker can report the PostgreSQL container as `healthy` while the database is
-unable to execute a real query. `Start-LocalAIControlPlane.ps1` therefore runs
-one read-only `SELECT 1` against its configured database before it starts the
-API. If that check fails, the API does not start and the script does not modify
-database data, schemas, volumes, or migrations.
+unable to execute a real query. `Start-LocalAIControlPlane.ps1` therefore
+ensures its own sibling database exists in the repository's disposable Compose
+PostgreSQL container, then runs one read-only `SELECT 1` against it before it
+starts the API. The default `events_ai_local` database is created only when it
+is absent; existing databases, schemas, volumes, and migrations are never
+reset or modified by that bootstrap.
+
+When an explicit `-DatabaseProbeContainer` is supplied, the script does not
+create anything. It stays read-only because that named container can be an
+existing integration database rather than the repository's disposable Compose
+cluster.
 
 ## Safe diagnosis
 
