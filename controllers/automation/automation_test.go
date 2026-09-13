@@ -1,10 +1,12 @@
 package automation
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"events-stocks/configuration"
 	"events-stocks/internal/automationagent"
 	"events-stocks/internal/environmentevidence"
 	"events-stocks/internal/projectvault"
@@ -500,6 +502,47 @@ func TestExpiredGitHubReviewLeaseRecoveryIsBoundedAndPreservesExactReviewSubject
 	exhausted.Status = "failed"
 	if exhaustedExpiredGitHubReviewLease(&exhausted, now) {
 		t.Fatalf("terminal reviewer task must not be reconciled: %#v", exhausted)
+	}
+}
+
+func TestReconcileExpiredGitHubReviewLeaseFinalizesExhaustedTaskBeforeReadingInput(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqlDB.Close()
+	db, err := gorm.Open(postgres.New(postgres.Config{Conn: sqlDB, PreferSimpleProtocol: true}), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousDB := configuration.DB
+	configuration.DB = db
+	defer func() { configuration.DB = previousDB }()
+
+	now := time.Now().UTC()
+	expired := now.Add(-time.Minute)
+	task := models.AutomationTask{
+		ID: uuid.Must(uuid.NewV4()), JobID: uuid.Must(uuid.NewV4()), Operation: "code.review", RequestedBy: "github-app-review",
+		Status: "running", AttemptCount: githubReviewLeaseRecoveryMaximumAttempts, InputRef: "s3://itbem-ai-inputs-test/automation/inputs/task/input.json",
+		EvidenceSubjectDigest: strings.Repeat("a", 64), LeaseExpiresAt: &expired,
+	}
+	rows := sqlmock.NewRows([]string{"id", "job_id", "operation", "requested_by", "status", "attempt_count", "input_ref", "evidence_subject_digest", "lease_expires_at"}).
+		AddRow(task.ID, task.JobID, task.Operation, task.RequestedBy, task.Status, task.AttemptCount, task.InputRef, task.EvidenceSubjectDigest, task.LeaseExpiresAt)
+	mock.ExpectQuery(`SELECT \* FROM "automation_tasks"`).WillReturnRows(rows)
+	mock.ExpectBegin()
+	currentRows := sqlmock.NewRows([]string{"id", "job_id", "operation", "requested_by", "status", "attempt_count", "input_ref", "evidence_subject_digest", "lease_expires_at"}).
+		AddRow(task.ID, task.JobID, task.Operation, task.RequestedBy, task.Status, task.AttemptCount, task.InputRef, task.EvidenceSubjectDigest, task.LeaseExpiresAt)
+	mock.ExpectQuery(`SELECT \* FROM "automation_tasks"`).WillReturnRows(currentRows)
+	mock.ExpectQuery(`SELECT count\(\*\) FROM "automation_code_review_publications"`).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectExec(`UPDATE "automation_tasks"`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	reconciled, err := reconcileOneExpiredGitHubReviewLease(context.Background(), &models.Config{GitHubReviewWebhookSecret: "secret", GitHubReviewRepositories: "itbem/dashboard"}, now)
+	if err != nil || !reconciled {
+		t.Fatalf("exhausted lease was not finalized before input recovery: reconciled=%t err=%v", reconciled, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }
 
