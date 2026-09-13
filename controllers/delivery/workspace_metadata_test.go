@@ -1,12 +1,34 @@
 package delivery
 
 import (
+	"encoding/json"
 	"events-stocks/internal/automationagent"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
 )
+
+func TestRemoteWorkspaceAttestationCapabilitiesAreBounded(t *testing.T) {
+	raw, err := json.Marshal([]string{automationagent.WorkspaceCapabilityReadRepository, automationagent.WorkspaceCapabilityCreateWorktree})
+	if err != nil {
+		t.Fatal(err)
+	}
+	capabilities, err := remoteWorkspaceAttestationCapabilities(string(raw))
+	if err != nil || len(capabilities) != 2 {
+		t.Fatalf("valid remote capabilities rejected: %#v / %v", capabilities, err)
+	}
+	for _, unsafe := range []string{
+		`["shell:execute"]`,
+		`["repository:read","repository:read"]`,
+		`[]`,
+		`not-json`,
+	} {
+		if _, err := remoteWorkspaceAttestationCapabilities(unsafe); err == nil {
+			t.Fatalf("unsafe remote capabilities accepted: %s", unsafe)
+		}
+	}
+}
 
 func TestApplyWorkspaceDeliveryMetadataKeepsSafeArchitectureSignals(t *testing.T) {
 	root := t.TempDir()

@@ -119,6 +119,15 @@ SQS leases, idempotent callbacks, output reuse and visibility heartbeats make
 redelivery safe. Set `ITBEM_AI_CONCURRENCY=1` for a strictly serial role, or
 raise it only for independent workspaces with available provider capacity. The
 worker never shares a writable worktree between tasks.
+
+Each heartbeat is followed by a short-lived, authenticated workspace
+attestation when a control plane is hosted separately. It contains only the
+logical workspace ID, GitHub identity, checked-out SHA/branch, clean/freshness
+signals and declared capabilities—never a filesystem path, remote URL, command,
+source content or secret. The control plane accepts it only from the same live
+role/lane and only uses it after reconciling it with that project's exact
+GitHub App checkpoint. It is a context observation, not implementation,
+publication, review, merge or release authority.
 The transport is strict: it accepts exactly one schema-versioned JSON message,
 with no unknown fields and a positive delivery attempt, before scheduling it.
 Malformed messages do not consume a model call or acquire review priority;

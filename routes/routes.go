@@ -297,6 +297,7 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	})
 	internalAutomation.Use(token.RequireTenantHost(cfg, "itbem"))
 	internalAutomation.PUT("/agents/heartbeat", automation.AgentHeartbeat)
+	internalAutomation.PUT("/agents/workspace-attestations", automation.AgentWorkspaceAttestations)
 	internalAutomation.PUT("/tasks/:id", automation.Complete)
 	internalAutomation.GET("/gateway/probe", automation.GatewayProbe)
 	internalAutomation.POST("/gateway/leases", automation.GatewayLease)

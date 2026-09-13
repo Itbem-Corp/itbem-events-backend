@@ -769,6 +769,27 @@ func TestWorkerWorkspaceReadinessRejectsImpossibleOrUnboundedStates(t *testing.T
 	}
 }
 
+func TestWorkspaceAttestationValidationRejectsUnsafeOrUnverifiableState(t *testing.T) {
+	valid := []workspaceAttestationStatement{{
+		ID: "backend", Available: true, GitHubRepository: "itbem-corp/itbem-events-backend", HeadSHA: strings.Repeat("a", 40),
+		Branch: "main", Clean: true, Capabilities: []string{automationagent.WorkspaceCapabilityReadRepository, automationagent.WorkspaceCapabilityCreateWorktree},
+	}}
+	if err := validateWorkspaceAttestations(valid); err != nil {
+		t.Fatalf("valid workspace attestation rejected: %v", err)
+	}
+	for _, candidate := range [][]workspaceAttestationStatement{
+		{{ID: "backend", Available: true, GitHubRepository: "itbem-corp/itbem-events-backend", HeadSHA: "short", Branch: "main", Clean: true, Capabilities: []string{automationagent.WorkspaceCapabilityReadRepository}}},
+		{{ID: "backend", Available: true, GitHubRepository: "itbem-corp/itbem-events-backend", HeadSHA: strings.Repeat("a", 40), Branch: "../main", Clean: true, Capabilities: []string{automationagent.WorkspaceCapabilityReadRepository}}},
+		{{ID: "backend", Available: true, GitHubRepository: "itbem-corp/itbem-events-backend", HeadSHA: strings.Repeat("a", 40), Branch: "main", Clean: true, ChangeCount: 1, Capabilities: []string{automationagent.WorkspaceCapabilityReadRepository}}},
+		{{ID: "backend", Available: true, GitHubRepository: "itbem-corp/itbem-events-backend", HeadSHA: strings.Repeat("a", 40), Branch: "main", Clean: true, Capabilities: []string{automationagent.WorkspaceCapabilityApplyPatch}}},
+		{{ID: "backend", Available: false, HeadSHA: strings.Repeat("a", 40)}},
+	} {
+		if err := validateWorkspaceAttestations(candidate); err == nil {
+			t.Fatalf("unsafe workspace attestation accepted: %#v", candidate)
+		}
+	}
+}
+
 func TestNormalizeWorkerRoleLaneKeepsLegacyVisibleAndRejectsCrossRoleIdentity(t *testing.T) {
 	if role, lane, err := normalizeWorkerRoleLane("", ""); err != nil || role != "" || lane != "" {
 		t.Fatalf("legacy combined worker rejected: %q %q %v", role, lane, err)

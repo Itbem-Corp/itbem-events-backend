@@ -524,6 +524,45 @@ type WorkspaceGitState struct {
 	RemoteAhead    int    `json:"remote_ahead,omitempty"`
 }
 
+// WorkspaceAttestationSnapshot is the intentionally narrow checkpoint that a
+// local worker can send to the Delivery control plane. It does not issue any
+// Git or network write and never exposes paths, origin URLs, commands or
+// repository contents. The control plane must still reconcile every accepted
+// value with the project's exact GitHub checkpoint before using it.
+func WorkspaceAttestationSnapshot(lookup func(string) string) ([]WorkspaceAttestation, error) {
+	workspaces, err := LoadWorkspaces(lookup("ITBEM_AI_WORKSPACES_JSON"))
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(workspaces))
+	for id := range workspaces {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	attestations := make([]WorkspaceAttestation, 0, len(ids))
+	for _, id := range ids {
+		workspace := workspaces[id]
+		state := ReadWorkspaceGitState(workspace)
+		attestation := WorkspaceAttestation{
+			ID:           id,
+			Available:    state.Available,
+			Capabilities: append([]string(nil), workspace.Config.Capabilities...),
+		}
+		if state.Available {
+			attestation.GitHubRepository = state.GitHubRepository
+			attestation.HeadSHA = state.HeadSHA
+			attestation.Branch = state.Branch
+			attestation.Clean = !state.HasLocalChanges
+			attestation.ChangeCount = state.LocalChangeCount
+			attestation.TrackingBranch = state.TrackingBranch
+			attestation.LocalAhead = state.LocalAhead
+			attestation.RemoteAhead = state.RemoteAhead
+		}
+		attestations = append(attestations, attestation)
+	}
+	return attestations, nil
+}
+
 type WorkspaceExcerpt struct {
 	Path    string `json:"path"`
 	Content string `json:"content"`
