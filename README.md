@@ -35,7 +35,7 @@ from the dashboard's existing `.env.local` without writing a new environment
 file:
 
 ```powershell
-docker compose -f deploy/staging/aws-emulator.compose.yml up -d --wait
+docker compose up -d --wait
 .\scripts\Start-LocalAIControlPlane.ps1
 ```
 
@@ -64,8 +64,9 @@ isolated PostgreSQL and Valkey ports can be selected with `-DatabasePort` and
 artifacts, shell history, or production configuration. See
 `docs/agent-platform/QUALIFICATION.md` for the exact lifecycle.
 
-The emulator is free, test-only Moto pinned to an immutable image digest and
-binds only to loopback. Production continues to use native AWS S3 and SQS.
+The compose service is a free, test-only Moto AWS emulator (the legacy
+`-LocalStackEndpoint` parameter name remains supported) pinned to an immutable
+image digest and bound only to loopback. Production continues to use native AWS S3 and SQS.
 `-AwsEmulatorEndpoint` selects another loopback port when needed; the older
 `-LocalStackEndpoint` name remains a compatibility alias.
 

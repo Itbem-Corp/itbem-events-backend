@@ -23,6 +23,10 @@ const (
 	maxInputBytes               = 10 << 20
 	maxErrorMessageLen          = 1024
 	deliveryPlanCompletionLimit = 8192
+	// A plan is only retried after a deterministic schema/boundary rejection.
+	// Keep this deliberately below the initial allowance: it is a compact JSON
+	// correction, never a second planning pass with an unbounded budget.
+	deliveryPlanRepairCompletionLimit = 4096
 	// This is one aggregate task budget, not a per-call model allowance. Large
 	// reviews split it across bounded 8k segments so reasoning-capable models
 	// can finish every strict JSON verdict without any unbounded request.
@@ -248,6 +252,17 @@ func (w *Worker) Process(ctx context.Context, message TaskMessage) error {
 			return fmt.Errorf("automation operation is outside this worker role and queue lane")
 		}
 	}
+	// Read the immutable input before creating the backend execution lease. A
+	// transient gateway/S3 failure is retried by the queue; claiming the task
+	// first would leave it "running" until that lease expires even though no
+	// provider call, state change, or result write has happened.
+	inputRef := message.Payload.InputRef
+	bucket, key, _ := ParsePrivateReference(inputRef)
+	raw, err := w.store.Get(ctx, bucket, key)
+	if err != nil {
+		return err
+	}
+
 	runID := uuid.Must(uuid.NewV4()).String()
 	accepted, err := w.callback.Update(ctx, message.Payload.TaskID, TaskUpdate{Status: "running", RunID: runID})
 	if err != nil {
@@ -257,12 +272,6 @@ func (w *Worker) Process(ctx context.Context, message TaskMessage) error {
 		return nil
 	}
 	if reused, err := w.completeFromExistingResult(ctx, message.Payload.TaskID, runID); reused || err != nil {
-		return err
-	}
-	inputRef := message.Payload.InputRef
-	bucket, key, _ := ParsePrivateReference(inputRef)
-	raw, err := w.store.Get(ctx, bucket, key)
-	if err != nil {
 		return err
 	}
 	if len(raw) > maxInputBytes {
@@ -418,18 +427,18 @@ func (w *Worker) Process(ctx context.Context, message TaskMessage) error {
 		execution = qaExecution
 	}
 	if message.Payload.Operation == "delivery.plan" {
-		structuredResult, err = ParseDeliveryPlan(completion.Content)
+		structuredResult, err = validateDeliveryPlanCompletion(completion.Content, input.Delivery)
 		if err != nil {
-			// The answer cannot become a plan, but it was still a real provider
-			// call. Preserve the private response and its usage for inspection and
-			// ledger accuracy while keeping the task terminally failed.
-			return w.failWithProviderResult(ctx, message.Payload.TaskID, runID, requestRef, message.Payload.Operation, completion, err)
-		}
-		if err := ValidateDeliveryPlanTopology(structuredResult, input.Delivery); err != nil {
-			return w.failWithProviderResult(ctx, message.Payload.TaskID, runID, requestRef, message.Payload.Operation, completion, err)
-		}
-		if err := ValidateDeliveryPlanContextCoverage(structuredResult, input.Delivery); err != nil {
-			return w.failWithProviderResult(ctx, message.Payload.TaskID, runID, requestRef, message.Payload.Operation, completion, err)
+			// MiniMax can occasionally produce a nearly-valid compact object while
+			// omitting a mechanically required provenance field. Do not weaken the
+			// immutable-Vault contract or silently fill that claim in ourselves.
+			// Instead, retain the rejected candidate privately and permit exactly
+			// one smaller, recorded correction call; its whole result is subjected
+			// to the same parser and topology/context validators.
+			completion, structuredResult, err = w.repairDeliveryPlan(ctx, message.Payload.TaskID, runID, completion, messages, input.Delivery, err)
+			if err != nil {
+				return w.failWithProviderResult(ctx, message.Payload.TaskID, runID, requestRef, message.Payload.Operation, completion, err)
+			}
 		}
 	}
 	if message.Payload.Operation == "delivery.assessment" {

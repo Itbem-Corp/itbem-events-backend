@@ -245,3 +245,32 @@ func TestLocalLaunchersSupportExplicitRoleLanesWithoutBreakingCombinedMode(t *te
 		}
 	}
 }
+
+func TestLocalControlPlaneHasAFirstClassLoopbackAWSService(t *testing.T) {
+	compose, err := os.ReadFile(filepath.Join("..", "..", "docker-compose.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		"aws-emulator:",
+		"ghcr.io/getmoto/motoserver:5.2.2@sha256:",
+		"127.0.0.1:4566:4566",
+		"read_only: true",
+		"no-new-privileges:true",
+	} {
+		if !strings.Contains(string(compose), required) {
+			t.Fatalf("local compose lost required AWS emulator setting %q", required)
+		}
+	}
+	controlPlane := localScriptAsset(t, "Start-LocalAIControlPlane.ps1")
+	for _, required := range []string{
+		"Test-LocalAwsEmulator",
+		"aws s3api list-buckets --endpoint-url $Endpoint",
+		"docker compose up -d --wait",
+		"No local automation buckets or queues were changed.",
+	} {
+		if !strings.Contains(controlPlane, required) {
+			t.Fatalf("local control plane lost emulator readiness behavior %q", required)
+		}
+	}
+}
