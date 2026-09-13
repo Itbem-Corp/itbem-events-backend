@@ -43,6 +43,31 @@ type AgentHeartbeat struct {
 	WorkspaceReadiness []WorkspaceReadiness `json:"workspace_readiness,omitempty"`
 }
 
+// WorkspaceAttestation is a deliberately small, recurring statement made by
+// an authenticated worker. It is separate from the public health heartbeat:
+// Delivery needs exact Git identity and revision to reconcile a workspace, but
+// the general operational dashboard must not disclose those details.
+// Paths, remotes, command lines, source content and credentials never cross
+// this boundary.
+type WorkspaceAttestation struct {
+	ID               string   `json:"id"`
+	Available        bool     `json:"available"`
+	GitHubRepository string   `json:"github_repository,omitempty"`
+	HeadSHA          string   `json:"head_sha,omitempty"`
+	Branch           string   `json:"branch,omitempty"`
+	Clean            bool     `json:"clean"`
+	ChangeCount      int      `json:"change_count"`
+	TrackingBranch   string   `json:"tracking_branch,omitempty"`
+	LocalAhead       int      `json:"local_ahead"`
+	RemoteAhead      int      `json:"remote_ahead"`
+	Capabilities     []string `json:"capabilities,omitempty"`
+}
+
+type WorkspaceAttestationReport struct {
+	WorkerID     string                 `json:"worker_id"`
+	Attestations []WorkspaceAttestation `json:"attestations"`
+}
+
 func NewHTTPCallback(baseURL, secret string, client *http.Client) (*HTTPCallback, error) {
 	if err := validateAPIBaseURL(baseURL); err != nil {
 		return nil, err
@@ -116,6 +141,36 @@ func (c *HTTPCallback) Heartbeat(ctx context.Context, heartbeat AgentHeartbeat) 
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return fmt.Errorf("automation heartbeat rejected (%d)", response.StatusCode)
+	}
+	return nil
+}
+
+// WorkspaceAttestations sends the private, short-lived workspace checkpoint
+// projection after a successful heartbeat. The API independently requires that
+// the worker heartbeat is fresh and bound to the same role/lane, so this call
+// cannot revive a stopped worker or escalate a lane.
+func (c *HTTPCallback) WorkspaceAttestations(ctx context.Context, report WorkspaceAttestationReport) error {
+	body, err := json.Marshal(report)
+	if err != nil {
+		return fmt.Errorf("workspace attestation body could not be encoded")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.baseURL+"/api/internal/automation/agents/workspace-attestations", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("workspace attestation request could not be created")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Automation-Secret", c.secret)
+	if c.role != "" && c.lane != "" {
+		req.Header.Set("X-Agent-Role", c.role)
+		req.Header.Set("X-Agent-Lane", c.lane)
+	}
+	response, err := c.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("workspace attestation request failed")
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return fmt.Errorf("workspace attestation rejected (%d)", response.StatusCode)
 	}
 	return nil
 }

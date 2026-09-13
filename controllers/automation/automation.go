@@ -52,6 +52,7 @@ var githubRepositoryPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]*/[a-z0-9]
 var githubOrganizationPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]*$`)
 var toolCallKeyPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{1,63}$`)
 var workerWorkspaceIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$`)
+var workspaceAttestationBranchPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$`)
 
 const maxGitHubReviewWebhookBytes = 1 << 20
 
@@ -61,6 +62,7 @@ const maxGitHubReviewWebhookBytes = 1 << 20
 // looks like duplicate capacity and can combine old, failing workspace
 // readiness with the current successful preflight.
 const maxAutomationHealthWorkerRows = 64
+const workspaceAttestationTTL = 2 * time.Minute
 
 var allowedOperations = map[string]struct{}{
 	"ai.chat":                   {},
@@ -946,6 +948,28 @@ type agentHeartbeatRequest struct {
 	Concurrency        int                         `json:"concurrency"`
 	StartedAt          string                      `json:"started_at"`
 	WorkspaceReadiness []automationWorkspaceHealth `json:"workspace_readiness"`
+}
+
+// workspaceAttestationRequest is accepted only over the worker callback
+// channel after a fresh heartbeat for the same immutable worker identity. It
+// is not a path to GitHub, source code, shell commands or credentials.
+type workspaceAttestationRequest struct {
+	WorkerID     string                          `json:"worker_id"`
+	Attestations []workspaceAttestationStatement `json:"attestations"`
+}
+
+type workspaceAttestationStatement struct {
+	ID               string   `json:"id"`
+	Available        bool     `json:"available"`
+	GitHubRepository string   `json:"github_repository,omitempty"`
+	HeadSHA          string   `json:"head_sha,omitempty"`
+	Branch           string   `json:"branch,omitempty"`
+	Clean            bool     `json:"clean"`
+	ChangeCount      int      `json:"change_count"`
+	TrackingBranch   string   `json:"tracking_branch,omitempty"`
+	LocalAhead       int      `json:"local_ahead"`
+	RemoteAhead      int      `json:"remote_ahead"`
+	Capabilities     []string `json:"capabilities,omitempty"`
 }
 
 // CreateInputUploadURL keeps prompt/document inputs in ITBEM storage before a
@@ -2150,6 +2174,115 @@ func AgentHeartbeat(c echo.Context) error {
 		return utils.Error(c, http.StatusInternalServerError, "Automation heartbeat unavailable", "")
 	}
 	return utils.Success(c, http.StatusOK, "Automation agent heartbeat accepted", map[string]any{"accepted_at": now})
+}
+
+// AgentWorkspaceAttestations records short-lived workspace metadata from a
+// live local agent. The later Delivery refresh path validates repository and
+// SHA against the independently obtained GitHub checkpoint, so an attestation
+// never creates workspace, merge, publish or deployment authority on its own.
+func AgentWorkspaceAttestations(c echo.Context) error {
+	if !validWorkerCallbackCredential(c) {
+		return utils.Error(c, http.StatusUnauthorized, "Unauthorized", "")
+	}
+	if configuration.DB == nil {
+		return utils.Error(c, http.StatusServiceUnavailable, "Automation unavailable", "")
+	}
+	var request workspaceAttestationRequest
+	if err := c.Bind(&request); err != nil {
+		return utils.Error(c, http.StatusBadRequest, "Invalid workspace attestation", "")
+	}
+	workerID := strings.TrimSpace(request.WorkerID)
+	if _, err := uuid.FromString(workerID); err != nil || len(request.Attestations) == 0 || len(request.Attestations) > 32 {
+		return utils.Error(c, http.StatusBadRequest, "Invalid workspace attestation", "")
+	}
+	role, lane, err := normalizeWorkerRoleLane(strings.TrimSpace(c.Request().Header.Get("X-Agent-Role")), strings.TrimSpace(c.Request().Header.Get("X-Agent-Lane")))
+	if err != nil || role == "" || lane == "" {
+		return utils.Error(c, http.StatusForbidden, "Worker identity is required for workspace attestation", "")
+	}
+	now := time.Now().UTC()
+	var heartbeat models.AutomationAgentHeartbeat
+	if err := configuration.DB.Where("worker_id = ? AND role = ? AND lane = ? AND last_seen_at >= ?", workerID, role, lane, now.Add(-workspaceAttestationTTL)).First(&heartbeat).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return utils.Error(c, http.StatusConflict, "Workspace attestation rejected", "A fresh heartbeat from the same worker is required before reporting workspace state")
+		}
+		return utils.Error(c, http.StatusInternalServerError, "Workspace attestation unavailable", "")
+	}
+	if err := validateWorkspaceAttestations(request.Attestations); err != nil {
+		return utils.Error(c, http.StatusBadRequest, "Invalid workspace attestation", "")
+	}
+	for _, statement := range request.Attestations {
+		capabilities, marshalErr := json.Marshal(statement.Capabilities)
+		if marshalErr != nil {
+			return utils.Error(c, http.StatusBadRequest, "Invalid workspace attestation", "")
+		}
+		attestation := models.AutomationWorkspaceAttestation{
+			WorkerID: workerID, Role: role, Lane: lane, WorkspaceID: statement.ID, Available: statement.Available,
+			GitHubRepository: strings.ToLower(strings.TrimSpace(statement.GitHubRepository)), HeadSHA: strings.ToLower(strings.TrimSpace(statement.HeadSHA)),
+			Branch: strings.TrimSpace(statement.Branch), Clean: statement.Clean, ChangeCount: statement.ChangeCount,
+			TrackingBranch: strings.TrimSpace(statement.TrackingBranch), LocalAhead: statement.LocalAhead, RemoteAhead: statement.RemoteAhead,
+			CapabilitiesJSON: string(capabilities), AttestedAt: now,
+		}
+		if err := configuration.DB.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "worker_id"}, {Name: "workspace_id"}},
+			DoUpdates: clause.AssignmentColumns([]string{"role", "lane", "available", "github_repository", "head_sha", "branch", "clean", "change_count", "tracking_branch", "local_ahead", "remote_ahead", "capabilities_json", "attested_at", "updated_at"}),
+		}).Create(&attestation).Error; err != nil {
+			return utils.Error(c, http.StatusInternalServerError, "Workspace attestation unavailable", "")
+		}
+	}
+	return utils.Success(c, http.StatusOK, "Workspace attestation accepted", map[string]any{"accepted_at": now, "workspace_count": len(request.Attestations)})
+}
+
+func validateWorkspaceAttestations(attestations []workspaceAttestationStatement) error {
+	seen := make(map[string]struct{}, len(attestations))
+	for _, statement := range attestations {
+		if !workerWorkspaceIDPattern.MatchString(statement.ID) {
+			return fmt.Errorf("invalid workspace id")
+		}
+		if _, exists := seen[statement.ID]; exists {
+			return fmt.Errorf("duplicate workspace id")
+		}
+		seen[statement.ID] = struct{}{}
+		if statement.ChangeCount < 0 || statement.ChangeCount > 1000000 || statement.LocalAhead < 0 || statement.LocalAhead > 1000000 || statement.RemoteAhead < 0 || statement.RemoteAhead > 1000000 || len(statement.Capabilities) > 8 {
+			return fmt.Errorf("invalid workspace counters")
+		}
+		if !statement.Available {
+			if statement.GitHubRepository != "" || statement.HeadSHA != "" || statement.Branch != "" || statement.TrackingBranch != "" || statement.Clean || statement.ChangeCount != 0 || statement.LocalAhead != 0 || statement.RemoteAhead != 0 {
+				return fmt.Errorf("unavailable workspace included git state")
+			}
+			continue
+		}
+		repository := strings.ToLower(strings.TrimSpace(statement.GitHubRepository))
+		if !githubRepositoryPattern.MatchString(repository) || !gitCommitSHA.MatchString(strings.ToLower(strings.TrimSpace(statement.HeadSHA))) || !validWorkspaceAttestationBranch(statement.Branch) || (statement.TrackingBranch != "" && !validWorkspaceAttestationBranch(statement.TrackingBranch)) {
+			return fmt.Errorf("invalid workspace git identity")
+		}
+		if !statement.Clean && statement.ChangeCount == 0 {
+			return fmt.Errorf("dirty workspace missing change count")
+		}
+		if statement.Clean && statement.ChangeCount != 0 {
+			return fmt.Errorf("clean workspace has changes")
+		}
+		capabilities := make(map[string]struct{}, len(statement.Capabilities))
+		for _, capability := range statement.Capabilities {
+			if _, supported := map[string]struct{}{
+				automationagent.WorkspaceCapabilityReadRepository: {}, automationagent.WorkspaceCapabilityFetchRemote: {}, automationagent.WorkspaceCapabilityCreateWorktree: {}, automationagent.WorkspaceCapabilityApplyPatch: {}, automationagent.WorkspaceCapabilityStageCommit: {}, automationagent.WorkspaceCapabilityPublishBranch: {}, automationagent.WorkspaceCapabilityCreatePullReq: {},
+			}[capability]; !supported {
+				return fmt.Errorf("unsupported workspace capability")
+			}
+			if _, duplicate := capabilities[capability]; duplicate {
+				return fmt.Errorf("duplicate workspace capability")
+			}
+			capabilities[capability] = struct{}{}
+		}
+		if _, readable := capabilities[automationagent.WorkspaceCapabilityReadRepository]; !readable {
+			return fmt.Errorf("available workspace is not readable")
+		}
+	}
+	return nil
+}
+
+func validWorkspaceAttestationBranch(value string) bool {
+	value = strings.TrimSpace(value)
+	return value != "" && value == strings.TrimSpace(value) && workspaceAttestationBranchPattern.MatchString(value) && !strings.Contains(value, "..") && !strings.Contains(value, "//") && !strings.HasSuffix(value, ".") && !strings.HasSuffix(value, "/")
 }
 
 // GetArtifact issues a short-lived URL for a task-scoped QA artifact. The

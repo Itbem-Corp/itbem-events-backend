@@ -48,6 +48,17 @@ SHA, rama, cambios locales y origen; no puede hacer `fetch`, `pull`, `add`,
 para que el revisor decida si el SHA congelado sigue representando el contexto
 correcto.
 
+Cuando el control plane y el worker viven en hosts distintos, el control plane
+**no** abre rutas del host remoto. El worker publica una atestación efímera por
+su callback autenticado con sólo: id lógico del workspace, disponibilidad,
+identidad GitHub, SHA, rama, limpieza, desfase respecto a tracking y
+capacidades. No incluye rutas, remotes, comandos, diffs, contenido ni
+credenciales. La atestación vence rápidamente, debe corresponder a un
+heartbeat del mismo rol/lane y sólo actualiza el checkpoint si coincide con el
+`github://owner/repo` y SHA ya verificados por GitHub App dentro del mismo
+proyecto. Una atestación nunca publica, crea worktrees, aprueba, fusiona o
+despliega; el worker vuelve a verificar identidad y SHA antes de ejecutar.
+
 ## Vault-first
 
 Ninguna fase de agente se admite con contexto de repositorio sin un Vault
