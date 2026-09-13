@@ -3667,12 +3667,20 @@ func reconcileOneExpiredGitHubReviewLease(ctx context.Context, cfg *models.Confi
 		return false, nil
 	}
 	candidate := &candidates[0]
+	// An exhausted lease is deliberately terminal: it must be released before
+	// attempting to reopen its immutable input. parseGitHubReviewRecoverySubject
+	// correctly rejects an exhausted task (only a recoverable lease may supply
+	// a subject), so doing the input read first would leave this row running
+	// forever and starve every later review recovery behind it.
+	if exhaustedExpiredGitHubReviewLease(candidate, now) {
+		if err := failExhaustedExpiredGitHubReviewLease(candidate, now); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
 	subject, err := loadGitHubReviewRecoverySubject(ctx, candidate, cfg, now)
 	if err != nil {
 		return false, nil
-	}
-	if exhaustedExpiredGitHubReviewLease(candidate, now) {
-		return false, failExhaustedExpiredGitHubReviewLease(candidate, now)
 	}
 	appConfig, err := automationagent.LoadGitHubAppConfig(os.Getenv)
 	if err != nil {
