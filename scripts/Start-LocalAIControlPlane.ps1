@@ -143,6 +143,24 @@ function Test-LocalPostgreSQL([string]$ComposeFile, [string]$DatabaseUser, [stri
     throw "Local PostgreSQL did not pass a read-only SELECT 1 query for '$DatabaseName'. The API was not started. Inspect 'docker compose logs postgres' and docs/LOCAL_DATABASE_RECOVERY.md; no data was changed."
 }
 
+function Test-LocalAwsEmulator([string]$Endpoint) {
+    # The automation control plane creates its disposable buckets and queues
+    # immediately after this preflight. Fail before any bootstrap write when
+    # Docker, the service, or its loopback mapping is absent.
+    $previousErrorAction = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $probeOutput = @(& aws s3api list-buckets --endpoint-url $Endpoint --output json 2>&1)
+        $probeExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorAction
+    }
+    if ($probeExitCode -ne 0) {
+        throw "Local AWS emulator is unavailable at $Endpoint. Run 'docker compose up -d --wait' from the backend repository, then retry. No local automation buckets or queues were changed."
+    }
+}
+
 function Ensure-LocalBucket([string]$Bucket) {
     # A missing bucket is the normal first-run condition. PowerShell 5.1 turns
     # an expected non-zero native exit into a terminating NativeCommandError
@@ -287,6 +305,7 @@ $env:AWS_ACCESS_KEY_ID = 'test'
 $env:AWS_SECRET_ACCESS_KEY = 'test'
 $env:AWS_REGION = $cognitoRegion
 $env:AWS_DEFAULT_REGION = $cognitoRegion
+Test-LocalAwsEmulator $AwsEmulatorEndpoint
 $inputBucket = 'itbem-ai-inputs-local'
 $outputBucket = 'itbem-ai-outputs-local'
 Ensure-LocalBucket $inputBucket

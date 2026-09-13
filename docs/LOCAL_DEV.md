@@ -10,7 +10,8 @@ Three services work together:
 | **Dashboard** (Next.js) | `dashboard-ts` | 3000 | `npm run dev` |
 | **Public site** (Astro) | `cafetton-casero` | 4321 | `npm run dev` |
 
-Infrastructure (PostgreSQL + Redis) is managed by Docker Compose.
+Infrastructure (PostgreSQL + Valkey + a loopback-only S3/SQS emulator for local
+automation) is managed by Docker Compose.
 
 ---
 
@@ -94,6 +95,7 @@ npm run dev
 | Public site | http://localhost:4321 |
 | PostgreSQL | localhost:5432 |
 | Redis | localhost:6379 |
+| Local automation S3/SQS emulator | http://localhost:4566 |
 
 ### CORS (already configured)
 
