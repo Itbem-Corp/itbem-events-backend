@@ -10,6 +10,7 @@ import (
 	"events-stocks/internal/authz"
 	"events-stocks/internal/automationagent"
 	"events-stocks/internal/deliveryledger"
+	"events-stocks/internal/projectvault"
 	"events-stocks/internal/releasegate"
 	"events-stocks/models"
 	awsrepository "events-stocks/repositories/awsrepository"
@@ -410,36 +411,47 @@ func CreateContext(c echo.Context) error {
 		if strings.HasPrefix(reference, "workspace://") {
 			workspace, workspaceErr := automationagent.RegisteredWorkspace(reference, os.Getenv)
 			if workspaceErr != nil {
-				return utils.Error(c, http.StatusConflict, "Local workspace unavailable", "Register the workspace on this control-plane host before attaching it to a project")
-			}
-			gitState := automationagent.ReadWorkspaceGitState(workspace)
-			if !gitState.Available || strings.TrimSpace(gitState.HeadSHA) == "" {
-				return utils.Error(c, http.StatusConflict, "Local workspace unavailable", "The registered workspace must be a readable Git repository with a checked-out revision")
-			}
-			if gitState.HasLocalChanges {
-				return utils.Error(c, http.StatusConflict, "Local workspace not ready", "Commit or stash local changes before attaching this workspace as Delivery context")
-			}
-			if gitState.RemoteAhead > 0 {
-				return utils.Error(c, http.StatusConflict, "Local workspace not ready", "Synchronize the workspace with its known tracking branch before attaching it as Delivery context")
-			}
-			if revision == "" {
-				revision = gitState.HeadSHA
-			} else if !strings.EqualFold(revision, gitState.HeadSHA) {
-				// A workspace source is a concrete local checkpoint, never an
-				// arbitrary label. Requiring its declared revision to equal HEAD
-				// prevents a task from freezing metadata for code the agent cannot
-				// actually inspect or implement against.
-				return utils.Error(c, http.StatusConflict, "Local workspace revision mismatch", "The registered workspace HEAD must match the declared context revision")
-			}
-			applyWorkspaceDeliveryMetadata(metadataValue, workspace)
-			metadataValue["local_git_branch"] = gitState.Branch
-			metadataValue["local_workspace_dirty"] = gitState.HasLocalChanges
-			metadataValue["local_change_count"] = gitState.LocalChangeCount
-			metadataValue["local_tracking_branch"] = gitState.TrackingBranch
-			metadataValue["local_ahead"] = gitState.LocalAhead
-			metadataValue["remote_ahead"] = gitState.RemoteAhead
-			if gitState.GitHubRepository != "" {
-				metadataValue["github_repository"] = gitState.GitHubRepository
+				// The control plane and the local agent runner can live on
+				// different hosts. Record a remote-runner workspace only when it
+				// is anchored to an already-ready GitHub checkpoint in this exact
+				// project. The runner still verifies its Git identity and frozen
+				// SHA before it can read code or make a worktree.
+				boundRevision, bindingErr := bindRemoteAgentWorkspace(projectID, metadataValue, revision)
+				if bindingErr != nil {
+					return utils.Error(c, http.StatusConflict, "Local workspace unavailable", bindingErr.Error())
+				}
+				revision = boundRevision
+				metadataValue["workspace_binding"] = "remote_agent"
+			} else {
+				gitState := automationagent.ReadWorkspaceGitState(workspace)
+				if !gitState.Available || strings.TrimSpace(gitState.HeadSHA) == "" {
+					return utils.Error(c, http.StatusConflict, "Local workspace unavailable", "The registered workspace must be a readable Git repository with a checked-out revision")
+				}
+				if gitState.HasLocalChanges {
+					return utils.Error(c, http.StatusConflict, "Local workspace not ready", "Commit or stash local changes before attaching this workspace as Delivery context")
+				}
+				if gitState.RemoteAhead > 0 {
+					return utils.Error(c, http.StatusConflict, "Local workspace not ready", "Synchronize the workspace with its known tracking branch before attaching it as Delivery context")
+				}
+				if revision == "" {
+					revision = gitState.HeadSHA
+				} else if !strings.EqualFold(revision, gitState.HeadSHA) {
+					// A workspace source is a concrete local checkpoint, never an
+					// arbitrary label. Requiring its declared revision to equal HEAD
+					// prevents a task from freezing metadata for code the agent cannot
+					// actually inspect or implement against.
+					return utils.Error(c, http.StatusConflict, "Local workspace revision mismatch", "The registered workspace HEAD must match the declared context revision")
+				}
+				applyWorkspaceDeliveryMetadata(metadataValue, workspace)
+				metadataValue["local_git_branch"] = gitState.Branch
+				metadataValue["local_workspace_dirty"] = gitState.HasLocalChanges
+				metadataValue["local_change_count"] = gitState.LocalChangeCount
+				metadataValue["local_tracking_branch"] = gitState.TrackingBranch
+				metadataValue["local_ahead"] = gitState.LocalAhead
+				metadataValue["remote_ahead"] = gitState.RemoteAhead
+				if gitState.GitHubRepository != "" {
+					metadataValue["github_repository"] = gitState.GitHubRepository
+				}
 			}
 		} else if revision == "" {
 			// A remote reference is not yet usable as task context until a person
@@ -463,6 +475,43 @@ func CreateContext(c echo.Context) error {
 		return utils.Error(c, 500, "Context source failed", "Could not save source")
 	}
 	return utils.Success(c, 201, "Context source created", source)
+}
+
+// bindRemoteAgentWorkspace records a workspace owned by a separately hosted
+// runner. It does not probe that machine or grant it authority. Instead, the
+// workspace must be tied to a ready github:// checkpoint already owned by the
+// project; the agent runtime verifies that GitHub identity and frozen SHA
+// again before it can inspect or mutate code.
+func bindRemoteAgentWorkspace(projectID uuid.UUID, metadata map[string]any, requestedRevision string) (string, error) {
+	rawRepository, ok := metadata["github_repository"].(string)
+	if !ok || strings.TrimSpace(rawRepository) == "" {
+		return "", fmt.Errorf("register the workspace on this control-plane host or link it to a ready GitHub context in this project")
+	}
+	repositoryReference := strings.TrimSpace(rawRepository)
+	if !strings.HasPrefix(strings.ToLower(repositoryReference), "github://") {
+		repositoryReference = "github://" + strings.Trim(repositoryReference, "/")
+	}
+	repositoryReference = canonicalDeliveryRepositoryReference(repositoryReference)
+	if !strings.HasPrefix(repositoryReference, "github://") || !isDeliveryRepositoryReference(repositoryReference) {
+		return "", fmt.Errorf("linked GitHub repository must use owner/repository")
+	}
+
+	var remote models.DeliveryContextSource
+	if err := configuration.DB.Where("project_id = ? AND kind = ? AND reference = ? AND status = ?", projectID, "repository", repositoryReference, "ready").First(&remote).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return "", fmt.Errorf("the linked GitHub repository must already be a ready context source in this project")
+		}
+		return "", fmt.Errorf("could not verify the linked GitHub repository")
+	}
+	if !projectvault.ValidRevision(remote.Revision) {
+		return "", fmt.Errorf("the linked GitHub repository has no immutable ready revision")
+	}
+	if requested := strings.TrimSpace(requestedRevision); requested != "" && !strings.EqualFold(requested, remote.Revision) {
+		return "", fmt.Errorf("workspace revision must match the linked GitHub context revision")
+	}
+	metadata["github_repository"] = strings.TrimPrefix(repositoryReference, "github://")
+	metadata["github_context_reference"] = repositoryReference
+	return remote.Revision, nil
 }
 
 // UpdateContextMetadata lets an operator refine the human-owned project map

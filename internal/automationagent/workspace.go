@@ -1476,9 +1476,10 @@ func DeliveryWorkspaceContext(delivery json.RawMessage, lookup func(string) stri
 			IncludedScope   []string `json:"included_scope"`
 		} `json:"work_item"`
 		ContextSources []struct {
-			Kind      string `json:"kind"`
-			Reference string `json:"reference"`
-			Revision  string `json:"revision"`
+			Kind      string         `json:"kind"`
+			Reference string         `json:"reference"`
+			Revision  string         `json:"revision"`
+			Metadata  map[string]any `json:"metadata"`
 		} `json:"context_sources"`
 	}
 	if err := json.Unmarshal(delivery, &value); err != nil {
@@ -1501,6 +1502,9 @@ func DeliveryWorkspaceContext(delivery json.RawMessage, lookup func(string) stri
 		state := ReadWorkspaceGitState(workspace)
 		if state.Available && state.HasLocalChanges {
 			return nil, fmt.Errorf("workspace %s has local changes; commit, stash, or register an immutable checkpoint before running Delivery", workspace.ID)
+		}
+		if err := verifyDeliveryWorkspaceBinding(workspace, state, source.Metadata); err != nil {
+			return nil, err
 		}
 		// The work item freezes the exact source revision before any provider
 		// call. A local workspace can move after that snapshot (or be registered
@@ -1540,9 +1544,10 @@ func DeliveryWorkspaceContext(delivery json.RawMessage, lookup func(string) stri
 func PrepareDeliveryWorkspaces(ctx context.Context, delivery json.RawMessage, lookup func(string) string) error {
 	var value struct {
 		ContextSources []struct {
-			Kind      string `json:"kind"`
-			Reference string `json:"reference"`
-			Revision  string `json:"revision"`
+			Kind      string         `json:"kind"`
+			Reference string         `json:"reference"`
+			Revision  string         `json:"revision"`
+			Metadata  map[string]any `json:"metadata"`
 		} `json:"context_sources"`
 	}
 	if err := json.Unmarshal(delivery, &value); err != nil {
@@ -1578,9 +1583,34 @@ func PrepareDeliveryWorkspaces(ctx context.Context, delivery json.RawMessage, lo
 		if err != nil {
 			return fmt.Errorf("workspace %s could not synchronize its managed base before Delivery: %w", workspace.ID, err)
 		}
+		if err := verifyDeliveryWorkspaceBinding(workspace, state, source.Metadata); err != nil {
+			return err
+		}
 		if !strings.EqualFold(state.HeadSHA, expected) {
 			return fmt.Errorf("workspace %s fetched origin has advanced beyond the frozen context revision; refresh the project checkpoint and replan", workspace.ID)
 		}
+	}
+	return nil
+}
+
+// verifyDeliveryWorkspaceBinding protects workspaces that were declared from
+// the control plane for a separately hosted runner. A task may name any
+// workspace:// identifier, so a runner must independently prove that its
+// checkout belongs to the GitHub repository frozen in the Delivery context.
+// Older local-only workspaces omit github_repository and retain their legacy
+// behavior; every remote-agent binding is fail-closed.
+func verifyDeliveryWorkspaceBinding(workspace Workspace, state WorkspaceGitState, metadata map[string]any) error {
+	rawExpected, declared := metadata["github_repository"].(string)
+	if !declared || strings.TrimSpace(rawExpected) == "" {
+		return nil
+	}
+	expected := strings.Trim(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(rawExpected)), "github://"), "/")
+	actual := strings.Trim(strings.ToLower(strings.TrimSpace(state.GitHubRepository)), "/")
+	if actual == "" {
+		return fmt.Errorf("workspace %s cannot verify the GitHub identity required by its frozen Delivery context", workspace.ID)
+	}
+	if actual != expected {
+		return fmt.Errorf("workspace %s GitHub identity does not match the frozen Delivery context", workspace.ID)
 	}
 	return nil
 }

@@ -37,6 +37,21 @@ func TestLoadWorkspacesProvidesBoundedSecretFreeContext(t *testing.T) {
 	}
 }
 
+func TestVerifyDeliveryWorkspaceBindingRejectsMismatchedGitHubIdentity(t *testing.T) {
+	workspace := Workspace{ID: "backend"}
+	state := WorkspaceGitState{Available: true, GitHubRepository: "Itbem-Corp/itbem-events-backend"}
+	metadata := map[string]any{"github_repository": "Itbem-Corp/itbem-events-backend"}
+	if err := verifyDeliveryWorkspaceBinding(workspace, state, metadata); err != nil {
+		t.Fatalf("matching remote-agent binding rejected: %v", err)
+	}
+	if err := verifyDeliveryWorkspaceBinding(workspace, state, map[string]any{"github_repository": "Itbem-Corp/other"}); err == nil {
+		t.Fatal("mismatched remote-agent binding was accepted")
+	}
+	if err := verifyDeliveryWorkspaceBinding(workspace, WorkspaceGitState{Available: true}, metadata); err == nil {
+		t.Fatal("binding without an observable GitHub identity was accepted")
+	}
+}
+
 func TestGitHubInstallationWorkspaceCommandsDisableCredentialHelpers(t *testing.T) {
 	config := []string{"-c", "credential.helper=", "-c", "http.proxy=", "-c", "http.sslVerify=true", "-c", "http.extraHeader="}
 	if got, want := gitWorkspaceFetchArguments("https://github.com/acme/service.git", true), append(append([]string{}, config...), "fetch", "--prune", "--tags", "--no-recurse-submodules", "https://github.com/acme/service.git", "+refs/heads/*:refs/remotes/origin/*"); !reflect.DeepEqual(got, want) {
