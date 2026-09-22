@@ -201,6 +201,25 @@ func TestReadGitHubPullRequestStateReturnsOnlyAValidOpenCurrentPR(t *testing.T) 
 	}
 }
 
+func TestReadGitHubPullRequestStateAcceptsNormalLargeGitHubRepresentation(t *testing.T) {
+	head := strings.Repeat("c", 40)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		// GitHub returns PR body and metadata together. Keep the large body ahead
+		// of head in JSON so this catches a response cap that truncates decoding.
+		_ = json.NewEncoder(response).Encode(map[string]any{
+			"body":  strings.Repeat("x", 40<<10),
+			"draft": false,
+			"head":  map[string]string{"sha": head},
+			"state": "open",
+		})
+	}))
+	defer server.Close()
+	actual, err := ReadGitHubPullRequestState(context.Background(), GitHubAppConfig{APIBaseURL: server.URL}, "ephemeral", "itbem/backend", 42)
+	if err != nil || actual.HeadSHA != head || !actual.Open {
+		t.Fatalf("large GitHub PR representation must remain reviewable: %#v / %v", actual, err)
+	}
+}
+
 func TestGitHubPullRequestStateKeepsClosedDraftOrMergedDeliveryOutOfReview(t *testing.T) {
 	head := strings.Repeat("b", 40)
 	for name, payload := range map[string]map[string]any{
