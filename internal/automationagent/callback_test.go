@@ -142,6 +142,39 @@ func TestHTTPCallbackHeartbeatSendsOnlyWorkerLivenessMetadata(t *testing.T) {
 	}
 }
 
+func TestHTTPCallbackWorkspaceAttestationUsesDedicatedAuthenticatedPath(t *testing.T) {
+	t.Parallel()
+	var received WorkspaceAttestationReport
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPut || request.URL.Path != "/api/internal/automation/agents/workspace-attestations" {
+			t.Fatalf("unexpected attestation request: %s %s", request.Method, request.URL.Path)
+		}
+		if request.Header.Get("X-Automation-Secret") != "test-secret" || request.Header.Get("X-Agent-Role") != "reviewer" || request.Header.Get("X-Agent-Lane") != "review" {
+			t.Fatal("attestation callback did not bind the authenticated lane")
+		}
+		if err := json.NewDecoder(request.Body).Decode(&received); err != nil {
+			t.Fatalf("decode attestation: %v", err)
+		}
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	callback, err := NewHTTPCallback(server.URL, "test-secret", server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	callback.BindIdentity("reviewer", "review")
+	report := WorkspaceAttestationReport{WorkerID: "a69b7f51-58b9-4f0e-aef3-1fbc23f79826", Attestations: []WorkspaceAttestation{{
+		ID: "backend", Available: true, GitHubRepository: "itbem-corp/itbem-events-backend", HeadSHA: "0123456789012345678901234567890123456789", Branch: "main", Clean: true,
+		Capabilities: []string{WorkspaceCapabilityReadRepository},
+	}}}
+	if err := callback.WorkspaceAttestations(context.Background(), report); err != nil {
+		t.Fatalf("workspace attestation: %v", err)
+	}
+	if !reflect.DeepEqual(received, report) {
+		t.Fatalf("attestation = %#v, want %#v", received, report)
+	}
+}
+
 func mustMarshal(t *testing.T, value any) []byte {
 	t.Helper()
 	body, err := json.Marshal(value)

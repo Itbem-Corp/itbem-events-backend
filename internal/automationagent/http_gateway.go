@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +19,102 @@ import (
 type gatewayLeaseContextKey struct{}
 
 const gatewayMaxResponseBytes = ((maxInputBytes + 2) / 3 * 4) + (64 << 10)
+
+const (
+	gatewayRetryMinimumDelay = time.Second
+	gatewayRetryDefaultDelay = 5 * time.Second
+	gatewayRetryMaximumDelay = time.Minute
+)
+
+// gatewayRequestError preserves the status boundary between the local worker
+// and its control plane. Only transport failures and explicitly transient HTTP
+// responses return a positive RetryDelay; authentication, authorization and
+// request validation errors intentionally remain terminal to the worker
+// process.
+type gatewayRequestError struct {
+	statusCode int
+	operation  string
+	diagnostic string
+	cause      error
+	retryAfter time.Duration
+}
+
+func (e *gatewayRequestError) Error() string {
+	if e.statusCode != 0 {
+		if e.operation != "" {
+			if e.diagnostic != "" {
+				return fmt.Sprintf("agent gateway rejected %s (%d; %s)", e.operation, e.statusCode, e.diagnostic)
+			}
+			return fmt.Sprintf("agent gateway rejected %s (%d)", e.operation, e.statusCode)
+		}
+		return fmt.Sprintf("agent gateway rejected request (%d)", e.statusCode)
+	}
+	if e.operation != "" {
+		return fmt.Sprintf("agent gateway %s request failed: %v", e.operation, e.cause)
+	}
+	return fmt.Sprintf("agent gateway request failed: %v", e.cause)
+}
+
+func (e *gatewayRequestError) Unwrap() error { return e.cause }
+
+// gatewayRejectedError preserves a non-retryable HTTP status for callers that
+// must make a narrowly scoped decision about a denied capability. It is kept
+// separate from gatewayRequestError so an authorization or validation failure
+// can never enter the queue retry path.
+type gatewayRejectedError struct{ statusCode int }
+
+func (e *gatewayRejectedError) Error() string {
+	return fmt.Sprintf("agent gateway rejected request (%d)", e.statusCode)
+}
+
+type gatewayStatusError interface{ GatewayStatusCode() int }
+
+func (e *gatewayRequestError) GatewayStatusCode() int { return e.statusCode }
+
+func (e *gatewayRejectedError) GatewayStatusCode() int { return e.statusCode }
+
+func gatewayResponseStatus(err error) (int, bool) {
+	var statusError gatewayStatusError
+	if !errors.As(err, &statusError) || statusError.GatewayStatusCode() < 100 {
+		return 0, false
+	}
+	return statusError.GatewayStatusCode(), true
+}
+
+// RetryDelay is deliberately absent from permanent gateway errors. RunQueue
+// uses this small interface instead of treating every receive error as safe to
+// retry, so a revoked token or an invalid lane cannot spin silently forever.
+func (e *gatewayRequestError) RetryDelay() time.Duration {
+	if !gatewayResponseIsTransient(e.statusCode) {
+		return 0
+	}
+	if e.retryAfter < gatewayRetryMinimumDelay {
+		return gatewayRetryMinimumDelay
+	}
+	if e.retryAfter > gatewayRetryMaximumDelay {
+		return gatewayRetryMaximumDelay
+	}
+	return e.retryAfter
+}
+
+func gatewayResponseIsTransient(statusCode int) bool {
+	return statusCode == 0 || statusCode == http.StatusRequestTimeout || statusCode == http.StatusTooManyRequests || statusCode >= 500
+}
+
+func gatewayRetryAfter(headers http.Header, now time.Time) time.Duration {
+	delay := gatewayRetryDefaultDelay
+	raw := strings.TrimSpace(headers.Get("Retry-After"))
+	if raw == "" {
+		return delay
+	}
+	if seconds, err := strconv.Atoi(raw); err == nil {
+		return time.Duration(seconds) * time.Second
+	}
+	if deadline, err := http.ParseTime(raw); err == nil {
+		return deadline.Sub(now)
+	}
+	return delay
+}
 
 type HTTPGateway struct {
 	baseURL string
@@ -40,6 +138,7 @@ func NewHTTPGateway(baseURL, token string, role agentwork.Role, lane agentwork.L
 }
 
 func (g *HTTPGateway) request(ctx context.Context, method, path string, input any, output any) error {
+	operation := gatewayOperation(path)
 	var body io.Reader
 	if input != nil {
 		encoded, err := json.Marshal(input)
@@ -60,11 +159,17 @@ func (g *HTTPGateway) request(ctx context.Context, method, path string, input an
 	req.Header.Set("X-Agent-Lane", string(g.lane))
 	response, err := g.client.Do(req)
 	if err != nil {
+		if ctx.Err() == nil {
+			return &gatewayRequestError{operation: operation, cause: err, retryAfter: gatewayRetryDefaultDelay}
+		}
 		return fmt.Errorf("agent gateway request failed: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("agent gateway rejected request (%d)", response.StatusCode)
+		if gatewayResponseIsTransient(response.StatusCode) || response.StatusCode == http.StatusNotFound {
+			return &gatewayRequestError{statusCode: response.StatusCode, operation: operation, diagnostic: gatewayDiagnostic(response.Header), retryAfter: gatewayRetryAfter(response.Header, time.Now().UTC())}
+		}
+		return &gatewayRejectedError{statusCode: response.StatusCode}
 	}
 	if output == nil || response.StatusCode == http.StatusNoContent {
 		return nil
@@ -73,6 +178,38 @@ func (g *HTTPGateway) request(ctx context.Context, method, path string, input an
 		return fmt.Errorf("decode agent gateway response: %w", err)
 	}
 	return nil
+}
+
+func gatewayDiagnostic(headers http.Header) string {
+	// This must match the server allow-list. Refusing unrecognized values keeps
+	// an intermediary from reflecting a sensitive diagnostic into local logs.
+	switch value := strings.TrimSpace(headers.Get("X-ITBEM-Gateway-Storage-Failure")); value {
+	case "authorization", "region", "transient", "unclassified":
+		return "storage=" + value
+	default:
+		return ""
+	}
+}
+
+// gatewayOperation returns a stable, non-sensitive operation label.  It is
+// intended for local worker diagnostics: paths contain no caller-controlled
+// data, but keeping a small allow-list ensures neither object references nor
+// sealed lease tokens can ever be echoed into a journal.
+func gatewayOperation(path string) string {
+	switch path {
+	case "/api/internal/automation/gateway/probe":
+		return "probe"
+	case "/api/internal/automation/gateway/leases":
+		return "lease"
+	case "/api/internal/automation/gateway/leases/visibility":
+		return "lease visibility"
+	case "/api/internal/automation/gateway/objects/read":
+		return "object read"
+	case "/api/internal/automation/gateway/objects/write":
+		return "object write"
+	default:
+		return "request"
+	}
 }
 
 func (g *HTTPGateway) Probe(ctx context.Context) error {
@@ -137,6 +274,10 @@ func (g *HTTPGateway) Get(ctx context.Context, bucket, key string) ([]byte, erro
 		} `json:"data"`
 	}
 	if err := g.request(ctx, http.MethodPost, "/api/internal/automation/gateway/objects/read", map[string]any{"lease_token": lease, "reference": "s3://" + bucket + "/" + key}, &response); err != nil {
+		var gatewayErr *gatewayRequestError
+		if errors.As(err, &gatewayErr) && gatewayErr.statusCode == http.StatusNotFound {
+			return nil, ErrObjectNotFound
+		}
 		return nil, err
 	}
 	body, err := base64.StdEncoding.DecodeString(response.Data.Body)

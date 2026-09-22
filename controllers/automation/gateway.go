@@ -2,6 +2,7 @@ package automation
 
 import (
 	"bytes"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
@@ -10,6 +11,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,6 +29,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 	"github.com/gofrs/uuid"
 	"github.com/labstack/echo/v4"
 )
@@ -36,6 +39,16 @@ const (
 	// prevents a sealed lease copied from worker memory becoming permanent.
 	gatewayLeaseLifetime  = 13 * time.Hour
 	gatewayMaxObjectBytes = 10 << 20
+	// Keep review-lease repair below the agent's gateway timeout. The normal
+	// lease call also long-polls SQS, so an unbounded GitHub/S3 repair here can
+	// make a healthy reviewer time out before it receives queued work.
+	gatewayReviewLeaseReconciliationTimeout = 5 * time.Second
+	// gatewayStorageFailureHeader is deliberately a small, stable diagnostic
+	// surface. It lets a locally operated worker distinguish a recoverable
+	// control-plane storage failure from a broken task without disclosing an
+	// object key, bucket, AWS request id, credential, or provider response.
+	gatewayStorageFailureHeader = "X-ITBEM-Gateway-Storage-Failure"
+	gatewayObjectClientTimeout  = 10 * time.Second
 )
 
 type gatewayIdentity struct {
@@ -60,6 +73,18 @@ type gatewayLeaseRequest struct {
 type gatewayLeaseMessage struct {
 	Body       string `json:"body"`
 	LeaseToken string `json:"lease_token"`
+}
+
+// gatewayObjectClient is deliberately scoped to the validated target bucket.
+// Media storage and private automation storage may be in separate AWS regions;
+// using the media client's signing region here can make a valid sealed task
+// look like a storage outage. The gateway still validates the lease, bucket
+// and task prefix before this helper is reached.
+func gatewayObjectClient(ctx context.Context, cfg *models.Config, bucket string) (*s3.Client, error) {
+	ctx, cancel := context.WithTimeout(ctx, gatewayObjectClientTimeout)
+	defer cancel()
+	client, _, err := configuration.BuildS3ClientForWorkloadIdentityBucket(ctx, cfg, bucket)
+	return client, err
 }
 
 type gatewayVisibilityRequest struct {
@@ -196,6 +221,18 @@ func GatewayLease(c echo.Context) error {
 	if request.Limit < 1 || request.Limit > 10 {
 		return utils.Error(c, http.StatusBadRequest, "Invalid lease request", "")
 	}
+	if identity.Role == agentwork.RoleReviewer && identity.Lane == agentwork.LaneReview {
+		// Lost worker leases are repaired only after revalidating the immutable
+		// GitHub subject. Keep this best-effort maintenance separate from the
+		// normal lease path: a transient GitHub or storage outage must never
+		// prevent a healthy Reviewer from processing already-queued work. The
+		// bounded child context leaves enough of the request budget for SQS's
+		// long poll, while preserving best-effort expired-lease recovery.
+		cfg, _ := c.Get("config").(*models.Config)
+		reconcileCtx, cancel := context.WithTimeout(c.Request().Context(), gatewayReviewLeaseReconciliationTimeout)
+		_, _ = reconcileOneExpiredGitHubReviewLease(reconcileCtx, cfg, time.Now().UTC())
+		cancel()
+	}
 	messages, err := automationqueue.ReceiveLane(c.Request().Context(), identity.Lane, request.Limit)
 	if err != nil {
 		return utils.Error(c, http.StatusServiceUnavailable, "Automation queue unavailable", "")
@@ -265,9 +302,14 @@ func validateGatewayObject(lease gatewayLease, cfg *models.Config, reference str
 	if err != nil {
 		return "", "", false
 	}
-	if !write {
-		return bucket, key, subtle.ConstantTimeCompare([]byte(reference), []byte(lease.InputRef)) == 1 && inputReferenceMatches(cfg, reference)
+	if !write && subtle.ConstantTimeCompare([]byte(reference), []byte(lease.InputRef)) == 1 && inputReferenceMatches(cfg, reference) {
+		return bucket, key, true
 	}
+	// A worker may resume or deduplicate work only from evidence already scoped
+	// to the exact task in its sealed lease.  In particular, code review reads
+	// its checkpoint before it can decide whether to call the provider again.
+	// Keep the input immutable and exact, while allowing neither reads nor
+	// writes to escape this task's private output namespace.
 	taskID, err := uuid.FromString(lease.TaskID)
 	if err != nil || cfg == nil || subtle.ConstantTimeCompare([]byte(bucket), []byte(strings.TrimSpace(cfg.AutomationOutputBucket))) != 1 {
 		return "", "", false
@@ -295,12 +337,16 @@ func GatewayReadObject(c echo.Context) error {
 	if !valid {
 		return utils.Error(c, http.StatusForbidden, "Object outside task lease", "")
 	}
-	client := configuration.GetS3Client(nil)
-	if client == nil {
+	client, err := gatewayObjectClient(c.Request().Context(), cfg, bucket)
+	if err != nil || client == nil {
 		return utils.Error(c, http.StatusServiceUnavailable, "Storage unavailable", "")
 	}
 	response, err := client.GetObject(c.Request().Context(), &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
 	if err != nil {
+		if gatewayObjectMissing(err) {
+			return utils.Error(c, http.StatusNotFound, "Object not found", "")
+		}
+		c.Response().Header().Set(gatewayStorageFailureHeader, gatewayStorageFailureCode(err))
 		return utils.Error(c, http.StatusServiceUnavailable, "Storage unavailable", "")
 	}
 	defer response.Body.Close()
@@ -309,6 +355,44 @@ func GatewayReadObject(c echo.Context) error {
 		return utils.Error(c, http.StatusRequestEntityTooLarge, "Object unavailable", "")
 	}
 	return utils.Success(c, http.StatusOK, "Automation object read", map[string]any{"body": base64.StdEncoding.EncodeToString(body)})
+}
+
+func gatewayObjectMissing(err error) bool {
+	var noSuchKey *s3types.NoSuchKey
+	if errors.As(err, &noSuchKey) {
+		return true
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		switch strings.ToLower(strings.TrimSpace(apiErr.ErrorCode())) {
+		case "notfound", "nosuchkey", "nosuchobject":
+			return true
+		}
+	}
+	var statusErr interface{ HTTPStatusCode() int }
+	return errors.As(err, &statusErr) && statusErr.HTTPStatusCode() == http.StatusNotFound
+}
+
+// gatewayStorageFailureCode normalizes only operator-actionable storage error
+// classes. It must never return a raw SDK error because this response is
+// consumed outside the trusted backend process.
+func gatewayStorageFailureCode(err error) string {
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		switch strings.ToLower(strings.TrimSpace(apiErr.ErrorCode())) {
+		case "accessdenied", "invalidaccesskeyid", "signaturedoesnotmatch", "expiredtoken":
+			return "authorization"
+		case "authorizationheadermalformed", "permanentredirect", "incorrectendpoint":
+			return "region"
+		case "requesttimeout", "slowdown", "serviceunavailable", "internalerror":
+			return "transient"
+		}
+	}
+	var statusErr interface{ HTTPStatusCode() int }
+	if errors.As(err, &statusErr) && statusErr.HTTPStatusCode() >= http.StatusInternalServerError {
+		return "transient"
+	}
+	return "unclassified"
 }
 
 func GatewayWriteObject(c echo.Context) error {
@@ -338,8 +422,8 @@ func GatewayWriteObject(c echo.Context) error {
 	if contentType == "" || len(contentType) > 128 || strings.ContainsAny(contentType, "\r\n") {
 		contentType = "application/octet-stream"
 	}
-	client := configuration.GetS3Client(nil)
-	if client == nil {
+	client, err := gatewayObjectClient(c.Request().Context(), cfg, bucket)
+	if err != nil || client == nil {
 		return utils.Error(c, http.StatusServiceUnavailable, "Storage unavailable", "")
 	}
 	_, err = client.PutObject(c.Request().Context(), &s3.PutObjectInput{Bucket: aws.String(bucket), Key: aws.String(key), Body: bytes.NewReader(body), ContentLength: aws.Int64(int64(len(body))), ContentType: aws.String(contentType), ServerSideEncryption: s3types.ServerSideEncryptionAes256})

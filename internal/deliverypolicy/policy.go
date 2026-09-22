@@ -39,6 +39,21 @@ const (
 	ModeRelease    DeliveryMode = "release"
 )
 
+// GateApprovalMode determines who may record a delivery gate after the
+// project's policy itself has been approved by a human owner. It is separate
+// from DeliveryMode: a project may be allowed to merge or release while still
+// requiring a human decision for every individual work item.
+//
+// Delegated mode never grants an engineer approval authority. The control
+// plane must still require evidence from the independent reviewer, QA and
+// deterministic release Gatekeeper before it advances a gate.
+type GateApprovalMode string
+
+const (
+	GateApprovalHuman     GateApprovalMode = "human"
+	GateApprovalDelegated GateApprovalMode = "delegated"
+)
+
 type Context struct {
 	OrganizationID string `json:"organization_id"`
 	ProjectID      string `json:"project_id"`
@@ -50,17 +65,18 @@ type Context struct {
 // list can deliberately configure a review-only project with no test runner.
 // Safety floors are not fields: no layer can disable them.
 type Patch struct {
-	Mode                       *DeliveryMode `json:"mode,omitempty"`
-	RequiredTestKinds          *[]string     `json:"required_test_kinds,omitempty"`
-	AllowedTargetBranches      *[]string     `json:"allowed_target_branches,omitempty"`
-	MergeMethod                *string       `json:"merge_method,omitempty"`
-	DeploymentWorkflow         *string       `json:"deployment_workflow,omitempty"`
-	DeploymentEnvironment      *string       `json:"deployment_environment,omitempty"`
-	RequiredSecretReferences   *[]string     `json:"required_secret_references,omitempty"`
-	RequiredVariableReferences *[]string     `json:"required_variable_references,omitempty"`
-	RequiredHealthChecks       *[]string     `json:"required_health_checks,omitempty"`
-	RequiredPostMergeChecks    *[]string     `json:"required_post_merge_checks,omitempty"`
-	RecoveryDefault            *string       `json:"recovery_default,omitempty"`
+	Mode                       *DeliveryMode     `json:"mode,omitempty"`
+	GateApprovalMode           *GateApprovalMode `json:"gate_approval_mode,omitempty"`
+	RequiredTestKinds          *[]string         `json:"required_test_kinds,omitempty"`
+	AllowedTargetBranches      *[]string         `json:"allowed_target_branches,omitempty"`
+	MergeMethod                *string           `json:"merge_method,omitempty"`
+	DeploymentWorkflow         *string           `json:"deployment_workflow,omitempty"`
+	DeploymentEnvironment      *string           `json:"deployment_environment,omitempty"`
+	RequiredSecretReferences   *[]string         `json:"required_secret_references,omitempty"`
+	RequiredVariableReferences *[]string         `json:"required_variable_references,omitempty"`
+	RequiredHealthChecks       *[]string         `json:"required_health_checks,omitempty"`
+	RequiredPostMergeChecks    *[]string         `json:"required_post_merge_checks,omitempty"`
+	RecoveryDefault            *string           `json:"recovery_default,omitempty"`
 }
 
 // Layer is an immutable policy content revision plus trusted approval
@@ -108,24 +124,25 @@ type Source struct {
 }
 
 type ResolvedPolicy struct {
-	SchemaVersion              int          `json:"schema_version"`
-	Context                    Context      `json:"context"`
-	Mode                       DeliveryMode `json:"mode,omitempty"`
-	RequiredTestKinds          []string     `json:"required_test_kinds"`
-	AllowedTargetBranches      []string     `json:"allowed_target_branches"`
-	MergeMethod                string       `json:"merge_method,omitempty"`
-	DeploymentWorkflow         string       `json:"deployment_workflow,omitempty"`
-	DeploymentEnvironment      string       `json:"deployment_environment,omitempty"`
-	RequiredSecretReferences   []string     `json:"required_secret_references"`
-	RequiredVariableReferences []string     `json:"required_variable_references"`
-	RequiredHealthChecks       []string     `json:"required_health_checks"`
-	RequiredPostMergeChecks    []string     `json:"required_post_merge_checks"`
-	RecoveryDefault            string       `json:"recovery_default,omitempty"`
-	Safety                     SafetyFloor  `json:"safety"`
-	Sources                    []Source     `json:"sources"`
-	Resolved                   bool         `json:"resolved"`
-	Missing                    []string     `json:"missing"`
-	Digest                     string       `json:"digest"`
+	SchemaVersion              int              `json:"schema_version"`
+	Context                    Context          `json:"context"`
+	Mode                       DeliveryMode     `json:"mode,omitempty"`
+	GateApprovalMode           GateApprovalMode `json:"gate_approval_mode"`
+	RequiredTestKinds          []string         `json:"required_test_kinds"`
+	AllowedTargetBranches      []string         `json:"allowed_target_branches"`
+	MergeMethod                string           `json:"merge_method,omitempty"`
+	DeploymentWorkflow         string           `json:"deployment_workflow,omitempty"`
+	DeploymentEnvironment      string           `json:"deployment_environment,omitempty"`
+	RequiredSecretReferences   []string         `json:"required_secret_references"`
+	RequiredVariableReferences []string         `json:"required_variable_references"`
+	RequiredHealthChecks       []string         `json:"required_health_checks"`
+	RequiredPostMergeChecks    []string         `json:"required_post_merge_checks"`
+	RecoveryDefault            string           `json:"recovery_default,omitempty"`
+	Safety                     SafetyFloor      `json:"safety"`
+	Sources                    []Source         `json:"sources"`
+	Resolved                   bool             `json:"resolved"`
+	Missing                    []string         `json:"missing"`
+	Digest                     string           `json:"digest"`
 	explicitTests              bool
 	explicitBranches           bool
 	explicitSecretReferences   bool
@@ -185,7 +202,7 @@ func Resolve(context Context, layers []Layer, now time.Time) (ResolvedPolicy, er
 		return ResolvedPolicy{}, fmt.Errorf("delivery policy context is invalid")
 	}
 	result := ResolvedPolicy{
-		SchemaVersion: SchemaVersion, Context: normalizedContext, Safety: safetyFloor(),
+		SchemaVersion: SchemaVersion, Context: normalizedContext, Safety: safetyFloor(), GateApprovalMode: GateApprovalHuman,
 		RequiredTestKinds: []string{}, AllowedTargetBranches: []string{}, RequiredHealthChecks: []string{},
 		RequiredSecretReferences: []string{}, RequiredVariableReferences: []string{},
 		RequiredPostMergeChecks: []string{}, Sources: []Source{}, Missing: []string{},
@@ -275,6 +292,9 @@ func validateLayer(context Context, layer Layer, now time.Time) error {
 	if err := validatePatch(layer.Patch); err != nil {
 		return fmt.Errorf("delivery policy %s layer: %w", layer.Level, err)
 	}
+	if layer.Patch.GateApprovalMode != nil && *layer.Patch.GateApprovalMode == GateApprovalDelegated && layer.Level == LevelOverride {
+		return fmt.Errorf("delivery policy override cannot delegate gate approval")
+	}
 	organizationID, projectID := strings.TrimSpace(layer.OrganizationID), strings.TrimSpace(layer.ProjectID)
 	repository, changeSetID := strings.TrimSpace(layer.Repository), strings.TrimSpace(layer.ChangeSetID)
 	switch layer.Level {
@@ -318,6 +338,9 @@ func validatePatch(patch Patch) error {
 	if patch.Mode != nil && *patch.Mode != ModeReviewOnly && *patch.Mode != ModeMerge && *patch.Mode != ModeRelease {
 		return fmt.Errorf("delivery mode is invalid")
 	}
+	if patch.GateApprovalMode != nil && *patch.GateApprovalMode != GateApprovalHuman && *patch.GateApprovalMode != GateApprovalDelegated {
+		return fmt.Errorf("gate approval mode is invalid")
+	}
 	if patch.RequiredTestKinds != nil && !validIdentifiers(*patch.RequiredTestKinds, true) {
 		return fmt.Errorf("required test kinds are invalid")
 	}
@@ -360,6 +383,9 @@ func validatePatch(patch Patch) error {
 func applyPatch(policy *ResolvedPolicy, patch Patch) {
 	if patch.Mode != nil {
 		policy.Mode = *patch.Mode
+	}
+	if patch.GateApprovalMode != nil {
+		policy.GateApprovalMode = *patch.GateApprovalMode
 	}
 	if patch.RequiredTestKinds != nil {
 		policy.RequiredTestKinds = append([]string(nil), (*patch.RequiredTestKinds)...)
@@ -452,6 +478,10 @@ func canonicalPatch(patch Patch) Patch {
 	if patch.Mode != nil {
 		value := DeliveryMode(strings.TrimSpace(string(*patch.Mode)))
 		clone.Mode = &value
+	}
+	if patch.GateApprovalMode != nil {
+		value := GateApprovalMode(strings.ToLower(strings.TrimSpace(string(*patch.GateApprovalMode))))
+		clone.GateApprovalMode = &value
 	}
 	if patch.MergeMethod != nil {
 		value := strings.ToLower(strings.TrimSpace(*patch.MergeMethod))

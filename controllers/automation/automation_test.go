@@ -1,10 +1,12 @@
 package automation
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"events-stocks/configuration"
 	"events-stocks/internal/automationagent"
 	"events-stocks/internal/environmentevidence"
 	"events-stocks/internal/projectvault"
@@ -12,6 +14,7 @@ import (
 	"events-stocks/internal/releasegate"
 	"events-stocks/models"
 	"events-stocks/repositories/automationqueuerepository"
+	"events-stocks/services/deliveryworkflow"
 	"fmt"
 	"io"
 	"net/http"
@@ -403,6 +406,201 @@ func TestRetryCodeReviewIsNarrowAndPreservesTheFrozenInputBoundary(t *testing.T)
 	}
 }
 
+func TestStrandedGitHubReviewRecoveryPreservesOnlyAnUnclaimedImmutableBoundary(t *testing.T) {
+	now := time.Now().UTC()
+	digest := strings.Repeat("a", 64)
+	original := &models.AutomationTask{
+		ID: uuid.Must(uuid.NewV4()), JobID: uuid.Must(uuid.NewV4()), RequestedBy: "github-app-review",
+		CorrelationID: "github-pr:subject:head", Operation: "code.review", Status: "queued", EvidenceSubjectDigest: digest,
+		MaxCompletionTokens: 4096, InputRef: "s3://itbem-ai-inputs-local/automation/inputs/original/input.json",
+		CreatedAt: now.Add(-githubReviewRecoveryDelay),
+	}
+	if !recoverableQueuedGitHubReview(original, now) {
+		t.Fatal("an aged, unclaimed GitHub review should be recoverable")
+	}
+	recovery, err := newStrandedGitHubReviewRecovery(original, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovery.ID == original.ID || recovery.JobID == original.JobID || recovery.Status != "queued" || recovery.InputRef != original.InputRef || recovery.EvidenceSubjectDigest != digest || recovery.CorrelationID != original.CorrelationID || recovery.RequestedBy != original.RequestedBy || recovery.MaxCompletionTokens != original.MaxCompletionTokens {
+		t.Fatalf("recovery did not preserve the immutable review boundary: %#v", recovery)
+	}
+	for _, mutate := range []func(*models.AutomationTask){
+		func(task *models.AutomationTask) { task.AttemptCount = 1 },
+		func(task *models.AutomationTask) { task.Status = "running" },
+		func(task *models.AutomationTask) {
+			task.CreatedAt = now.Add(-githubReviewRecoveryDelay + time.Nanosecond)
+		},
+		func(task *models.AutomationTask) { task.RequestedBy = "operator" },
+		func(task *models.AutomationTask) { task.EvidenceSubjectDigest = "invalid" },
+	} {
+		candidate := *original
+		mutate(&candidate)
+		if recoverableQueuedGitHubReview(&candidate, now) {
+			t.Fatalf("unexpected recovery eligibility: %#v", candidate)
+		}
+		if _, err := newStrandedGitHubReviewRecovery(&candidate, now); err == nil {
+			t.Fatalf("invalid recovery boundary was accepted: %#v", candidate)
+		}
+	}
+}
+
+func TestExpiredGitHubReviewLeaseRecoveryIsBoundedAndPreservesExactReviewSubject(t *testing.T) {
+	now := time.Now().UTC()
+	digest := strings.Repeat("a", 64)
+	expiredLease := now.Add(-time.Second)
+	original := &models.AutomationTask{
+		ID:                    uuid.Must(uuid.NewV4()),
+		JobID:                 uuid.Must(uuid.NewV4()),
+		RequestedBy:           "github-app-review",
+		CorrelationID:         "github-pr:subject:head",
+		Operation:             "code.review",
+		Status:                "running",
+		AttemptCount:          1,
+		EvidenceSubjectDigest: digest,
+		MaxCompletionTokens:   4096,
+		InputRef:              "s3://itbem-ai-inputs-local/automation/inputs/original/input.json",
+		LeaseExpiresAt:        &expiredLease,
+	}
+	if !recoverableExpiredGitHubReviewLease(original, now) {
+		t.Fatal("an expired, claimed GitHub review with no completion should be recoverable once")
+	}
+	recovery, err := newExpiredGitHubReviewLeaseRecovery(original, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovery.ID == original.ID || recovery.JobID == original.JobID || recovery.Status != "queued" || recovery.AttemptCount != original.AttemptCount || recovery.InputRef != original.InputRef || recovery.EvidenceSubjectDigest != digest || recovery.CorrelationID != original.CorrelationID || recovery.RequestedBy != original.RequestedBy || recovery.MaxCompletionTokens != original.MaxCompletionTokens {
+		t.Fatalf("lease recovery did not preserve the immutable review boundary: %#v", recovery)
+	}
+	message := codeReviewRetryQueueMessage(original, recovery)
+	if message.Payload.RetryOfTaskID != original.ID.String() || message.Payload.TaskID != recovery.ID.String() || message.Payload.InputRef != original.InputRef || message.Payload.Operation != "code.review" || message.Payload.Attempt != original.AttemptCount+1 {
+		t.Fatalf("lease recovery queue message was not bounded to its original review: %#v", message)
+	}
+	for _, mutate := range []func(*models.AutomationTask){
+		func(task *models.AutomationTask) { task.Status = "queued" },
+		func(task *models.AutomationTask) { task.LeaseExpiresAt = nil },
+		func(task *models.AutomationTask) { future := now.Add(time.Second); task.LeaseExpiresAt = &future },
+		func(task *models.AutomationTask) { task.AttemptCount = githubReviewLeaseRecoveryMaximumAttempts },
+		func(task *models.AutomationTask) { completed := now; task.CompletedAt = &completed },
+		func(task *models.AutomationTask) { task.RequestedBy = "operator" },
+		func(task *models.AutomationTask) { task.EvidenceSubjectDigest = "invalid" },
+	} {
+		candidate := *original
+		mutate(&candidate)
+		if recoverableExpiredGitHubReviewLease(&candidate, now) {
+			t.Fatalf("unexpected expired-lease recovery eligibility: %#v", candidate)
+		}
+		if _, err := newExpiredGitHubReviewLeaseRecovery(&candidate, now); err == nil {
+			t.Fatalf("invalid expired-lease recovery boundary was accepted: %#v", candidate)
+		}
+	}
+	exhausted := *original
+	exhausted.AttemptCount = githubReviewLeaseRecoveryMaximumAttempts
+	if recoverableExpiredGitHubReviewLease(&exhausted, now) || !exhaustedExpiredGitHubReviewLease(&exhausted, now) {
+		t.Fatalf("maximum-attempt reviewer lease must be terminal-only, got %#v", exhausted)
+	}
+	exhausted.Status = "failed"
+	if exhaustedExpiredGitHubReviewLease(&exhausted, now) {
+		t.Fatalf("terminal reviewer task must not be reconciled: %#v", exhausted)
+	}
+}
+
+func TestReconcileExpiredGitHubReviewLeaseFinalizesExhaustedTaskBeforeReadingInput(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqlDB.Close()
+	db, err := gorm.Open(postgres.New(postgres.Config{Conn: sqlDB, PreferSimpleProtocol: true}), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousDB := configuration.DB
+	configuration.DB = db
+	defer func() { configuration.DB = previousDB }()
+
+	now := time.Now().UTC()
+	expired := now.Add(-time.Minute)
+	task := models.AutomationTask{
+		ID: uuid.Must(uuid.NewV4()), JobID: uuid.Must(uuid.NewV4()), Operation: "code.review", RequestedBy: "github-app-review",
+		Status: "running", AttemptCount: githubReviewLeaseRecoveryMaximumAttempts, InputRef: "s3://itbem-ai-inputs-test/automation/inputs/task/input.json",
+		EvidenceSubjectDigest: strings.Repeat("a", 64), LeaseExpiresAt: &expired,
+	}
+	rows := sqlmock.NewRows([]string{"id", "job_id", "operation", "requested_by", "status", "attempt_count", "input_ref", "evidence_subject_digest", "lease_expires_at"}).
+		AddRow(task.ID, task.JobID, task.Operation, task.RequestedBy, task.Status, task.AttemptCount, task.InputRef, task.EvidenceSubjectDigest, task.LeaseExpiresAt)
+	mock.ExpectQuery(`SELECT \* FROM "automation_tasks"`).WillReturnRows(rows)
+	mock.ExpectBegin()
+	currentRows := sqlmock.NewRows([]string{"id", "job_id", "operation", "requested_by", "status", "attempt_count", "input_ref", "evidence_subject_digest", "lease_expires_at"}).
+		AddRow(task.ID, task.JobID, task.Operation, task.RequestedBy, task.Status, task.AttemptCount, task.InputRef, task.EvidenceSubjectDigest, task.LeaseExpiresAt)
+	mock.ExpectQuery(`SELECT \* FROM "automation_tasks"`).WillReturnRows(currentRows)
+	mock.ExpectQuery(`SELECT count\(\*\) FROM "automation_code_review_publications"`).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectExec(`UPDATE "automation_tasks"`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	reconciled, err := reconcileOneExpiredGitHubReviewLease(context.Background(), &models.Config{GitHubReviewWebhookSecret: "secret", GitHubReviewRepositories: "itbem/dashboard"}, now)
+	if err != nil || !reconciled {
+		t.Fatalf("exhausted lease was not finalized before input recovery: reconciled=%t err=%v", reconciled, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestParseGitHubReviewRecoverySubjectRequiresFrozenCurrentReviewIdentity(t *testing.T) {
+	now := time.Now().UTC()
+	base, head := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	patch := "diff --git a/controllers/orders.go b/controllers/orders.go\nindex abc..def 100644\n--- a/controllers/orders.go\n+++ b/controllers/orders.go\n@@ -1 +1 @@\n-old\n+new\n"
+	review, err := automationagent.NewCodeReviewInput("github://itbem/backend", base, head, patch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	review, err = automationagent.BindCodeReviewRemoteTarget(review, 42, 67890)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := automationagent.CodeReviewPublicationSubjectSHA256(review)
+	if err != nil {
+		t.Fatal(err)
+	}
+	correlation, err := githubReviewCorrelationID("itbem/backend", 42, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(automationagent.TaskInput{Prompt: "Review only the frozen patch.", Delivery: mustJSON(review)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expired := now.Add(-time.Second)
+	task := &models.AutomationTask{
+		ID:                    uuid.Must(uuid.NewV4()),
+		JobID:                 uuid.Must(uuid.NewV4()),
+		RequestedBy:           "github-app-review",
+		CorrelationID:         correlation,
+		Operation:             "code.review",
+		Status:                "running",
+		AttemptCount:          1,
+		EvidenceSubjectDigest: digest,
+		InputRef:              "s3://itbem-ai-inputs-test/automation/inputs/task/input.json",
+		LeaseExpiresAt:        &expired,
+	}
+	cfg := &models.Config{AutomationInputBucket: "itbem-ai-inputs-test"}
+	subject, err := parseGitHubReviewRecoverySubject(task, cfg, raw, now)
+	if err != nil || subject.Repository != "itbem/backend" || subject.PullRequest != 42 || subject.InstallationID != 67890 || subject.HeadSHA != head {
+		t.Fatalf("frozen recovery subject rejected or changed: %#v / %v", subject, err)
+	}
+	for _, mutate := range []func(*models.AutomationTask){
+		func(value *models.AutomationTask) { value.EvidenceSubjectDigest = strings.Repeat("c", 64) },
+		func(value *models.AutomationTask) { value.CorrelationID = "github-pr:wrong" },
+		func(value *models.AutomationTask) { value.Status = "failed" },
+	} {
+		candidate := *task
+		mutate(&candidate)
+		if _, err := parseGitHubReviewRecoverySubject(&candidate, cfg, raw, now); err == nil {
+			t.Fatalf("mutated recovery task was accepted: %#v", candidate)
+		}
+	}
+}
+
 func TestAutomationReviewIngressStatusReportsOnlySafeReadiness(t *testing.T) {
 	t.Setenv("ITBEM_GITHUB_APP_ID", "")
 	t.Setenv("ITBEM_GITHUB_INSTALLATION_ID", "")
@@ -436,6 +634,58 @@ func TestAutomationHealthExposesLaneTelemetryWithoutInventingIt(t *testing.T) {
 		if !strings.Contains(string(withTelemetry), expected) {
 			t.Fatalf("lane telemetry is missing %s: %s", expected, withTelemetry)
 		}
+	}
+}
+
+func TestPopulateAutomationOutboxHealthKeepsTheHandoffAggregateOnly(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqlDB.Close()
+	db, err := gorm.Open(postgres.New(postgres.Config{Conn: sqlDB, PreferSimpleProtocol: true}), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldest := time.Date(2026, time.September, 11, 15, 4, 5, 0, time.UTC)
+	mock.ExpectQuery(`SELECT.*COUNT.*FROM "outbox_events".*`).
+		WithArgs("local-ai-agent").
+		WillReturnRows(sqlmock.NewRows([]string{"state", "count", "retrying"}).
+			AddRow("pending", 2, 1).
+			AddRow("processing", 1, 3).
+			AddRow("completed", 9, 0))
+	mock.ExpectQuery(`SELECT MIN\(created_at\).*FROM "outbox_events".*`).
+		WithArgs("local-ai-agent", "pending").
+		WillReturnRows(sqlmock.NewRows([]string{"min"}).AddRow(oldest))
+
+	health := automationHealth{}
+	populateAutomationOutboxHealth(db, &health)
+	if !health.OutboxTelemetryAvailable || health.OutboxPending != 2 || health.OutboxProcessing != 1 || health.OutboxRetrying != 4 || health.OutboxOldestPendingAt == nil || !health.OutboxOldestPendingAt.Equal(oldest) {
+		t.Fatalf("unexpected safe outbox health projection: %#v", health)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPopulateAutomationOutboxHealthKeepsUnknownTelemetryAbsent(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqlDB.Close()
+	db, err := gorm.Open(postgres.New(postgres.Config{Conn: sqlDB, PreferSimpleProtocol: true}), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectQuery(`SELECT.*COUNT.*FROM "outbox_events".*`).WithArgs("local-ai-agent").WillReturnError(errors.New("outbox migration pending"))
+	health := automationHealth{}
+	populateAutomationOutboxHealth(db, &health)
+	if health.OutboxTelemetryAvailable || health.OutboxPending != 0 || health.OutboxProcessing != 0 || health.OutboxRetrying != 0 || health.OutboxOldestPendingAt != nil {
+		t.Fatalf("unavailable telemetry must remain unknown: %#v", health)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -515,6 +765,27 @@ func TestWorkerWorkspaceReadinessRejectsImpossibleOrUnboundedStates(t *testing.T
 	} {
 		if err := validateWorkerWorkspaceReadiness(invalid); err == nil {
 			t.Fatalf("expected invalid readiness rejected: %#v", invalid)
+		}
+	}
+}
+
+func TestWorkspaceAttestationValidationRejectsUnsafeOrUnverifiableState(t *testing.T) {
+	valid := []workspaceAttestationStatement{{
+		ID: "backend", Available: true, GitHubRepository: "itbem-corp/itbem-events-backend", HeadSHA: strings.Repeat("a", 40),
+		Branch: "main", Clean: true, Capabilities: []string{automationagent.WorkspaceCapabilityReadRepository, automationagent.WorkspaceCapabilityCreateWorktree},
+	}}
+	if err := validateWorkspaceAttestations(valid); err != nil {
+		t.Fatalf("valid workspace attestation rejected: %v", err)
+	}
+	for _, candidate := range [][]workspaceAttestationStatement{
+		{{ID: "backend", Available: true, GitHubRepository: "itbem-corp/itbem-events-backend", HeadSHA: "short", Branch: "main", Clean: true, Capabilities: []string{automationagent.WorkspaceCapabilityReadRepository}}},
+		{{ID: "backend", Available: true, GitHubRepository: "itbem-corp/itbem-events-backend", HeadSHA: strings.Repeat("a", 40), Branch: "../main", Clean: true, Capabilities: []string{automationagent.WorkspaceCapabilityReadRepository}}},
+		{{ID: "backend", Available: true, GitHubRepository: "itbem-corp/itbem-events-backend", HeadSHA: strings.Repeat("a", 40), Branch: "main", Clean: true, ChangeCount: 1, Capabilities: []string{automationagent.WorkspaceCapabilityReadRepository}}},
+		{{ID: "backend", Available: true, GitHubRepository: "itbem-corp/itbem-events-backend", HeadSHA: strings.Repeat("a", 40), Branch: "main", Clean: true, Capabilities: []string{automationagent.WorkspaceCapabilityApplyPatch}}},
+		{{ID: "backend", Available: false, HeadSHA: strings.Repeat("a", 40)}},
+	} {
+		if err := validateWorkspaceAttestations(candidate); err == nil {
+			t.Fatalf("unsafe workspace attestation accepted: %#v", candidate)
 		}
 	}
 }
@@ -1289,6 +1560,29 @@ func TestDeliveryQAEvidenceTitlesDescribeResponsiveScreenshots(t *testing.T) {
 	}
 	if key, role := deliveryQAEvidenceComparison("dashboard-semantic-qa-case-untrusted-before.png"); key != "" || role != "" {
 		t.Fatalf("unbounded evidence name must not become a comparison pair: %q / %q", key, role)
+	}
+}
+
+func TestDelegatedSubmissionOnlyAdvancesCompletedRoleHandoffs(t *testing.T) {
+	cases := []struct {
+		operation string
+		state     string
+		action    deliveryworkflow.Action
+		phase     string
+		allowed   bool
+	}{
+		{"delivery.implementation", deliveryworkflow.StateImplementation, deliveryworkflow.ActionSubmitCodeReview, "implementation", true},
+		{"delivery.qa", deliveryworkflow.StateQARunning, deliveryworkflow.ActionSubmitQA, "qa", true},
+		{"delivery.plan", deliveryworkflow.StatePlanning, "", "", false},
+		{"delivery.release_gate", deliveryworkflow.StateReleaseReview, "", "", false},
+		{"delivery.implementation", deliveryworkflow.StateCodeReview, deliveryworkflow.ActionSubmitCodeReview, "implementation", false},
+	}
+	for _, check := range cases {
+		action, phase := delegatedSubmissionAction(check.operation)
+		allowed := action != "" && delegatedSubmissionStateMatches(check.state, action)
+		if action != check.action || phase != check.phase || allowed != check.allowed {
+			t.Fatalf("delegated submission for %q/%q = (%q, %q, %t), want (%q, %q, %t)", check.operation, check.state, action, phase, allowed, check.action, check.phase, check.allowed)
+		}
 	}
 }
 

@@ -93,6 +93,15 @@ GITHUB_REVIEW_WEBHOOK_SECRET=generate-a-dedicated-random-secret
 GITHUB_REVIEW_REPOSITORIES=itbem/itbem-events-backend,itbem/dashboard
 ```
 
+Para la API backend de producción, configura los tres valores
+`ITBEM_GITHUB_SOURCE_*` como secretos protegidos del environment `production`
+en `Itbem-Corp/itbem-events-backend`. El workflow los escribe sólo en el
+archivo temporal de entorno con modo `0600` y rechaza el despliegue si falta
+alguno. El PEM debe conservar los escapes literales `\\n` para permanecer en
+una única línea del Docker env-file. Esta copia del API sólo sirve para la
+inspección estática del onboarding y no se sustituye por la App de Reviewer ni
+la de Release.
+
 En local, el archivo es `itbem-events-backend/.env.ai.local`. El script de
 control plane importa exclusivamente las credenciales de App necesarias para
 la operación solicitada; no transfiere `MINIMAX_API_KEY` ni otros secretos del

@@ -39,6 +39,15 @@ branch, pins its full SHA, reads a bounded safe tree and stores a proposal.
 Review repository/default branch/SHA, inventory truncation, detected stacks,
 proposed commands, every capability state, provenance and the Vault digest.
 
+The same immutable proposal carries a **non-authoritative policy suggestion**
+for that repository. It is always `review_only`, pins only the discovered
+default branch, and lists test kinds observed in allow-listed manifests. It
+does not infer a merge method, deployment workflow, environment, secrets,
+health checks or recovery from file names or repository prose. Copying the
+suggestion into the policy ledger creates a separate immutable revision that
+still requires independent approval; the suggestion itself cannot enable
+merge or release.
+
 The deterministic manifest records path-only evidence for dependency
 manifests, API contracts, data schemas/migrations, CI, ownership,
 infrastructure, tests, documentation, runbooks/ADRs and allow-listed

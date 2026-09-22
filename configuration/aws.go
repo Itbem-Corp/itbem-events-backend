@@ -8,6 +8,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/credentials/ec2rolecreds"
+	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -30,6 +32,15 @@ var (
 
 var discoverS3BucketRegion = func(ctx context.Context, client *s3.Client, bucket string) (string, error) {
 	return manager.GetBucketRegion(ctx, client, bucket)
+}
+
+// newEC2WorkloadCredentials is replaceable only for bounded unit tests. The
+// production implementation is deliberately an EC2 instance-profile provider:
+// private automation objects must never fall back to ambient environment keys.
+var newEC2WorkloadCredentials = func(cfg aws.Config) aws.CredentialsProvider {
+	return aws.NewCredentialsCache(ec2rolecreds.New(func(options *ec2rolecreds.Options) {
+		options.Client = imds.NewFromConfig(cfg)
+	}))
 }
 
 func InitAwsServices(cfg *models.Config) {
@@ -61,6 +72,12 @@ func InitAwsServices(cfg *models.Config) {
 // S3_REGION is explicit. This prevents stale configuration from producing
 // PermanentRedirect responses after a bucket is created or moved elsewhere.
 func BuildS3Client(ctx context.Context, cfg *models.Config) (*s3.Client, string, error) {
+	return buildS3Client(ctx, cfg, LoadAWSConfig)
+}
+
+type awsConfigLoader func(context.Context, string, string, string) (aws.Config, error)
+
+func buildS3Client(ctx context.Context, cfg *models.Config, loadConfig awsConfigLoader) (*s3.Client, string, error) {
 	if cfg == nil {
 		return nil, "", fmt.Errorf("S3 config is required")
 	}
@@ -73,7 +90,7 @@ func BuildS3Client(ctx context.Context, cfg *models.Config) (*s3.Client, string,
 		return nil, "", fmt.Errorf("AWS_REGION or S3_REGION is required")
 	}
 
-	awsCfg, err := LoadAWSConfig(ctx, region, cfg.S3ClientId, cfg.S3ClientSecret)
+	awsCfg, err := loadConfig(ctx, region, cfg.S3ClientId, cfg.S3ClientSecret)
 	if err != nil {
 		return nil, "", err
 	}
@@ -101,6 +118,50 @@ func BuildS3Client(ctx context.Context, cfg *models.Config) (*s3.Client, string,
 	}
 
 	return client, region, nil
+}
+
+// BuildS3ClientForBucket resolves a client against the actual target bucket.
+// The primary media bucket and the private automation buckets may live in
+// different regions, so reusing the process-global media client for a sealed
+// automation object can produce a redirect or a failed signature. This helper
+// preserves the same credential chain and endpoint policy while discovering
+// the region for the exact bucket being accessed.
+func BuildS3ClientForBucket(ctx context.Context, cfg *models.Config, bucket string) (*s3.Client, string, error) {
+	if cfg == nil {
+		return nil, "", fmt.Errorf("S3 config is required")
+	}
+	bucket = strings.TrimSpace(bucket)
+	if bucket == "" {
+		return nil, "", fmt.Errorf("S3 bucket is required")
+	}
+	scoped := *cfg
+	scoped.AwsBucketName = bucket
+	return BuildS3Client(ctx, &scoped)
+}
+
+// BuildS3ClientForWorkloadIdentityBucket is for server-mediated private
+// automation objects. "Workload identity" means the credential chain of the
+// backend process, never the physical Linux worker. The gateway validates the
+// exact bucket, sealed lease and task prefix before creating this client, so
+// allowing the server's configured chain here does not give a worker ambient
+// S3 access.
+//
+// Some established deployments use a server-scoped S3 credential through
+// S3_CLIENT_ID/S3_CLIENT_SECRET while their EC2 instance role is being
+// migrated. Forcing IMDS in the gateway made those otherwise working control
+// planes unable to read their own private inputs from inside a container. Use
+// the same backend credential chain used to persist the input, while keeping
+// the worker on the HTTPS gateway with no AWS credentials.
+func BuildS3ClientForWorkloadIdentityBucket(ctx context.Context, cfg *models.Config, bucket string) (*s3.Client, string, error) {
+	if cfg == nil {
+		return nil, "", fmt.Errorf("S3 config is required")
+	}
+	scoped := *cfg
+	scoped.AwsBucketName = strings.TrimSpace(bucket)
+	if scoped.AwsBucketName == "" {
+		return nil, "", fmt.Errorf("S3 bucket is required")
+	}
+	return BuildS3Client(ctx, &scoped)
 }
 
 func configureS3Transport(cfg *aws.Config) {
@@ -145,6 +206,20 @@ func LoadAWSConfig(ctx context.Context, region, legacyAccessKeyID, legacySecretA
 		options = append(options, config.WithCredentialsProvider(provider))
 	}
 	return config.LoadDefaultConfig(ctx, options...)
+}
+
+// LoadEC2InstanceRoleConfig is reserved for the backend gateway that mediates
+// private automation inputs and outputs. Loading the base configuration keeps
+// the normal region, endpoint and HTTP settings, but replacing Credentials
+// prevents an accidental AWS_ACCESS_KEY_ID in a container environment from
+// shadowing the audited EC2 instance role.
+func LoadEC2InstanceRoleConfig(ctx context.Context, region, _, _ string) (aws.Config, error) {
+	awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
+	if err != nil {
+		return aws.Config{}, err
+	}
+	awsCfg.Credentials = newEC2WorkloadCredentials(awsCfg)
+	return awsCfg, nil
 }
 
 func SQSClientOptions(endpoint string) func(*sqs.Options) {

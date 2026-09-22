@@ -66,9 +66,11 @@ func ListPublicationGrants(c echo.Context) error {
 	return success(c, "Delivery publication grants", grants)
 }
 
-// CreatePublicationGrant creates a narrow authorization only after a human
-// approved the code review. It cannot create a token or publish anything; the
-// eventual GitHub App adapter must independently verify this exact scope.
+// CreatePublicationGrant creates a narrow authorization after a locally
+// validated implementation and before remote review. It cannot create a token
+// or publish anything; the eventual GitHub App adapter independently verifies
+// this exact scope. A branch/PR is not a merge or deployment authority: the
+// later exact-SHA code-review gate remains mandatory before preview.
 func CreatePublicationGrant(c echo.Context) error {
 	workItemID, err := id(c, "work item")
 	if err != nil {
@@ -119,8 +121,8 @@ func CreatePublicationGrant(c echo.Context) error {
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&lockedItem, item.ID).Error; err != nil {
 			return err
 		}
-		if lockedItem.State != deliveryworkflow.StatePreviewPending {
-			return fmt.Errorf("a publication grant can only be issued after code review approval")
+		if err := publicationGrantPrecondition(lockedItem); err != nil {
+			return err
 		}
 		var snapshots []models.DeliveryContextSnapshot
 		if err := tx.Where("work_item_id = ?", lockedItem.ID).Find(&snapshots).Error; err != nil {
@@ -162,13 +164,6 @@ func CreatePublicationGrant(c echo.Context) error {
 		if err != nil {
 			return err
 		}
-		var approvedGate models.DeliveryGate
-		if err := tx.Where("work_item_id = ? AND kind = ? AND decision = ?", lockedItem.ID, deliveryworkflow.GateCodeReview, deliveryworkflow.DecisionApproved).Order("decided_at DESC").First(&approvedGate).Error; err != nil {
-			if err == gorm.ErrRecordNotFound {
-				return fmt.Errorf("an approved code review gate is required")
-			}
-			return err
-		}
 		grant = models.DeliveryPublicationGrant{
 			WorkItemID: lockedItem.ID, RepositoryRef: repositoryRef, BaseSHA: baseSHA, GitHubRepository: githubRepository, ReviewDiffSHA256: reviewDiffSHA256, Branch: branch,
 			CapabilitiesJSON: string(encodedCapabilities), Reason: strings.TrimSpace(input.Reason),
@@ -179,6 +174,18 @@ func CreatePublicationGrant(c echo.Context) error {
 		return conflict(c, "Publication grant rejected", err.Error())
 	}
 	return success(c, "Delivery publication grant created", grant)
+}
+
+// publicationGrantPrecondition is deliberately narrow: issuing a one-shot
+// publication grant is allowed only while the immutable local worktree is
+// awaiting its independent code review. The grant itself is not a review
+// approval and does not advance the workflow, so no prior approved gate may
+// be inferred here.
+func publicationGrantPrecondition(item models.DeliveryWorkItem) error {
+	if !strings.EqualFold(strings.TrimSpace(item.State), deliveryworkflow.StateCodeReview) {
+		return fmt.Errorf("a publication grant can only be issued while code review is pending")
+	}
+	return nil
 }
 
 // grantRepositoryReference requires an explicit repository for a project with

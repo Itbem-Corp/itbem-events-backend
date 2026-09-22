@@ -3,6 +3,7 @@ package automationagent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -221,6 +222,37 @@ func TestRetryVisibilitySecondsIsBoundedAndHonorsProviderDelay(t *testing.T) {
 	}
 }
 
+func TestRetryableDeliveryErrorAllowsOnlyExplicitTransientGatewayFailures(t *testing.T) {
+	transient := retryableDeliveryError(&gatewayRequestError{statusCode: 503, operation: "object read", diagnostic: "storage=authorization", retryAfter: 7 * time.Second})
+	if transient == nil || transient.RetryAfter != 7*time.Second {
+		t.Fatalf("expected temporary gateway failure to use the short retry path: %#v", transient)
+	}
+	if transient.Message != "temporary automation gateway failure during object read (storage=authorization)" {
+		t.Fatalf("gateway retry message = %q", transient.Message)
+	}
+	if retryableDeliveryError(&gatewayRequestError{statusCode: 403, retryAfter: 7 * time.Second}) != nil {
+		t.Fatal("authorization failure must remain terminal")
+	}
+	if retryableDeliveryError(errors.New("arbitrary worker failure")) != nil {
+		t.Fatal("arbitrary worker failure must remain terminal")
+	}
+}
+
+func TestQueueReceiveRetryDelayRequiresExplicitBoundedContract(t *testing.T) {
+	if _, retryable := queueReceiveRetryDelay(context.Canceled); retryable {
+		t.Fatal("generic errors must not be retried as queue receives")
+	}
+	if _, retryable := queueReceiveRetryDelay(&gatewayRequestError{statusCode: 401}); retryable {
+		t.Fatal("authentication failures must not be retried as queue receives")
+	}
+	if delay, retryable := queueReceiveRetryDelay(&gatewayRequestError{statusCode: 502, retryAfter: 2 * time.Second}); !retryable || delay != 2*time.Second {
+		t.Fatalf("temporary gateway failure retry = (%s, %t), want (2s, true)", delay, retryable)
+	}
+	if delay, retryable := queueReceiveRetryDelay(&gatewayRequestError{statusCode: 502, retryAfter: time.Millisecond}); !retryable || delay != gatewayRetryMinimumDelay {
+		t.Fatalf("temporary gateway retry minimum = (%s, %t), want (%s, true)", delay, retryable, gatewayRetryMinimumDelay)
+	}
+}
+
 func TestRetryVisibilitySurvivesWorkerContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -274,6 +306,21 @@ type drainingQueue struct {
 	deleted  int
 	cancel   context.CancelFunc
 }
+
+type retryThenCancelQueue struct {
+	calls  atomic.Int32
+	cancel context.CancelFunc
+}
+
+func (q *retryThenCancelQueue) Receive(_ context.Context, _ int) ([]QueueMessage, error) {
+	if q.calls.Add(1) == 1 {
+		return nil, &gatewayRequestError{statusCode: 502, retryAfter: gatewayRetryMinimumDelay}
+	}
+	q.cancel()
+	return nil, nil
+}
+
+func (q *retryThenCancelQueue) Delete(context.Context, QueueMessage) error { return nil }
 
 func (q *drainingQueue) Receive(ctx context.Context, limit int) ([]QueueMessage, error) {
 	q.mu.Lock()
@@ -368,6 +415,22 @@ func TestRunQueueHonorsConfiguredConcurrency(t *testing.T) {
 	}
 	if provider.maximum.Load() > 2 || provider.maximum.Load() < 2 {
 		t.Fatalf("unexpected max provider concurrency: %d", provider.maximum.Load())
+	}
+}
+
+func TestRunQueueKeepsLaneAliveAfterTransientGatewayReceiveFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	queue := &retryThenCancelQueue{cancel: cancel}
+	started := time.Now()
+	if err := RunQueue(ctx, nil, queue, 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	if queue.calls.Load() != 2 {
+		t.Fatalf("queue receives = %d, want retry after one transient failure", queue.calls.Load())
+	}
+	if elapsed := time.Since(started); elapsed < gatewayRetryMinimumDelay {
+		t.Fatalf("queue retry waited %s, want at least %s", elapsed, gatewayRetryMinimumDelay)
 	}
 }
 

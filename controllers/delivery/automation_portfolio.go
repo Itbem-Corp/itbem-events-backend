@@ -467,14 +467,26 @@ func automationPortfolioWorkItemTotalsQuery() string {
 		SELECT work_item.project_id,
 			COUNT(*) AS work_item_count,
 			COALESCE(SUM(CASE
-				WHEN work_item.state IN ('planning', 'implementation', 'preview_pending', 'qa_running')
+				WHEN (work_item.state IN ('planning', 'implementation', 'preview_pending', 'qa_running')
+					OR (work_item.state = 'code_review' AND EXISTS (
+						SELECT 1 FROM automation_tasks AS active_publication
+						WHERE active_publication.delivery_work_item_id = work_item.id
+							AND active_publication.operation = 'delivery.publish'
+							AND active_publication.status IN ('queued', 'running')
+					)))
 					AND NOT EXISTS (
 						SELECT 1 FROM automation_tasks AS stopping_task
 						WHERE stopping_task.delivery_work_item_id = work_item.id
 							AND stopping_task.status = 'cancel_requested'
 					)
 				THEN 1 ELSE 0 END), 0) AS active_work_items,
-			COALESCE(SUM(CASE WHEN work_item.state IN ('plan_review', 'code_review', 'qa_review', 'release_review') THEN 1 ELSE 0 END), 0) AS decisions_required,
+			COALESCE(SUM(CASE WHEN work_item.state IN ('plan_review', 'qa_review', 'release_review')
+				OR (work_item.state = 'code_review' AND NOT EXISTS (
+					SELECT 1 FROM automation_tasks AS active_publication
+					WHERE active_publication.delivery_work_item_id = work_item.id
+						AND active_publication.operation = 'delivery.publish'
+						AND active_publication.status IN ('queued', 'running')
+				)) THEN 1 ELSE 0 END), 0) AS decisions_required,
 			COALESCE(SUM(CASE WHEN work_item.state = 'blocked' THEN 1 ELSE 0 END), 0) AS blocked_work_items
 		FROM delivery_work_items AS work_item
 		WHERE work_item.project_id IN ? AND work_item.deleted_at IS NULL

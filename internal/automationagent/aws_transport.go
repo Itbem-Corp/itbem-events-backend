@@ -3,8 +3,10 @@ package automationagent
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -12,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	"github.com/aws/smithy-go"
 )
 
 type AWSRuntime struct {
@@ -45,6 +48,9 @@ func NewAWSObjectStore(client *s3.Client) *AWSObjectStore { return &AWSObjectSto
 func (s *AWSObjectStore) Get(ctx context.Context, bucket, key string) ([]byte, error) {
 	response, err := s.client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
 	if err != nil {
+		if automationObjectMissing(err) {
+			return nil, ErrObjectNotFound
+		}
 		return nil, fmt.Errorf("read private automation input: %w", err)
 	}
 	defer response.Body.Close()
@@ -53,6 +59,22 @@ func (s *AWSObjectStore) Get(ctx context.Context, bucket, key string) ([]byte, e
 		return nil, fmt.Errorf("read private automation input: %w", err)
 	}
 	return data, nil
+}
+
+func automationObjectMissing(err error) bool {
+	var noSuchKey *s3types.NoSuchKey
+	if errors.As(err, &noSuchKey) {
+		return true
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		switch strings.ToLower(strings.TrimSpace(apiErr.ErrorCode())) {
+		case "notfound", "nosuchkey", "nosuchobject":
+			return true
+		}
+	}
+	var statusErr interface{ HTTPStatusCode() int }
+	return errors.As(err, &statusErr) && statusErr.HTTPStatusCode() == http.StatusNotFound
 }
 
 func (s *AWSObjectStore) PutEncryptedJSON(ctx context.Context, bucket, key string, body []byte) error {

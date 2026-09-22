@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"events-stocks/configuration"
+	"events-stocks/internal/deliveryledger"
 	"events-stocks/models"
 	"net/http"
 	"sort"
@@ -98,6 +99,7 @@ type executionGraphBuildInput struct {
 	Gates        []models.DeliveryGate
 	Evidence     []models.DeliveryEvidence
 	Messages     []models.DeliveryMessage
+	Events       []models.DeliveryEvent
 	ViewerID     string
 	CanManage    bool
 	Truncated    bool
@@ -202,7 +204,7 @@ func loadExecutionGraphInput(workItemID uuid.UUID, limit int, input *executionGr
 	}
 	input.ToolCalls, input.Truncated = trimExecutionGraphRows(input.ToolCalls, limit, input.Truncated)
 
-	if err := configuration.DB.Select("id", "work_item_id", "kind", "decision", "decided_at", "created_at").Where("work_item_id = ?", workItemID).
+	if err := configuration.DB.Select("id", "work_item_id", "kind", "decision", "authority", "decided_at", "created_at").Where("work_item_id = ?", workItemID).
 		Order("decided_at DESC").Limit(limitPlusOne).Find(&input.Gates).Error; err != nil {
 		return err
 	}
@@ -219,6 +221,14 @@ func loadExecutionGraphInput(workItemID uuid.UUID, limit int, input *executionGr
 		return err
 	}
 	input.Messages, input.Truncated = trimExecutionGraphRows(input.Messages, limit, input.Truncated)
+
+	// Events are private by default. The graph only consumes the verified
+	// authority projection, never the ledger payload itself.
+	if err := configuration.DB.Select("id", "work_item_id", "sequence", "event_type", "subject_digest", "payload_json", "payload_digest", "occurred_at", "created_at").Where("work_item_id = ? AND event_type = ?", workItemID, deliveryledger.EventTypeAutonomySnapshot).
+		Order("sequence ASC").Limit(limitPlusOne).Find(&input.Events).Error; err != nil {
+		return err
+	}
+	input.Events, input.Truncated = trimExecutionGraphRows(input.Events, limit, input.Truncated)
 	return nil
 }
 
@@ -250,7 +260,7 @@ func buildExecutionGraph(input executionGraphBuildInput) executionGraphSnapshot 
 		},
 		Actions: []executionGraphAction{{ID: "inspect", TargetType: "delivery_work_item", TargetID: input.WorkItem.ID.String()}},
 	}}
-	edges := make([]executionGraphEdge, 0, len(input.Dependencies)+len(input.Tasks)+len(input.Executions)+len(input.ToolCalls)+len(input.Gates)+len(input.Evidence)+len(input.Messages))
+	edges := make([]executionGraphEdge, 0, len(input.Dependencies)+len(input.Tasks)+len(input.Executions)+len(input.ToolCalls)+len(input.Gates)+len(input.Evidence)+len(input.Messages)+len(input.Events))
 	taskByID := make(map[uuid.UUID]models.AutomationTask, len(input.Tasks))
 
 	for _, dependency := range input.Dependencies {
@@ -386,8 +396,9 @@ func buildExecutionGraph(input executionGraphBuildInput) executionGraphSnapshot 
 			OccurredAt: executionGraphOccurredAt(gate.DecidedAt, gate.CreatedAt),
 			Entity:     executionGraphNodeEntity{Type: "delivery_gate", ID: gate.ID.String()},
 			Metadata: map[string]any{
-				"kind":     strings.TrimSpace(gate.Kind),
-				"decision": strings.TrimSpace(gate.Decision),
+				"kind":      strings.TrimSpace(gate.Kind),
+				"decision":  strings.TrimSpace(gate.Decision),
+				"authority": executionGraphGateAuthority(gate.Authority),
 			},
 			Actions: []executionGraphAction{{ID: "inspect", TargetType: "delivery_gate", TargetID: gate.ID.String()}},
 		})
@@ -443,6 +454,32 @@ func buildExecutionGraph(input executionGraphBuildInput) executionGraphSnapshot 
 		edges = append(edges, executionGraphEdge{ID: executionGraphEdgeID(rootID, nodeID, "adds_context"), SourceID: rootID, TargetID: nodeID, Kind: "adds_context", Status: "decision"})
 	}
 
+	for _, event := range input.Events {
+		if event.EventType != deliveryledger.EventTypeAutonomySnapshot {
+			continue
+		}
+		projection, projectionErr := deliveryledger.ProjectAutonomySnapshot(event)
+		// An invalid immutable snapshot is not authority evidence. Omitting it is
+		// deliberately fail-closed: rendering an "attention" authority node would
+		// still make unverified provenance look like usable workflow state.
+		if projectionErr != nil {
+			continue
+		}
+		status, detail := "completed", "Gates humanos por defecto"
+		if projection.Delegated {
+			detail = "Gates delegados con evidencia independiente obligatoria"
+		}
+		metadata := map[string]any{"verified": true, "delegated": projection.Delegated, "repositories": len(projection.Repositories)}
+		nodeID := executionGraphAuthorityNodeID(event.ID)
+		nodes = append(nodes, executionGraphNode{
+			ID: nodeID, Kind: "authority", Status: status,
+			Summary: "Autoridad congelada", Detail: detail, ParentID: rootID, TrackID: "authority",
+			OccurredAt: event.OccurredAt.UTC(), Entity: executionGraphNodeEntity{Type: "delivery_authority_snapshot", ID: event.ID.String()},
+			Metadata: metadata, Actions: []executionGraphAction{{ID: "inspect", TargetType: "delivery_authority_snapshot", TargetID: event.ID.String()}},
+		})
+		edges = append(edges, executionGraphEdge{ID: executionGraphEdgeID(rootID, nodeID, "freezes_authority"), SourceID: rootID, TargetID: nodeID, Kind: "freezes_authority", Status: status})
+	}
+
 	sort.Slice(nodes, func(i, j int) bool {
 		if nodes[i].OccurredAt.Equal(nodes[j].OccurredAt) {
 			return nodes[i].ID < nodes[j].ID
@@ -471,6 +508,7 @@ func executionGraphToolExecutionNodeID(id uuid.UUID) string  { return "tool-call
 func executionGraphGateNodeID(id uuid.UUID) string           { return "gate:" + id.String() }
 func executionGraphEvidenceNodeID(id uuid.UUID) string       { return "evidence:" + id.String() }
 func executionGraphMessageNodeID(id uuid.UUID) string        { return "message:" + id.String() }
+func executionGraphAuthorityNodeID(id uuid.UUID) string      { return "authority:" + id.String() }
 
 func executionGraphEdgeID(sourceID, targetID, kind string) string {
 	return kind + ":" + sourceID + ":" + targetID
@@ -556,6 +594,19 @@ func executionGraphGateStatus(decision string) string {
 	}
 }
 
+func executionGraphGateAuthority(authority string) string {
+	switch strings.ToLower(strings.TrimSpace(authority)) {
+	case "delegated":
+		return "delegated"
+	case "human":
+		return "human"
+	default:
+		// Graph records can include historic rows that predate the explicit
+		// authority field. Do not present missing provenance as a human decision.
+		return "unknown"
+	}
+}
+
 func executionGraphDependencyStatus(state string) string {
 	switch strings.ToLower(strings.TrimSpace(state)) {
 	case "released":
@@ -577,7 +628,16 @@ func executionGraphWorkItemStatus(state string, live bool) string {
 		return "blocked"
 	case "cancelled":
 		return "cancelled"
-	case "plan_review", "code_review", "qa_review", "release_review":
+	case "code_review":
+		// A branch/PR publication is intentionally performed while the item is
+		// in code_review: the resulting immutable head is what the independent
+		// reviewer evaluates. Do not show that bounded operation as a stale
+		// decision while its worker is still active.
+		if live {
+			return "running"
+		}
+		return "decision"
+	case "plan_review", "qa_review", "release_review":
 		return "decision"
 	case "planning", "implementation", "preview_pending", "qa_running":
 		if live {

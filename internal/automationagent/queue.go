@@ -67,6 +67,69 @@ type Queue interface {
 	Delete(context.Context, QueueMessage) error
 }
 
+// retryableQueueReceiveError is intentionally narrower than a generic
+// temporary error. A queue implementation must explicitly opt into this
+// contract and supply a bounded delay before RunQueue keeps the process alive
+// after a failed receive.
+type retryableQueueReceiveError interface {
+	error
+	RetryDelay() time.Duration
+}
+
+func queueReceiveRetryDelay(err error) (time.Duration, bool) {
+	var retryable retryableQueueReceiveError
+	if !errors.As(err, &retryable) {
+		return 0, false
+	}
+	delay := retryable.RetryDelay()
+	if delay <= 0 {
+		return 0, false
+	}
+	if delay < gatewayRetryMinimumDelay {
+		delay = gatewayRetryMinimumDelay
+	}
+	if delay > gatewayRetryMaximumDelay {
+		delay = gatewayRetryMaximumDelay
+	}
+	return delay, true
+}
+
+// retryableDeliveryError translates only explicitly retryable gateway
+// responses into the queue's bounded retry contract. In particular, a 401,
+// 403, malformed task, or arbitrary worker failure remains terminal and keeps
+// the existing fail-closed behavior.
+func retryableDeliveryError(err error) *RetryableError {
+	var providerRetry *RetryableError
+	if errors.As(err, &providerRetry) {
+		return providerRetry
+	}
+	var gatewayRetry retryableQueueReceiveError
+	if !errors.As(err, &gatewayRetry) {
+		return nil
+	}
+	delay := gatewayRetry.RetryDelay()
+	if delay <= 0 {
+		return nil
+	}
+	// gatewayRequestError.Operation is an allow-listed, fixed label (for
+	// example "lease" or "object read"). Retain it in the local journal so an
+	// operator can distinguish a queue lease outage from storage I/O without
+	// logging a URL, object reference, sealed lease, credential, or payload.
+	message := "temporary automation gateway failure"
+	if gatewayErr, ok := err.(*gatewayRequestError); ok {
+		if gatewayErr.operation != "" {
+			message += " during " + gatewayErr.operation
+		}
+		// diagnostic is normalized from a server allow-list. It is useful to
+		// distinguish a backend storage credential or region fault without
+		// logging object references, lease tokens, credentials, or SDK details.
+		if gatewayErr.diagnostic != "" {
+			message += " (" + gatewayErr.diagnostic + ")"
+		}
+	}
+	return &RetryableError{Message: message, RetryAfter: delay}
+}
+
 type scheduledQueueMessage struct {
 	raw       QueueMessage
 	review    bool
@@ -199,8 +262,7 @@ func RunQueue(ctx context.Context, worker *Worker, queue Queue, concurrency int,
 					if err == nil {
 						return
 					}
-					var retryable *RetryableError
-					if errors.As(err, &retryable) {
+					if retryable := retryableDeliveryError(err); retryable != nil {
 						if extender, ok := queue.(VisibilityExtendingQueue); ok {
 							if visibilityErr := extendRetryVisibility(ctx, extender, scheduled.raw, retryVisibilitySeconds(retryable)); visibilityErr != nil {
 								logger.Warn("automation retry delay could not be applied; SQS default visibility remains active", "error", visibilityErr)
@@ -331,6 +393,15 @@ func RunQueue(ctx context.Context, worker *Worker, queue Queue, concurrency int,
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
+			}
+			if delay, retryable := queueReceiveRetryDelay(err); retryable {
+				logger.Warn("automation queue receive failed temporarily; retaining worker process", "error", err, "retry_in", delay)
+				select {
+				case <-ctx.Done():
+					return nil
+				case <-time.After(delay):
+					continue
+				}
 			}
 			return err
 		}

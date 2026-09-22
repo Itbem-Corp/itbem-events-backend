@@ -63,7 +63,7 @@ func TestResolveAppliesHierarchyIndependentOfInputOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !first.Resolved || first.Digest != second.Digest || first.Mode != ModeMerge || first.MergeMethod != "squash" {
+	if !first.Resolved || first.Digest != second.Digest || first.Mode != ModeMerge || first.MergeMethod != "squash" || first.GateApprovalMode != GateApprovalHuman {
 		t.Fatalf("hierarchical policy was not stable: %#v / %#v", first, second)
 	}
 	if strings.Join(first.RequiredTestKinds, ",") != "contract,unit" || strings.Join(first.AllowedTargetBranches, ",") != "release/v2" {
@@ -75,6 +75,31 @@ func TestResolveAppliesHierarchyIndependentOfInputOrder(t *testing.T) {
 	gate := first.GatePolicyFor(releasegate.ActionMerge)
 	if !gate.Resolved || gate.Digest != first.Digest || len(gate.RequiredTestKinds) != 2 {
 		t.Fatalf("resolved merge policy did not bind the Gatekeeper: %#v", gate)
+	}
+}
+
+func TestDelegatedGateApprovalNeedsDurableApprovedPolicyAndCannotComeFromOverride(t *testing.T) {
+	context := releaseContext()
+	mode, mergeMethod := ModeMerge, "squash"
+	tests, branches := []string{"unit"}, []string{"main"}
+	delegated := GateApprovalDelegated
+	policy, err := Resolve(context, []Layer{approvedLayer(t, LevelProject, context, Patch{
+		Mode: &mode, MergeMethod: &mergeMethod, RequiredTestKinds: &tests, AllowedTargetBranches: &branches,
+		GateApprovalMode: &delegated,
+	})}, policyNow)
+	if err != nil || !policy.Resolved || policy.GateApprovalMode != GateApprovalDelegated || !policy.Safety.HumanApproval {
+		t.Fatalf("approved durable delegated policy was not resolved safely: %#v / %v", policy, err)
+	}
+
+	override := approvedLayer(t, LevelOverride, context, Patch{GateApprovalMode: &delegated})
+	if _, err := Resolve(context, []Layer{override}, policyNow); err == nil {
+		t.Fatal("a temporary change-set override must not delegate gate authority")
+	}
+
+	invalid := GateApprovalMode("anyone")
+	invalidLayer := approvedLayer(t, LevelProject, context, Patch{GateApprovalMode: &invalid})
+	if _, err := Resolve(context, []Layer{invalidLayer}, policyNow); err == nil {
+		t.Fatal("an unknown gate approval mode must fail closed")
 	}
 }
 

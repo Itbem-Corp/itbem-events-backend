@@ -423,9 +423,21 @@ func reportHeartbeats(ctx context.Context, callback *automationagent.HTTPCallbac
 			current.WorkspaceReadiness = readiness
 		}
 		requestCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
 		if err := callback.Heartbeat(requestCtx, current); err != nil && ctx.Err() == nil {
 			slog.Warn("ITBEM agent heartbeat failed", "error", err)
+			cancel()
+			return
+		}
+		cancel()
+		attestations, attestationErr := automationagent.WorkspaceAttestationSnapshot(lookup)
+		if attestationErr != nil {
+			slog.Warn("ITBEM agent workspace attestation check failed", "error", attestationErr)
+			return
+		}
+		attestationCtx, attestationCancel := context.WithTimeout(ctx, 10*time.Second)
+		defer attestationCancel()
+		if err := callback.WorkspaceAttestations(attestationCtx, automationagent.WorkspaceAttestationReport{WorkerID: heartbeat.WorkerID, Attestations: attestations}); err != nil && ctx.Err() == nil {
+			slog.Warn("ITBEM agent workspace attestation failed", "error", err)
 		}
 	}
 	report()

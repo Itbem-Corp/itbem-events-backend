@@ -36,6 +36,10 @@ const (
 	providerRetryMaxDelay     = 15 * time.Minute
 	providerAuthProbeTimeout  = 8 * time.Second
 	maxProviderProbeBodySize  = 64 << 10
+	// MiniMax-M3's documented direct interface. Operators that deliberately
+	// need the OpenAI-compatible route can still set MINIMAX_API_BASE_URL;
+	// the default must not silently select the legacy compatibility contract.
+	miniMaxDirectCompletionEndpoint = "https://api.minimax.io/v1/text/chatcompletion_v2"
 )
 
 type Provider string
@@ -112,7 +116,7 @@ func LoadProviderConfig(lookup func(string) string) (ProviderConfig, error) {
 		provider = ProviderMiniMax
 	}
 	defaults := map[Provider]struct{ secret, modelName, model, endpointName, endpoint string }{
-		ProviderMiniMax:   {"MINIMAX_API_KEY", "MINIMAX_MODEL", "MiniMax-M3", "MINIMAX_API_BASE_URL", "https://api.minimax.io/v1/chat/completions"},
+		ProviderMiniMax:   {"MINIMAX_API_KEY", "MINIMAX_MODEL", "MiniMax-M3", "MINIMAX_API_BASE_URL", miniMaxDirectCompletionEndpoint},
 		ProviderOpenAI:    {"OPENAI_API_KEY", "OPENAI_MODEL", "gpt-4.1-mini", "OPENAI_API_BASE_URL", "https://api.openai.com/v1/chat/completions"},
 		ProviderAnthropic: {"ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "claude-sonnet-4-20250514", "ANTHROPIC_API_BASE_URL", "https://api.anthropic.com/v1/messages"},
 	}
@@ -277,7 +281,7 @@ func ProbeProviderAuth(ctx context.Context, config ProviderConfig, client *http.
 				return result, nil
 			}
 			result.Status = "region_mismatch"
-			result.RecommendedEndpoint = region.base + "/v1/chat/completions"
+			result.RecommendedEndpoint = region.base + "/v1/text/chatcompletion_v2"
 			return result, nil
 		}
 		if sawUnauthorized {
@@ -499,7 +503,7 @@ func (p *httpProviderClient) payload(messages []Message, maxTokens int) (map[str
 		return map[string]any{"model": p.config.Model, "system": strings.Join(system, "\n\n"), "messages": conversation, "max_tokens": maxTokens, "temperature": 0.2}, map[string]string{"x-api-key": p.config.secret, "anthropic-version": "2023-06-01", "content-type": "application/json"}
 	}
 	payload := map[string]any{"model": p.config.Model, "messages": messages, "max_completion_tokens": maxTokens, "temperature": 0.2}
-	if p.config.Provider == ProviderMiniMax {
+	if p.config.Provider == ProviderMiniMax && !usesMiniMaxDirectCompletionEndpoint(p.config.Endpoint) {
 		payload["reasoning_split"] = true
 		if strings.EqualFold(strings.TrimSpace(p.config.Model), "MiniMax-M3") {
 			// M3 defaults to adaptive thinking, whose private reasoning consumes
@@ -511,6 +515,19 @@ func (p *httpProviderClient) payload(messages []Message, maxTokens int) (map[str
 		}
 	}
 	return payload, map[string]string{"Authorization": "Bearer " + p.config.secret, "Content-Type": "application/json"}
+}
+
+// usesMiniMaxDirectCompletionEndpoint distinguishes MiniMax's documented
+// direct API from an operator-selected OpenAI-compatible override. The direct
+// contract intentionally receives only portable completion fields; reasoning
+// controls remain on the compatibility path where their wire behavior is
+// explicitly known.
+func usesMiniMaxDirectCompletionEndpoint(raw string) bool {
+	endpoint, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	return strings.TrimRight(endpoint.Path, "/") == "/v1/text/chatcompletion_v2"
 }
 
 func parseCompletion(config ProviderConfig, body map[string]any) (Completion, error) {

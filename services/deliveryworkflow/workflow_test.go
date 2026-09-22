@@ -71,6 +71,37 @@ func TestAdvanceRejectsSkippedOrMismatchedGate(t *testing.T) {
 	}
 }
 
+func TestReadOnlyAssessmentTerminatesWithoutEnteringRelease(t *testing.T) {
+	item := &models.DeliveryWorkItem{ID: uuid.Must(uuid.NewV4()), State: StateImplementation}
+	if err := Advance(item, ActionSubmitAssessment, nil, time.Now().UTC()); err != nil {
+		t.Fatalf("submit read-only assessment: %v", err)
+	}
+	if item.State != StateAssessed || !isTerminal(item.State) {
+		t.Fatalf("assessment must be terminal and distinct from release: %#v", item)
+	}
+	if err := Advance(item, ActionApproveRelease, &models.DeliveryGate{WorkItemID: item.ID, Kind: GateRelease, Decision: DecisionApproved, DecidedBy: "reviewer"}, time.Now().UTC()); err == nil {
+		t.Fatal("assessed delivery must not reach release")
+	}
+}
+
+func TestAdvanceRecordsGateAuthorityAndRejectsUnknownAuthority(t *testing.T) {
+	now := time.Now().UTC()
+	item := &models.DeliveryWorkItem{ID: uuid.Must(uuid.NewV4()), State: StatePlanReview}
+	delegated := &models.DeliveryGate{WorkItemID: item.ID, Kind: GatePlan, Decision: DecisionApproved, DecidedBy: "delivery-gatekeeper", Authority: "delegated"}
+	if err := Advance(item, ActionApprovePlan, delegated, now); err != nil || item.State != StateImplementation || delegated.Authority != "delegated" {
+		t.Fatalf("delegated gate provenance was not preserved: %#v / %v", delegated, err)
+	}
+	item = &models.DeliveryWorkItem{ID: uuid.Must(uuid.NewV4()), State: StatePlanReview}
+	unknown := &models.DeliveryGate{WorkItemID: item.ID, Kind: GatePlan, Decision: DecisionApproved, DecidedBy: "reviewer", Authority: "model"}
+	if err := Advance(item, ActionApprovePlan, unknown, now); err == nil {
+		t.Fatal("an unknown gate authority was accepted")
+	}
+	legacy := &models.DeliveryGate{WorkItemID: item.ID, Kind: GatePlan, Decision: DecisionApproved, DecidedBy: "reviewer"}
+	if err := Advance(item, ActionApprovePlan, legacy, now); err != nil || legacy.Authority != "human" {
+		t.Fatalf("legacy human gate did not default safely: %#v / %v", legacy, err)
+	}
+}
+
 func approvePlan(t *testing.T, item *models.DeliveryWorkItem, now time.Time) {
 	t.Helper()
 	if err := Advance(item, ActionApprovePlan, &models.DeliveryGate{WorkItemID: item.ID, Kind: GatePlan, Decision: DecisionApproved, DecidedBy: "reviewer"}, now); err != nil {

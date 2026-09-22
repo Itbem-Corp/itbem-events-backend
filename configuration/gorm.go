@@ -62,6 +62,7 @@ var modelsWithoutSeed = []interface{}{
 	&models.AutomationCodeReviewPublication{},
 	&models.AutomationToolExecution{},
 	&models.AutomationAgentHeartbeat{},
+	&models.AutomationWorkspaceAttestation{},
 	&models.DeliveryClientProfile{},
 	&models.DeliveryProject{},
 	&models.DeliveryProjectMember{},

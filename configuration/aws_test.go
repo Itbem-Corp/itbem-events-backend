@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"events-stocks/models"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -105,6 +107,65 @@ func TestBuildS3ClientCorrectsExplicitS3RegionFromBucketDiscovery(t *testing.T) 
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "us-east-2", region)
+}
+
+func TestBuildS3ClientForBucketDiscoversTheTargetBucketRegion(t *testing.T) {
+	previous := discoverS3BucketRegion
+	t.Cleanup(func() { discoverS3BucketRegion = previous })
+	seen := ""
+	discoverS3BucketRegion = func(_ context.Context, _ *s3.Client, bucket string) (string, error) {
+		seen = bucket
+		return "us-east-2", nil
+	}
+	_, region, err := BuildS3ClientForBucket(context.Background(), &models.Config{
+		AwsRegion:     "us-east-1",
+		AwsBucketName: "primary-media-bucket",
+	}, "itbem-ai-outputs-prod-752279076974-us-east-2")
+	if err != nil {
+		t.Fatalf("BuildS3ClientForBucket returned error: %v", err)
+	}
+	if seen != "itbem-ai-outputs-prod-752279076974-us-east-2" || region != "us-east-2" {
+		t.Fatalf("target bucket region = (%q, %q), want automation bucket in us-east-2", seen, region)
+	}
+}
+
+func TestBuildS3ClientForWorkloadIdentityBucketUsesBackendCredentialChain(t *testing.T) {
+	previous := discoverS3BucketRegion
+	t.Cleanup(func() { discoverS3BucketRegion = previous })
+	discoverS3BucketRegion = func(_ context.Context, _ *s3.Client, bucket string) (string, error) {
+		if bucket != "itbem-ai-outputs-prod-752279076974-us-east-2" {
+			t.Fatalf("unexpected bucket discovery for %q", bucket)
+		}
+		return "us-east-2", nil
+	}
+
+	cfg := &models.Config{
+		AwsRegion:      "us-east-1",
+		S3ClientId:     "legacy-media-access-key",
+		S3ClientSecret: "legacy-media-secret-key",
+		AwsBucketName:  "primary-media-bucket",
+	}
+	client, _, err := BuildS3ClientForWorkloadIdentityBucket(context.Background(), cfg, "itbem-ai-outputs-prod-752279076974-us-east-2")
+	if err != nil || client == nil {
+		t.Fatalf("workload identity bucket client = (%v, %v), want client without legacy credentials", client, err)
+	}
+}
+
+func TestLoadEC2InstanceRoleConfigOverridesAmbientEnvironmentCredentials(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "ambient-access-key")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "ambient-secret-key")
+
+	previous := newEC2WorkloadCredentials
+	t.Cleanup(func() { newEC2WorkloadCredentials = previous })
+	newEC2WorkloadCredentials = func(aws.Config) aws.CredentialsProvider {
+		return credentials.NewStaticCredentialsProvider("instance-profile-access-key", "instance-profile-secret-key", "")
+	}
+
+	cfg, err := LoadEC2InstanceRoleConfig(context.Background(), "us-east-2", "legacy-access-key", "legacy-secret-key")
+	require.NoError(t, err)
+	resolved, err := cfg.Credentials.Retrieve(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "instance-profile-access-key", resolved.AccessKeyID)
 }
 
 func TestBuildS3ClientSkipsAWSDiscoveryForCustomEndpoint(t *testing.T) {

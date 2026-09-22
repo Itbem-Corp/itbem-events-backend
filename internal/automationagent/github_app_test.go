@@ -467,6 +467,30 @@ func TestReadGitHubRepositorySourceContextUsesOnlySelectedRedactedFrozenFiles(t 
 	}
 }
 
+func TestReadGitHubRepositorySourceContextProjectsLargePackageManifestWithoutScriptBodies(t *testing.T) {
+	revision := strings.Repeat("f", 40)
+	body := `{"scripts":{"test:unit":"vitest run --token=must-not-persist","test:e2e":"playwright test","bad;name":"must-not-persist"},"private":"must-not-persist"}` + strings.Repeat(" ", maxGitHubRepositoryExcerptBytes)
+	if len(body) <= maxGitHubRepositoryExcerptBytes || len(body) > maxGitHubRepositoryManifestBytes {
+		t.Fatalf("test manifest bounds are invalid: %d", len(body))
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Query().Get("ref") != revision || request.URL.Path != "/repos/Itbem-Corp/repo/contents/package.json" {
+			t.Fatalf("unexpected manifest request: %s", request.URL.String())
+		}
+		_ = json.NewEncoder(response).Encode(map[string]any{"type": "file", "encoding": "base64", "size": len(body), "content": base64.StdEncoding.EncodeToString([]byte(body))})
+	}))
+	defer server.Close()
+
+	source, err := ReadGitHubRepositorySourceContext(context.Background(), GitHubAppConfig{APIBaseURL: server.URL}, "ephemeral-installation-token", GitHubRepositorySnapshot{Reference: "github://Itbem-Corp/repo", Revision: revision}, GitHubRepositoryMap{Revision: revision, Files: []string{"package.json"}})
+	if err != nil || len(source.Excerpts) != 1 || source.Excerpts[0].Path != "package.json" {
+		t.Fatalf("large package manifest was not projected: %#v / %v", source, err)
+	}
+	projected := source.Excerpts[0].Content
+	if !strings.Contains(projected, `"test:unit"`) || !strings.Contains(projected, `"test:e2e"`) || strings.Contains(projected, "must-not-persist") || strings.Contains(projected, "bad;name") {
+		t.Fatalf("manifest projection leaked body or accepted unsafe script name: %q", projected)
+	}
+}
+
 func TestReadGitHubEnvironmentDeclarationsReturnsNamesWithoutValues(t *testing.T) {
 	revision := strings.Repeat("e", 40)
 	body := "# names only\nAPI_URL=https://example.invalid\nexport API_KEY=must-never-persist\nINVALID-NAME=value\nAPI_KEY=duplicate\n"

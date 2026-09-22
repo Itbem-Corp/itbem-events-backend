@@ -41,6 +41,7 @@ func TestParseQueueTargetsRoutesEveryOperationToItsRoleLane(t *testing.T) {
 		agentwork.OperationDeliverySummary:         "orchestration",
 		agentwork.OperationDeliveryPlan:            "engineering",
 		agentwork.OperationDeliveryImplementation:  "engineering",
+		agentwork.OperationDeliveryAssessment:      "review",
 		agentwork.OperationCodeReview:              "review",
 		agentwork.OperationDeliveryQA:              "qa",
 		agentwork.OperationDeliveryOnboardingProbe: "qa",

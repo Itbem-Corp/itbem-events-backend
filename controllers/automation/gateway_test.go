@@ -1,11 +1,16 @@
 package automation
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"events-stocks/internal/agentwork"
+	"events-stocks/models"
+
+	"github.com/aws/smithy-go"
 )
 
 func TestGatewayTokensAreLaneBoundAndDoNotExposeRoot(t *testing.T) {
@@ -42,5 +47,71 @@ func TestGatewayLeaseIsConfidentialTamperEvidentAndIdentityBound(t *testing.T) {
 	tampered := token[:len(token)-1] + replacement
 	if _, err := openGatewayLease(tampered, identity); err == nil {
 		t.Fatal("tampered lease was accepted")
+	}
+}
+
+func TestGatewayObjectMissingDoesNotTreatStorageFailuresAsAbsence(t *testing.T) {
+	if !gatewayObjectMissing(&smithy.GenericAPIError{Code: "NoSuchKey"}) {
+		t.Fatal("confirmed missing object was not classified as absent")
+	}
+	if gatewayObjectMissing(&smithy.GenericAPIError{Code: "AccessDenied"}) || gatewayObjectMissing(errors.New("network unavailable")) {
+		t.Fatal("storage authorization or network failures must not look like an absent checkpoint")
+	}
+}
+
+func TestGatewayStorageFailureCodeKeepsDiagnosticsNonSensitive(t *testing.T) {
+	for _, sample := range []struct {
+		errorCode string
+		want      string
+	}{
+		{errorCode: "AccessDenied", want: "authorization"},
+		{errorCode: "PermanentRedirect", want: "region"},
+		{errorCode: "SlowDown", want: "transient"},
+		{errorCode: "ArbitraryPrivateAWSFailure", want: "unclassified"},
+	} {
+		if got := gatewayStorageFailureCode(&smithy.GenericAPIError{Code: sample.errorCode}); got != sample.want {
+			t.Fatalf("gatewayStorageFailureCode(%q) = %q, want %q", sample.errorCode, got, sample.want)
+		}
+	}
+}
+
+func TestGatewayObjectClientRequiresAConfiguredBucket(t *testing.T) {
+	if _, err := gatewayObjectClient(context.Background(), &models.Config{AwsRegion: "us-east-2"}, ""); err == nil {
+		t.Fatal("gateway object client must reject an empty validated bucket")
+	}
+}
+
+func TestValidateGatewayObjectBindsReadsAndWritesToTheExactTask(t *testing.T) {
+	const taskID = "11111111-1111-4111-8111-111111111111"
+	inputBucket := "itbem-ai-inputs-test"
+	outputBucket := "itbem-ai-outputs-test"
+	lease := gatewayLease{
+		TaskID:   taskID,
+		InputRef: "s3://" + inputBucket + "/automation/inputs/" + taskID + "/input.json",
+	}
+	cfg := &models.Config{AutomationInputBucket: inputBucket, AutomationOutputBucket: outputBucket}
+	checkpoint := "s3://" + outputBucket + "/automation/" + taskID + "/code-review-progress.json"
+	otherTask := "s3://" + outputBucket + "/automation/22222222-2222-4222-8222-222222222222/code-review-progress.json"
+
+	for _, test := range []struct {
+		name      string
+		reference string
+		write     bool
+		valid     bool
+	}{
+		{name: "reads exact input", reference: lease.InputRef, valid: true},
+		{name: "does not write input", reference: lease.InputRef, write: true, valid: false},
+		{name: "reads own checkpoint", reference: checkpoint, valid: true},
+		{name: "writes own checkpoint", reference: checkpoint, write: true, valid: true},
+		{name: "does not read another task output", reference: otherTask, valid: false},
+		{name: "does not write another task output", reference: otherTask, write: true, valid: false},
+		{name: "does not read foreign bucket", reference: "s3://foreign/automation/" + taskID + "/result.json", valid: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, _, valid := validateGatewayObject(lease, cfg, test.reference, test.write)
+			if valid != test.valid {
+				t.Fatalf("valid = %t, want %t", valid, test.valid)
+			}
+		})
 	}
 }

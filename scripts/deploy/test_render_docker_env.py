@@ -110,6 +110,9 @@ class RenderDockerEnvTests(unittest.TestCase):
             "ITBEM_GITHUB_APP_ID",
             "ITBEM_GITHUB_INSTALLATION_IDS",
             "ITBEM_GITHUB_APP_PRIVATE_KEY",
+            "ITBEM_GITHUB_SOURCE_APP_ID",
+            "ITBEM_GITHUB_SOURCE_INSTALLATION_IDS",
+            "ITBEM_GITHUB_SOURCE_APP_PRIVATE_KEY",
         )
         for name in direct_secret_names:
             self.assertIn(f"--required {name}", workflow)

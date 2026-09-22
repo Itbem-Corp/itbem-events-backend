@@ -1,6 +1,7 @@
 package automation
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -22,6 +23,7 @@ import (
 	automationqueue "events-stocks/repositories/automationqueuerepository"
 	awsrepository "events-stocks/repositories/awsrepository"
 	"events-stocks/services/automationcost"
+	"events-stocks/services/deliveryworkflow"
 	outboxService "events-stocks/services/outbox"
 	"events-stocks/utils"
 	"fmt"
@@ -50,6 +52,7 @@ var githubRepositoryPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]*/[a-z0-9]
 var githubOrganizationPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]*$`)
 var toolCallKeyPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{1,63}$`)
 var workerWorkspaceIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$`)
+var workspaceAttestationBranchPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$`)
 
 const maxGitHubReviewWebhookBytes = 1 << 20
 
@@ -59,6 +62,7 @@ const maxGitHubReviewWebhookBytes = 1 << 20
 // looks like duplicate capacity and can combine old, failing workspace
 // readiness with the current successful preflight.
 const maxAutomationHealthWorkerRows = 64
+const workspaceAttestationTTL = 2 * time.Minute
 
 var allowedOperations = map[string]struct{}{
 	"ai.chat":                   {},
@@ -67,6 +71,7 @@ var allowedOperations = map[string]struct{}{
 	"product.ideate":            {},
 	"delivery.plan":             {},
 	"delivery.implementation":   {},
+	"delivery.assessment":       {},
 	"delivery.onboarding_probe": {},
 	"delivery.publish":          {},
 	"delivery.release_gate":     {},
@@ -165,12 +170,6 @@ func GitHubPullRequestReviewWebhook(c echo.Context) error {
 	if taskID == uuid.Nil {
 		return utils.Error(c, http.StatusInternalServerError, "GitHub review failed", "")
 	}
-	var existing models.AutomationTask
-	if err := configuration.DB.First(&existing, taskID).Error; err == nil {
-		return utils.Success(c, http.StatusAccepted, "GitHub review already queued", githubReviewTaskProjection(existing))
-	} else if err != gorm.ErrRecordNotFound {
-		return utils.Error(c, http.StatusServiceUnavailable, "GitHub review unavailable", "")
-	}
 	appConfig, err := automationagent.LoadGitHubAppConfig(os.Getenv)
 	if err != nil {
 		return utils.Error(c, http.StatusServiceUnavailable, "GitHub review unavailable", "")
@@ -189,6 +188,19 @@ func GitHubPullRequestReviewWebhook(c echo.Context) error {
 	}
 	if !currentPR.Open || currentPR.Draft || currentPR.Merged || subtle.ConstantTimeCompare([]byte(currentPR.HeadSHA), []byte(strings.ToLower(event.PullRequest.Head.SHA))) != 1 {
 		return utils.Success(c, http.StatusAccepted, "GitHub review ignored", map[string]string{"status": "stale_delivery"})
+	}
+	var existing models.AutomationTask
+	if err := configuration.DB.First(&existing, taskID).Error; err == nil {
+		recovered, recoveryErr := recoverStrandedGitHubReview(c.Request().Context(), &existing, time.Now().UTC())
+		if recoveryErr != nil {
+			return utils.Error(c, http.StatusServiceUnavailable, "GitHub review unavailable", "")
+		}
+		if recovered != nil {
+			return utils.Success(c, http.StatusAccepted, "GitHub pull request review recovery queued", githubReviewTaskProjection(*recovered))
+		}
+		return utils.Success(c, http.StatusAccepted, "GitHub review already queued", githubReviewTaskProjection(existing))
+	} else if err != gorm.ErrRecordNotFound {
+		return utils.Error(c, http.StatusServiceUnavailable, "GitHub review unavailable", "")
 	}
 	patch, err := automationagent.ReadGitHubPullRequestPatch(c.Request().Context(), appConfig, installation.Token, repository, event.PullRequest.Base.SHA, event.PullRequest.Head.SHA)
 	if err != nil {
@@ -416,6 +428,29 @@ func genericTaskOperationAllowed(operation string) bool {
 }
 
 const automationRunLeaseDuration = 20 * time.Minute
+
+// githubReviewRecoveryDelay is deliberately longer than the normal outbox
+// dispatch and worker-poll intervals. A signed GitHub redelivery may recover
+// only a task that was never claimed, so it cannot create a second provider
+// call for a live reviewer execution.
+const githubReviewRecoveryDelay = 15 * time.Minute
+
+// githubReviewLeaseReconciliationBatchSize deliberately limits the amount of
+// historical work a polling Reviewer can repair. A live webhook remains the
+// normal ingress; this is only the narrowly-scoped escape hatch for a worker
+// lease that was lost after GitHub successfully delivered that webhook.
+const githubReviewLeaseReconciliationBatchSize = 1
+
+// The webhook's patch and bounded source context are stored together in this
+// immutable input. Keep the reconciliation read bounded as well: a corrupt
+// object must never turn a reviewer poll into an unbounded S3 download.
+const maxGitHubReviewRecoveryInputBytes = 2 << 20
+
+// githubReviewLeaseRecoveryMaximumAttempts is deliberately small. A current
+// signed GitHub redelivery may repair one abandoned reviewer execution, but a
+// repeated worker outage must become visible to an operator rather than spend
+// an unbounded number of provider calls against the same immutable SHA.
+const githubReviewLeaseRecoveryMaximumAttempts = 2
 
 // retryReservationHeader is deliberately an internal, response-only signal.
 // It distinguishes a recoverable expired budget hold from ordinary callback
@@ -857,24 +892,38 @@ type automationWorkspaceHealth struct {
 // task-scoped inspector. Workers contains only current, anonymous runtime
 // metadata so that readiness claims remain auditable in the dashboard.
 type automationHealth struct {
-	Queued                        int64                                 `json:"queued"`
-	Running                       int64                                 `json:"running"`
-	FailedLastDay                 int64                                 `json:"failed_last_day"`
-	ExpiredLeases                 int64                                 `json:"expired_leases"`
-	SpendLastDay                  int64                                 `json:"spend_last_day_microusd"`
-	ActiveWorkers                 int64                                 `json:"active_workers"`
-	WorkerCapacity                int64                                 `json:"worker_capacity"`
-	QueueTelemetry                bool                                  `json:"queue_telemetry_available"`
-	QueueLanes                    map[string]automationqueue.LaneHealth `json:"queue_lanes,omitempty"`
-	QueueVisible                  int64                                 `json:"queue_visible_approximate"`
-	QueueInFlight                 int64                                 `json:"queue_in_flight_approximate"`
-	QueueDelayed                  int64                                 `json:"queue_delayed_approximate"`
-	DeadLetterTelemetry           bool                                  `json:"dead_letter_telemetry_available"`
-	DeadLetterVisible             int64                                 `json:"dead_letter_visible_approximate"`
-	OperationalTelemetryAvailable bool                                  `json:"operational_telemetry_available"`
-	LastWorkerSeenAt              *time.Time                            `json:"last_worker_seen_at,omitempty"`
-	Workers                       []automationWorkerHealth              `json:"workers"`
-	ReviewIngress                 automationReviewIngressHealth         `json:"review_ingress"`
+	Queued              int64                                 `json:"queued"`
+	Running             int64                                 `json:"running"`
+	FailedLastDay       int64                                 `json:"failed_last_day"`
+	ExpiredLeases       int64                                 `json:"expired_leases"`
+	SpendLastDay        int64                                 `json:"spend_last_day_microusd"`
+	ActiveWorkers       int64                                 `json:"active_workers"`
+	WorkerCapacity      int64                                 `json:"worker_capacity"`
+	QueueTelemetry      bool                                  `json:"queue_telemetry_available"`
+	QueueLanes          map[string]automationqueue.LaneHealth `json:"queue_lanes,omitempty"`
+	QueueVisible        int64                                 `json:"queue_visible_approximate"`
+	QueueInFlight       int64                                 `json:"queue_in_flight_approximate"`
+	QueueDelayed        int64                                 `json:"queue_delayed_approximate"`
+	DeadLetterTelemetry bool                                  `json:"dead_letter_telemetry_available"`
+	DeadLetterVisible   int64                                 `json:"dead_letter_visible_approximate"`
+	// Outbox is the durable boundary before a task reaches a lane. It is
+	// intentionally aggregate-only: task IDs, payloads, queue URLs and delivery
+	// errors remain private to the task inspector and server logs.
+	OutboxTelemetryAvailable      bool                          `json:"outbox_telemetry_available"`
+	OutboxPending                 int64                         `json:"outbox_pending"`
+	OutboxProcessing              int64                         `json:"outbox_processing"`
+	OutboxRetrying                int64                         `json:"outbox_retrying"`
+	OutboxOldestPendingAt         *time.Time                    `json:"outbox_oldest_pending_at,omitempty"`
+	OperationalTelemetryAvailable bool                          `json:"operational_telemetry_available"`
+	LastWorkerSeenAt              *time.Time                    `json:"last_worker_seen_at,omitempty"`
+	Workers                       []automationWorkerHealth      `json:"workers"`
+	ReviewIngress                 automationReviewIngressHealth `json:"review_ingress"`
+}
+
+type automationOutboxStateCount struct {
+	State    string `gorm:"column:state"`
+	Count    int64  `gorm:"column:count"`
+	Retrying int64  `gorm:"column:retrying"`
 }
 
 // automationReviewIngressHealth makes automatic PR review operationally
@@ -899,6 +948,28 @@ type agentHeartbeatRequest struct {
 	Concurrency        int                         `json:"concurrency"`
 	StartedAt          string                      `json:"started_at"`
 	WorkspaceReadiness []automationWorkspaceHealth `json:"workspace_readiness"`
+}
+
+// workspaceAttestationRequest is accepted only over the worker callback
+// channel after a fresh heartbeat for the same immutable worker identity. It
+// is not a path to GitHub, source code, shell commands or credentials.
+type workspaceAttestationRequest struct {
+	WorkerID     string                          `json:"worker_id"`
+	Attestations []workspaceAttestationStatement `json:"attestations"`
+}
+
+type workspaceAttestationStatement struct {
+	ID               string   `json:"id"`
+	Available        bool     `json:"available"`
+	GitHubRepository string   `json:"github_repository,omitempty"`
+	HeadSHA          string   `json:"head_sha,omitempty"`
+	Branch           string   `json:"branch,omitempty"`
+	Clean            bool     `json:"clean"`
+	ChangeCount      int      `json:"change_count"`
+	TrackingBranch   string   `json:"tracking_branch,omitempty"`
+	LocalAhead       int      `json:"local_ahead"`
+	RemoteAhead      int      `json:"remote_ahead"`
+	Capabilities     []string `json:"capabilities,omitempty"`
 }
 
 // CreateInputUploadURL keeps prompt/document inputs in ITBEM storage before a
@@ -1821,6 +1892,7 @@ func Health(c echo.Context) error {
 		result.QueueLanes = queueHealth.Lanes
 		result.QueueVisible, result.QueueInFlight, result.QueueDelayed = queueHealth.Visible, queueHealth.InFlight, queueHealth.Delayed
 		result.DeadLetterTelemetry, result.DeadLetterVisible = queueHealth.DeadLetterAvailable, queueHealth.DeadLetterVisible
+		populateAutomationOutboxHealth(configuration.DB, &result)
 	}
 	// Health must use the same schema-compatible accounting projection as the
 	// cost screen. Otherwise an optional tool-ledger migration can make a
@@ -1875,6 +1947,46 @@ func Health(c echo.Context) error {
 		result.ReviewIngress = automationReviewIngressStatus(cfg, reviewWorkers)
 	}
 	return utils.Success(c, http.StatusOK, "Automation health", result)
+}
+
+// populateAutomationOutboxHealth keeps the control-plane handoff observable
+// without turning a temporarily unavailable optional projection into a false
+// claim that no work is pending. The dispatcher remains the only component
+// that can publish an event; this read model never retries, edits, or exposes
+// a durable payload.
+func populateAutomationOutboxHealth(db *gorm.DB, health *automationHealth) {
+	if db == nil || health == nil {
+		return
+	}
+	var rows []automationOutboxStateCount
+	if err := db.Model(&models.OutboxEvent{}).
+		Select("state, COUNT(*) AS count, COALESCE(SUM(CASE WHEN attempts > 0 THEN 1 ELSE 0 END), 0) AS retrying").
+		Where("target_runtime = ?", string(outboxService.RuntimeLocalAgent)).
+		Group("state").
+		Scan(&rows).Error; err != nil {
+		return
+	}
+	var oldest sql.NullTime
+	if err := db.Model(&models.OutboxEvent{}).
+		Select("MIN(created_at)").
+		Where("target_runtime = ? AND state = ?", string(outboxService.RuntimeLocalAgent), "pending").
+		Scan(&oldest).Error; err != nil {
+		return
+	}
+	health.OutboxTelemetryAvailable = true
+	for _, row := range rows {
+		health.OutboxRetrying += row.Retrying
+		switch row.State {
+		case "pending":
+			health.OutboxPending = row.Count
+		case "processing":
+			health.OutboxProcessing = row.Count
+		}
+	}
+	if oldest.Valid {
+		value := oldest.Time.UTC()
+		health.OutboxOldestPendingAt = &value
+	}
 }
 
 func automationReviewIngressStatus(cfg *models.Config, activeWorkers int64) automationReviewIngressHealth {
@@ -2064,6 +2176,115 @@ func AgentHeartbeat(c echo.Context) error {
 	return utils.Success(c, http.StatusOK, "Automation agent heartbeat accepted", map[string]any{"accepted_at": now})
 }
 
+// AgentWorkspaceAttestations records short-lived workspace metadata from a
+// live local agent. The later Delivery refresh path validates repository and
+// SHA against the independently obtained GitHub checkpoint, so an attestation
+// never creates workspace, merge, publish or deployment authority on its own.
+func AgentWorkspaceAttestations(c echo.Context) error {
+	if !validWorkerCallbackCredential(c) {
+		return utils.Error(c, http.StatusUnauthorized, "Unauthorized", "")
+	}
+	if configuration.DB == nil {
+		return utils.Error(c, http.StatusServiceUnavailable, "Automation unavailable", "")
+	}
+	var request workspaceAttestationRequest
+	if err := c.Bind(&request); err != nil {
+		return utils.Error(c, http.StatusBadRequest, "Invalid workspace attestation", "")
+	}
+	workerID := strings.TrimSpace(request.WorkerID)
+	if _, err := uuid.FromString(workerID); err != nil || len(request.Attestations) == 0 || len(request.Attestations) > 32 {
+		return utils.Error(c, http.StatusBadRequest, "Invalid workspace attestation", "")
+	}
+	role, lane, err := normalizeWorkerRoleLane(strings.TrimSpace(c.Request().Header.Get("X-Agent-Role")), strings.TrimSpace(c.Request().Header.Get("X-Agent-Lane")))
+	if err != nil || role == "" || lane == "" {
+		return utils.Error(c, http.StatusForbidden, "Worker identity is required for workspace attestation", "")
+	}
+	now := time.Now().UTC()
+	var heartbeat models.AutomationAgentHeartbeat
+	if err := configuration.DB.Where("worker_id = ? AND role = ? AND lane = ? AND last_seen_at >= ?", workerID, role, lane, now.Add(-workspaceAttestationTTL)).First(&heartbeat).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return utils.Error(c, http.StatusConflict, "Workspace attestation rejected", "A fresh heartbeat from the same worker is required before reporting workspace state")
+		}
+		return utils.Error(c, http.StatusInternalServerError, "Workspace attestation unavailable", "")
+	}
+	if err := validateWorkspaceAttestations(request.Attestations); err != nil {
+		return utils.Error(c, http.StatusBadRequest, "Invalid workspace attestation", "")
+	}
+	for _, statement := range request.Attestations {
+		capabilities, marshalErr := json.Marshal(statement.Capabilities)
+		if marshalErr != nil {
+			return utils.Error(c, http.StatusBadRequest, "Invalid workspace attestation", "")
+		}
+		attestation := models.AutomationWorkspaceAttestation{
+			WorkerID: workerID, Role: role, Lane: lane, WorkspaceID: statement.ID, Available: statement.Available,
+			GitHubRepository: strings.ToLower(strings.TrimSpace(statement.GitHubRepository)), HeadSHA: strings.ToLower(strings.TrimSpace(statement.HeadSHA)),
+			Branch: strings.TrimSpace(statement.Branch), Clean: statement.Clean, ChangeCount: statement.ChangeCount,
+			TrackingBranch: strings.TrimSpace(statement.TrackingBranch), LocalAhead: statement.LocalAhead, RemoteAhead: statement.RemoteAhead,
+			CapabilitiesJSON: string(capabilities), AttestedAt: now,
+		}
+		if err := configuration.DB.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "worker_id"}, {Name: "workspace_id"}},
+			DoUpdates: clause.AssignmentColumns([]string{"role", "lane", "available", "github_repository", "head_sha", "branch", "clean", "change_count", "tracking_branch", "local_ahead", "remote_ahead", "capabilities_json", "attested_at", "updated_at"}),
+		}).Create(&attestation).Error; err != nil {
+			return utils.Error(c, http.StatusInternalServerError, "Workspace attestation unavailable", "")
+		}
+	}
+	return utils.Success(c, http.StatusOK, "Workspace attestation accepted", map[string]any{"accepted_at": now, "workspace_count": len(request.Attestations)})
+}
+
+func validateWorkspaceAttestations(attestations []workspaceAttestationStatement) error {
+	seen := make(map[string]struct{}, len(attestations))
+	for _, statement := range attestations {
+		if !workerWorkspaceIDPattern.MatchString(statement.ID) {
+			return fmt.Errorf("invalid workspace id")
+		}
+		if _, exists := seen[statement.ID]; exists {
+			return fmt.Errorf("duplicate workspace id")
+		}
+		seen[statement.ID] = struct{}{}
+		if statement.ChangeCount < 0 || statement.ChangeCount > 1000000 || statement.LocalAhead < 0 || statement.LocalAhead > 1000000 || statement.RemoteAhead < 0 || statement.RemoteAhead > 1000000 || len(statement.Capabilities) > 8 {
+			return fmt.Errorf("invalid workspace counters")
+		}
+		if !statement.Available {
+			if statement.GitHubRepository != "" || statement.HeadSHA != "" || statement.Branch != "" || statement.TrackingBranch != "" || statement.Clean || statement.ChangeCount != 0 || statement.LocalAhead != 0 || statement.RemoteAhead != 0 {
+				return fmt.Errorf("unavailable workspace included git state")
+			}
+			continue
+		}
+		repository := strings.ToLower(strings.TrimSpace(statement.GitHubRepository))
+		if !githubRepositoryPattern.MatchString(repository) || !gitCommitSHA.MatchString(strings.ToLower(strings.TrimSpace(statement.HeadSHA))) || !validWorkspaceAttestationBranch(statement.Branch) || (statement.TrackingBranch != "" && !validWorkspaceAttestationBranch(statement.TrackingBranch)) {
+			return fmt.Errorf("invalid workspace git identity")
+		}
+		if !statement.Clean && statement.ChangeCount == 0 {
+			return fmt.Errorf("dirty workspace missing change count")
+		}
+		if statement.Clean && statement.ChangeCount != 0 {
+			return fmt.Errorf("clean workspace has changes")
+		}
+		capabilities := make(map[string]struct{}, len(statement.Capabilities))
+		for _, capability := range statement.Capabilities {
+			if _, supported := map[string]struct{}{
+				automationagent.WorkspaceCapabilityReadRepository: {}, automationagent.WorkspaceCapabilityFetchRemote: {}, automationagent.WorkspaceCapabilityCreateWorktree: {}, automationagent.WorkspaceCapabilityApplyPatch: {}, automationagent.WorkspaceCapabilityStageCommit: {}, automationagent.WorkspaceCapabilityPublishBranch: {}, automationagent.WorkspaceCapabilityCreatePullReq: {},
+			}[capability]; !supported {
+				return fmt.Errorf("unsupported workspace capability")
+			}
+			if _, duplicate := capabilities[capability]; duplicate {
+				return fmt.Errorf("duplicate workspace capability")
+			}
+			capabilities[capability] = struct{}{}
+		}
+		if _, readable := capabilities[automationagent.WorkspaceCapabilityReadRepository]; !readable {
+			return fmt.Errorf("available workspace is not readable")
+		}
+	}
+	return nil
+}
+
+func validWorkspaceAttestationBranch(value string) bool {
+	value = strings.TrimSpace(value)
+	return value != "" && value == strings.TrimSpace(value) && workspaceAttestationBranchPattern.MatchString(value) && !strings.Contains(value, "..") && !strings.Contains(value, "//") && !strings.HasSuffix(value, ".") && !strings.HasSuffix(value, "/")
+}
+
 // GetArtifact issues a short-lived URL for a task-scoped QA artifact. The
 // object key is derived from the authenticated owner's task ID, so the caller
 // cannot choose a bucket, prefix, or another task's evidence.
@@ -2227,7 +2448,7 @@ func Complete(c echo.Context) error {
 		if task.Operation == "delivery.release_gate" {
 			limit = 256 * 1024
 		}
-		if request.Status != "completed" || (task.Operation != "code.review" && task.Operation != "delivery.implementation" && task.Operation != "delivery.onboarding_probe" && task.Operation != "delivery.publish" && task.Operation != "delivery.release_gate" && task.Operation != "delivery.qa") || len(request.Execution) > limit || !json.Valid(request.Execution) {
+		if request.Status != "completed" || (task.Operation != "code.review" && task.Operation != "delivery.implementation" && task.Operation != "delivery.assessment" && task.Operation != "delivery.onboarding_probe" && task.Operation != "delivery.publish" && task.Operation != "delivery.release_gate" && task.Operation != "delivery.qa") || len(request.Execution) > limit || !json.Valid(request.Execution) {
 			return utils.Error(c, http.StatusBadRequest, "Invalid automation execution", "only a bounded completed review or delivery execution may register execution metadata")
 		}
 	}
@@ -2372,6 +2593,11 @@ func Complete(c echo.Context) error {
 				}
 			}
 		}
+		if !cancellationRequested && request.Status == "completed" && len(request.Execution) > 0 {
+			if err := advanceDelegatedDeliverySubmission(tx, &task, completedAt); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	if err != nil {
@@ -2381,6 +2607,110 @@ func Complete(c echo.Context) error {
 		return utils.Error(c, http.StatusConflict, "Automation result ignored", "Task is not awaiting a result")
 	}
 	return c.NoContent(http.StatusNoContent)
+}
+
+// advanceDelegatedDeliverySubmission advances only non-decision workflow
+// transitions after the authenticated worker has already persisted its strict
+// handoff in this transaction. It is intentionally not a model decision: a
+// frozen delegated policy merely allows the control plane to move completed
+// implementation and QA work into their independent review states. Human
+// mode, plan approval, code approval, QA approval, release approval, merge
+// and deployment all remain outside this helper.
+func advanceDelegatedDeliverySubmission(tx *gorm.DB, task *models.AutomationTask, completedAt time.Time) error {
+	if tx == nil || task == nil || task.ID == uuid.Nil || task.DeliveryWorkItemID == nil || completedAt.IsZero() {
+		return nil
+	}
+	action, phase := delegatedSubmissionAction(task.Operation)
+	if action == "" {
+		return nil
+	}
+	var item models.DeliveryWorkItem
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&item, *task.DeliveryWorkItemID).Error; err != nil {
+		return err
+	}
+	if !delegatedSubmissionStateMatches(item.State, action) {
+		// A human or an earlier idempotent callback already moved this item. The
+		// task result remains valid evidence, but it must not move a newer state.
+		return nil
+	}
+	var event models.DeliveryEvent
+	err := tx.Where("work_item_id = ? AND event_type = ?", item.ID, deliveryledger.EventTypeAutonomySnapshot).Order("sequence ASC").First(&event).Error
+	if err == gorm.ErrRecordNotFound {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	snapshot, err := deliveryledger.ProjectAutonomySnapshot(event)
+	if err != nil || snapshot.ProjectID != item.ProjectID || !snapshot.Delegated {
+		// A malformed or manual-only snapshot never becomes a reason to advance
+		// a task. The callback is still durable; a malformed immutable event is
+		// surfaced as a retryable control-plane integrity fault.
+		if err != nil {
+			return fmt.Errorf("delegated delivery authority is invalid: %w", err)
+		}
+		return nil
+	}
+	if err := recordDelegatedSubmissionEvidence(tx, *task, item.ID, phase, completedAt); err != nil {
+		return err
+	}
+	if err := deliveryworkflow.Advance(&item, action, nil, completedAt); err != nil {
+		return err
+	}
+	return tx.Save(&item).Error
+}
+
+// delegatedSubmissionAction maps an eligible delegated operation to its
+// transition and its immutable delivery phase label. An empty result means the
+// operation is not allowed to advance a delivery work item.
+func delegatedSubmissionAction(operation string) (deliveryworkflow.Action, string) {
+	switch strings.TrimSpace(operation) {
+	case "delivery.implementation":
+		return deliveryworkflow.ActionSubmitCodeReview, "implementation"
+	case "delivery.assessment":
+		return deliveryworkflow.ActionSubmitAssessment, "assessment"
+	case "delivery.qa":
+		return deliveryworkflow.ActionSubmitQA, "qa"
+	default:
+		return "", ""
+	}
+}
+
+func delegatedSubmissionStateMatches(state string, action deliveryworkflow.Action) bool {
+	switch action {
+	case deliveryworkflow.ActionSubmitCodeReview:
+		return strings.TrimSpace(state) == deliveryworkflow.StateImplementation
+	case deliveryworkflow.ActionSubmitAssessment:
+		return strings.TrimSpace(state) == deliveryworkflow.StateImplementation
+	case deliveryworkflow.ActionSubmitQA:
+		return strings.TrimSpace(state) == deliveryworkflow.StateQARunning
+	default:
+		return false
+	}
+}
+
+// recordDelegatedSubmissionEvidence is the same bounded report provenance the
+// manual submission route records. It deliberately stores a reference only:
+// private output is never copied into the ledger or exposed to the dashboard.
+func recordDelegatedSubmissionEvidence(tx *gorm.DB, task models.AutomationTask, workItemID uuid.UUID, phase string, completedAt time.Time) error {
+	if strings.TrimSpace(task.OutputRef) == "" {
+		return fmt.Errorf("delegated %s submission has no private result reference", phase)
+	}
+	var existing models.DeliveryEvidence
+	err := tx.Where("work_item_id = ? AND reference = ?", workItemID, task.OutputRef).First(&existing).Error
+	if err == nil {
+		return nil
+	}
+	if err != gorm.ErrRecordNotFound {
+		return err
+	}
+	evidence := models.DeliveryEvidence{
+		WorkItemID: workItemID, Kind: "report", Phase: phase,
+		Title: "Resultado del agente: " + phase, Reference: task.OutputRef,
+		MetadataJSON: fmt.Sprintf(`{"automation_task_id":%q,"operation":%q,"provider":%q,"model":%q,"submission_authority":"delegated"}`, task.ID.String(), task.Operation, task.Provider, task.Model),
+		CapturedBy:   "itbem-control-plane", CapturedAt: &completedAt,
+	}
+	return tx.Create(&evidence).Error
 }
 
 func persistCodeReviewPublication(tx *gorm.DB, task *models.AutomationTask, raw json.RawMessage, completedAt time.Time) error {
@@ -3293,6 +3623,355 @@ func retryableCodeReviewTask(task *models.AutomationTask) bool {
 	return task != nil && task.Operation == "code.review" && task.Status == "failed" && strings.TrimSpace(task.InputRef) != "" && artifactDigestPattern.MatchString(strings.ToLower(strings.TrimSpace(task.EvidenceSubjectDigest)))
 }
 
+// recoverableQueuedGitHubReview is intentionally narrower than a normal
+// retry. It describes a durable handoff that was accepted by the control
+// plane but was never claimed by any worker. A lease or an execution attempt
+// makes recovery ineligible, leaving the task to the normal at-least-once
+// worker protocol instead.
+func recoverableQueuedGitHubReview(task *models.AutomationTask, now time.Time) bool {
+	if task == nil || task.ID == uuid.Nil || task.JobID == uuid.Nil || task.Operation != "code.review" || task.RequestedBy != "github-app-review" || task.Status != "queued" || task.AttemptCount != 0 || strings.TrimSpace(task.InputRef) == "" || !artifactDigestPattern.MatchString(strings.ToLower(strings.TrimSpace(task.EvidenceSubjectDigest))) || task.CreatedAt.IsZero() {
+		return false
+	}
+	return !task.CreatedAt.After(now.UTC().Add(-githubReviewRecoveryDelay))
+}
+
+// recoverableExpiredGitHubReviewLease is the second, narrower recovery path.
+// The task was claimed, but its worker lease has expired and no terminal
+// callback was recorded. A fresh task is necessary because the original
+// outbox event is already deduplicated; the new task carries RetryOfTaskID so
+// publication remains bound to the same immutable review subject.
+func recoverableExpiredGitHubReviewLease(task *models.AutomationTask, now time.Time) bool {
+	if task == nil || task.ID == uuid.Nil || task.JobID == uuid.Nil || task.Operation != "code.review" || task.RequestedBy != "github-app-review" || task.Status != "running" || task.AttemptCount < 1 || task.AttemptCount >= githubReviewLeaseRecoveryMaximumAttempts || strings.TrimSpace(task.InputRef) == "" || !artifactDigestPattern.MatchString(strings.ToLower(strings.TrimSpace(task.EvidenceSubjectDigest))) || task.LeaseExpiresAt == nil || task.LeaseExpiresAt.After(now.UTC()) || task.CompletedAt != nil {
+		return false
+	}
+	return true
+}
+
+func exhaustedExpiredGitHubReviewLease(task *models.AutomationTask, now time.Time) bool {
+	if task == nil || task.ID == uuid.Nil || task.JobID == uuid.Nil || task.Operation != "code.review" || task.RequestedBy != "github-app-review" || task.Status != "running" || task.AttemptCount < githubReviewLeaseRecoveryMaximumAttempts || strings.TrimSpace(task.InputRef) == "" || !artifactDigestPattern.MatchString(strings.ToLower(strings.TrimSpace(task.EvidenceSubjectDigest))) || task.LeaseExpiresAt == nil || task.LeaseExpiresAt.After(now.UTC()) || task.CompletedAt != nil {
+		return false
+	}
+	return true
+}
+
+type githubReviewRecoverySubject struct {
+	Repository     string
+	PullRequest    int
+	InstallationID int64
+	HeadSHA        string
+}
+
+// parseGitHubReviewRecoverySubject re-establishes every side-effect boundary
+// from the encrypted, immutable input before a stale task may be retried. In
+// particular, neither a database correlation id nor a worker-provided value
+// is enough to select a GitHub PR for a recovery.
+func parseGitHubReviewRecoverySubject(task *models.AutomationTask, cfg *models.Config, raw []byte, now time.Time) (githubReviewRecoverySubject, error) {
+	if !recoverableExpiredGitHubReviewLease(task, now) || !inputReferenceMatches(cfg, task.InputRef) || len(raw) == 0 || len(raw) > maxGitHubReviewRecoveryInputBytes {
+		return githubReviewRecoverySubject{}, fmt.Errorf("GitHub review recovery input boundary is invalid")
+	}
+	var input automationagent.TaskInput
+	if err := json.Unmarshal(raw, &input); err != nil {
+		return githubReviewRecoverySubject{}, fmt.Errorf("GitHub review recovery input is invalid")
+	}
+	review, err := automationagent.ParseCodeReviewInput(input.Delivery)
+	if err != nil || review.Remote == nil {
+		return githubReviewRecoverySubject{}, fmt.Errorf("GitHub review recovery subject is invalid")
+	}
+	digest, err := automationagent.CodeReviewPublicationSubjectSHA256(review)
+	if err != nil || subtle.ConstantTimeCompare([]byte(strings.ToLower(strings.TrimSpace(task.EvidenceSubjectDigest))), []byte(digest)) != 1 {
+		return githubReviewRecoverySubject{}, fmt.Errorf("GitHub review recovery subject digest is invalid")
+	}
+	repository := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(review.RepositoryRef), "github://"))
+	if !githubRepositoryPattern.MatchString(repository) {
+		return githubReviewRecoverySubject{}, fmt.Errorf("GitHub review recovery repository is invalid")
+	}
+	expectedCorrelationID, err := githubReviewCorrelationID(repository, review.Remote.PullRequestNumber, review.HeadSHA)
+	if err != nil || subtle.ConstantTimeCompare([]byte(task.CorrelationID), []byte(expectedCorrelationID)) != 1 {
+		return githubReviewRecoverySubject{}, fmt.Errorf("GitHub review recovery correlation is invalid")
+	}
+	return githubReviewRecoverySubject{Repository: repository, PullRequest: review.Remote.PullRequestNumber, InstallationID: review.Remote.InstallationID, HeadSHA: review.HeadSHA}, nil
+}
+
+func loadGitHubReviewRecoverySubject(ctx context.Context, task *models.AutomationTask, cfg *models.Config, now time.Time) (githubReviewRecoverySubject, error) {
+	if task == nil || !inputReferenceMatches(cfg, task.InputRef) {
+		return githubReviewRecoverySubject{}, fmt.Errorf("GitHub review recovery input reference is invalid")
+	}
+	bucket, key, err := privateReference(task.InputRef)
+	if err != nil {
+		return githubReviewRecoverySubject{}, err
+	}
+	body, err := awsrepository.GetS3Object(ctx, key, bucket)
+	if err != nil {
+		return githubReviewRecoverySubject{}, err
+	}
+	defer body.Close()
+	raw, err := io.ReadAll(io.LimitReader(body, maxGitHubReviewRecoveryInputBytes+1))
+	if err != nil {
+		return githubReviewRecoverySubject{}, err
+	}
+	return parseGitHubReviewRecoverySubject(task, cfg, raw, now)
+}
+
+// cancelObsoleteExpiredGitHubReviewLease retires a historical attempt only
+// after GitHub has positively reported that its sealed revision is no longer
+// reviewable. A transport failure deliberately does not enter this path. A
+// publication is always terminal, even if its callback raced a worker crash.
+func cancelObsoleteExpiredGitHubReviewLease(original *models.AutomationTask, now time.Time) error {
+	if configuration.DB == nil || original == nil || original.ID == uuid.Nil {
+		return fmt.Errorf("GitHub review recovery is unavailable")
+	}
+	return configuration.DB.Transaction(func(tx *gorm.DB) error {
+		var current models.AutomationTask
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&current, original.ID).Error; err != nil {
+			return err
+		}
+		if !recoverableExpiredGitHubReviewLease(&current, now) {
+			return nil
+		}
+		var publications int64
+		if err := tx.Model(&models.AutomationCodeReviewPublication{}).Where("automation_task_id = ?", current.ID).Count(&publications).Error; err != nil {
+			return err
+		}
+		if publications != 0 {
+			return nil
+		}
+		return tx.Model(&models.AutomationTask{}).
+			Where("id = ? AND status = ? AND lease_expires_at <= ?", current.ID, "running", now.UTC()).
+			Updates(map[string]any{
+				"status":                        "cancelled",
+				"completed_at":                  now.UTC(),
+				"lease_expires_at":              nil,
+				"budget_reservation_expires_at": nil,
+				"error_message":                 "Cancelled during reviewer lease reconciliation because GitHub no longer exposes the sealed pull-request revision",
+			}).Error
+	})
+}
+
+// failExhaustedExpiredGitHubReviewLease makes a bounded recovery policy
+// observable. It never retries or publishes: after the one permitted repair
+// path has itself expired, the only safe action is to release the stale lease
+// and preserve the failure for an operator.
+func failExhaustedExpiredGitHubReviewLease(original *models.AutomationTask, now time.Time) error {
+	if configuration.DB == nil || original == nil || original.ID == uuid.Nil {
+		return fmt.Errorf("GitHub review recovery is unavailable")
+	}
+	return configuration.DB.Transaction(func(tx *gorm.DB) error {
+		var current models.AutomationTask
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&current, original.ID).Error; err != nil {
+			return err
+		}
+		if !exhaustedExpiredGitHubReviewLease(&current, now) {
+			return nil
+		}
+		var publications int64
+		if err := tx.Model(&models.AutomationCodeReviewPublication{}).Where("automation_task_id = ?", current.ID).Count(&publications).Error; err != nil {
+			return err
+		}
+		if publications != 0 {
+			return nil
+		}
+		return tx.Model(&models.AutomationTask{}).
+			Where("id = ? AND status = ? AND lease_expires_at <= ?", current.ID, "running", now.UTC()).
+			Updates(map[string]any{
+				"status":                        "failed",
+				"completed_at":                  now.UTC(),
+				"lease_expires_at":              nil,
+				"budget_reservation_expires_at": nil,
+				"error_message":                 "Reviewer lease expired after the maximum permitted recovery attempts; no additional provider retry was created",
+			}).Error
+	})
+}
+
+// reconcileOneExpiredGitHubReviewLease is invoked only by the authenticated
+// Review lane before it asks SQS for more work. It does not block ordinary
+// queue delivery: any storage, GitHub or configuration failure simply leaves
+// the historical task untouched for a later poll. At most one exact stale
+// task is inspected, and it can be requeued only after a fresh GitHub App
+// read proves the same open PR head still exists.
+func reconcileOneExpiredGitHubReviewLease(ctx context.Context, cfg *models.Config, now time.Time) (bool, error) {
+	if configuration.DB == nil || cfg == nil || !githubReviewWebhookConfigured(cfg) {
+		return false, nil
+	}
+	var candidates []models.AutomationTask
+	if err := configuration.DB.Where("operation = ? AND requested_by = ? AND status = ? AND attempt_count >= ? AND lease_expires_at <= ? AND completed_at IS NULL", "code.review", "github-app-review", "running", 1, now.UTC()).Order("lease_expires_at ASC").Limit(githubReviewLeaseReconciliationBatchSize).Find(&candidates).Error; err != nil {
+		return false, err
+	}
+	if len(candidates) == 0 {
+		return false, nil
+	}
+	candidate := &candidates[0]
+	// An exhausted lease is deliberately terminal: it must be released before
+	// attempting to reopen its immutable input. parseGitHubReviewRecoverySubject
+	// correctly rejects an exhausted task (only a recoverable lease may supply
+	// a subject), so doing the input read first would leave this row running
+	// forever and starve every later review recovery behind it.
+	if exhaustedExpiredGitHubReviewLease(candidate, now) {
+		if err := failExhaustedExpiredGitHubReviewLease(candidate, now); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	subject, err := loadGitHubReviewRecoverySubject(ctx, candidate, cfg, now)
+	if err != nil {
+		return false, nil
+	}
+	appConfig, err := automationagent.LoadGitHubAppConfig(os.Getenv)
+	if err != nil {
+		return false, nil
+	}
+	appConfig, err = appConfig.WithInstallationID(subject.InstallationID)
+	if err != nil {
+		return false, nil
+	}
+	installation, err := automationagent.MintGitHubInstallationToken(ctx, appConfig, nil, now.UTC())
+	if err != nil {
+		return false, nil
+	}
+	currentPR, err := automationagent.ReadGitHubPullRequestState(ctx, appConfig, installation.Token, subject.Repository, subject.PullRequest)
+	if err != nil {
+		return false, nil
+	}
+	if !currentPR.Open || currentPR.Draft || currentPR.Merged || subtle.ConstantTimeCompare([]byte(currentPR.HeadSHA), []byte(subject.HeadSHA)) != 1 {
+		return false, cancelObsoleteExpiredGitHubReviewLease(candidate, now)
+	}
+	recovered, err := recoverStrandedGitHubReview(ctx, candidate, now)
+	if err != nil {
+		return false, err
+	}
+	return recovered != nil, nil
+}
+
+// newStrandedGitHubReviewRecovery preserves the immutable review boundary but
+// deliberately has a new task and job identity. The original has no worker
+// attempt, so it is retained as cancelled audit evidence instead of being
+// relabelled as a failed provider execution. RetryOfTaskID stays empty: this
+// recovery must never authorize replacing a prior Reviewer check.
+func newStrandedGitHubReviewRecovery(original *models.AutomationTask, now time.Time) (*models.AutomationTask, error) {
+	if !recoverableQueuedGitHubReview(original, now) {
+		return nil, fmt.Errorf("queued GitHub review recovery boundary is invalid")
+	}
+	return &models.AutomationTask{
+		ID:                    uuid.Must(uuid.NewV4()),
+		JobID:                 uuid.Must(uuid.NewV4()),
+		RequestedBy:           original.RequestedBy,
+		DeliveryWorkItemID:    original.DeliveryWorkItemID,
+		DeliveryOnboardingID:  original.DeliveryOnboardingID,
+		CorrelationID:         original.CorrelationID,
+		Operation:             original.Operation,
+		EvidenceSubjectDigest: strings.ToLower(strings.TrimSpace(original.EvidenceSubjectDigest)),
+		MaxCompletionTokens:   original.MaxCompletionTokens,
+		InputRef:              original.InputRef,
+		Status:                "queued",
+	}, nil
+}
+
+func newExpiredGitHubReviewLeaseRecovery(original *models.AutomationTask, now time.Time) (*models.AutomationTask, error) {
+	if !recoverableExpiredGitHubReviewLease(original, now) {
+		return nil, fmt.Errorf("expired GitHub review lease recovery boundary is invalid")
+	}
+	// Reuse the existing retry contract so the worker is explicitly told that
+	// this task can supersede only the prior, same-subject reviewer attempt.
+	failed := *original
+	failed.Status = "failed"
+	next, err := newCodeReviewRetryTask(&failed)
+	if err != nil {
+		return nil, err
+	}
+	// A retry is a new task identity, not a new retry budget. Carry the number
+	// of completed claims forward so its next lease becomes the final allowed
+	// attempt instead of opening an unbounded chain of fresh task rows.
+	next.AttemptCount = original.AttemptCount
+	return next, nil
+}
+
+// recoverStrandedGitHubReview gives an authenticated, current-head GitHub
+// redelivery one bounded repair path for a lost queue handoff. The transaction
+// re-reads and locks the source task, so a concurrent worker claim or another
+// redelivery cannot create duplicate provider work.
+func recoverStrandedGitHubReview(ctx context.Context, original *models.AutomationTask, now time.Time) (*models.AutomationTask, error) {
+	if configuration.DB == nil || original == nil || original.ID == uuid.Nil {
+		return nil, fmt.Errorf("queued GitHub review recovery is unavailable")
+	}
+	var recovered *models.AutomationTask
+	err := configuration.DB.Transaction(func(tx *gorm.DB) error {
+		var current models.AutomationTask
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&current, original.ID).Error; err != nil {
+			return err
+		}
+		var next *models.AutomationTask
+		var message automationqueue.Message
+		var updates map[string]any
+		var where string
+		var args []any
+		switch {
+		case recoverableQueuedGitHubReview(&current, now):
+			var recoveryErr error
+			next, recoveryErr = newStrandedGitHubReviewRecovery(&current, now)
+			if recoveryErr != nil {
+				return recoveryErr
+			}
+			updates = map[string]any{
+				"status":                        "cancelled",
+				"completed_at":                  now.UTC(),
+				"budget_reservation_expires_at": nil,
+				"error_message":                 "Recovered after an authenticated GitHub redelivery found no worker execution attempt",
+			}
+			where, args = "id = ? AND status = ? AND attempt_count = ?", []any{current.ID, "queued", 0}
+			message = automationqueue.Message{SchemaVersion: 1, JobID: next.JobID.String(), TenantCode: "itbem", CorrelationID: next.CorrelationID, Type: "ai.local.process"}
+			message.Payload.TaskID, message.Payload.Operation, message.Payload.MaxCompletionTokens, message.Payload.InputRef, message.Payload.Attempt = next.ID.String(), next.Operation, next.MaxCompletionTokens, next.InputRef, 1
+		case recoverableExpiredGitHubReviewLease(&current, now):
+			// A published reviewer result is terminal even if a late callback
+			// failed to update its task row. Never publish or infer a duplicate.
+			var publications int64
+			if err := tx.Model(&models.AutomationCodeReviewPublication{}).Where("automation_task_id = ?", current.ID).Count(&publications).Error; err != nil {
+				return err
+			}
+			if publications != 0 {
+				return nil
+			}
+			var recoveryErr error
+			next, recoveryErr = newExpiredGitHubReviewLeaseRecovery(&current, now)
+			if recoveryErr != nil {
+				return recoveryErr
+			}
+			updates = map[string]any{
+				"status":                        "failed",
+				"completed_at":                  now.UTC(),
+				"lease_expires_at":              nil,
+				"budget_reservation_expires_at": nil,
+				"error_message":                 "Recovered after an authenticated GitHub redelivery found an expired reviewer execution lease without a publication",
+			}
+			where, args = "id = ? AND status = ? AND lease_expires_at <= ?", []any{current.ID, "running", now.UTC()}
+			message = codeReviewRetryQueueMessage(&current, next)
+		default:
+			return nil
+		}
+		result := tx.Model(&models.AutomationTask{}).Where(where, args...).Updates(updates)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return nil
+		}
+		if err := tx.Create(next).Error; err != nil {
+			return err
+		}
+		queued, enqueueErr := outboxService.EnqueueAutomationProcess(ctx, tx, message)
+		if enqueueErr != nil {
+			return enqueueErr
+		}
+		if !queued {
+			return fmt.Errorf("GitHub review recovery delivery was not enqueued")
+		}
+		recovered = next
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return recovered, nil
+}
+
 // newCodeReviewRetryTask preserves the frozen input and its evidence subject.
 // A retry is a new billable execution, not a new review target; dropping the
 // subject digest would make an otherwise successful exact-SHA publication
@@ -3315,17 +3994,18 @@ func newCodeReviewRetryTask(original *models.AutomationTask) (*models.Automation
 	}, nil
 }
 
-// codeReviewRetryQueueMessage carries the sole authorization for a Reviewer
-// retry to supersede its earlier failed exact-SHA check. It is emitted only by
-// RetryCodeReview after that endpoint verified both the original task and the
-// caller; ordinary queue delivery and redelivery leave RetryOfTaskID empty.
+// codeReviewRetryQueueMessage carries the explicit authorization for a Reviewer
+// retry to supersede its earlier failed exact-SHA check. It is emitted by a
+// manually authorized retry, or by the bounded authenticated-redelivery repair
+// of an expired, unpublished GitHub review lease; ordinary delivery leaves
+// RetryOfTaskID empty.
 func codeReviewRetryQueueMessage(original, retry *models.AutomationTask) automationqueue.Message {
 	message := automationqueue.Message{SchemaVersion: 1, JobID: retry.JobID.String(), TenantCode: "itbem", CorrelationID: retry.CorrelationID, Type: "ai.local.process"}
 	message.Payload.TaskID = retry.ID.String()
 	message.Payload.Operation = retry.Operation
 	message.Payload.MaxCompletionTokens = retry.MaxCompletionTokens
 	message.Payload.InputRef = retry.InputRef
-	message.Payload.Attempt = 1
+	message.Payload.Attempt = retry.AttemptCount + 1
 	message.Payload.RetryOfTaskID = original.ID.String()
 	return message
 }

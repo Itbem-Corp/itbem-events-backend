@@ -221,6 +221,9 @@ func TestAutomationPortfolioWorkItemTotalsDoNotCountClosingRunsAsActive(t *testi
 		"stopping_task.delivery_work_item_id = work_item.id",
 		"stopping_task.status = 'cancel_requested'",
 		"AS active_work_items",
+		"active_publication.operation = 'delivery.publish'",
+		"active_publication.status IN ('queued', 'running')",
+		"AS decisions_required",
 	} {
 		if !strings.Contains(query, fragment) {
 			t.Fatalf("active work-item query must exclude safe closures; missing %q", fragment)

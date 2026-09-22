@@ -37,6 +37,7 @@ install -m 0755 "$source_binary" "$release_dir/itbem-ai-agent"
 ln -sfn "$release_dir" /opt/itbem-ai-agent/current
 install -m 0644 "$asset_dir/itbem-ai-agent@.service" /etc/systemd/system/itbem-ai-agent@.service
 install -m 0644 "$asset_dir/itbem-ai-agent-doctor@.service" /etc/systemd/system/itbem-ai-agent-doctor@.service
+install -m 0644 "$asset_dir/itbem-ai-agent-sync@.service" /etc/systemd/system/itbem-ai-agent-sync@.service
 install -d -m 0711 -o root -g root /srv/itbem-agent-workspaces
 
 for lane in orchestration engineering review qa release; do

@@ -82,6 +82,20 @@ lane root private to its Unix account (`0700`); do not weaken those modes or
 reuse a checkout across Engineer, Reviewer, QA and Release. This provides the
 independent checkout boundary required by review and exact-SHA evidence.
 
+Each service also declares `StateDirectoryMode=0700`. This matters after a
+restart: systemd must preserve the same lane-private mode for
+`/var/lib/itbem-ai-agent/<lane>` instead of recreating a readable state root.
+After installing or updating the units, verify both state and workspace roots
+before enabling a lane:
+
+```bash
+sudo stat -c '%a %U %G %n' /var/lib/itbem-ai-agent/* /srv/itbem-agent-workspaces/*
+```
+
+Every lane-specific path must report mode `700` and its matching
+`itbem-agent-<lane>` owner/group. Do not place secrets in state roots; secret
+material remains in the root-owned environment files and lane secret paths.
+
 The installed units also deny namespace creation, IPC persistence, hostname
 changes and syscall groups unrelated to an outbound HTTPS worker. These guards
 are deliberately shared by the long-running and doctor units. Keep the
@@ -138,6 +152,23 @@ for lane in orchestration engineering review qa release; do
   sudo journalctl -u "itbem-ai-agent-doctor@${lane}.service" -n 20 --no-pager
 done
 ```
+
+Before starting or restarting a lane after its registered repository has moved,
+synchronize its private base checkout with the separate, bounded sync unit:
+
+```bash
+for lane in orchestration engineering review qa release; do
+  sudo systemctl start "itbem-ai-agent-sync@${lane}.service"
+  sudo journalctl -u "itbem-ai-agent-sync@${lane}.service" -n 20 --no-pager
+done
+```
+
+The sync unit runs the same non-billable identity preflights and then only
+fast-forwards the lane's operator-registered base checkout using its dedicated
+read-only Source App. It cannot lease work, call a model, publish a review, or
+release a change. A stale, divergent, dirty, or unpinned checkout fails closed;
+do not use `git pull`, reset, or a developer checkout as a workaround. Start
+the long-running lane only after its matching sync unit succeeds.
 
 The doctor unit runs only the local, non-billable `--doctor` command and cannot
 lease work or mutate a workspace. Before every worker start, the service then

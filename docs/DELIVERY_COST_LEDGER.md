@@ -32,6 +32,19 @@ standard traces expose only metadata and totals; an authorized reviewer opens
 the exact inspector for a specific call. Failed provider calls remain in the
 ledger when usage exists, so retries cannot hide cost.
 
+## Segmented exact-SHA reviews
+
+A large `code.review` persists an encrypted task-scoped progress object before
+the first provider call, after each validated segment, and after an invalid
+candidate is bound to its single repair request. The checkpoint is bound to the
+task ID, base SHA, head SHA, full patch digest, each segment digest and the
+original immutable request reference. A retry may reuse only those completed
+segments and may resume only the stored repair; it never re-infers an observed
+completion. A missing, mismatched or malformed checkpoint fails closed before
+inference. The checkpoint is not a terminal result and cannot be published as
+a GitHub review; the normal exact-SHA aggregate and result evidence remain
+required before any external side effect.
+
 ## Stagehand
 
 Stagehand emits a separate call ledger from its report. Browser metrics and

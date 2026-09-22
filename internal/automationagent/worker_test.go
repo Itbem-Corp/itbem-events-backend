@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gofrs/uuid"
 )
@@ -31,7 +32,13 @@ func (s *fakeStore) Get(_ context.Context, bucket, key string) ([]byte, error) {
 	if value, ok := s.existing[bucket+"/"+key]; ok {
 		return value, nil
 	}
-	return s.input, nil
+	if value, ok := s.writes[bucket+"/"+key]; ok {
+		return value, nil
+	}
+	if strings.HasPrefix(key, "automation/inputs/") && strings.HasSuffix(key, "/input.json") {
+		return s.input, nil
+	}
+	return nil, ErrObjectNotFound
 }
 func (s *fakeStore) PutEncryptedJSON(_ context.Context, bucket, key string, body []byte) error {
 	s.mu.Lock()
@@ -46,6 +53,19 @@ func (s *fakeStore) PutEncryptedJSON(_ context.Context, bucket, key string, body
 type fakeCallback struct {
 	mu      sync.Mutex
 	updates []TaskUpdate
+}
+
+type failingInputStore struct{ err error }
+
+func (s failingInputStore) Get(_ context.Context, _ string, key string) ([]byte, error) {
+	if strings.HasPrefix(key, "automation/inputs/") && strings.HasSuffix(key, "/input.json") {
+		return nil, s.err
+	}
+	return nil, ErrObjectNotFound
+}
+
+func (failingInputStore) PutEncryptedJSON(_ context.Context, _ string, _ string, _ []byte) error {
+	return errors.New("input storage is unavailable")
 }
 
 func (c *fakeCallback) Update(_ context.Context, _ string, update TaskUpdate) (bool, error) {
@@ -237,6 +257,25 @@ func TestWorkerWritesEncryptedPrivateResultAndCallbacks(t *testing.T) {
 	}
 }
 
+func TestWorkerDoesNotAcquireExecutionLeaseBeforeTransientInputRead(t *testing.T) {
+	callback := &fakeCallback{}
+	storageErr := errors.New("temporary automation gateway failure during object read (storage=authorization)")
+	worker, err := NewWorker(
+		WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"},
+		failingInputStore{err: storageErr}, callback,
+		fakeProvider{err: errors.New("provider must not run before input is readable")},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Process(context.Background(), validMessage()); !errors.Is(err, storageErr) {
+		t.Fatalf("input read error = %v, want the retryable storage failure", err)
+	}
+	if len(callback.updates) != 0 {
+		t.Fatalf("unreadable input must not create a running lease: %#v", callback.updates)
+	}
+}
+
 func TestWorkerFailsBeforeProviderWhenManagedWorkspaceAdvanced(t *testing.T) {
 	remoteRoot := t.TempDir()
 	remote := filepath.Join(remoteRoot, "origin.git")
@@ -399,6 +438,115 @@ func TestWorkerSegmentsLargeCodeReviewAndAccountsForEveryCall(t *testing.T) {
 	result := store.writes["itbem-ai-outputs-local/automation/task/runs/"+callback.updates[1].RunID+"/result.json"]
 	if strings.Count(string(result), `"patch_sha256"`) < 2 || !strings.Contains(string(result), `"review_segments"`) || !strings.Contains(string(result), `"verdict":"comment"`) {
 		t.Fatalf("segmented result lost private calls or conservative aggregate: %s", result)
+	}
+}
+
+func TestWorkerRetainsSegmentedReviewAfterTransientLaterProviderFailure(t *testing.T) {
+	patch := ""
+	for index := 0; index < codeReviewSegmentMaxFiles+1; index++ {
+		file := fmt.Sprintf("src/file_%02d.go", index)
+		patch += fmt.Sprintf("diff --git a/%s b/%s\n--- a/%s\n+++ b/%s\n@@ -1 +1 @@\n-old%d\n+new%d\n", file, file, file, file, index, index)
+	}
+	boundary, err := NewCodeReviewInput("github://acme/service", strings.Repeat("a", 40), strings.Repeat("b", 40), patch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivery, _ := json.Marshal(boundary)
+	input, _ := json.Marshal(TaskInput{Prompt: "Review every exact segment.", Delivery: delivery})
+	approved := `{"summary":"The exact segment is consistent.","verdict":"approve","review_scope":["changed files"],"findings":[],"test_plan":["Run go test ./..."],"coverage_gaps":[]}`
+	firstProvider := &sequenceProvider{
+		completions: []Completion{{Provider: ProviderMiniMax, Model: "MiniMax-M3", ResponseID: "segment-one", Content: approved, Usage: map[string]any{"total_tokens": float64(100)}}, {}},
+		errors:      []error{nil, &RetryableError{Message: "provider network request failed", RetryAfter: time.Minute}},
+	}
+	store, callback := &fakeStore{input: input}, &fakeCallback{}
+	worker, err := NewWorker(WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"}, store, callback, firstProvider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := validMessage()
+	message.Payload.Operation = "code.review"
+	err = worker.Process(context.Background(), message)
+	var retryable *RetryableError
+	if !errors.As(err, &retryable) {
+		t.Fatalf("later transient segment failure must retain the review, got %v", err)
+	}
+	if firstProvider.calls != 2 || len(callback.updates) != 1 || callback.updates[0].Status != "running" {
+		t.Fatalf("transient review failure must not publish a terminal result: calls=%d updates=%#v", firstProvider.calls, callback.updates)
+	}
+	checkpoint := store.writes["itbem-ai-outputs-local/automation/task/code-review-progress.json"]
+	if !strings.Contains(string(checkpoint), "segment-one") || strings.Contains(string(checkpoint), "segment-two") {
+		t.Fatalf("completed first segment was not durably checkpointed: %s", checkpoint)
+	}
+	secondProvider := &sequenceProvider{completions: []Completion{{Provider: ProviderMiniMax, Model: "MiniMax-M3", ResponseID: "segment-two", Content: approved, Usage: map[string]any{"total_tokens": float64(80)}}}}
+	worker, err = NewWorker(WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"}, store, callback, secondProvider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Process(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	if secondProvider.calls != 1 || len(callback.updates) != 3 || callback.updates[2].Status != "completed" || callback.updates[2].Usage["total_tokens"] != float64(180) {
+		t.Fatalf("retry must resume at only the missing segment with cumulative accounting: calls=%d updates=%#v", secondProvider.calls, callback.updates)
+	}
+}
+
+func TestWorkerRetainsReviewAfterTransientRepairFailure(t *testing.T) {
+	input, _ := json.Marshal(TaskInput{Prompt: "Review the frozen pull request.", Delivery: json.RawMessage(validCodeReviewInput())})
+	truncated := `{"summary":"Checked the change.","verdict":"approve"`
+	firstProvider := &sequenceProvider{
+		completions: []Completion{{Provider: ProviderMiniMax, Model: "MiniMax-M3", ResponseID: "candidate", Content: truncated, Usage: map[string]any{"total_tokens": float64(20)}}, {}},
+		errors:      []error{nil, &RetryableError{Message: "provider temporarily unavailable (503)", RetryAfter: time.Minute}},
+	}
+	store, callback := &fakeStore{input: input}, &fakeCallback{}
+	worker, err := NewWorker(WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"}, store, callback, firstProvider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := validMessage()
+	message.Payload.Operation = "code.review"
+	err = worker.Process(context.Background(), message)
+	var retryable *RetryableError
+	if !errors.As(err, &retryable) {
+		t.Fatalf("transient repair failure must retain the review, got %v", err)
+	}
+	if firstProvider.calls != 2 || len(callback.updates) != 1 || callback.updates[0].Status != "running" {
+		t.Fatalf("transient repair failure must not publish a terminal result: calls=%d updates=%#v", firstProvider.calls, callback.updates)
+	}
+	checkpoint := store.writes["itbem-ai-outputs-local/automation/task/code-review-progress.json"]
+	if !strings.Contains(string(checkpoint), "candidate") || !strings.Contains(string(checkpoint), "pending_repair") {
+		t.Fatalf("candidate and pending repair were not durably checkpointed: %s", checkpoint)
+	}
+	repaired := `{"summary":"The exact changed line is consistent.","verdict":"approve","review_scope":["handler"],"findings":[],"test_plan":["Run the handler tests"],"coverage_gaps":[]}`
+	secondProvider := &sequenceProvider{completions: []Completion{{Provider: ProviderMiniMax, Model: "MiniMax-M3", ResponseID: "repaired", Content: repaired, Usage: map[string]any{"total_tokens": float64(10)}}}}
+	worker, err = NewWorker(WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"}, store, callback, secondProvider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Process(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	if secondProvider.calls != 1 || secondProvider.maxTokens[0] != codeReviewRepairCompletionLimit || len(callback.updates) != 3 || callback.updates[2].Status != "completed" || callback.updates[2].Usage["total_tokens"] != float64(30) {
+		t.Fatalf("retry must resume at only the repair with cumulative accounting: calls=%d max=%#v updates=%#v", secondProvider.calls, secondProvider.maxTokens, callback.updates)
+	}
+}
+
+func TestWorkerFailsClosedBeforeInferenceForMismatchedCodeReviewCheckpoint(t *testing.T) {
+	input, _ := json.Marshal(TaskInput{Prompt: "Review the frozen pull request.", Delivery: json.RawMessage(validCodeReviewInput())})
+	store := &fakeStore{input: input, existing: map[string][]byte{
+		"itbem-ai-outputs-local/automation/task/code-review-progress.json": []byte(`{"schema_version":1,"task_id":"task","base_sha":"` + strings.Repeat("a", 40) + `","head_sha":"` + strings.Repeat("b", 40) + `","patch_sha256":"` + strings.Repeat("0", 64) + `","request_ref":"s3://itbem-ai-outputs-local/automation/task/runs/not-a-uuid/request.json","segments":[]}`),
+	}}
+	callback, provider := &fakeCallback{}, &sequenceProvider{}
+	worker, err := NewWorker(WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"}, store, callback, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := validMessage()
+	message.Payload.Operation = "code.review"
+	if err := worker.Process(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	if provider.calls != 0 || len(callback.updates) != 2 || callback.updates[1].Status != "failed" || !strings.Contains(callback.updates[1].ErrorMessage, "checkpoint is invalid") {
+		t.Fatalf("mismatched checkpoint reached inference or was not terminally rejected: calls=%d updates=%#v", provider.calls, callback.updates)
 	}
 }
 
@@ -688,8 +836,11 @@ func TestWorkerRetainsInvalidDeliveryPlanForAuthorizedInspectionAndLedger(t *tes
 		t.Fatalf("expected failed callback with private result: %#v", callback.updates)
 	}
 	failed := callback.updates[1]
-	if failed.Provider != ProviderMiniMax || failed.Model != "MiniMax-M3" || failed.ResponseID != "response-1" || failed.Usage["total_tokens"] != 7 {
+	if got, ok := numericReviewUsage(failed.Usage["total_tokens"]); failed.Provider != ProviderMiniMax || failed.Model != "MiniMax-M3" || failed.ResponseID != "response-1" || !ok || got != 14 {
 		t.Fatalf("provider accounting metadata was not retained: %#v", failed)
+	}
+	if repair, ok := failed.Usage["_itbem_repair"].(map[string]any); !ok || repair["provider_call_count"] != 2 {
+		t.Fatalf("failed repair accounting metadata was not retained: %#v", failed.Usage)
 	}
 	result := store.writes["itbem-ai-outputs-local/automation/task/result.json"]
 	if !strings.Contains(string(result), "not a JSON plan") || !strings.Contains(string(result), "validation_error") {
@@ -700,6 +851,49 @@ func TestWorkerRetainsInvalidDeliveryPlanForAuthorizedInspectionAndLedger(t *tes
 	}
 	if !strings.Contains(failed.RequestRef, "/runs/"+failed.RunID+"/request.json") {
 		t.Fatalf("failed provider result must retain its immutable request reference: %#v", failed)
+	}
+}
+
+func TestWorkerRepairsDeliveryPlanContextCoverageOnceWithoutWeakeningTheGate(t *testing.T) {
+	input, err := json.Marshal(TaskInput{Prompt: "Plan the scoped read-only validation", Delivery: json.RawMessage(`{"context_sources":[{"kind":"repository","reference":"github://Itbem-Corp/itbem-events-backend","revision":"17bc9ee0ef9436cb77e00e40fb57ce2a43b32a73"}]}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	missingContext := `{"summary":"bounded","goal_interpretation":"read-only validation","confidence":0.9,"autonomy_boundary":"wait for gates","context_reviewed":[],"context_gaps":[],"assumptions":[],"human_decisions":[],"implementation_steps":["inspect"],"risks":[],"qa_plan":["validate"],"evidence_plan":["record result"],"acceptance_criteria":["plan is bounded"],"repository_impact":[],"files_impacted":[],"rollback_plan":["no mutation"],"estimate":"0 minutes","questions":[]}`
+	repaired := `{"summary":"bounded","goal_interpretation":"read-only validation","confidence":0.9,"autonomy_boundary":"wait for gates","context_reviewed":["github://Itbem-Corp/itbem-events-backend"],"context_gaps":[],"assumptions":[],"human_decisions":[],"implementation_steps":["inspect"],"risks":[],"qa_plan":["validate"],"evidence_plan":["record result"],"acceptance_criteria":["plan is bounded"],"repository_impact":[],"files_impacted":[],"rollback_plan":["no mutation"],"estimate":"0 minutes","questions":[]}`
+	store, callback := &fakeStore{input: input}, &fakeCallback{}
+	provider := &sequenceProvider{completions: []Completion{
+		{Provider: ProviderMiniMax, Model: "MiniMax-M3", Content: missingContext, ResponseID: "candidate", Usage: map[string]any{"total_tokens": 7}},
+		{Provider: ProviderMiniMax, Model: "MiniMax-M3", Content: repaired, ResponseID: "repair", Usage: map[string]any{"total_tokens": 9}},
+	}}
+	worker, err := NewWorker(WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"}, store, callback, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Process(context.Background(), validMessage()); err != nil {
+		t.Fatal(err)
+	}
+	if provider.calls != 2 || len(provider.maxTokens) != 2 || provider.maxTokens[1] != deliveryPlanRepairCompletionLimit {
+		t.Fatalf("expected one bounded repair call, got calls=%d limits=%#v", provider.calls, provider.maxTokens)
+	}
+	if len(callback.updates) != 2 || callback.updates[1].Status != "completed" || callback.updates[1].ResponseID != "repair" {
+		t.Fatalf("expected completed repair result, got %#v", callback.updates)
+	}
+	if got, ok := numericReviewUsage(callback.updates[1].Usage["total_tokens"]); !ok || got != 16 {
+		t.Fatalf("combined provider accounting was not retained: %#v", callback.updates[1].Usage)
+	}
+	repairMeta, ok := callback.updates[1].Usage["_itbem_repair"].(map[string]any)
+	if !ok || repairMeta["provider_call_count"] != 2 {
+		t.Fatalf("repair audit metadata missing: %#v", callback.updates[1].Usage)
+	}
+	repairRequestFound := false
+	for key, body := range store.writes {
+		if strings.HasSuffix(key, "/repairs/delivery-plan/request.json") {
+			repairRequestFound = strings.Contains(string(body), "context_reviewed") && strings.Contains(string(body), "candidate")
+		}
+	}
+	if !repairRequestFound {
+		t.Fatal("the rejected candidate and compact repair request were not retained privately")
 	}
 }
 

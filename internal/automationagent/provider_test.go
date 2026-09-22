@@ -3,12 +3,19 @@ package automationagent
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
+
+type providerRoundTripper func(*http.Request) (*http.Response, error)
+
+func (fn providerRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	return fn(request)
+}
 
 func TestProviderConfigDefaultsToMiniMaxM3AndRejectsUnsafeEndpoints(t *testing.T) {
 	config, err := LoadProviderConfig(func(name string) string {
@@ -17,7 +24,7 @@ func TestProviderConfigDefaultsToMiniMaxM3AndRejectsUnsafeEndpoints(t *testing.T
 		}
 		return ""
 	})
-	if err != nil || config.Provider != ProviderMiniMax || config.Model != "MiniMax-M3" || config.requestTimeout != providerRequestTimeout {
+	if err != nil || config.Provider != ProviderMiniMax || config.Model != "MiniMax-M3" || config.Endpoint != miniMaxDirectCompletionEndpoint || config.requestTimeout != providerRequestTimeout {
 		t.Fatalf("unexpected config: %#v, %v", config, err)
 	}
 	configured, err := LoadProviderConfig(func(name string) string {
@@ -58,6 +65,60 @@ func TestProviderConfigDefaultsToMiniMaxM3AndRejectsUnsafeEndpoints(t *testing.T
 	})
 	if err == nil {
 		t.Fatal("expected insecure endpoint to be rejected")
+	}
+}
+
+func TestMiniMaxDirectM3PayloadOmitsCompatibilityOnlyControls(t *testing.T) {
+	client := &httpProviderClient{config: ProviderConfig{Provider: ProviderMiniMax, Model: "MiniMax-M3", Endpoint: miniMaxDirectCompletionEndpoint, secret: "test-key"}}
+	payload, _ := client.payload([]Message{{Role: "user", Content: "work"}}, 1)
+	if _, exists := payload["reasoning_split"]; exists {
+		t.Fatalf("MiniMax direct payload unexpectedly used compatibility reasoning_split: %#v", payload)
+	}
+	if _, exists := payload["thinking"]; exists {
+		t.Fatalf("MiniMax direct payload unexpectedly used compatibility thinking control: %#v", payload)
+	}
+	if payload["model"] != "MiniMax-M3" || payload["max_completion_tokens"] != 1 {
+		t.Fatalf("MiniMax direct payload lost bounded portable fields: %#v", payload)
+	}
+	if !usesMiniMaxDirectCompletionEndpoint(miniMaxDirectCompletionEndpoint) || usesMiniMaxDirectCompletionEndpoint("https://api.minimax.io/v1/chat/completions") {
+		t.Fatalf("MiniMax completion endpoint classification is incorrect")
+	}
+}
+
+func TestProviderClientUsesMiniMaxDirectM3TokenPlanContract(t *testing.T) {
+	client := &http.Client{Transport: providerRoundTripper(func(request *http.Request) (*http.Response, error) {
+		if request.Method != http.MethodPost || request.URL.String() != miniMaxDirectCompletionEndpoint {
+			t.Fatalf("MiniMax direct request = %s %s", request.Method, request.URL)
+		}
+		if request.Header.Get("Authorization") != "Bearer private-test-key" || request.Header.Get("x-api-key") != "" {
+			t.Fatalf("MiniMax direct authorization contract is incorrect")
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode MiniMax direct payload: %v", err)
+		}
+		if payload["model"] != "MiniMax-M3" || payload["max_completion_tokens"] != float64(7) {
+			t.Fatalf("MiniMax direct payload lost bounded model fields: %#v", payload)
+		}
+		if _, present := payload["reasoning_split"]; present {
+			t.Fatalf("MiniMax direct request included a compatibility-only control: %#v", payload)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"id":"direct-response","model":"MiniMax-M3","usage":{"total_tokens":7},"base_resp":{"status_code":0},"choices":[{"finish_reason":"stop","message":{"content":"ok"}}]}`)),
+			Request:    request,
+		}, nil
+	})}
+
+	completion, err := NewProviderClient(ProviderConfig{
+		Provider: ProviderMiniMax,
+		Model:    "MiniMax-M3",
+		Endpoint: miniMaxDirectCompletionEndpoint,
+		secret:   "private-test-key",
+	}, client).Complete(context.Background(), []Message{{Role: "user", Content: "test"}}, 7)
+	if err != nil || completion.Content != "ok" || completion.ResponseID != "direct-response" {
+		t.Fatalf("MiniMax direct completion = %#v, %v", completion, err)
 	}
 }
 

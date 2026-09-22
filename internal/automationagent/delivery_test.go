@@ -206,6 +206,28 @@ func TestValidateDeliveryPlanContextCoverageNormalizesExactFrozenProvenance(t *t
 	}
 }
 
+func TestValidateDeliveryPlanContextCoverageNormalizesFixedRepositoryMarker(t *testing.T) {
+	plan := map[string]any{"context_reviewed": []any{"github://Itbem-Corp/itbem-events-backend@1110ee62f34d648316390212ebf558ef3cd9bef8 (repository)"}}
+	delivery := json.RawMessage(`{"context_sources":[{"reference":"github://Itbem-Corp/itbem-events-backend","revision":"1110ee62f34d648316390212ebf558ef3cd9bef8"}]}`)
+	if err := ValidateDeliveryPlanContextCoverage(plan, delivery); err != nil {
+		t.Fatalf("expected fixed repository marker to normalize: %v", err)
+	}
+	if got := plan["context_reviewed"].([]any); got[0] != "github://Itbem-Corp/itbem-events-backend" {
+		t.Fatalf("expected canonical repository reference, got %#v", got)
+	}
+
+	plan["context_reviewed"] = []any{"github://Itbem-Corp/itbem-events-backend@1110ee62f34d648316390212ebf558ef3cd9bef8 (untrusted)"}
+	if err := ValidateDeliveryPlanContextCoverage(plan, delivery); err == nil {
+		t.Fatal("arbitrary provenance prose must remain rejected")
+	}
+
+	plan["context_reviewed"] = []any{"document://architecture@1110ee62f34d648316390212ebf558ef3cd9bef8 (repository)"}
+	documentDelivery := json.RawMessage(`{"context_sources":[{"reference":"document://architecture","revision":"1110ee62f34d648316390212ebf558ef3cd9bef8"}]}`)
+	if err := ValidateDeliveryPlanContextCoverage(plan, documentDelivery); err == nil {
+		t.Fatal("the repository marker must not relabel a non-repository source")
+	}
+}
+
 func TestValidateDeliveryPlanTopologyRequiresStagehandEvidenceForConfiguredFrontend(t *testing.T) {
 	plan := map[string]any{
 		"repository_impact": []any{map[string]any{

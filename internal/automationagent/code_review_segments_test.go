@@ -123,7 +123,7 @@ func TestCodeReviewSegmentPromptRestrictsFindingsToTheSegmentFiles(t *testing.T)
 		t.Fatalf("expected one bounded segment: %#v / %v", segments, err)
 	}
 	prompt := codeReviewSegmentPrompt("review the exact diff", 1, 1, segments[0], boundary)
-	if !strings.Contains(prompt, "The only permitted values of findings[].file in this segment are exactly: controllers/orders.go") || !strings.Contains(prompt, "Never cite supporting context") || !strings.Contains(prompt, "A coverage gap is permitted only") || !strings.Contains(prompt, "Never report a coverage gap merely because") || !strings.Contains(prompt, "Do not require this segment to independently prove coverage") || !strings.Contains(prompt, "A coverage gap must never request go build/go vet output") {
+	if !strings.Contains(prompt, "The only permitted values of findings[].file in this segment are exactly: controllers/orders.go") || !strings.Contains(prompt, "Never cite supporting context") || !strings.Contains(prompt, "request_changes is valid only with at least one grounded finding") || !strings.Contains(prompt, "A coverage gap is permitted only") || !strings.Contains(prompt, "Never report a coverage gap merely because") || !strings.Contains(prompt, "Do not require this segment to independently prove coverage") || !strings.Contains(prompt, "A coverage gap must never request go build/go vet output") {
 		t.Fatalf("segment prompt must make the file boundary explicit: %s", prompt)
 	}
 }
@@ -198,7 +198,7 @@ func TestCodeReviewRepairBoundaryRestatesExactPermittedLocations(t *testing.T) {
 	if len(messages) == 1 {
 		content = messages[0].Content
 	}
-	if len(messages) != 1 || !strings.Contains(content, "Authoritative permitted finding files: src/a.go, src/b_test.go") || !strings.Contains(content, "src/a.go:head:1-1, src/b_test.go:head:1-1") || !strings.Contains(content, "findings=[]") {
+	if len(messages) != 1 || !strings.Contains(content, "Authoritative permitted finding files: src/a.go, src/b_test.go") || !strings.Contains(content, "src/a.go:head:1-1, src/b_test.go:head:1-1") || !strings.Contains(content, "request_changes requires at least one grounded finding") || !strings.Contains(content, "findings=[]") {
 		t.Fatalf("repair prompt lost its deterministic finding boundary: %#v", messages)
 	}
 }

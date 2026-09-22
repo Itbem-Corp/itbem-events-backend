@@ -123,6 +123,13 @@ the standard chain remains active. Do not place a Cognito App Client ID or App
 Client secret in the backend aliases. Dashboard OAuth/App Client configuration
 belongs in `dashboard-ts/.env.local`.
 
+The backend's private automation gateway is deliberately stricter than the
+general SDK chain: reads of immutable automation inputs and task-scoped writes
+to automation outputs use the EC2 instance profile directly. This prevents an
+ambient `AWS_ACCESS_KEY_ID` or deprecated S3 alias from overriding the audited
+runtime identity. It is an internal gateway behavior, not a new environment
+variable; physical Linux agents still receive no AWS credentials.
+
 ### Disposable local OIDC qualification
 
 `cmd/itbem-local-oidc` is an active, test-only fixture for authenticated local
