@@ -317,7 +317,7 @@ func sandboxAttestation(raw string) *SandboxAttestation {
 	value.Runtime = strings.ToLower(strings.TrimSpace(value.Runtime))
 	value.Transport = strings.ToLower(strings.TrimSpace(value.Transport))
 	value.EvidenceScope = strings.ToLower(strings.TrimSpace(value.EvidenceScope))
-	if value.Runtime != WorkspaceSandboxFirecracker || !value.GuestCommandVerified || value.EvidenceScope == "" || (value.Transport != "virtio_vsock" && !(value.Transport == "serial_console" && value.EvidenceScope == "local_task_guest_command")) {
+	if value.Runtime != WorkspaceSandboxFirecracker || !value.GuestCommandVerified || value.EvidenceScope == "" || (value.Transport != "virtio_vsock" && (value.Transport != "serial_console" || value.EvidenceScope != "local_task_guest_command")) {
 		return nil
 	}
 	return &value

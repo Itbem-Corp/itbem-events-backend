@@ -37,9 +37,10 @@ func newSandboxLease(ctx context.Context, workspace Workspace, directory string)
 		runtime = WorkspaceSandboxProcess
 	}
 	isolation := "host_process"
-	if runtime == WorkspaceSandboxDocker {
+	switch runtime {
+	case WorkspaceSandboxDocker:
 		isolation = "docker_container"
-	} else if runtime == WorkspaceSandboxFirecracker {
+	case WorkspaceSandboxFirecracker:
 		isolation = "firecracker_microvm"
 	}
 	lease := map[string]any{
