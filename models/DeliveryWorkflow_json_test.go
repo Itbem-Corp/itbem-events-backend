@@ -66,3 +66,25 @@ func TestDeliveryMetadataFailsClosedToJSONObject(t *testing.T) {
 		t.Fatalf("invalid metadata must become {}, got %#v", payload["metadata"])
 	}
 }
+
+func TestDeliveryMessageSerializesAuthorizedAttachmentReferences(t *testing.T) {
+	message := DeliveryMessage{
+		AttachmentsJSON: `[{"kind":"evidence","id":"00000000-0000-0000-0000-000000000001","name":"QA","reference":"evidence://qa","revision":"rev"}]`,
+		ReceiptJSON:     `{"status":"received"}`,
+	}
+	encoded, err := json.Marshal(message)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	attachments, ok := payload["attachments"].([]any)
+	if !ok || len(attachments) != 1 {
+		t.Fatalf("attachments must be a bounded JSON array, got %#v", payload["attachments"])
+	}
+	if _, leaked := payload["attachments_json"]; leaked {
+		t.Fatal("storage JSON must not leak as a duplicate API field")
+	}
+}

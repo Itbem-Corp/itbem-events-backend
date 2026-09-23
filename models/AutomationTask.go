@@ -10,8 +10,11 @@ import (
 // request. Inputs and outputs are object references, never the heavyweight or
 // sensitive payload itself.
 type AutomationTask struct {
+	ProgressStep         string     `gorm:"type:varchar(32);not null;default:''" json:"progress_step,omitempty"`
+	ProgressCall         int        `gorm:"not null;default:0" json:"progress_call,omitempty"`
 	ID                   uuid.UUID  `gorm:"type:uuid;default:uuid_generate_v4();primaryKey" json:"id"`
 	JobID                uuid.UUID  `gorm:"type:uuid;not null;uniqueIndex" json:"job_id"`
+	ContinuationID       *uuid.UUID `gorm:"type:uuid;uniqueIndex" json:"continuation_id,omitempty"`
 	RequestedBy          string     `gorm:"type:varchar(128);not null;index" json:"requested_by"`
 	DeliveryWorkItemID   *uuid.UUID `gorm:"type:uuid;index" json:"delivery_work_item_id,omitempty"`
 	DeliveryOnboardingID *uuid.UUID `gorm:"type:uuid;index" json:"delivery_onboarding_id,omitempty"`

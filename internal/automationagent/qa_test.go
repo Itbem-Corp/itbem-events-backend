@@ -3,6 +3,7 @@ package automationagent
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -87,7 +88,7 @@ func main() {
 	if err != nil {
 		t.Fatal(err)
 	}
-	uploaded, references, err := worker.uploadArtifacts(context.Background(), "task", result, artifacts)
+	uploaded, references, err := worker.uploadArtifacts(context.Background(), "task", "d4a4b837-2e18-43af-9f58-6d59629db2bb", result, artifacts)
 	if err != nil || len(store.objects) != 2 || len(uploaded["artifacts"].([]map[string]any)) != 2 || len(references) != 2 {
 		t.Fatalf("unexpected uploaded artifacts: %#v / %#v / %#v / %v", uploaded, references, store.objects, err)
 	}
@@ -95,6 +96,120 @@ func main() {
 		if len(reference.SHA256) != 64 {
 			t.Fatalf("uploaded QA evidence must carry a SHA-256 digest: %#v", reference)
 		}
+	}
+}
+
+func TestRunQAMultiRepositoryTraversalUsesDependencyOrderAndPrivateEvidence(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusOK) }))
+	defer server.Close()
+
+	// Keep this topology test hermetic. Browser availability is covered by the
+	// dedicated default-command checks; this test is about dependency order and
+	// private evidence separation and therefore uses the same approved fixture
+	// screenshot contract as the bounded workspace test above.
+	captureProgram := `package main
+import (
+  "encoding/base64"
+  "os"
+)
+func main() {
+  body, _ := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL92gAAAABJRU5ErkJggg==")
+  if len(os.Args) != 3 { os.Exit(2) }
+  if err := os.WriteFile(os.Args[2], body, 0600); err != nil { panic(err) }
+}`
+	workspaceIDs := []string{"api", "dashboard"}
+	roots := make(map[string]string, len(workspaceIDs))
+	branches := make(map[string]string, len(workspaceIDs))
+	for _, id := range workspaceIDs {
+		root := t.TempDir()
+		roots[id] = root
+		for _, command := range [][]string{{"git", "init"}, {"git", "config", "user.email", "qa@example.invalid"}, {"git", "config", "user.name", "ITBEM QA"}} {
+			result, err := runLocal(context.Background(), root, commandTimeout, "", command[0], command[1:]...)
+			if err != nil || result.ExitCode != 0 {
+				t.Fatalf("git setup for %s failed: %#v / %v", id, result, err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(root, "result.txt"), []byte(id+" evidence\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "capture.go"), []byte(captureProgram), 0600); err != nil {
+			t.Fatal(err)
+		}
+		for _, command := range [][]string{{"git", "add", "result.txt"}, {"git", "commit", "-m", "initial"}} {
+			result, err := runLocal(context.Background(), root, commandTimeout, "", command[0], command[1:]...)
+			if err != nil || result.ExitCode != 0 {
+				t.Fatalf("git commit setup for %s failed: %#v / %v", id, result, err)
+			}
+		}
+		worktree, branch, err := isolatedWorktree(context.Background(), Workspace{Root: root}, "b5b5b837-2e18-43af-9f58-6d59629db2bb")
+		if id == "dashboard" {
+			// A repository-specific task identity is required so the two worktrees
+			// remain isolated even when they share one QA traversal.
+			worktree, branch, err = isolatedWorktree(context.Background(), Workspace{Root: root}, "c6c6c837-2e18-43af-9f58-6d59629db2cc")
+		}
+		if err != nil || worktree == "" || branch == "" {
+			t.Fatalf("reviewed worktree for %s was not created: %s / %v", id, worktree, err)
+		}
+		branches[id] = branch
+	}
+
+	registryEntries := map[string]any{}
+	for _, id := range workspaceIDs {
+		registryEntries[id] = map[string]any{
+			"path":                  roots[id],
+			"validation_commands":   [][]string{{"go", "version"}},
+			"qa_commands":           [][]string{{"go", "env", "GOMOD"}},
+			"qa_artifact_patterns":  []string{"result.txt"},
+			"qa_screenshot_command": []string{"go", "run", "capture.go", "{preview_url}", "{artifact_path}"},
+		}
+	}
+	registryBytes, err := json.Marshal(registryEntries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lookup := func(name string) string {
+		if name == "ITBEM_AI_WORKSPACES_JSON" {
+			return string(registryBytes)
+		}
+		return ""
+	}
+	delivery := map[string]any{
+		"work_item": map[string]any{"preview_url": server.URL},
+		"context_sources": []any{
+			map[string]any{"kind": "repository", "reference": "workspace://api"},
+			map[string]any{"kind": "repository", "reference": "workspace://dashboard"},
+		},
+		"repository_topology": []any{
+			map[string]any{"reference": "workspace://api", "depends_on": []string{}},
+			map[string]any{"reference": "workspace://dashboard", "depends_on": []string{"workspace://api"}},
+		},
+		"change_sets": []any{
+			map[string]any{"repository_ref": "workspace://dashboard", "branch": branches["dashboard"], "review_type": "local_worktree", "ci_status": "passed"},
+			map[string]any{"repository_ref": "workspace://api", "branch": branches["api"], "review_type": "local_worktree", "ci_status": "passed"},
+		},
+		"approved_plan": map[string]any{"qa_execution_matrix": []any{
+			map[string]any{"repository_ref": "workspace://api", "run_validation": true, "run_qa": true, "run_stagehand": false, "collect_evidence": true},
+			map[string]any{"repository_ref": "workspace://dashboard", "run_validation": true, "run_qa": true, "run_stagehand": false, "collect_evidence": true},
+		}},
+	}
+	deliveryBytes, err := json.Marshal(delivery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, artifacts, err := RunQA(context.Background(), "d7d7d837-2e18-43af-9f58-6d59629db2dd", deliveryBytes, lookup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	order, ok := result["repository_execution_order"].([]string)
+	if !ok || len(order) != 2 || order[0] != "workspace://api" || order[1] != "workspace://dashboard" {
+		t.Fatalf("QA must execute repositories in frozen dependency order: %#v", result["repository_execution_order"])
+	}
+	runs, ok := result["repository_runs"].([]any)
+	if !ok || len(runs) != 2 {
+		t.Fatalf("QA must retain one run record per repository: %#v", result["repository_runs"])
+	}
+	if len(artifacts) != 2 || artifacts[0].Name != "api-result.txt" || artifacts[1].Name != "dashboard-result.txt" {
+		t.Fatalf("multi-repository evidence must remain private and distinguishable: %#v", artifacts)
 	}
 }
 

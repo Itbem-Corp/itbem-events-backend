@@ -158,7 +158,7 @@ func ensurePublicMomentsWallIndex(ctx context.Context, db *sql.DB) (returnErr er
 		}
 	}()
 
-	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, publicMomentsWallIndexAdvisoryKey); err != nil {
+	if err := acquirePublicMomentsWallLock(ctx, conn); err != nil {
 		return fmt.Errorf("acquire migration advisory lock: %w", err)
 	}
 	lockConfirmed = true
@@ -208,6 +208,38 @@ func ensurePublicMomentsWallIndex(ctx context.Context, db *sql.DB) (returnErr er
 		)
 	}
 	return nil
+}
+
+// acquirePublicMomentsWallLock deliberately uses a non-blocking PostgreSQL
+// advisory-lock probe instead of pg_advisory_lock. The latter participates in
+// PostgreSQL's wait-for graph while a concurrent CREATE INDEX may be acquiring
+// catalog/table locks, which can make two API replicas appear deadlocked even
+// though only one should be waiting. A bounded retry keeps the same
+// cross-process serialization without introducing that wait graph.
+func acquirePublicMomentsWallLock(ctx context.Context, conn *sql.Conn) error {
+	const retryInterval = 25 * time.Millisecond
+	for {
+		var acquired bool
+		if err := conn.QueryRowContext(ctx, `SELECT pg_try_advisory_lock($1)`, publicMomentsWallIndexAdvisoryKey).Scan(&acquired); err != nil {
+			return err
+		}
+		if acquired {
+			return nil
+		}
+
+		timer := time.NewTimer(retryInterval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func readPostgresIndexState(ctx context.Context, conn *sql.Conn, indexName string) (postgresIndexState, error) {

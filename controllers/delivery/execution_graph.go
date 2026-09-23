@@ -438,7 +438,7 @@ func buildExecutionGraph(input executionGraphBuildInput) executionGraphSnapshot 
 		nodes = append(nodes, executionGraphNode{
 			ID:         nodeID,
 			Kind:       "message",
-			Status:     "decision",
+			Status:     "completed",
 			Summary:    executionGraphMessageSummary(message.AuthorType),
 			Detail:     executionGraphText(message.Phase, "Contexto"),
 			ParentID:   rootID,
@@ -451,7 +451,7 @@ func buildExecutionGraph(input executionGraphBuildInput) executionGraphSnapshot 
 			},
 			Actions: []executionGraphAction{{ID: "inspect", TargetType: "delivery_message", TargetID: message.ID.String()}},
 		})
-		edges = append(edges, executionGraphEdge{ID: executionGraphEdgeID(rootID, nodeID, "adds_context"), SourceID: rootID, TargetID: nodeID, Kind: "adds_context", Status: "decision"})
+		edges = append(edges, executionGraphEdge{ID: executionGraphEdgeID(rootID, nodeID, "adds_context"), SourceID: rootID, TargetID: nodeID, Kind: "adds_context", Status: "completed"})
 	}
 
 	for _, event := range input.Events {
@@ -694,6 +694,8 @@ func executionGraphWorkItemDetail(state string) string {
 
 func executionGraphOperationSummary(operation string) string {
 	switch strings.ToLower(strings.TrimSpace(operation)) {
+	case "delivery.chat":
+		return "Conversación"
 	case "delivery.plan":
 		return "Plan"
 	case "delivery.implementation":
@@ -711,6 +713,8 @@ func executionGraphOperationSummary(operation string) string {
 
 func executionGraphStepSummary(stepKey, fallback string) string {
 	switch strings.ToLower(strings.TrimSpace(stepKey)) {
+	case "chat", "delivery.chat":
+		return "Conversación"
 	case "plan":
 		return "Plan"
 	case "implementation":

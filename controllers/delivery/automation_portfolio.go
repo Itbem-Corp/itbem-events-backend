@@ -119,6 +119,7 @@ type automationPortfolioWorkItem struct {
 	AutomationTasks          []automationPortfolioTask      `json:"automation_tasks"`
 	GateSummary              automationPortfolioGateSummary `json:"gate_summary"`
 	EvidenceCount            int64                          `json:"evidence_count"`
+	WorkflowProjection       deliveryWorkflowProjection     `json:"workflow_projection"`
 }
 
 type automationPortfolioTask struct {
@@ -651,12 +652,20 @@ func buildAutomationPortfolio(input automationPortfolioBuildInput) automationPor
 		if tasks == nil {
 			tasks = []automationPortfolioTask{}
 		}
+		projectionTasks := make([]models.AutomationTask, 0, len(tasks))
+		for _, task := range tasks {
+			projectionTasks = append(projectionTasks, models.AutomationTask{ID: task.ID, Operation: task.Operation, Status: task.Status, AttemptCount: task.AttemptCount, CreatedAt: task.CreatedAt, UpdatedAt: task.UpdatedAt, CompletedAt: task.CompletedAt})
+		}
+		projection := buildDeliveryWorkflowProjection(models.DeliveryWorkItem{ID: workItem.ID, State: workItem.State, CreatedAt: workItem.CreatedAt, UpdatedAt: workItem.UpdatedAt, AutomationTasks: projectionTasks}, input.GeneratedAt)
+		projection.Evidence.Total = int(evidence.EvidenceCount)
+		projection.Evidence.HasHumanGate = gates.Total > 0
 		workItemsByProject[workItem.ProjectID] = append(workItemsByProject[workItem.ProjectID], automationPortfolioWorkItem{
 			ID: workItem.ID, ProjectID: workItem.ProjectID, Title: strings.TrimSpace(workItem.Title), State: strings.TrimSpace(workItem.State),
 			CreatedAt: workItem.CreatedAt, UpdatedAt: workItem.UpdatedAt, AutomationTaskCount: taskTotal.AutomationTasks,
 			AutomationTasksTruncated: taskTotal.AutomationTasks > int64(len(tasks)), AutomationTasks: tasks,
-			GateSummary:   automationPortfolioGateSummary{Total: gates.Total, Approved: gates.Approved, ChangesRequested: gates.ChangesRequested},
-			EvidenceCount: evidence.EvidenceCount,
+			GateSummary:        automationPortfolioGateSummary{Total: gates.Total, Approved: gates.Approved, ChangesRequested: gates.ChangesRequested},
+			EvidenceCount:      evidence.EvidenceCount,
+			WorkflowProjection: projection,
 		})
 	}
 

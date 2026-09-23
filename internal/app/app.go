@@ -14,9 +14,11 @@ import (
 	"time"
 
 	"events-stocks/configuration"
+	automationController "events-stocks/controllers/automation"
 	cacheController "events-stocks/controllers/cache"
 	clientrolesController "events-stocks/controllers/clientroles"
 	clientsController "events-stocks/controllers/clients"
+	deliveryController "events-stocks/controllers/delivery"
 	designtemplatesController "events-stocks/controllers/designtemplates"
 	eventconfigController "events-stocks/controllers/eventconfig"
 	eventmembersController "events-stocks/controllers/eventmembers"
@@ -30,6 +32,7 @@ import (
 	resourcesController "events-stocks/controllers/resources"
 	sessionsController "events-stocks/controllers/sessions"
 	usersController "events-stocks/controllers/users"
+	"events-stocks/internal/aicredentials"
 	"events-stocks/internal/authz"
 	"events-stocks/internal/observability"
 	"events-stocks/middleware/applicationaccess"
@@ -119,6 +122,17 @@ func Run() error {
 		}
 	}
 	configuration.InitAwsServices(cfg)
+	if secretID := strings.TrimSpace(cfg.AIProviderCredentialsSecretID); secretID != "" {
+		store, err := aicredentials.NewSecretsManagerStore(context.Background(), cfg.AwsRegion)
+		if err != nil {
+			return fmt.Errorf("configure AI provider credential store: %w", err)
+		}
+		resolver, err := aicredentials.NewResolver(store, secretID, 5*time.Minute)
+		if err != nil {
+			return fmt.Errorf("configure AI provider credential resolver: %w", err)
+		}
+		automationController.ConfigureInferenceCredentials(resolver)
+	}
 	sqsrepository.Init(cfg.AwsRegion, cfg.S3ClientId, cfg.S3ClientSecret, cfg.SQSImageQueueURL, cfg.SQSVideoQueueURL, cfg.SQSEndpoint)
 	jobqueuerepository.Init(cfg.AwsRegion, cfg.S3ClientId, cfg.S3ClientSecret, cfg.SQSWorkerQueueURL, cfg.SNSWorkerTopicARN)
 	if err := automationqueuerepository.Init(cfg.AwsRegion, cfg.S3ClientId, cfg.S3ClientSecret, cfg.SQSAutomationQueueURL, cfg.SQSAutomationDeadLetterQueueURL, cfg.SQSAutomationQueueLanesJSON, cfg.SQSAutomationRoleDeadLetterQueueURL, cfg.SQSEndpoint); err != nil {
@@ -127,6 +141,7 @@ func Run() error {
 	dispatcherCtx, stopDispatcher := context.WithCancel(context.Background())
 	defer stopDispatcher()
 	outboxService.StartDispatcher(dispatcherCtx, configuration.DB)
+	deliveryController.StartContinuationDispatcher(dispatcherCtx, configuration.DB, cfg)
 	metricsCollector := productmetricsService.NewCollector(configuration.DB)
 	productmetricsService.Configure(metricsCollector)
 	metricsCollector.Start(dispatcherCtx)

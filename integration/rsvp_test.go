@@ -33,9 +33,11 @@ import (
 	invitationaccesstokenrepository "events-stocks/repositories/invitationaccesstokenrepository"
 	invitationlogrepository "events-stocks/repositories/invitationlogrepository"
 	invitationrepository "events-stocks/repositories/invitationrepository"
+	momentrepository "events-stocks/repositories/momentrepository"
 	redisrepository "events-stocks/repositories/redisrepository"
 	"events-stocks/seeds"
 	invitationsSvc "events-stocks/services/invitations"
+	momentsSvc "events-stocks/services/moments"
 )
 
 var testPostgresConnectionString string
@@ -89,8 +91,11 @@ func TestMain(m *testing.M) {
 	// uuid_generate_v4() is used as the default for UUID primary keys
 	configuration.DB.Exec(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`)
 
-	// Migrate all models (same set as production)
-	if err := configuration.DB.AutoMigrate(configuration.GetAllModels()...); err != nil {
+	// Migrate through the same ordered, transactional path used by production.
+	// A single variadic AutoMigrate call lets GORM infer associations in an
+	// unstable order on a fresh schema (notably DeliveryWorkItem and its
+	// automation relation).
+	if err := configuration.MigrateModelsForTest(configuration.DB); err != nil {
 		panic("migration failed: " + err.Error())
 	}
 
@@ -104,6 +109,8 @@ func TestMain(m *testing.M) {
 	}
 	defer mr.Close()
 	configuration.RedisClient = redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	momentsSvc.SetDefaultMomentService(momentsSvc.NewMomentService(momentrepository.NewMomentRepo(), redisrepository.NewRedisRepo()))
+	defer momentsSvc.SetDefaultMomentService(nil)
 
 	os.Exit(m.Run())
 }
@@ -215,14 +222,16 @@ func TestRSVP_HappyPath_Confirmed(t *testing.T) {
 
 	var resp map[string]interface{}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Equal(t, "success", resp["status"])
+	assert.Equal(t, float64(http.StatusOK), resp["status"])
 	assert.Equal(t, "RSVP confirmed", resp["message"])
 
 	data, ok := resp["data"].(map[string]interface{})
 	require.True(t, ok, "data field missing or wrong type in: %s", rec.Body.String())
-	assert.Equal(t, "confirmed", data["rsvp_status"])
-	assert.Equal(t, float64(2), data["rsvp_guest_count"]) // JSON numbers decode as float64
-	assert.NotEmpty(t, data["rsvp_at"])
+	guestData, ok := data["guest"].(map[string]interface{})
+	require.True(t, ok, "guest field missing or wrong type in: %s", rec.Body.String())
+	assert.Equal(t, "confirmed", guestData["rsvp_status"])
+	assert.Equal(t, float64(2), guestData["rsvp_guest_count"]) // JSON numbers decode as float64
+	assert.NotEmpty(t, guestData["rsvp_at"])
 
 	// ── Assert DB state ───────────────────────────────────────────────────────
 	var updated models.Guest

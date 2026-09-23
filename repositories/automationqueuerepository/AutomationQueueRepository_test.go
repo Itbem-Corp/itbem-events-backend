@@ -115,9 +115,12 @@ func TestQueueCountsRequireEveryApproximateCounter(t *testing.T) {
 
 func TestValidateRejectsMessagesTheWorkerWouldNeverBeAllowedToConsume(t *testing.T) {
 	valid := Message{SchemaVersion: 1, JobID: "job", TenantCode: "itbem", Type: "ai.local.process"}
-	valid.Payload.TaskID, valid.Payload.Operation, valid.Payload.Attempt = "task", "code.review", 1
-	if err := Validate(valid); err != nil {
-		t.Fatalf("valid review message rejected: %v", err)
+	valid.Payload.TaskID, valid.Payload.Attempt = "task", 1
+	for _, operation := range []string{"code.review", "delivery.plan"} {
+		valid.Payload.Operation = operation
+		if err := Validate(valid); err != nil {
+			t.Fatalf("valid %s message rejected: %v", operation, err)
+		}
 	}
 	for _, mutate := range []func(*Message){
 		func(message *Message) { message.Payload.Attempt = 0 },

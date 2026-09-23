@@ -137,8 +137,12 @@ type DeliveryWorkItem struct {
 	// cannot consume the entire project allocation before a person intervenes.
 	BudgetMicros       int64                        `gorm:"not null;default:0" json:"budget_microusd"`
 	BudgetAlertPercent int                          `gorm:"not null;default:80" json:"budget_alert_percent"`
+	MandateVersion     int                          `gorm:"not null;default:1" json:"mandate_version"`
+	MandateJSON        string                       `gorm:"type:jsonb;not null;default:'{}'" json:"-"`
 	State              string                       `gorm:"type:varchar(32);not null;default:'planning';index" json:"state"`
 	BlockedReason      string                       `gorm:"type:text;not null;default:''" json:"blocked_reason,omitempty"`
+	AutomationEpoch    int64                        `gorm:"not null;default:0" json:"automation_epoch"`
+	AgentProgress      string                       `gorm:"type:varchar(32);not null;default:''" json:"agent_progress,omitempty"`
 	Project            DeliveryProject              `gorm:"foreignKey:ProjectID" json:"project,omitempty" validate:"-"`
 	Request            *DeliveryRequest             `gorm:"foreignKey:RequestID" json:"request,omitempty" validate:"-"`
 	ContextSnapshots   []DeliveryContextSnapshot    `gorm:"foreignKey:WorkItemID" json:"context_snapshots,omitempty" validate:"-"`
@@ -154,6 +158,29 @@ type DeliveryWorkItem struct {
 	CreatedAt          time.Time                    `json:"created_at"`
 	UpdatedAt          time.Time                    `json:"updated_at"`
 	DeletedAt          gorm.DeletedAt               `gorm:"index" json:"-"`
+}
+
+func (item DeliveryWorkItem) MarshalJSON() ([]byte, error) {
+	type alias DeliveryWorkItem
+	mandate := strings.TrimSpace(item.MandateJSON)
+	if mandate == "" || mandate == "{}" {
+		objective := strings.TrimSpace(item.ExpectedOutcome)
+		if objective == "" {
+			objective = strings.TrimSpace(item.Title)
+		}
+		included, excluded := []string{}, []string{}
+		_ = json.Unmarshal([]byte(item.IncludedScopeJSON), &included)
+		_ = json.Unmarshal([]byte(item.ExcludedScopeJSON), &excluded)
+		encoded, _ := json.Marshal(map[string]any{"version": 1, "objective": objective, "included_scope": included, "excluded_scope": excluded, "repository_refs": []string{}, "autonomy_policy": "bounded_autonomy"})
+		mandate = string(encoded)
+	}
+	if !json.Valid([]byte(mandate)) {
+		mandate = "{}"
+	}
+	return json.Marshal(struct {
+		alias
+		Mandate json.RawMessage `json:"mandate"`
+	}{alias: alias(item), Mandate: json.RawMessage(mandate)})
 }
 
 // DeliveryWorkItemDependency records an explicit ordering constraint between
@@ -388,11 +415,47 @@ func (evidence DeliveryEvidence) MarshalJSON() ([]byte, error) {
 // DeliveryMessage keeps the human-agent conversation attached to a specific
 // work item and phase instead of losing change requests in a generic chat.
 type DeliveryMessage struct {
-	ID         uuid.UUID `gorm:"type:uuid;default:uuid_generate_v4();primaryKey" json:"id"`
-	WorkItemID uuid.UUID `gorm:"type:uuid;not null;index" json:"work_item_id"`
-	Phase      string    `gorm:"type:varchar(32);not null;index" json:"phase"`
-	AuthorType string    `gorm:"type:varchar(16);not null" json:"author_type"`
-	AuthorID   string    `gorm:"type:varchar(128);not null;default:''" json:"author_id,omitempty"`
-	Body       string    `gorm:"type:text;not null" json:"body"`
-	CreatedAt  time.Time `json:"created_at"`
+	ResumeRequested bool      `gorm:"not null;default:false" json:"resume_requested,omitempty"`
+	ID              uuid.UUID `gorm:"type:uuid;default:uuid_generate_v4();primaryKey" json:"id"`
+	WorkItemID      uuid.UUID `gorm:"type:uuid;not null;index" json:"work_item_id"`
+	Phase           string    `gorm:"type:varchar(32);not null;index" json:"phase"`
+	AuthorType      string    `gorm:"type:varchar(16);not null" json:"author_type"`
+	AuthorID        string    `gorm:"type:varchar(128);not null;default:''" json:"author_id,omitempty"`
+	AttachmentsJSON string    `gorm:"type:jsonb;not null;default:'[]'" json:"-"`
+	ReceiptJSON     string    `gorm:"type:jsonb;not null;default:'{}'" json:"-"`
+	Body            string    `gorm:"type:text;not null" json:"body"`
+	Intent          string    `gorm:"type:varchar(32);not null;default:'context'" json:"intent,omitempty"`
+	Effect          string    `gorm:"type:varchar(32);not null;default:'none'" json:"effect,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
+// DeliveryMessageAttachment is an already-authorized reference to evidence or
+// immutable context; it never carries uploaded bytes or local paths.
+type DeliveryMessageAttachment struct {
+	Kind      string `json:"kind"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Reference string `json:"reference"`
+	Revision  string `json:"revision,omitempty"`
+}
+
+func (message DeliveryMessage) MarshalJSON() ([]byte, error) {
+	type alias DeliveryMessage
+	receipt := map[string]any{}
+	if strings.TrimSpace(message.ReceiptJSON) != "" {
+		if err := json.Unmarshal([]byte(message.ReceiptJSON), &receipt); err != nil {
+			receipt = map[string]any{}
+		}
+	}
+	attachments := []DeliveryMessageAttachment{}
+	if strings.TrimSpace(message.AttachmentsJSON) != "" {
+		if err := json.Unmarshal([]byte(message.AttachmentsJSON), &attachments); err != nil || attachments == nil {
+			attachments = []DeliveryMessageAttachment{}
+		}
+	}
+	return json.Marshal(struct {
+		alias
+		Receipt     map[string]any              `json:"receipt,omitempty"`
+		Attachments []DeliveryMessageAttachment `json:"attachments,omitempty"`
+	}{alias: alias(message), Receipt: receipt, Attachments: attachments})
 }

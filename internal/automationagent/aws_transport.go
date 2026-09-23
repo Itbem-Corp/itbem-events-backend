@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -16,6 +17,27 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/smithy-go"
 )
+
+// normalizeLocalQueueURL keeps LocalStack virtual-host queue URLs reachable
+// through an explicit loopback endpoint without rewriting real AWS URLs.
+func normalizeLocalQueueURL(queueURL, localEndpoint string) (string, error) {
+	if strings.TrimSpace(localEndpoint) == "" {
+		return queueURL, nil
+	}
+	queue, err := url.Parse(strings.TrimSpace(queueURL))
+	if err != nil {
+		return "", err
+	}
+	endpoint, err := url.Parse(strings.TrimSpace(localEndpoint))
+	if err != nil || !isLoopbackHost(endpoint.Hostname()) {
+		return "", fmt.Errorf("local SQS endpoint must be loopback HTTP")
+	}
+	if !strings.HasSuffix(strings.ToLower(queue.Hostname()), ".localhost.localstack.cloud") {
+		return queueURL, nil
+	}
+	queue.Scheme, queue.Host, queue.User = endpoint.Scheme, endpoint.Host, nil
+	return queue.String(), nil
+}
 
 type AWSRuntime struct {
 	SQS *sqs.Client

@@ -89,13 +89,15 @@ func setupMomentsEvent(t *testing.T, opts sharedUploadOpts) sharedUploadFx {
 	require.NoError(t, db.Create(&event).Error)
 
 	cfg := models.EventConfig{
-		ID:                  eventID, // 1:1 with Event
-		ShareUploadsEnabled: opts.shareEnabled,
-		AllowUploads:        opts.allowUploads,
-		ShowMomentWall:      opts.showWall,
-		MaxUploadsPerGuest:  30,
-		CreatedAt:           time.Now(),
-		UpdatedAt:           time.Now(),
+		ID:                   eventID, // 1:1 with Event
+		IsPublic:             true,
+		VisibilityConfigured: true,
+		ShareUploadsEnabled:  opts.shareEnabled,
+		AllowUploads:         opts.allowUploads,
+		ShowMomentWall:       opts.showWall,
+		MaxUploadsPerGuest:   30,
+		CreatedAt:            time.Now(),
+		UpdatedAt:            time.Now(),
 	}
 	require.NoError(t, db.Create(&cfg).Error)
 
@@ -148,7 +150,9 @@ func TestCreateSharedMoment_EventNotFound_Returns404(t *testing.T) {
 }
 
 func TestCreateSharedMoment_NoEventConfig_Returns404(t *testing.T) {
-	// Event exists but no EventConfig row → 404
+	// Event exists but no EventConfig row → the default private config rejects
+	// anonymous access. The public endpoint intentionally does not reveal
+	// whether a configuration row exists.
 	db := configuration.DB
 	suffix := uuid.Must(uuid.NewV4()).String()[:8]
 
@@ -175,7 +179,7 @@ func TestCreateSharedMoment_NoEventConfig_Returns404(t *testing.T) {
 	req := multipartNoFile(t, fmt.Sprintf("/api/events/%s/moments/shared", identifier))
 	rec := httptest.NewRecorder()
 	e.ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusNotFound, rec.Code, "body: %s", rec.Body.String())
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
 }
 
 func TestCreateSharedMoment_ShareUploadsDisabled_Returns403(t *testing.T) {

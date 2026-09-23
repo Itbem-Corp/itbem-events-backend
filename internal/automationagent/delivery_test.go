@@ -27,6 +27,55 @@ func TestParseDeliveryPlanRequiresEveryHumanReviewField(t *testing.T) {
 	}
 }
 
+func TestParseDeliveryPlanRequiresExecutionContractWhenChangingCode(t *testing.T) {
+	valid := map[string]any{
+		"summary": "A bounded plan", "goal_interpretation": "Deliver the bounded change", "confidence": 0.8,
+		"autonomy_boundary": "Wait for human gates.", "context_reviewed": []any{"repo"}, "context_gaps": []any{},
+		"assumptions": []any{}, "human_decisions": []any{}, "implementation_steps": []any{"change"},
+		"risks": []any{}, "qa_plan": []any{"test"}, "evidence_plan": []any{"report"},
+		"acceptance_criteria": []any{"works"}, "repository_impact": []any{map[string]any{
+			"name": "Backend", "reference": "workspace://repo", "revision": "deadbeef", "role": "primary", "impact": "changes", "notes": "Bounded change",
+		}}, "files_impacted": []any{"controllers/delivery.go"}, "rollback_plan": []any{"revert"}, "estimate": "30 minutes", "questions": []any{},
+	}
+	for _, field := range []string{"implementation_steps", "qa_plan", "evidence_plan", "acceptance_criteria", "rollback_plan"} {
+		t.Run(field, func(t *testing.T) {
+			rawValid, err := json.Marshal(valid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			candidate := map[string]any{}
+			if err := json.Unmarshal(rawValid, &candidate); err != nil {
+				t.Fatal(err)
+			}
+			candidate[field] = []any{}
+			raw, err := json.Marshal(candidate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ParseDeliveryPlan(string(raw)); err == nil {
+				t.Fatalf("expected code-changing plan without %s to fail", field)
+			}
+		})
+	}
+}
+
+func TestParseDeliveryPlanAllowsEmptyExecutionListsWhileExploratory(t *testing.T) {
+	plan := map[string]any{
+		"summary": "Need context", "goal_interpretation": "Clarify scope", "confidence": 0.2,
+		"autonomy_boundary": "No changes before human review.", "context_reviewed": []any{}, "context_gaps": []any{"Repository is missing"},
+		"assumptions": []any{}, "human_decisions": []any{}, "implementation_steps": []any{}, "risks": []any{},
+		"qa_plan": []any{}, "evidence_plan": []any{}, "acceptance_criteria": []any{}, "repository_impact": []any{},
+		"files_impacted": []any{}, "rollback_plan": []any{}, "estimate": "Unknown", "questions": []any{},
+	}
+	raw, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseDeliveryPlan(string(raw)); err != nil {
+		t.Fatalf("exploratory plan should remain reviewable: %v", err)
+	}
+}
+
 func TestDecodeJSONObjectRepairsOnlyOneTrailingArrayClosure(t *testing.T) {
 	decoded, ok := decodeJSONObject(`{"summary":"bounded","items":["one"}`)
 	if !ok || decoded["summary"] != "bounded" {
@@ -48,6 +97,34 @@ func TestParseDeliveryPlanNormalizesAProviderRollbackSentence(t *testing.T) {
 	}
 	if rollback, ok := plan["rollback_plan"].([]any); !ok || len(rollback) != 1 || rollback[0] != "No mutation occurred." {
 		t.Fatalf("rollback sentence was not normalized: %#v", plan["rollback_plan"])
+	}
+}
+
+func TestParseDeliveryPlanMakesOmittedRisksExplicitlyReviewable(t *testing.T) {
+	valid := `{"summary":"An exploratory plan","goal_interpretation":"Validate the local worker","confidence":0.72,"autonomy_boundary":"Plan only; wait for a human gate.","context_reviewed":["repo"],"context_gaps":["Worker health is not yet observed"],"assumptions":[],"human_decisions":[],"implementation_steps":["Observe the worker"],"qa_plan":["Check the heartbeat"],"evidence_plan":["Persist the run id"],"acceptance_criteria":["No code changes"],"repository_impact":[{"name":"Backend","reference":"workspace://repo","revision":"deadbeef","role":"primary","impact":"consulted","notes":"Planning only"}],"files_impacted":[],"rollback_plan":["Stop the local worker"],"estimate":"10 minutes","questions":[]}`
+	plan, err := ParseDeliveryPlan(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	risks, ok := plan["risks"].([]any)
+	if !ok || len(risks) != 1 || !strings.Contains(fmt.Sprint(risks[0]), "omitted") {
+		t.Fatalf("expected an explicit review risk, got %#v", plan["risks"])
+	}
+	repairs, ok := plan["_harness_repairs"].([]any)
+	if !ok || len(repairs) != 1 || !strings.Contains(fmt.Sprint(repairs[0]), "risks missing") {
+		t.Fatalf("expected an observable repair marker, got %#v", plan["_harness_repairs"])
+	}
+}
+
+func TestParseDeliveryPlanNormalizesBoundedRiskSentence(t *testing.T) {
+	valid := `{"summary":"An exploratory plan","goal_interpretation":"Validate the local worker","confidence":0.72,"autonomy_boundary":"Plan only; wait for a human gate.","context_reviewed":["repo"],"context_gaps":[],"assumptions":[],"human_decisions":[],"implementation_steps":["Observe the worker"],"risks":"The worker may be offline.","qa_plan":["Check the heartbeat"],"evidence_plan":["Persist the run id"],"acceptance_criteria":["No code changes"],"repository_impact":[{"name":"Backend","reference":"workspace://repo","revision":"deadbeef","role":"primary","impact":"consulted","notes":"Planning only"}],"files_impacted":[],"rollback_plan":["Stop the local worker"],"estimate":"10 minutes","questions":[]}`
+	plan, err := ParseDeliveryPlan(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	risks, ok := plan["risks"].([]any)
+	if !ok || len(risks) != 1 || risks[0] != "The worker may be offline." {
+		t.Fatalf("expected normalized risk list, got %#v", plan["risks"])
 	}
 }
 
@@ -112,6 +189,27 @@ func TestValidateDeliveryPlanTopologyRejectsModelInventedRepositoriesAndRevision
 	plan["repository_impact"] = plan["repository_impact"].([]any)[:1]
 	if err := ValidateDeliveryPlanTopology(plan, topology); err == nil {
 		t.Fatal("expected omitted supporting repository to be rejected")
+	}
+}
+
+func TestValidateDeliveryPlanTopologyKeepsOperatorComponentScopeMaximum(t *testing.T) {
+	content := `{"summary":"A bounded plan","goal_interpretation":"Deliver the bounded change","confidence":0.8,"autonomy_boundary":"Propose only; wait for human gates.","context_reviewed":["repo"],"context_gaps":[],"assumptions":[],"human_decisions":[],"implementation_steps":["change"],"risks":[],"qa_plan":["test"],"evidence_plan":["evidence"],"acceptance_criteria":["works"],"repository_impact":[{"name":"Dashboard","reference":"workspace://dashboard","revision":"cafebabe","role":"primary","impact":"changes","notes":"Bounded component","allowed_paths":["apps/dashboard/src"]}],"files_impacted":["apps/dashboard/src"],"rollback_plan":["revert"],"estimate":"30 minutes","questions":[]}`
+	plan, err := ParseDeliveryPlan(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	topology := json.RawMessage(`{"repository_topology":[{"name":"Dashboard","reference":"workspace://dashboard","revision":"cafebabe","role":"primary","allowed_paths":["apps/dashboard"]}]}`)
+	if err := ValidateDeliveryPlanTopology(plan, topology); err != nil {
+		t.Fatalf("a narrowed component scope should remain valid: %v", err)
+	}
+	entry := plan["repository_impact"].([]any)[0].(map[string]any)
+	entry["allowed_paths"] = []any{"packages/shared"}
+	if err := ValidateDeliveryPlanTopology(plan, topology); err == nil {
+		t.Fatal("a plan must not widen beyond the operator-approved component root")
+	}
+	delete(entry, "allowed_paths")
+	if err := ValidateDeliveryPlanTopology(plan, topology); err == nil {
+		t.Fatal("omitting a required component scope must fail closed")
 	}
 }
 
@@ -321,6 +419,57 @@ func TestParseDeliverySummaryRequiresAReviewableReleaseDraft(t *testing.T) {
 	}
 }
 
+func TestParseDeliverySummaryRepairsStructuredEvidenceCitations(t *testing.T) {
+	content := `{"executive":{"what_changed":"Delivery flow","why":"Reduce review friction","how_to_test":"Open the QA evidence","risks":["Human release gate remains required"]},"technical":{"decisions":[],"evidence":[{"id":"1e5c5eb5-38cb-46af-9e50-a196ad7fc333","title":"Synthetic authorization test","summary":"Admin and non-admin paths were observed."}]}}`
+	summary, err := ParseDeliverySummary(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	technical := summary["technical"].(map[string]any)
+	evidence := technical["evidence"].([]any)
+	if len(evidence) != 1 || evidence[0] != "1e5c5eb5-38cb-46af-9e50-a196ad7fc333 — Synthetic authorization test: Admin and non-admin paths were observed." {
+		t.Fatalf("structured evidence was not normalized: %#v", evidence)
+	}
+	repairs := technical["_harness_repairs"].([]any)
+	if len(repairs) != 1 {
+		t.Fatalf("expected one observable bounded repair, got %#v", repairs)
+	}
+	delivery := json.RawMessage(`{"evidence":[{"id":"1e5c5eb5-38cb-46af-9e50-a196ad7fc333","title":"Synthetic authorization test"}],"gates":[]}`)
+	if err := ValidateDeliverySummaryEvidence(summary, delivery); err != nil {
+		t.Fatalf("normalized citation should still pass membership validation: %v", err)
+	}
+}
+
+func TestValidateDeliverySummaryGroundsHumanDecisions(t *testing.T) {
+	content := `{"executive":{"what_changed":"Delivery flow","why":"Reduce review friction","how_to_test":"Open the QA evidence","risks":["Human release gate remains required"]},"technical":{"decisions":["Plan gate approved by reviewer"],"evidence":["1e5c5eb5-38cb-46af-9e50-a196ad7fc333 — Synthetic authorization test"]}}`
+	summary, err := ParseDeliverySummary(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivery := json.RawMessage(`{"evidence":[{"id":"1e5c5eb5-38cb-46af-9e50-a196ad7fc333","title":"Synthetic authorization test"}],"gates":[{"kind":"plan","decision":"approved"}]}`)
+	if err := ValidateDeliverySummaryEvidence(summary, delivery); err != nil {
+		t.Fatalf("grounded gate decision rejected: %v", err)
+	}
+	for _, invalid := range []struct {
+		name     string
+		content  string
+		delivery string
+	}{
+		{"generic decision", `{"executive":{"what_changed":"x","why":"y","how_to_test":"z","risks":["r"]},"technical":{"decisions":["Reviewed"],"evidence":["1e5c5eb5-38cb-46af-9e50-a196ad7fc333 — Synthetic authorization test"]}}`, `{"evidence":[{"id":"1e5c5eb5-38cb-46af-9e50-a196ad7fc333","title":"Synthetic authorization test"}],"gates":[{"kind":"plan","decision":"approved"}]}`},
+		{"invented without gate", `{"executive":{"what_changed":"x","why":"y","how_to_test":"z","risks":["r"]},"technical":{"decisions":["Plan approved"],"evidence":["1e5c5eb5-38cb-46af-9e50-a196ad7fc333 — Synthetic authorization test"]}}`, `{"evidence":[{"id":"1e5c5eb5-38cb-46af-9e50-a196ad7fc333","title":"Synthetic authorization test"}],"gates":[]}`},
+	} {
+		t.Run(invalid.name, func(t *testing.T) {
+			candidate, err := ParseDeliverySummary(invalid.content)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ValidateDeliverySummaryEvidence(candidate, json.RawMessage(invalid.delivery)) == nil {
+				t.Fatal("ungrounded human decision was accepted")
+			}
+		})
+	}
+}
+
 func TestParseDeliveryQAReportAndObservedFailureValidation(t *testing.T) {
 	valid := `{"summary":"Preview and checks passed","verdict":"passed","checks":[{"name":"Preview","status":"passed","detail":"HTTP 200"}],"defects":[],"coverage_gaps":[],"recommended_actions":["Human QA review"]}`
 	report, err := ParseDeliveryQAReport(valid)
@@ -407,6 +556,26 @@ func TestParseChangeProposalBindsEachMultiRepositoryPatchToAWorkspace(t *testing
 	} {
 		if _, err := ParseChangeProposal(invalid); err == nil {
 			t.Fatalf("unsafe multi-repository proposal must fail: %s", invalid)
+		}
+	}
+}
+
+func TestRepositoryComponentScopeRejectsPatchOutsideApprovedMonorepoPath(t *testing.T) {
+	paths, err := NormalizeRepositoryAllowedPaths([]any{"apps/web", "packages/ui"})
+	if err != nil || len(paths) != 2 || paths[0] != "apps/web" {
+		t.Fatalf("expected normalized component roots: %#v / %v", paths, err)
+	}
+	patch := "diff --git a/apps/web/page.tsx b/apps/web/page.tsx\n--- a/apps/web/page.tsx\n+++ b/apps/web/page.tsx\n@@ -1 +1 @@\n-old\n+new"
+	if err := validatePatchPaths(patch, paths); err != nil {
+		t.Fatalf("patch inside approved component roots rejected: %v", err)
+	}
+	unsafe := strings.ReplaceAll(patch, "apps/web/page.tsx", "services/api/main.go")
+	if err := validatePatchPaths(unsafe, paths); err == nil {
+		t.Fatal("patch outside approved component roots must fail closed")
+	}
+	for _, raw := range []any{[]any{"../escape"}, []any{".env"}, []any{"/absolute"}, []any{"apps/web", "apps/web"}} {
+		if _, err := NormalizeRepositoryAllowedPaths(raw); err == nil {
+			t.Fatalf("unsafe or duplicate component scope accepted: %#v", raw)
 		}
 	}
 }
@@ -595,6 +764,113 @@ func TestRunImplementationCreatesIndependentWorktreesForEveryChangedRepository(t
 	}
 	if _, err := RunImplementation(context.Background(), "f4a4b837-2e18-43af-9f58-6d59629db2bb", delivery, `{"summary":"partial","patch":"diff --git a/partial.txt b/partial.txt\nnew file mode 100644\n--- /dev/null\n+++ b/partial.txt\n@@ -0,0 +1 @@\n+partial\n"}`, lookup); err == nil {
 		t.Fatal("a single patch must not bypass a plan that changes multiple repositories")
+	}
+}
+
+func TestRunImplementationReportsPartialRepositoryFailure(t *testing.T) {
+	setupRepository := func(root string) {
+		for _, command := range [][]string{{"git", "init"}, {"git", "config", "user.email", "test@example.invalid"}, {"git", "config", "user.name", "ITBEM Test"}} {
+			result, err := runLocal(context.Background(), root, commandTimeout, "", command[0], command[1:]...)
+			if err != nil || result.ExitCode != 0 {
+				t.Fatalf("git setup failed: %#v, %v", result, err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("base\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if result, err := runLocal(context.Background(), root, commandTimeout, "", "git", "add", "README.md"); err != nil || result.ExitCode != 0 {
+			t.Fatalf("git add failed: %#v, %v", result, err)
+		}
+		if result, err := runLocal(context.Background(), root, commandTimeout, "", "git", "commit", "-m", "initial"); err != nil || result.ExitCode != 0 {
+			t.Fatalf("git commit failed: %#v, %v", result, err)
+		}
+	}
+	apiRoot, webRoot := filepath.Join(t.TempDir(), "api"), filepath.Join(t.TempDir(), "web")
+	for _, root := range []string{apiRoot, webRoot} {
+		if err := os.MkdirAll(root, 0700); err != nil {
+			t.Fatal(err)
+		}
+		setupRepository(root)
+	}
+	lookup := func(name string) string {
+		if name == "ITBEM_AI_WORKSPACES_JSON" {
+			return `{"api":{"path":"` + filepath.ToSlash(apiRoot) + `"},"web":{"path":"` + filepath.ToSlash(webRoot) + `"}}`
+		}
+		return ""
+	}
+	delivery := []byte(`{"context_sources":[{"kind":"repository","reference":"workspace://api"},{"kind":"repository","reference":"workspace://web"}],"repository_topology":[{"reference":"workspace://api"},{"reference":"workspace://web","depends_on":["workspace://api"]}],"approved_plan":{"repository_impact":[{"reference":"workspace://api","impact":"changes"},{"reference":"workspace://web","impact":"changes"}]}}`)
+	proposal := `{"summary":"partial two-repo delivery","patches":[{"repository_ref":"workspace://api","patch":"diff --git a/api.txt b/api.txt\nnew file mode 100644\n--- /dev/null\n+++ b/api.txt\n@@ -0,0 +1 @@\n+api\n"},{"repository_ref":"workspace://web","patch":"diff --git a/missing.txt b/missing.txt\n--- a/missing.txt\n+++ b/missing.txt\n@@ -1 +1 @@\n-old\n+new\n"}]}`
+	result, err := RunImplementation(context.Background(), "a5a4b837-2e18-43af-9f58-6d59629db2bb", delivery, proposal, lookup)
+	if err == nil {
+		t.Fatal("a failed dependent repository must keep the implementation failed")
+	}
+	if partial, ok := result["partial"].(bool); !ok || !partial {
+		t.Fatalf("expected partial reconciliation marker: %#v", result)
+	}
+	if result["failed_repository"] != "workspace://web" {
+		t.Fatalf("failed repository = %#v, want workspace://web", result["failed_repository"])
+	}
+	completed, ok := result["completed_repositories"].([]string)
+	if !ok || !reflect.DeepEqual(completed, []string{"workspace://api"}) {
+		t.Fatalf("completed repositories = %#v", result["completed_repositories"])
+	}
+	if _, err := os.Stat(filepath.Join(apiRoot, ".itbem-agent-worktrees", "a5a4b837-2e18-43af-9f58-6d59629db2bb", "api.txt")); err != nil {
+		t.Fatalf("completed repository evidence was not retained: %v", err)
+	}
+}
+
+func setupImplementationRepository(t *testing.T) string {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range [][]string{{"git", "init"}, {"git", "config", "user.email", "test@example.invalid"}, {"git", "config", "user.name", "ITBEM Test"}} {
+		result, err := runLocal(context.Background(), root, commandTimeout, "", command[0], command[1:]...)
+		if err != nil || result.ExitCode != 0 {
+			t.Fatalf("git setup failed: %#v, %v", result, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("base\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range [][]string{{"git", "add", "README.md"}, {"git", "commit", "-m", "initial"}} {
+		result, err := runLocal(context.Background(), root, commandTimeout, "", command[0], command[1:]...)
+		if err != nil || result.ExitCode != 0 {
+			t.Fatalf("git commit setup failed: %#v, %v", result, err)
+		}
+	}
+	return root
+}
+
+func TestRunImplementationPreservesPartialMultirepositoryEvidenceOnFailure(t *testing.T) {
+	apiRoot, webRoot := setupImplementationRepository(t), setupImplementationRepository(t)
+	workspaceJSON := `{"api":{"path":"` + filepath.ToSlash(apiRoot) + `"},"web":{"path":"` + filepath.ToSlash(webRoot) + `"}}`
+	lookup := func(name string) string {
+		if name == "ITBEM_AI_WORKSPACES_JSON" {
+			return workspaceJSON
+		}
+		return ""
+	}
+	delivery := []byte(`{"context_sources":[{"kind":"repository","reference":"workspace://api"},{"kind":"repository","reference":"workspace://web"}],"repository_topology":[{"reference":"workspace://api"},{"reference":"workspace://web","depends_on":["workspace://api"]}],"approved_plan":{"repository_impact":[{"reference":"workspace://api","impact":"changes"},{"reference":"workspace://web","impact":"changes"}]}}`)
+	proposal := `{"summary":"partial multi-repo change","patches":[{"repository_ref":"workspace://api","patch":"diff --git a/api.txt b/api.txt\nnew file mode 100644\n--- /dev/null\n+++ b/api.txt\n@@ -0,0 +1 @@\n+api\n"},{"repository_ref":"workspace://web","patch":"diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1,1 +1,1 @@\n-NOT-THERE\n+web\n"}]}`
+	result, err := RunImplementation(context.Background(), "a5a4b837-2e18-43af-9f58-6d59629db2bb", delivery, proposal, lookup)
+	if err == nil {
+		t.Fatal("a later repository failure must keep the implementation failed")
+	}
+	if result == nil || result["partial"] != true || result["failed_repository"] != "workspace://web" {
+		t.Fatalf("partial reconciliation projection = %#v, error=%v", result, err)
+	}
+	completed, ok := result["completed_repositories"].([]string)
+	if !ok || !reflect.DeepEqual(completed, []string{"workspace://api"}) {
+		t.Fatalf("completed repository order = %#v", result["completed_repositories"])
+	}
+	changeSets, ok := result["change_sets"].([]any)
+	if !ok || len(changeSets) != 1 {
+		t.Fatalf("expected one completed private change set, got %#v", result["change_sets"])
+	}
+	if _, readErr := os.Stat(filepath.Join(apiRoot, ".itbem-agent-worktrees", "a5a4b837-2e18-43af-9f58-6d59629db2bb", "api.txt")); readErr != nil {
+		t.Fatalf("completed repository evidence was not preserved: %v", readErr)
 	}
 }
 

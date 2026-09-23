@@ -865,10 +865,65 @@ type automationWorkerHealth struct {
 	Role                   string                      `json:"role,omitempty"`
 	Lane                   string                      `json:"lane,omitempty"`
 	Concurrency            int                         `json:"concurrency"`
+	Capabilities           []string                    `json:"capabilities,omitempty"`
+	Draining               bool                        `json:"draining,omitempty"`
 	StartedAt              time.Time                   `json:"started_at"`
 	LastSeenAt             time.Time                   `json:"last_seen_at"`
 	WorkspaceReadiness     []automationWorkspaceHealth `gorm:"-" json:"workspace_readiness,omitempty"`
 	WorkspaceReadinessJSON string                      `gorm:"column:workspace_readiness" json:"-"`
+}
+
+type automationOperationReadiness struct {
+	Operation      string `json:"operation"`
+	WorkerCount    int    `json:"worker_count"`
+	WorkerCapacity int    `json:"worker_capacity"`
+	Ready          bool   `json:"ready"`
+}
+
+func operationReadiness(workers []automationWorkerHealth) []automationOperationReadiness {
+	operations := make([]string, 0, len(allowedOperations))
+	for operation := range allowedOperations {
+		operations = append(operations, operation)
+	}
+	sort.Strings(operations)
+	result := make([]automationOperationReadiness, 0, len(operations))
+	for _, operation := range operations {
+		readiness := automationOperationReadiness{Operation: operation}
+		for _, worker := range workers {
+			if worker.Draining {
+				continue
+			}
+			if len(worker.Capabilities) != 0 && !containsCapability(worker.Capabilities, operation) {
+				continue
+			}
+			readiness.WorkerCount++
+			if worker.Concurrency > 0 {
+				readiness.WorkerCapacity += worker.Concurrency
+			}
+		}
+		readiness.Ready = readiness.WorkerCount > 0 && readiness.WorkerCapacity > 0
+		result = append(result, readiness)
+	}
+	return result
+}
+
+func effectiveWorkerCapacity(workers []automationWorkerHealth) int64 {
+	var total int64
+	for _, worker := range workers {
+		if !worker.Draining && worker.Concurrency > 0 {
+			total += int64(worker.Concurrency)
+		}
+	}
+	return total
+}
+func effectiveWorkerCount(active, draining int64) int64 {
+	if active <= 0 || draining >= active {
+		return 0
+	}
+	if draining < 0 {
+		draining = 0
+	}
+	return active - draining
 }
 
 // automationWorkspaceHealth is the only workspace-level information that
@@ -3136,6 +3191,7 @@ func claimAutomationTaskRun(c echo.Context, id uuid.UUID, runID string) error {
 	if !claimed {
 		if retryAfterSeconds > 0 {
 			c.Response().Header().Set(retryLeaseHeader, strconv.FormatInt(retryAfterSeconds, 10))
+			c.Response().Header().Set("X-ITBEM-Automation-Run-Busy", "1")
 		}
 		return utils.Error(c, http.StatusConflict, "Automation run is already leased", "Another active worker owns this execution; no provider call will be duplicated")
 	}

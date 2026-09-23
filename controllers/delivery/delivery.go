@@ -6,10 +6,12 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"events-stocks/configuration"
 	"events-stocks/internal/authz"
 	"events-stocks/internal/automationagent"
 	"events-stocks/internal/deliveryledger"
+	"events-stocks/internal/products"
 	"events-stocks/internal/projectvault"
 	"events-stocks/internal/releasegate"
 	"events-stocks/models"
@@ -37,6 +39,7 @@ var evidenceKinds = map[string]struct{}{"screenshot": {}, "video": {}, "test_res
 var deliveryArtifactNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,180}$`)
 var deliveryArtifactDigestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 var deliveryGitHubRepositoryReference = regexp.MustCompile(`^github://[A-Za-z0-9][A-Za-z0-9_.-]{0,38}/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$`)
+var errPendingDependencies = errors.New("all declared task dependencies must be released before plan review")
 
 const releaseGateAuthorizationMaxAge = 10 * time.Minute
 
@@ -50,6 +53,36 @@ type projectRequest struct {
 	// there is enough project context for the agent to refine them.
 	Intent string `json:"intent"`
 }
+
+type deliveryProjectResponse struct {
+	models.DeliveryProject
+	WorkItems   []deliveryProjectWorkItem `json:"work_items"`
+	Preparation projectPreparation        `json:"preparation"`
+}
+
+type deliveryProjectWorkItem struct {
+	models.DeliveryWorkItem
+	WorkflowProjection deliveryWorkflowProjection `json:"workflow_projection"`
+}
+
+func (response deliveryProjectWorkItem) MarshalJSON() ([]byte, error) {
+	type alias models.DeliveryWorkItem
+	return json.Marshal(struct {
+		alias
+		WorkflowProjection deliveryWorkflowProjection `json:"workflow_projection"`
+	}{alias: alias(response.DeliveryWorkItem), WorkflowProjection: response.WorkflowProjection})
+}
+
+func automationClientAllowed(client models.Client) bool {
+	return products.SupportsAutomation(client.Code)
+}
+
+func deliveryProjectCreationFingerprint(clientID uuid.UUID, name, slug, summary, intent string) string {
+	payload, _ := json.Marshal(struct{ ClientID, Name, Slug, Summary, Intent string }{clientID.String(), name, slug, summary, intent})
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:])
+}
+
 type contextRequest struct {
 	Kind      string         `json:"kind"`
 	Name      string         `json:"name"`
@@ -647,6 +680,14 @@ func normalizeRepositoryContextMetadata(reference string, source map[string]any)
 			dependencies = append(dependencies, dependency)
 		}
 		metadata["depends_on_repositories"] = dependencies
+	}
+	if rawPaths, exists := metadata["allowed_paths"]; exists {
+		paths, err := automationagent.NormalizeRepositoryAllowedPaths(rawPaths)
+		if err != nil {
+			return nil, err
+		}
+		sort.Strings(paths)
+		metadata["allowed_paths"] = paths
 	}
 	return metadata, nil
 }
@@ -1386,14 +1427,33 @@ func deliveryArtifactReference(cfg *models.Config, reference string) (uuid.UUID,
 		return uuid.Nil, "", "", false
 	}
 	parts := strings.Split(key, "/")
-	if len(parts) != 4 || parts[0] != "automation" || parts[2] != "artifacts" || !deliveryArtifactNamePattern.MatchString(parts[3]) {
+	legacy := len(parts) == 4 && parts[0] == "automation" && parts[2] == "artifacts"
+	runScoped := len(parts) == 6 && parts[0] == "automation" && parts[2] == "runs" && parts[4] == "artifacts"
+	if (!legacy && !runScoped) || !deliveryArtifactNamePattern.MatchString(parts[len(parts)-1]) {
 		return uuid.Nil, "", "", false
 	}
 	taskID, err := uuid.FromString(parts[1])
 	if err != nil || taskID == uuid.Nil {
 		return uuid.Nil, "", "", false
 	}
-	return taskID, key, parts[3], true
+	if runScoped {
+		if runID, parseErr := uuid.FromString(parts[3]); parseErr != nil || runID == uuid.Nil {
+			return uuid.Nil, "", "", false
+		}
+	}
+	return taskID, key, parts[len(parts)-1], true
+}
+
+func deliveryArtifactRunID(key string) (string, bool) {
+	parts := strings.Split(strings.TrimSpace(key), "/")
+	if len(parts) != 6 || parts[0] != "automation" || parts[2] != "runs" || parts[4] != "artifacts" {
+		return "", false
+	}
+	runID, err := uuid.FromString(parts[3])
+	if err != nil || runID == uuid.Nil {
+		return "", false
+	}
+	return runID.String(), true
 }
 
 func deliveryEvidenceContentType(metadataJSON, artifactName string) string {

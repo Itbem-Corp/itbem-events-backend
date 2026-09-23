@@ -66,7 +66,28 @@ type WorkspaceConfig struct {
 	// preview URL and a private evidence output path; a task or model response
 	// can never select its executable or arguments.
 	QASemanticCommand []string `json:"qa_semantic_command"`
+	// AcceptanceChecks bind task criteria to operator-owned commands. The
+	// agent can request a criterion, never its executable or arguments.
+	AcceptanceChecks []AcceptanceCheck `json:"acceptance_checks"`
+	// Sandbox configuration is operator-owned. Process is explicit legacy mode;
+	// Docker and Firecracker provide the execution boundaries used for hostile
+	// repository-owned toolchains.
+	SandboxRuntime           string   `json:"sandbox_runtime"`
+	RequireSandbox           bool     `json:"require_sandbox"`
+	SandboxImage             string   `json:"sandbox_image"`
+	SandboxImageDigest       string   `json:"sandbox_image_digest"`
+	SandboxNetwork           string   `json:"sandbox_network"`
+	SandboxCPUs              string   `json:"sandbox_cpus"`
+	SandboxMemory            string   `json:"sandbox_memory"`
+	SandboxPIDsLimit         int      `json:"sandbox_pids_limit"`
+	SandboxSupervisorCommand []string `json:"sandbox_supervisor_command"`
 }
+
+const (
+	WorkspaceSandboxProcess     = "process"
+	WorkspaceSandboxDocker      = "docker"
+	WorkspaceSandboxFirecracker = "firecracker"
+)
 
 const (
 	WorkspaceCapabilityReadRepository = "repository:read"
@@ -192,9 +213,114 @@ func loadWorkspaces(raw string, requireDirectory bool) (map[string]Workspace, er
 		if err := validateSemanticQACommand(config.QASemanticCommand); err != nil {
 			return nil, fmt.Errorf("workspace %s: %w", id, err)
 		}
+		if err := validateAcceptanceChecks(config.AcceptanceChecks); err != nil {
+			return nil, fmt.Errorf("workspace %s: %w", id, err)
+		}
+		if err := validateWorkspaceSandbox(&config); err != nil {
+			return nil, fmt.Errorf("workspace %s: %w", id, err)
+		}
 		result[id] = Workspace{ID: id, Root: root, Config: config}
 	}
 	return result, nil
+}
+
+func validateAcceptanceChecks(checks []AcceptanceCheck) error {
+	seen := map[string]struct{}{}
+	for _, check := range checks {
+		criterion := strings.TrimSpace(check.Criterion)
+		if criterion == "" || len(criterion) > 500 || len(check.Command) == 0 {
+			return fmt.Errorf("acceptance_checks contains an invalid criterion or command")
+		}
+		if _, ok := seen[criterion]; ok {
+			return fmt.Errorf("acceptance_checks duplicates criterion %q", criterion)
+		}
+		seen[criterion] = struct{}{}
+		if err := validateCommandList("acceptance_checks", [][]string{check.Command}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateWorkspaceSandbox(config *WorkspaceConfig) error {
+	runtime := strings.ToLower(strings.TrimSpace(config.SandboxRuntime))
+	if runtime == "" {
+		runtime = WorkspaceSandboxProcess
+	}
+	if runtime != WorkspaceSandboxProcess && runtime != WorkspaceSandboxDocker && runtime != WorkspaceSandboxFirecracker {
+		return fmt.Errorf("sandbox_runtime must be process, docker, or firecracker")
+	}
+	config.SandboxRuntime = runtime
+	if runtime == WorkspaceSandboxProcess {
+		if config.RequireSandbox {
+			return fmt.Errorf("require_sandbox requires docker or firecracker")
+		}
+		config.SandboxNetwork = "inherited"
+		return nil
+	}
+	if runtime == WorkspaceSandboxFirecracker {
+		if len(config.SandboxSupervisorCommand) == 0 {
+			return fmt.Errorf("firecracker sandbox requires a supervisor command")
+		}
+		for _, argument := range config.SandboxSupervisorCommand {
+			if strings.TrimSpace(argument) == "" || strings.ContainsAny(argument, "\x00\r\n;&|<>`$(){}") {
+				return fmt.Errorf("sandbox_supervisor_command contains an unsafe argument")
+			}
+		}
+		config.SandboxNetwork = "isolated"
+		return nil
+	}
+	if strings.TrimSpace(config.SandboxImage) == "" {
+		return fmt.Errorf("docker sandbox requires sandbox_image")
+	}
+	if config.SandboxNetwork == "" {
+		config.SandboxNetwork = "none"
+	}
+	config.SandboxNetwork = strings.ToLower(strings.TrimSpace(config.SandboxNetwork))
+	if config.SandboxNetwork != "none" && config.SandboxNetwork != "bridge" {
+		return fmt.Errorf("sandbox_network must be none or bridge")
+	}
+	if config.SandboxCPUs == "" {
+		config.SandboxCPUs = "2"
+	}
+	if config.SandboxMemory == "" {
+		config.SandboxMemory = "2g"
+	}
+	if config.SandboxPIDsLimit == 0 {
+		config.SandboxPIDsLimit = 256
+	}
+	if config.SandboxPIDsLimit < 32 || config.SandboxPIDsLimit > 4096 {
+		return fmt.Errorf("sandbox_pids_limit must be between 32 and 4096")
+	}
+	return nil
+}
+
+// SandboxAttestation is observational evidence from an operator-owned
+// Firecracker supervisor. It never acts as a permission grant on its own.
+type SandboxAttestation struct {
+	Runtime              string `json:"runtime"`
+	RuntimeVersion       string `json:"runtime_version,omitempty"`
+	Transport            string `json:"transport,omitempty"`
+	EvidenceScope        string `json:"evidence_scope"`
+	GuestCommandVerified bool   `json:"guest_command_verified"`
+	EvidenceDigest       string `json:"evidence_digest,omitempty"`
+}
+
+func sandboxAttestation(raw string) *SandboxAttestation {
+	if strings.TrimSpace(raw) == "" || len(raw) > 2048 {
+		return nil
+	}
+	var value SandboxAttestation
+	if json.Unmarshal([]byte(raw), &value) != nil {
+		return nil
+	}
+	value.Runtime = strings.ToLower(strings.TrimSpace(value.Runtime))
+	value.Transport = strings.ToLower(strings.TrimSpace(value.Transport))
+	value.EvidenceScope = strings.ToLower(strings.TrimSpace(value.EvidenceScope))
+	if value.Runtime != WorkspaceSandboxFirecracker || !value.GuestCommandVerified || value.EvidenceScope == "" || (value.Transport != "virtio_vsock" && (value.Transport != "serial_console" || value.EvidenceScope != "local_task_guest_command")) {
+		return nil
+	}
+	return &value
 }
 
 func validateReadOnlyFixturePaths(paths []string) error {

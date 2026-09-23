@@ -112,6 +112,10 @@ type Config struct {
 	AutomationInputBucket               string `required:"false"`
 	// AutomationOutputBucket stores local-agent results independently from inputs.
 	AutomationOutputBucket string `required:"false"`
+	// AIProviderCredentialsSecretID is the single environment-scoped Secrets
+	// Manager bundle consumed only by the cloud inference gateway. It contains
+	// provider API keys and must never be injected into workers or browsers.
+	AIProviderCredentialsSecretID string `required:"false"`
 	// AutomationPricingJSON is a server-owned, versioned price catalog. It may
 	// be empty for subscription-backed environments, where execution usage is
 	// still recorded but cost is intentionally marked unpriced rather than guessed.
@@ -129,6 +133,22 @@ type Config struct {
 	// defaults so a missing non-secret setting cannot under-reserve a QA run.
 	AutomationQASemanticInputTokenReserve  int `required:"false"`
 	AutomationQASemanticOutputTokenReserve int `required:"false"`
+	// AutomationGlobalActiveLimit and AutomationProjectActiveLimit are hard
+	// admission ceilings for queued/running automation tasks. Zero preserves
+	// the legacy unlimited behavior for an environment that has not opted in;
+	// production/local agent deployments should set both explicitly.
+	AutomationGlobalActiveLimit  int `required:"false"`
+	AutomationProjectActiveLimit int `required:"false"`
+	// AutomationQueueDepthLimit bounds all active task records (including
+	// cancellation handoff) so a burst cannot grow an unbounded durable queue.
+	// It is checked under a PostgreSQL advisory transaction lock.
+	AutomationQueueDepthLimit int `required:"false"`
+	// AutomationScaleTargetMessages and AutomationScaleMaxWorkers describe the
+	// capacity policy used by the health projection. The API is deliberately
+	// observe-only: an external supervisor may reconcile this recommendation,
+	// but a health read never starts or stops infrastructure.
+	AutomationScaleTargetMessages int `required:"false"`
+	AutomationScaleMaxWorkers     int `required:"false"`
 	// SQSEndpoint is only for isolated SQS-compatible integration environments.
 	// Leave empty in AWS deployments so the SDK resolves the normal AWS endpoint.
 	SQSEndpoint       string `required:"false"`

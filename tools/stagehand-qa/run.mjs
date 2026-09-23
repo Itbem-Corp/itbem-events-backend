@@ -650,6 +650,8 @@ async function captureCaseScreenshot(page, directory, name) {
   const url = safeText(page.url(), maxURLLength);
   const viewport = await browserViewport(page);
   try {
+    await waitForRenderedDocument(page);
+    await waitForVisualStability(page);
     await fs.writeFile(path.join(directory, name), await page.screenshot({ fullPage: true }), { mode: 0o600 });
     return { name, captured_at: capturedAt, url, viewport, error: "" };
   } catch (error) {
@@ -668,6 +670,52 @@ async function waitForRenderedDocument(page) {
     return Boolean(body && style && style.visibility !== "hidden" && style.display !== "none" && (body.innerText || body.querySelector("img, svg, canvas, [role], input, button")));
   });
   if (!rendered) throw new Error("Mobile document did not render visible page content");
+}
+
+// A DOM assertion can pass while a shell transition is still moving the
+// content. Capturing at that instant creates misleading before/after evidence
+// (for example, a login form whose companion panel has not finished entering).
+// Sample a bounded set of layout/visibility signatures and require two stable
+// samples before the PNG is recorded. This is browser-derived; it does not ask
+// the model to decide whether a screenshot is complete.
+async function waitForVisualStability(page) {
+  await page.evaluate(async () => {
+    const signature = () => {
+      const elements = [
+        document.body,
+        ...Array.from(document.querySelectorAll("main, form, [role='main'], button, input, h1, h2")).slice(0, 32),
+      ];
+      return JSON.stringify(elements.map((element) => {
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return [
+          Math.round(rect.x * 10) / 10,
+          Math.round(rect.y * 10) / 10,
+          Math.round(rect.width * 10) / 10,
+          Math.round(rect.height * 10) / 10,
+          style.visibility,
+          style.display,
+          style.opacity,
+          style.transform,
+        ];
+      }));
+    };
+    if (document.fonts?.ready) await document.fonts.ready.catch(() => {});
+    let previous = signature();
+    let stableSamples = 0;
+    const deadline = performance.now() + 1500;
+    while (performance.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      const next = signature();
+      if (next === previous) {
+        stableSamples += 1;
+        if (stableSamples >= 2) return;
+      } else {
+        stableSamples = 0;
+        previous = next;
+      }
+    }
+  });
 }
 
 // Responsive QA is deterministic and happens in addition to the reviewed
@@ -836,6 +884,8 @@ async function main() {
     await setVerifiedViewport(page, desktop);
     await page.goto(previewURL, { waitUntil: "domcontentloaded", timeoutMs: 45_000 });
     await browserRuntime.capturePerformance(page);
+    await waitForRenderedDocument(page);
+    await waitForVisualStability(page);
     await fs.writeFile(screenshot, await page.screenshot({ fullPage: true }), { mode: 0o600 });
     const landingScreenshotCapturedAt = new Date().toISOString();
     const landingScreenshotURL = safeText(page.url(), maxURLLength);

@@ -219,7 +219,16 @@ func RunImplementation(ctx context.Context, taskID string, delivery json.RawMess
 	for _, target := range targets {
 		changeSet, runErr := runWorkspaceImplementation(ctx, taskID, target.workspace, target.revision, target.patch)
 		if runErr != nil {
-			return nil, runErr
+			// Preserve independently completed repositories for reconciliation when
+			// a later dependency fails. The error remains terminal; this evidence
+			// never authorizes publication of the partial implementation.
+			return map[string]any{
+				"summary": proposal.Summary, "change_sets": changeSets,
+				"repository_execution_order": executionOrder, "partial": len(changeSets) > 0,
+				"failed_repository":      "workspace://" + target.workspace.ID,
+				"completed_repositories": executionOrder,
+				"deployment":             "not attempted; implementation failed before all repositories completed",
+			}, runErr
 		}
 		changeSets = append(changeSets, changeSet)
 		executionOrder = append(executionOrder, "workspace://"+target.workspace.ID)
@@ -744,12 +753,73 @@ func copyReadOnlyWorkspaceFixtures(workspace Workspace, worktreeRoot string) err
 }
 
 type commandResult struct {
-	ExitCode int
-	Output   string
+	ExitCode           int
+	Output             string
+	SandboxLease       map[string]any
+	SandboxAttestation *SandboxAttestation
+	SandboxLifecycle   map[string]any
 }
 
 func runLocal(parent context.Context, directory string, timeout time.Duration, input string, command string, arguments ...string) (commandResult, error) {
 	return runLocalWithEnv(parent, directory, timeout, input, nil, command, arguments...)
+}
+
+// boundedCommandBuffer caps command output while preserving io.Writer's
+// short-write contract. Repository commands can be arbitrarily noisy.
+type boundedCommandBuffer struct{ bytes.Buffer }
+
+func (b *boundedCommandBuffer) ReadFrom(reader io.Reader) (int64, error) {
+	return io.Copy(struct{ io.Writer }{b}, reader)
+}
+
+func (b *boundedCommandBuffer) Write(value []byte) (int, error) {
+	written := len(value)
+	if remaining := maxCommandOutput - b.Len(); remaining > 0 {
+		if len(value) > remaining {
+			value = value[:remaining]
+		}
+		_, _ = b.Buffer.Write(value)
+	}
+	return written, nil
+}
+
+func validatePatchPaths(patch string, allowedPaths []string) error {
+	if len(allowedPaths) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	for _, line := range strings.Split(strings.ReplaceAll(patch, "\\", "/"), "\n") {
+		if !strings.HasPrefix(line, "diff --git ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			return fmt.Errorf("implementation diff has an invalid file header")
+		}
+		for _, field := range fields[2:4] {
+			path := strings.TrimPrefix(strings.TrimPrefix(strings.Trim(field, "\""), "a/"), "b/")
+			if path != "/dev/null" {
+				seen[path] = struct{}{}
+			}
+		}
+	}
+	if len(seen) == 0 {
+		return fmt.Errorf("implementation diff has no file paths")
+	}
+	for path := range seen {
+		allowed := false
+		for _, root := range allowedPaths {
+			root = strings.Trim(strings.ReplaceAll(strings.TrimSpace(root), "\\", "/"), " /")
+			if root != "" && (path == root || strings.HasPrefix(path, root+"/")) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return fmt.Errorf("implementation patch touches %s outside approved component scope", path)
+		}
+	}
+	return nil
 }
 
 // runLocalWithEnv runs repository-owned commands with a deliberately reduced
@@ -761,7 +831,7 @@ func runLocal(parent context.Context, directory string, timeout time.Duration, i
 func runLocalWithEnv(parent context.Context, directory string, timeout time.Duration, input string, environment map[string]string, command string, arguments ...string) (commandResult, error) {
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	process := exec.CommandContext(ctx, command, arguments...)
+	process := exec.Command(command, arguments...)
 	process.Dir = directory
 	process.Env = repositoryCommandEnvironment(os.Environ(), environment)
 	if input != "" {
@@ -769,7 +839,19 @@ func runLocalWithEnv(parent context.Context, directory string, timeout time.Dura
 	}
 	var stdout, stderr bytes.Buffer
 	process.Stdout, process.Stderr = &stdout, &stderr
-	err := process.Run()
+	killProcessGroup := configureCommandProcessGroup(process)
+	if err := process.Start(); err != nil {
+		return commandResult{}, fmt.Errorf("local command failed to start")
+	}
+	done := make(chan error, 1)
+	go func() { done <- process.Wait() }()
+	var err error
+	select {
+	case err = <-done:
+	case <-ctx.Done():
+		killProcessGroup()
+		err = <-done
+	}
 	output := strings.TrimSpace(stdout.String() + stderr.String())
 	if len(output) > maxCommandOutput {
 		output = output[:maxCommandOutput]

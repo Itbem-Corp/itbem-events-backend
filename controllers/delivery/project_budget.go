@@ -2,6 +2,7 @@ package delivery
 
 import (
 	"events-stocks/configuration"
+	"events-stocks/internal/automationagent"
 	"events-stocks/models"
 	"events-stocks/services/automationcost"
 	"fmt"
@@ -144,7 +145,7 @@ func rejectRunWhenProjectBudgetReached(tx *gorm.DB, project models.DeliveryProje
 		return err
 	}
 	if !budgetAdmissionAllowed(project.MonthlyBudgetMicros, spent, reserved, reservationMicros) {
-		return fmt.Errorf("the monthly AI budget cannot reserve this run; wait for active runs to settle or raise the project budget")
+		return errProjectBudgetAdmission
 	}
 	return nil
 }
@@ -180,6 +181,16 @@ const (
 // Stagehand call in addition to the delivery agent summary; reserving it here
 // prevents concurrent QA tasks from silently exceeding a project cap.
 func deliveryRunBudgetReservation(cfg *models.Config, operation string, inputBytes, maxCompletionTokens int) (int64, error) {
+	if operation == "delivery.implementation" {
+		perCall, err := projectBudgetReservation(cfg, automationagent.AgentMaxRequestBytes, maxCompletionTokens)
+		if err != nil {
+			return 0, err
+		}
+		if perCall > math.MaxInt64/automationagent.AgentMaxCalls {
+			return 0, fmt.Errorf("agent budget exceeds supported range")
+		}
+		return perCall * automationagent.AgentMaxCalls, nil
+	}
 	primary, err := projectBudgetReservation(cfg, inputBytes, maxCompletionTokens)
 	if err != nil || operation != "delivery.qa" {
 		return primary, err

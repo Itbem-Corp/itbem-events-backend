@@ -4,6 +4,8 @@ import (
 	"events-stocks/models"
 	"testing"
 	"time"
+
+	"github.com/gofrs/uuid"
 )
 
 func TestMonthStartUTCIsStableAcrossTimezones(t *testing.T) {
@@ -35,6 +37,18 @@ func TestTaskBudgetAdmissionIsAnIndependentHardCeiling(t *testing.T) {
 	}
 	if budgetAdmissionAllowed(taskBudget, 450, 250, 301) {
 		t.Fatal("a task cap must reject a run that would exceed its allocation even when the project has budget left")
+	}
+}
+
+func TestAutomationAdmissionLimitsAreOptInAndStable(t *testing.T) {
+	if got := activeAutomationStatuses; len(got) != 3 || got[0] != "queued" || got[1] != "running" || got[2] != "cancel_requested" {
+		t.Fatalf("active status set = %#v", got)
+	}
+	// The admission helper deliberately does no database work for an
+	// unconfigured environment. This preserves local/legacy deployments while
+	// allowing the production operator to turn on hard backpressure explicitly.
+	if err := rejectAutomationAdmission(nil, &models.Config{}, uuid.Nil); err != nil {
+		t.Fatalf("unconfigured admission should be a no-op: %v", err)
 	}
 }
 

@@ -3,6 +3,8 @@ package automationagent
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -32,12 +34,25 @@ func ParseDeliveryPlan(content string) (map[string]any, error) {
 		return nil, fmt.Errorf("delivery plan requires a non-empty summary")
 	}
 	for _, name := range deliveryPlanListFields {
-		// Some reasoning models serialize a single rollback sentence as text
-		// despite the requested list. Normalize that unambiguous shape instead
-		// of discarding a complete plan; every other field remains strict.
-		if name == "rollback_plan" {
+		// Some reasoning models serialize a single sentence as text despite the
+		// requested list. Normalize only bounded, semantically unambiguous list
+		// fields. A missing risks field is represented as an explicit harness
+		// warning rather than silently treated as "no risk"; all other missing
+		// fields remain strict and fail closed.
+		if name == "risks" {
+			if _, present := plan[name]; !present {
+				plan[name] = []any{"Provider omitted the risks field; human review is required before approval."}
+				recordDeliveryPlanRepair(plan, "risks missing: inserted an explicit human-review warning")
+			}
+		}
+		if name == "rollback_plan" || name == "risks" {
 			if value, ok := plan[name].(string); ok && strings.TrimSpace(value) != "" {
-				plan[name] = []any{strings.TrimSpace(value)}
+				trimmed := strings.TrimSpace(value)
+				if len(trimmed) > 240 {
+					return nil, fmt.Errorf("delivery plan field %s must be a list of non-empty strings", name)
+				}
+				plan[name] = []any{trimmed}
+				recordDeliveryPlanRepair(plan, fmt.Sprintf("%s single string normalized to a one-item list", name))
 			}
 		}
 		values, ok := plan[name].([]any)
@@ -60,6 +75,9 @@ func ParseDeliveryPlan(content string) (map[string]any, error) {
 	if err := normalizeBrowserQAProposalForHumanReview(plan); err != nil {
 		return nil, err
 	}
+	if err := ValidateDeliveryPlanExecutionContract(plan); err != nil {
+		return nil, err
+	}
 	if estimate, ok := plan["estimate"].(string); !ok || strings.TrimSpace(estimate) == "" {
 		return nil, fmt.Errorf("delivery plan requires a non-empty estimate")
 	}
@@ -74,6 +92,45 @@ func ParseDeliveryPlan(content string) (map[string]any, error) {
 		return nil, fmt.Errorf("delivery plan confidence must be a number from 0 to 1")
 	}
 	return plan, nil
+}
+
+// recordDeliveryPlanRepair makes compatibility repairs observable in the
+// structured result. It never grants a missing capability or invents a
+// repository; it only records a bounded shape repair before the normal
+// validators run.
+func recordDeliveryPlanRepair(plan map[string]any, repair string) {
+	if strings.TrimSpace(repair) == "" {
+		return
+	}
+	entries, _ := plan["_harness_repairs"].([]any)
+	plan["_harness_repairs"] = append(entries, repair)
+}
+
+// ValidateDeliveryPlanExecutionContract prevents a plan that intends to
+// change code from crossing the review boundary without the minimum contract
+// needed to execute and verify it. Exploratory or metadata-only plans may keep
+// these lists empty while they are still waiting for context.
+func ValidateDeliveryPlanExecutionContract(plan map[string]any) error {
+	files, _ := plan["files_impacted"].([]any)
+	impacts, _ := plan["repository_impact"].([]any)
+	hasChanges := len(files) > 0
+	for _, raw := range impacts {
+		entry, ok := raw.(map[string]any)
+		if ok && strings.EqualFold(strings.TrimSpace(stringAny(entry["impact"])), "changes") {
+			hasChanges = true
+			break
+		}
+	}
+	if !hasChanges {
+		return nil
+	}
+	for _, field := range []string{"implementation_steps", "qa_plan", "evidence_plan", "acceptance_criteria", "rollback_plan"} {
+		values, ok := plan[field].([]any)
+		if !ok || len(values) == 0 {
+			return fmt.Errorf("delivery plan with code changes requires a non-empty %s", field)
+		}
+	}
+	return nil
 }
 
 // normalizeBrowserQAProposalForHumanReview keeps an optional browser proposal
@@ -186,12 +243,107 @@ func ParseDeliverySummary(content string) (map[string]any, error) {
 	if !ok {
 		return nil, fmt.Errorf("delivery summary requires a technical object")
 	}
+	normalizeDeliverySummaryEvidence(technical)
 	for _, field := range deliverySummaryTechnicalFields {
+		// Absence is valid when the supplied history contains no decisions.
+		// The context-aware evidence gate rejects omission of recorded gates.
+		if field == "decisions" {
+			if decisions, ok := technical[field].([]any); ok && len(decisions) == 0 {
+				continue
+			}
+		}
 		if err := validateDeliverySummaryList(technical, field); err != nil {
 			return nil, err
 		}
 	}
 	return map[string]any{"executive": executive, "technical": technical}, nil
+}
+
+// normalizeDeliverySummaryEvidence is a bounded compatibility repair for
+// providers that follow the evidence shape semantically but serialize each
+// citation as {id,title,summary} instead of the declared string list. It never
+// grants evidence: ValidateDeliverySummaryEvidence still checks UUID
+// membership and the exact recorded title against the control-plane input.
+// Invalid or mixed entries remain invalid and fail closed in the normal list
+// validator. The repair marker is retained in the structured result so the
+// operator can distinguish a normalized provider response from a native one.
+func normalizeDeliverySummaryEvidence(technical map[string]any) {
+	entries, ok := technical["evidence"].([]any)
+	if !ok || len(entries) == 0 {
+		return
+	}
+	normalized := make([]any, 0, len(entries))
+	repaired := false
+	for _, raw := range entries {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			normalized = append(normalized, raw)
+			continue
+		}
+		id := strings.TrimSpace(stringAny(entry["id"]))
+		title := strings.TrimSpace(stringAny(entry["title"]))
+		if id == "" || title == "" {
+			normalized = append(normalized, raw)
+			continue
+		}
+		citation := id + " — " + title
+		if summary := strings.TrimSpace(stringAny(entry["summary"])); summary != "" {
+			citation += ": " + summary
+		}
+		normalized = append(normalized, citation)
+		repaired = true
+	}
+	if repaired {
+		technical["evidence"] = normalized
+		technical["_harness_repairs"] = []any{"technical.evidence object citations normalized to grounded strings"}
+	}
+}
+
+// ParseDeliveryChat accepts only a bounded, informational answer. A chat
+// response is never a plan, gate decision or tool instruction; keeping this
+// contract separate prevents a conversational provider response from being
+// promoted into workflow state by accident.
+func ParseDeliveryChat(content string) (map[string]any, error) {
+	answer, ok := decodeJSONObject(content)
+	if !ok {
+		return nil, fmt.Errorf("delivery chat must be a JSON object")
+	}
+	text, ok := answer["answer"].(string)
+	text = strings.TrimSpace(text)
+	if !ok || text == "" || len(text) > 6000 {
+		return nil, fmt.Errorf("delivery chat requires a bounded non-empty answer")
+	}
+	repairs := make([]any, 0, 2)
+	for _, field := range []string{"next_steps", "questions"} {
+		raw, present := answer[field]
+		if !present {
+			answer[field] = []any{}
+			continue
+		}
+		items, ok := raw.([]any)
+		valid := ok && len(items) <= 4
+		if valid {
+			for _, item := range items {
+				value, stringValue := item.(string)
+				if !stringValue || strings.TrimSpace(value) == "" || len(value) > 240 {
+					valid = false
+					break
+				}
+			}
+		}
+		if !valid {
+			// Suggestions are optional presentation fields. Preserve the valid,
+			// bounded answer while explicitly dropping an invalid optional list;
+			// never coerce model objects into operator instructions.
+			answer[field] = []any{}
+			repairs = append(repairs, field+" omitted because it did not contain at most four bounded strings")
+		}
+	}
+	if len(repairs) > 0 {
+		answer["_harness_repairs"] = repairs
+	}
+	answer["answer"] = text
+	return answer, nil
 }
 
 // ParseDeliveryQAReport turns the agent's narration of an already-executed QA
@@ -251,6 +403,11 @@ func ParseDeliveryQAReport(content string) (map[string]any, error) {
 // command or screenshot. A bad narration is simply not promoted to structured
 // UI; the real evidence and private response remain available for review.
 func ValidateDeliveryQAReport(report, execution map[string]any) error {
+	if strings.EqualFold(stringAny(report["verdict"]), "passed") {
+		if err := validateQASuccessEvidence(report, execution); err != nil {
+			return err
+		}
+	}
 	if strings.EqualFold(stringAny(report["verdict"]), "passed") && deliveryQAExecutionFailed(execution) {
 		return fmt.Errorf("delivery QA report cannot pass when observed QA contains a failed check")
 	}
@@ -353,10 +510,60 @@ func normalizeRepositoryImpact(plan map[string]any) error {
 			return fmt.Errorf("delivery plan field repository_impact must not repeat a repository reference")
 		}
 		seen[reference] = struct{}{}
-		normalized = append(normalized, map[string]any{"name": name, "reference": reference, "revision": revision, "role": role, "impact": impact, "notes": notes})
+		normalizedEntry := map[string]any{"name": name, "reference": reference, "revision": revision, "role": role, "impact": impact, "notes": notes}
+		if rawScopes, present := entry["allowed_paths"]; present {
+			scopes, err := NormalizeRepositoryAllowedPaths(rawScopes)
+			if err != nil {
+				return err
+			}
+			if len(scopes) > 0 {
+				normalizedEntry["allowed_paths"] = scopes
+			}
+		}
+		normalized = append(normalized, normalizedEntry)
 	}
 	plan["repository_impact"] = normalized
 	return nil
+}
+
+// normalizeRepositoryAllowedPaths is the monorepo boundary. A plan may bind
+// one repository to one or more explicit relative component roots, but it may
+// never use an absolute path, traversal, .git, or secret-bearing environment
+// file as a scope. The scope is advisory until the implementation patch is
+// checked against it below; it is never inferred from model prose.
+func NormalizeRepositoryAllowedPaths(raw any) ([]string, error) {
+	var values []any
+	switch typed := raw.(type) {
+	case []any:
+		values = typed
+	case []string:
+		values = make([]any, len(typed))
+		for index, value := range typed {
+			values[index] = value
+		}
+	default:
+		return nil, fmt.Errorf("repository_impact allowed_paths must be a list")
+	}
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		path, ok := value.(string)
+		path = strings.ReplaceAll(path, "\\", "/")
+		if !ok || strings.HasPrefix(path, "/") {
+			return nil, fmt.Errorf("repository_impact allowed_paths contains an unsafe path")
+		}
+		path = strings.Trim(path, " /")
+		if path == "" || strings.Contains(path, "../") || path == ".." || path == "." || strings.HasPrefix(path, ".git/") || path == ".git" || strings.HasPrefix(path, ".env") {
+			return nil, fmt.Errorf("repository_impact allowed_paths contains an unsafe path")
+		}
+		if _, duplicate := seen[path]; duplicate {
+			return nil, fmt.Errorf("repository_impact allowed_paths must not repeat a path")
+		}
+		seen[path] = struct{}{}
+		result = append(result, path)
+	}
+	sort.Strings(result)
+	return result, nil
 }
 
 // ValidateDeliveryPlanTopology binds an otherwise well-formed plan to the
@@ -366,12 +573,13 @@ func normalizeRepositoryImpact(plan map[string]any) error {
 func ValidateDeliveryPlanTopology(plan map[string]any, delivery json.RawMessage) error {
 	var input struct {
 		RepositoryTopology []struct {
-			Name                string `json:"name"`
-			Reference           string `json:"reference"`
-			Revision            string `json:"revision"`
-			Role                string `json:"role"`
-			Kind                string `json:"kind"`
-			StagehandConfigured bool   `json:"stagehand_configured"`
+			Name                string   `json:"name"`
+			Reference           string   `json:"reference"`
+			Revision            string   `json:"revision"`
+			Role                string   `json:"role"`
+			Kind                string   `json:"kind"`
+			AllowedPaths        []string `json:"allowed_paths"`
+			StagehandConfigured bool     `json:"stagehand_configured"`
 		} `json:"repository_topology"`
 	}
 	if err := json.Unmarshal(delivery, &input); err != nil {
@@ -387,6 +595,7 @@ func ValidateDeliveryPlanTopology(plan map[string]any, delivery json.RawMessage)
 	expected := make(map[string]struct {
 		name, revision, role string
 		kind                 string
+		allowedPaths         []string
 		stagehandConfigured  bool
 		metadataOnly         bool
 	}, len(input.RepositoryTopology))
@@ -401,11 +610,12 @@ func ValidateDeliveryPlanTopology(plan map[string]any, delivery json.RawMessage)
 		expected[reference] = struct {
 			name, revision, role string
 			kind                 string
+			allowedPaths         []string
 			stagehandConfigured  bool
 			metadataOnly         bool
 		}{
 			strings.TrimSpace(repository.Name), strings.TrimSpace(repository.Revision), strings.ToLower(strings.TrimSpace(repository.Role)),
-			strings.ToLower(strings.TrimSpace(repository.Kind)), repository.StagehandConfigured,
+			strings.ToLower(strings.TrimSpace(repository.Kind)), append([]string(nil), repository.AllowedPaths...), repository.StagehandConfigured,
 			strings.HasPrefix(strings.ToLower(reference), "github://"),
 		}
 	}
@@ -418,6 +628,9 @@ func ValidateDeliveryPlanTopology(plan map[string]any, delivery json.RawMessage)
 		repository, exists := expected[reference]
 		if !exists || strings.TrimSpace(stringAny(entry["name"])) != repository.name || strings.TrimSpace(stringAny(entry["revision"])) != repository.revision || strings.ToLower(strings.TrimSpace(stringAny(entry["role"]))) != repository.role {
 			return fmt.Errorf("delivery plan repository_impact does not match frozen repository topology")
+		}
+		if err := validateAllowedPathsWithin(entry["allowed_paths"], repository.allowedPaths); err != nil {
+			return fmt.Errorf("delivery plan repository_impact %s: %w", reference, err)
 		}
 		if repository.metadataOnly && strings.EqualFold(strings.TrimSpace(stringAny(entry["impact"])), "changes") {
 			return fmt.Errorf("delivery plan cannot mark a github-only repository as changed; register a local workspace checkpoint before implementation")
@@ -488,6 +701,42 @@ func ValidateDeliveryPlanTopology(plan map[string]any, delivery json.RawMessage)
 		return err
 	}
 	return nil
+}
+
+// validateAllowedPathsWithin prevents a plan from widening a component scope
+// that an operator already attached to the frozen repository context. A plan
+// may narrow that maximum, but an omitted scope means whole-repository access
+// and is therefore rejected when a maximum exists.
+func validateAllowedPathsWithin(raw any, maximum []string) error {
+	if len(maximum) == 0 {
+		return nil
+	}
+	planned, err := NormalizeRepositoryAllowedPaths(raw)
+	if err != nil {
+		return err
+	}
+	if len(planned) == 0 {
+		return fmt.Errorf("allowed_paths must remain within the operator-approved component scope")
+	}
+	for _, path := range planned {
+		within := false
+		for _, root := range maximum {
+			if workspacePathWithin(root, path) {
+				within = true
+				break
+			}
+		}
+		if !within {
+			return fmt.Errorf("allowed_paths contains %q outside the operator-approved component scope", path)
+		}
+	}
+	return nil
+}
+
+func workspacePathWithin(root, candidate string) bool {
+	root = strings.Trim(strings.TrimSpace(filepath.ToSlash(root)), "/")
+	candidate = strings.Trim(strings.TrimSpace(filepath.ToSlash(candidate)), "/")
+	return root != "" && (candidate == root || strings.HasPrefix(candidate, root+"/"))
 }
 
 // ValidateStagehandBrowserQAContract ensures a configured browser harness is

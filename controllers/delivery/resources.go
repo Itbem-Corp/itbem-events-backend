@@ -855,6 +855,22 @@ func requiresPlan(tx *gorm.DB, itemID uuid.UUID) error {
 	}
 	return nil
 }
+
+func agentPlanResultKey(taskID uuid.UUID, key string) bool {
+	if key == "automation/"+taskID.String()+"/result.json" {
+		return true
+	}
+	prefix := "automation/" + taskID.String() + "/runs/"
+	if !strings.HasPrefix(key, prefix) || !strings.HasSuffix(key, "/result.json") {
+		return false
+	}
+	runID := strings.TrimSuffix(strings.TrimPrefix(key, prefix), "/result.json")
+	if strings.Contains(runID, "/") {
+		return false
+	}
+	parsed, err := uuid.FromString(runID)
+	return err == nil && parsed != uuid.Nil
+}
 func markPlan(tx *gorm.DB, itemID uuid.UUID, status string, gateID *uuid.UUID) error {
 	var plan models.DeliveryPlan
 	if err := tx.Where("work_item_id = ? AND status = ?", itemID, "proposed").Order("version DESC").First(&plan).Error; err != nil {

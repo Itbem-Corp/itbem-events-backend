@@ -70,3 +70,17 @@ retained privately with token and cost dimensions.
 4. Review the isolated diff and CI/worktree evidence; approve code review.
 5. Review command results, Stagehand report and screenshots before accepting
    QA. A semantic verdict never approves the gate by itself.
+
+## Server-authoritative workflow projection
+
+`GET /automation/work-items/:id` and the compact automation portfolio expose
+`workflow_projection`. It is a versioned read model derived from durable state,
+the latest task attempt, gates and evidence. Clients may use its stage,
+waiting reason, actor, staleness and `available_actions` to render the control
+surface, but every action is re-authorized by its existing endpoint; the
+projection never grants permission or advances the workflow.
+
+An `uncertain` projection is fail-closed: it must be reconciled from evidence
+before a new agent run is offered. Terminal work items expose navigation only.
+`stale` is a signal for the operator, not proof that a worker is dead; the
+worker heartbeat and durable task state remain authoritative for recovery.

@@ -265,10 +265,6 @@ func StartAgentRun(c echo.Context) error {
 		return utils.Error(c, http.StatusBadRequest, "Invalid agent run", err.Error())
 	}
 	phase := strings.ToLower(strings.TrimSpace(request.Phase))
-	spec, allowed := agentRunSpecs[phase]
-	if !allowed || len(request.Instructions) > 12000 {
-		return utils.Error(c, http.StatusBadRequest, "Invalid agent run", "phase or instructions are invalid")
-	}
 	permission := deliveryManage
 	if phase == "release_gate" {
 		permission = deliveryRelease
@@ -276,6 +272,18 @@ func StartAgentRun(c echo.Context) error {
 	actor, _, err := workItemActor(c, workItemID, permission)
 	if err != nil {
 		return err
+	}
+	return enqueueAgentRun(c, workItemID, actor.CognitoSub, request, nil)
+}
+
+// enqueueAgentRun is shared by a human request and a persisted continuation.
+// Continuations remain bound to their epoch so an old automatic instruction
+// cannot resurrect work after a human has changed the workflow.
+func enqueueAgentRun(c echo.Context, workItemID uuid.UUID, requestedBy string, request agentRunRequest, continuation *models.DeliveryContinuation) error {
+	phase := strings.ToLower(strings.TrimSpace(request.Phase))
+	spec, allowed := agentRunSpecs[phase]
+	if !allowed || len(request.Instructions) > 12000 {
+		return utils.Error(c, http.StatusBadRequest, "Invalid agent run", "phase or instructions are invalid")
 	}
 	var requestedPublicationGrantID uuid.UUID
 	if phase == "publish" {
@@ -304,6 +312,9 @@ func StartAgentRun(c echo.Context) error {
 		// work-item timeline as human transitions and publication grants.
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&item, workItemID).Error; err != nil {
 			return err
+		}
+		if continuation != nil && item.AutomationEpoch != continuation.Epoch {
+			return fmt.Errorf("continuation was superseded by a newer decision")
 		}
 		if _, valid := spec.states[item.State]; !valid {
 			return fmt.Errorf("%s agent run is not allowed while work item is %s", phase, item.State)
@@ -417,7 +428,10 @@ func StartAgentRun(c echo.Context) error {
 		return utils.Error(c, http.StatusServiceUnavailable, "Agent run failed", "Could not write private agent input")
 	}
 	inputRef := "s3://" + cfg.AutomationInputBucket + "/" + inputKey
-	task := &models.AutomationTask{ID: taskID, JobID: jobID, RequestedBy: actor.CognitoSub, DeliveryWorkItemID: &item.ID, CorrelationID: item.ID.String(), Operation: spec.operation, EvidenceSubjectDigest: evidenceSubjectDigest, MaxCompletionTokens: maxCompletionTokens, InputRef: inputRef, Status: "queued"}
+	task := &models.AutomationTask{ID: taskID, JobID: jobID, RequestedBy: requestedBy, DeliveryWorkItemID: &item.ID, CorrelationID: item.ID.String(), Operation: spec.operation, EvidenceSubjectDigest: evidenceSubjectDigest, MaxCompletionTokens: maxCompletionTokens, InputRef: inputRef, Status: "queued"}
+	if continuation != nil {
+		task.ContinuationID = &continuation.ID
+	}
 	message := automationqueue.Message{SchemaVersion: 1, JobID: jobID.String(), TenantCode: "itbem", CorrelationID: task.CorrelationID, Type: "ai.local.process"}
 	message.Payload.TaskID, message.Payload.Operation, message.Payload.MaxCompletionTokens, message.Payload.InputRef, message.Payload.Attempt = task.ID.String(), task.Operation, task.MaxCompletionTokens, task.InputRef, 1
 	if err := configuration.DB.Transaction(func(tx *gorm.DB) error {
@@ -428,6 +442,9 @@ func StartAgentRun(c echo.Context) error {
 		var lockedItem models.DeliveryWorkItem
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&lockedItem, item.ID).Error; err != nil {
 			return err
+		}
+		if continuation != nil && lockedItem.AutomationEpoch != continuation.Epoch {
+			return fmt.Errorf("continuation was superseded by a newer decision")
 		}
 		if _, valid := spec.states[lockedItem.State]; !valid {
 			return fmt.Errorf("%s agent run is no longer allowed while work item is %s", phase, lockedItem.State)

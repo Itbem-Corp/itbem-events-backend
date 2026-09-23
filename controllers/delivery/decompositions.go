@@ -160,6 +160,18 @@ func ApplyRequestDecomposition(c echo.Context) error {
 			excluded, _ := json.Marshal(task.ExcludedScope)
 			acceptance, _ := json.Marshal(task.AcceptanceCriteria)
 			child := models.DeliveryWorkItem{ProjectID: projectID, RequestID: &requestID, RequestedBy: actor.CognitoSub, Title: task.Title, Description: task.Description, ExpectedOutcome: task.ExpectedOutcome, IncludedScopeJSON: string(included), ExcludedScopeJSON: string(excluded), AcceptanceJSON: string(acceptance), BudgetMicros: task.BudgetMicros, BudgetAlertPercent: defaultTaskBudgetAlertPercent, State: deliveryworkflow.StatePlanning}
+			repositoryRefs := make([]string, 0, len(task.ContextReferences))
+			for _, reference := range task.ContextReferences {
+				if strings.EqualFold(strings.TrimSpace(sources[reference].Kind), "repository") {
+					repositoryRefs = append(repositoryRefs, sources[reference].Reference)
+				}
+			}
+			mandate, mandateErr := marshalDeliveryMandate(defaultDeliveryMandate(child, repositoryRefs))
+			if mandateErr != nil {
+				return mandateErr
+			}
+			child.MandateVersion = deliveryMandateVersion
+			child.MandateJSON = mandate
 			child.ClientContextJSON = clientContext
 			if err := tx.Create(&child).Error; err != nil {
 				return err
