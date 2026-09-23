@@ -106,8 +106,11 @@ func (p *sequenceProvider) Complete(_ context.Context, _ []Message, maxTokens in
 
 type failingResultStore struct{ input []byte }
 
-func (s failingResultStore) Get(_ context.Context, _ string, _ string) ([]byte, error) {
-	return s.input, nil
+func (s failingResultStore) Get(_ context.Context, _ string, key string) ([]byte, error) {
+	if strings.HasPrefix(key, "automation/inputs/") && strings.HasSuffix(key, "/input.json") {
+		return s.input, nil
+	}
+	return nil, ErrObjectNotFound
 }
 func (failingResultStore) PutEncryptedJSON(_ context.Context, _ string, key string, _ []byte) error {
 	// The exact request reaches durable storage before the provider is called;
