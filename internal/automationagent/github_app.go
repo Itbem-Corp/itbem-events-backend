@@ -76,7 +76,14 @@ const (
 	maxGitHubEnvironmentBytes          = 16 << 10
 )
 
-const maxGitHubPullRequestPatchBytes = 512 << 10
+const (
+	// GitHub's pull-request representation includes author and repository
+	// metadata in addition to the fields we consume. A 32 KiB cap rejects
+	// otherwise ordinary PRs before the head SHA is decoded; retain a bounded
+	// response while allowing the documented PR body size plus metadata.
+	maxGitHubPullRequestStateBytes = 1 << 20
+	maxGitHubPullRequestPatchBytes = 512 << 10
+)
 const maxGitHubInstallationIDs = 16
 
 // GitHubPullRequestState is the small mutable PR checkpoint used solely to
@@ -124,7 +131,7 @@ func ReadGitHubPullRequestState(ctx context.Context, config GitHubAppConfig, tok
 			Login string `json:"login"`
 		} `json:"user"`
 	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 32<<10)).Decode(&payload); err != nil || !validGitHubCommitSHA(strings.ToLower(strings.TrimSpace(payload.Head.SHA))) {
+	if err := json.NewDecoder(io.LimitReader(response.Body, maxGitHubPullRequestStateBytes+1)).Decode(&payload); err != nil || !validGitHubCommitSHA(strings.ToLower(strings.TrimSpace(payload.Head.SHA))) {
 		return GitHubPullRequestState{}, fmt.Errorf("GitHub pull request state is invalid")
 	}
 	return GitHubPullRequestState{HeadSHA: strings.ToLower(strings.TrimSpace(payload.Head.SHA)), AuthorActor: strings.ToLower(strings.TrimSpace(payload.User.Login)), Open: strings.EqualFold(strings.TrimSpace(payload.State), "open"), Draft: payload.Draft, Merged: payload.Merged}, nil
