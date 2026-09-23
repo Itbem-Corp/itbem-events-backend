@@ -63,7 +63,7 @@ func RefreshRemoteRepositoryContext(c echo.Context) error {
 	if err != nil {
 		return conflict(c, "Remote context refresh unavailable", "GitHub App must be configured before remote repository context can be read")
 	}
-	installation, err := automationagent.MintGitHubInstallationToken(c.Request().Context(), appConfig, nil, time.Now().UTC())
+	installation, err := automationagent.MintGitHubInstallationToken(c.Request().Context(), appConfig, nil, time.Now().UTC(), automationagent.RepositoryReadTokenScope(strings.TrimPrefix(source.Reference, "github://")))
 	if err != nil {
 		return utils.Error(c, http.StatusServiceUnavailable, "Remote context refresh unavailable", "Could not obtain a short-lived GitHub App token")
 	}

@@ -33,6 +33,29 @@ func TestDeliveryPlanResultKeyAcceptsOnlyExactTaskRun(t *testing.T) {
 	}
 }
 
+import "github.com/gofrs/uuid"
+
+func TestAgentPlanResultKeyAcceptsRunScopedAndLegacyReferencesOnly(t *testing.T) {
+	taskID := uuid.Must(uuid.NewV4())
+	runID := uuid.Must(uuid.NewV4())
+	if !agentPlanResultKey(taskID, "automation/"+taskID.String()+"/result.json") {
+		t.Fatal("legacy plan result pointer should remain readable")
+	}
+	if !agentPlanResultKey(taskID, "automation/"+taskID.String()+"/runs/"+runID.String()+"/result.json") {
+		t.Fatal("run-scoped plan result should be readable")
+	}
+	for _, key := range []string{
+		"automation/" + uuid.Must(uuid.NewV4()).String() + "/result.json",
+		"automation/" + taskID.String() + "/runs/not-a-uuid/result.json",
+		"automation/" + taskID.String() + "/runs/" + runID.String() + "/request.json",
+		"automation/" + taskID.String() + "/runs/" + runID.String() + "/result.json/extra",
+	} {
+		if agentPlanResultKey(taskID, key) {
+			t.Fatalf("unexpectedly accepted plan result key %q", key)
+		}
+	}
+}
+
 func TestChangeSetMetadataCannotClaimAgentOrGitHubAppProvenance(t *testing.T) {
 	if containsReservedChangeSetProvenance(map[string]any{"external_ticket": "OPS-42"}) {
 		t.Fatal("ordinary human evidence metadata must remain available")
@@ -179,6 +202,7 @@ func TestNormalizeRepositoryContextMetadataRejectsMalformedTopologyEarly(t *test
 		"repository_kind":           "BACKEND_API",
 		"repository_responsibility": " Delivery control plane ",
 		"depends_on_repositories":   []any{"github://Itbem-Corp/dashboard-ts"},
+		"allowed_paths":             []any{"packages/ui", "apps/dashboard"},
 	})
 	if err != nil {
 		t.Fatalf("valid repository topology rejected: %v", err)
@@ -190,12 +214,17 @@ func TestNormalizeRepositoryContextMetadataRejectsMalformedTopologyEarly(t *test
 	if !ok || len(dependencies) != 1 || dependencies[0] != "github://Itbem-Corp/dashboard-ts" {
 		t.Fatalf("repository dependencies were not normalized: %#v", metadata)
 	}
+	paths, ok := metadata["allowed_paths"].([]string)
+	if !ok || len(paths) != 2 || paths[0] != "apps/dashboard" || paths[1] != "packages/ui" {
+		t.Fatalf("monorepo component roots were not normalized: %#v", metadata)
+	}
 
 	for _, candidate := range []map[string]any{
 		{"repository_role": "owner"},
 		{"repository_kind": "cron_script"},
 		{"depends_on_repositories": []any{"workspace://backend"}},
 		{"depends_on_repositories": []any{"workspace://frontend", "workspace://frontend"}},
+		{"allowed_paths": []any{"../outside"}},
 	} {
 		if _, err := normalizeRepositoryContextMetadata("workspace://backend", candidate); err == nil {
 			t.Fatalf("expected malformed topology to be rejected: %#v", candidate)

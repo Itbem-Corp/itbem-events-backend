@@ -1,12 +1,58 @@
 package delivery
 
 import (
+	"encoding/json"
 	"testing"
 
 	"events-stocks/models"
 	"events-stocks/services/deliveryworkflow"
 	"github.com/gofrs/uuid"
+	"time"
 )
+
+func TestDeliveryProjectResponseKeepsWorkflowProjectionOnProjectWorkItems(t *testing.T) {
+	item := models.DeliveryWorkItem{ID: uuid.Must(uuid.NewV4()), ProjectID: uuid.Must(uuid.NewV4()), State: deliveryworkflow.StatePlanReview, Title: "Review"}
+	response := deliveryProjectResponse{
+		DeliveryProject: models.DeliveryProject{ID: item.ProjectID, Name: "Project", WorkItems: []models.DeliveryWorkItem{item}},
+		WorkItems:       []deliveryProjectWorkItem{{DeliveryWorkItem: item, WorkflowProjection: buildDeliveryWorkflowProjection(item, time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC))}},
+		Preparation:     projectPreparation{Version: 1, Checks: []preparationCheck{}},
+	}
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		WorkItems []struct {
+			WorkflowProjection deliveryWorkflowProjection `json:"workflow_projection"`
+		} `json:"work_items"`
+	}
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.WorkItems) != 1 || decoded.WorkItems[0].WorkflowProjection.Stage != "plan" {
+		t.Fatalf("project response lost work-item projection: %s", encoded)
+	}
+}
+
+func TestLegacyDeliveryWorkItemResponseProjectsConservativeMandateObject(t *testing.T) {
+	item := models.DeliveryWorkItem{Title: "Legacy task", ExpectedOutcome: "A checked result", IncludedScopeJSON: `["src"]`, ExcludedScopeJSON: `["prod"]`}
+	encoded, err := json.Marshal(item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Mandate map[string]any `json:"mandate"`
+	}
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Mandate["objective"] != "A checked result" || decoded.Mandate["autonomy_policy"] != "bounded_autonomy" {
+		t.Fatalf("legacy work item must expose a usable conservative mandate: %s", encoded)
+	}
+	if _, exposed := decoded.Mandate["mandate_json"]; exposed {
+		t.Fatal("private mandate storage must never leak into the API")
+	}
+}
 
 func TestAgentOperationForSubmission(t *testing.T) {
 	tests := []struct {
@@ -41,8 +87,9 @@ func TestValidWebURL(t *testing.T) {
 	}
 }
 
-func TestDeliveryArtifactReferenceAcceptsOnlyTaskScopedAssets(t *testing.T) {
+func TestDeliveryArtifactReferenceAcceptsLegacyAndRunScopedAssets(t *testing.T) {
 	taskID := uuid.Must(uuid.NewV4())
+	runID := uuid.Must(uuid.NewV4())
 	cfg := &models.Config{AutomationOutputBucket: "itbem-ai-outputs-local"}
 	reference := "s3://itbem-ai-outputs-local/automation/" + taskID.String() + "/artifacts/01-preview.png"
 	parsedTaskID, key, name, ok := deliveryArtifactReference(cfg, reference)
@@ -51,6 +98,28 @@ func TestDeliveryArtifactReferenceAcceptsOnlyTaskScopedAssets(t *testing.T) {
 	}
 	if _, _, _, ok := deliveryArtifactReference(cfg, "s3://itbem-ai-outputs-local/automation/"+taskID.String()+"/result.json"); ok {
 		t.Fatal("result documents must not be served as visual artifacts")
+	}
+
+	runScopedReference := "s3://itbem-ai-outputs-local/automation/" + taskID.String() + "/runs/" + runID.String() + "/artifacts/01-preview.png"
+	parsedTaskID, key, name, ok = deliveryArtifactReference(cfg, runScopedReference)
+	if !ok || parsedTaskID != taskID || key != "automation/"+taskID.String()+"/runs/"+runID.String()+"/artifacts/01-preview.png" || name != "01-preview.png" {
+		t.Fatalf("unexpected run-scoped artifact parse: %s / %s / %s / %v", parsedTaskID, key, name, ok)
+	}
+	parsedRunID, runScoped := deliveryArtifactRunID(key)
+	if !runScoped || parsedRunID != runID.String() {
+		t.Fatalf("unexpected run lineage: %q / %v", parsedRunID, runScoped)
+	}
+	if _, runScoped := deliveryArtifactRunID("automation/" + taskID.String() + "/artifacts/01-preview.png"); runScoped {
+		t.Fatal("legacy artifact key must not claim a worker run")
+	}
+	for _, invalid := range []string{
+		"s3://itbem-ai-outputs-local/automation/" + taskID.String() + "/runs/not-a-uuid/artifacts/01-preview.png",
+		"s3://itbem-ai-outputs-local/automation/" + taskID.String() + "/runs/" + runID.String() + "/steps/01-preview.png",
+		"s3://itbem-ai-outputs-local/automation/" + taskID.String() + "/runs/" + runID.String() + "/artifacts/../01-preview.png",
+	} {
+		if _, _, _, ok := deliveryArtifactReference(cfg, invalid); ok {
+			t.Fatalf("invalid private artifact reference accepted: %s", invalid)
+		}
 	}
 }
 

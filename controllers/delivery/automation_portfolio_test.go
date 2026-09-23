@@ -68,6 +68,9 @@ func TestBuildAutomationPortfolioIsCompactAndRevisionStable(t *testing.T) {
 	if item.GateSummary != (automationPortfolioGateSummary{Total: 2, Approved: 1, ChangesRequested: 1}) || item.EvidenceCount != 4 {
 		t.Fatalf("safe gate/evidence summaries were lost: %#v", item)
 	}
+	if item.WorkflowProjection.Stage != "qa" || item.WorkflowProjection.StateKind != "review" || item.WorkflowProjection.Evidence.Total != 4 || !item.WorkflowProjection.Evidence.HasHumanGate {
+		t.Fatalf("portfolio must expose the same server state projection: %#v", item.WorkflowProjection)
+	}
 
 	encoded, err := json.Marshal(snapshot)
 	if err != nil {

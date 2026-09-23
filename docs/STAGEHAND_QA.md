@@ -115,6 +115,10 @@ bounded before/after screenshot pair and every step has a pass/fail record in th
 report. An `approved_test_flow` click must have an immediate post-action
 assertion (`assert_visible`, `assert_text`, or `assert_path`), so a successful
 click alone is never treated as evidence of a successful flow.
+Before each case screenshot the runner waits for a rendered document and two
+stable layout/visibility samples (bounded to 1.5 seconds). This prevents a
+transitioning shell from being recorded as a false before/after state even when
+the DOM selector assertion has already passed.
 At most three cases are allowed: that limit deliberately reserves storage for
 the private report, desktop/mobile checks, and all six visual states without
 letting generic test output displace human-review evidence.

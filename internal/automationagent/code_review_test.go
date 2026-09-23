@@ -311,6 +311,13 @@ func TestParseCodeReviewProducesStructuredActionableFindings(t *testing.T) {
 	}
 }
 
+func TestParseCodeReviewRejectsMissingVerdictInsteadOfInferringOne(t *testing.T) {
+	raw := `{"summary":"The patch weakens authorization and needs correction.","review_scope":["authorization"],"findings":[],"test_plan":["Run the authorization regression suite."],"coverage_gaps":[]}`
+	if _, err := ParseCodeReview(raw); err == nil {
+		t.Fatal("a review without the required verdict must fail closed")
+	}
+}
+
 func TestCodeReviewCannotEscapeFrozenDiffOrDowngradeHighImpactFinding(t *testing.T) {
 	review, err := ParseCodeReview(validCodeReview())
 	if err != nil {
@@ -362,6 +369,15 @@ func TestParseCodeReviewRejectsUnsafeOrAmbiguousApproval(t *testing.T) {
 	traversal := `{"summary":"Needs a fix.","verdict":"request_changes","review_scope":[],"findings":[{"id":"x","severity":"low","category":"maintainability","title":"x","file":"../secret","line_start":1,"line_end":1,"evidence":"x","evidence_quote":"x","recommendation":"x","confidence":1}],"test_plan":[],"coverage_gaps":[]}`
 	if _, err := ParseCodeReview(traversal); err == nil {
 		t.Fatal("review locations must not accept path traversal")
+	}
+}
+
+func TestParseCodeReviewRejectsConfidenceOutsideNormalizedRange(t *testing.T) {
+	for _, confidence := range []string{"100", "-0.01"} {
+		raw := fmt.Sprintf(`{"summary":"A grounded concern.","verdict":"request_changes","review_scope":["authorization"],"findings":[{"id":"confidence-boundary","severity":"low","category":"security","title":"Authorization concern","file":"auth.go","side":"head","line_start":3,"line_end":3,"evidence":"return true","evidence_quote":"return true","recommendation":"Restore the authorization guard.","confidence":%s}],"test_plan":["Run the authorization regression test."],"coverage_gaps":[]}`, confidence)
+		if _, err := ParseCodeReview(raw); err == nil {
+			t.Fatalf("confidence %s must be rejected instead of coerced into the 0..1 range", confidence)
+		}
 	}
 }
 

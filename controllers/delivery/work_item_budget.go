@@ -1,6 +1,7 @@
 package delivery
 
 import (
+	"errors"
 	"events-stocks/configuration"
 	"events-stocks/models"
 	"fmt"
@@ -10,6 +11,60 @@ import (
 	"github.com/labstack/echo/v4"
 	"gorm.io/gorm"
 )
+
+var errTaskBudgetAdmission = errors.New("the task AI budget cannot reserve this run; raise the task budget or wait for active runs to settle")
+var errProjectBudgetAdmission = errors.New("the monthly AI budget cannot reserve this run; wait for active runs to settle or raise the project budget")
+var errAutomationGlobalAdmission = errors.New("the automation global concurrency limit is saturated; wait for active runs to settle")
+var errAutomationProjectAdmission = errors.New("the automation project concurrency limit is saturated; wait for active runs to settle")
+var errAutomationQueueAdmission = errors.New("the automation queue depth limit is saturated; wait for active runs to settle")
+
+var activeAutomationStatuses = []string{"queued", "running", "cancel_requested"}
+
+// rejectAutomationAdmission is a deterministic backpressure gate. It runs
+// inside the same transaction as task creation and serializes configured
+// environments with a PostgreSQL advisory lock, preventing two projects from
+// both observing the same last global slot. Zero means an environment has not
+// opted into that particular ceiling yet, which keeps older deployments
+// compatible while making the policy explicit in the config surface.
+func rejectAutomationAdmission(tx *gorm.DB, cfg *models.Config, projectID uuid.UUID) error {
+	if cfg == nil || (cfg.AutomationGlobalActiveLimit <= 0 && cfg.AutomationProjectActiveLimit <= 0 && cfg.AutomationQueueDepthLimit <= 0) {
+		return nil
+	}
+	if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtext(?))", "itbem:automation:admission").Error; err != nil {
+		return fmt.Errorf("lock automation admission: %w", err)
+	}
+	if cfg.AutomationQueueDepthLimit > 0 {
+		var queued int64
+		if err := tx.Model(&models.AutomationTask{}).Where("status IN ?", activeAutomationStatuses).Count(&queued).Error; err != nil {
+			return err
+		}
+		if queued >= int64(cfg.AutomationQueueDepthLimit) {
+			return errAutomationQueueAdmission
+		}
+	}
+	if cfg.AutomationGlobalActiveLimit > 0 {
+		var active int64
+		if err := tx.Model(&models.AutomationTask{}).Where("status IN ?", activeAutomationStatuses).Count(&active).Error; err != nil {
+			return err
+		}
+		if active >= int64(cfg.AutomationGlobalActiveLimit) {
+			return errAutomationGlobalAdmission
+		}
+	}
+	if cfg.AutomationProjectActiveLimit > 0 {
+		var active int64
+		if err := tx.Model(&models.AutomationTask{}).
+			Joins("JOIN delivery_work_items ON delivery_work_items.id = automation_tasks.delivery_work_item_id").
+			Where("delivery_work_items.project_id = ? AND automation_tasks.status IN ?", projectID, activeAutomationStatuses).
+			Count(&active).Error; err != nil {
+			return err
+		}
+		if active >= int64(cfg.AutomationProjectActiveLimit) {
+			return errAutomationProjectAdmission
+		}
+	}
+	return nil
+}
 
 type workItemBudgetRequest struct {
 	BudgetMicros int64 `json:"budget_microusd"`
@@ -77,7 +132,7 @@ func rejectRunWhenWorkItemBudgetReached(tx *gorm.DB, item models.DeliveryWorkIte
 		return err
 	}
 	if !budgetAdmissionAllowed(item.BudgetMicros, spent, reserved, reservationMicros) {
-		return fmt.Errorf("the task AI budget cannot reserve this run; raise the task budget or wait for active runs to settle")
+		return errTaskBudgetAdmission
 	}
 	return nil
 }

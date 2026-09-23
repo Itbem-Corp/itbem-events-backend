@@ -57,6 +57,7 @@ var modelsWithoutSeed = []interface{}{
 	&models.ProductActiveUserDaily{},
 	&models.IdempotencyRecord{},
 	&models.OutboxEvent{},
+	&models.OutboxDispatchCursor{},
 	&models.AutomationTask{},
 	&models.AutomationExecution{},
 	&models.AutomationCodeReviewPublication{},
@@ -75,6 +76,7 @@ var modelsWithoutSeed = []interface{}{
 	&models.DeliveryRequest{},
 	&models.DeliveryDecomposition{},
 	&models.DeliveryWorkItem{},
+	&models.DeliveryContinuation{},
 	&models.DeliveryWorkItemDependency{},
 	&models.DeliveryContextSnapshot{},
 	&models.DeliveryPlan{},
@@ -185,6 +187,18 @@ func MigrarModelos() {
 		os.Exit(1)
 	}
 	slog.Info("models migrated")
+}
+
+// MigrateModelsForTest runs the same ordered, transactional migration used by
+// the service without terminating the process. Integration suites use this on
+// a fresh database so schema bootstrap is tested as an actual startup path
+// rather than through GORM's variadic AutoMigrate (which can resolve
+// cross-model associations in an unsafe order).
+func MigrateModelsForTest(db *gorm.DB) error {
+	if db == nil {
+		return fmt.Errorf("database is nil")
+	}
+	return migrateModels(db)
 }
 
 // migrateModels makes startup DDL atomic and bounded. The advisory transaction

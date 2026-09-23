@@ -169,7 +169,10 @@ func CreatePublicationGrant(c echo.Context) error {
 			CapabilitiesJSON: string(encodedCapabilities), Reason: strings.TrimSpace(input.Reason),
 			GrantedBy: actor.CognitoSub, GrantedAt: now, ExpiresAt: now.Add(time.Duration(expiresIn) * time.Minute),
 		}
-		return tx.Create(&grant).Error
+		if err := tx.Create(&grant).Error; err != nil {
+			return err
+		}
+		return scheduleContinuation(tx, lockedItem, "publish", actor.CognitoSub, grant.ID.String())
 	}); err != nil {
 		return conflict(c, "Publication grant rejected", err.Error())
 	}
@@ -313,10 +316,28 @@ func RevokePublicationGrant(c echo.Context) error {
 		return conflict(c, "Publication grant already revoked", "this publication grant is already inactive")
 	}
 	now := time.Now().UTC()
-	if err := configuration.DB.Model(&grant).Updates(map[string]any{"revoked_by": actor.CognitoSub, "revoked_at": now, "revocation_reason": strings.TrimSpace(input.Reason)}).Error; err != nil {
+	reason := strings.TrimSpace(input.Reason)
+	if err := configuration.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&grant).Updates(map[string]any{"revoked_by": actor.CognitoSub, "revoked_at": now, "revocation_reason": reason}).Error; err != nil {
+			return err
+		}
+		// Revocation is a durable fence for effects that have not started. A
+		// queued publication is cancelled; an active one is asked to stop and
+		// must re-check its lease before the remote effect. Already-accepted
+		// remote effects remain uncertain and require reconciliation.
+		if err := tx.Model(&models.DeliveryContinuation{}).
+			Where("publication_grant_id = ? AND status IN ?", grant.ID.String(), []string{"pending", "claimed", "dispatched"}).
+			Updates(map[string]any{"status": "superseded", "updated_at": now}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&models.AutomationTask{}).
+			Where("delivery_work_item_id = ? AND operation = ? AND continuation_id IN (SELECT id FROM delivery_continuations WHERE publication_grant_id = ?)", workItemID, "delivery.publish", grant.ID.String()).
+			Where("status IN ?", []string{"queued", "running"}).
+			Updates(map[string]any{"status": gorm.Expr("CASE WHEN status = 'queued' THEN 'cancelled' ELSE 'cancel_requested' END"), "error_message": "Publication grant revoked: " + reason, "updated_at": now}).Error
+	}); err != nil {
 		return utilsError(c, err)
 	}
-	grant.RevokedBy, grant.RevokedAt, grant.RevocationReason = actor.CognitoSub, &now, strings.TrimSpace(input.Reason)
+	grant.RevokedBy, grant.RevokedAt, grant.RevocationReason = actor.CognitoSub, &now, reason
 	return success(c, "Delivery publication grant revoked", grant)
 }
 

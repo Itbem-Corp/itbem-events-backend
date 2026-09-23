@@ -117,6 +117,10 @@ func dispatchOnce(ctx context.Context, db *gorm.DB, publisher Publisher) {
 	if ctx.Err() != nil || db == nil {
 		return
 	}
+	// ClaimBatch applies a cursor-backed round-robin across durable
+	// project/operation lanes before this publisher touches SQS. The dispatcher
+	// therefore keeps noisy projects from monopolizing a shared queue while
+	// preserving the at-least-once lease semantics.
 	events, err := outboxrepository.ClaimBatch(db, 20, 30*time.Second)
 	if err != nil {
 		slog.Error("outbox claim failed", "error", err)

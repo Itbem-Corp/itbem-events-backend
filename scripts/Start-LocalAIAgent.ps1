@@ -258,7 +258,14 @@ $env:ITBEM_AI_S3_ENDPOINT = $AwsEmulatorEndpoint
 $env:ITBEM_AI_INPUT_BUCKET = 'itbem-ai-inputs-local'
 $env:ITBEM_AI_OUTPUT_BUCKET = 'itbem-ai-outputs-local'
 $env:ITBEM_API_BASE_URL = $ApiBaseURL.TrimEnd('/')
-$env:AUTOMATION_CALLBACK_SECRET = 'local-automation-callback-secret'
+# Keep the callback credential aligned with the local control plane. The
+# process/.env.ai.local value is intentionally authoritative; the fallback is
+# only for the disposable all-local launcher and is never sent to production.
+$callbackSecret = [Environment]::GetEnvironmentVariable('AUTOMATION_CALLBACK_SECRET', 'Process')
+if ([string]::IsNullOrWhiteSpace($callbackSecret)) {
+    $callbackSecret = 'local-automation-callback-secret'
+}
+$env:AUTOMATION_CALLBACK_SECRET = $callbackSecret
 
 $workerLock = Enter-LocalAgentWorkerLock $Lane
 $exitCode = 0
