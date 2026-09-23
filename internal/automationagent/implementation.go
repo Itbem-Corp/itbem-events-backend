@@ -219,7 +219,16 @@ func RunImplementation(ctx context.Context, taskID string, delivery json.RawMess
 	for _, target := range targets {
 		changeSet, runErr := runWorkspaceImplementation(ctx, taskID, target.workspace, target.revision, target.patch)
 		if runErr != nil {
-			return nil, runErr
+			// Preserve independently completed repositories for reconciliation when
+			// a later dependency fails. The error remains terminal; this evidence
+			// never authorizes publication of the partial implementation.
+			return map[string]any{
+				"summary": proposal.Summary, "change_sets": changeSets,
+				"repository_execution_order": executionOrder, "partial": len(changeSets) > 0,
+				"failed_repository":      "workspace://" + target.workspace.ID,
+				"completed_repositories": executionOrder,
+				"deployment":             "not attempted; implementation failed before all repositories completed",
+			}, runErr
 		}
 		changeSets = append(changeSets, changeSet)
 		executionOrder = append(executionOrder, "workspace://"+target.workspace.ID)
@@ -822,7 +831,7 @@ func validatePatchPaths(patch string, allowedPaths []string) error {
 func runLocalWithEnv(parent context.Context, directory string, timeout time.Duration, input string, environment map[string]string, command string, arguments ...string) (commandResult, error) {
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	process := exec.CommandContext(ctx, command, arguments...)
+	process := exec.Command(command, arguments...)
 	process.Dir = directory
 	process.Env = repositoryCommandEnvironment(os.Environ(), environment)
 	if input != "" {
@@ -830,7 +839,19 @@ func runLocalWithEnv(parent context.Context, directory string, timeout time.Dura
 	}
 	var stdout, stderr bytes.Buffer
 	process.Stdout, process.Stderr = &stdout, &stderr
-	err := process.Run()
+	killProcessGroup := configureCommandProcessGroup(process)
+	if err := process.Start(); err != nil {
+		return commandResult{}, fmt.Errorf("local command failed to start")
+	}
+	done := make(chan error, 1)
+	go func() { done <- process.Wait() }()
+	var err error
+	select {
+	case err = <-done:
+	case <-ctx.Done():
+		killProcessGroup()
+		err = <-done
+	}
 	output := strings.TrimSpace(stdout.String() + stderr.String())
 	if len(output) > maxCommandOutput {
 		output = output[:maxCommandOutput]
