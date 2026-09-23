@@ -19,7 +19,7 @@ type AutomationWorkspaceAttestation struct {
 	Lane             string    `gorm:"type:varchar(32);not null;default:''" json:"lane"`
 	WorkspaceID      string    `gorm:"type:varchar(96);not null;uniqueIndex:automation_workspace_attestation_worker_workspace;index" json:"workspace_id"`
 	Available        bool      `gorm:"not null;default:false" json:"available"`
-	GitHubRepository string    `gorm:"type:varchar(192);not null;default:'';index" json:"github_repository,omitempty"`
+	GitHubRepository string    `gorm:"column:github_repository;type:varchar(192);not null;default:'';index" json:"github_repository,omitempty"`
 	HeadSHA          string    `gorm:"type:char(40);not null;default:'';index" json:"head_sha,omitempty"`
 	Branch           string    `gorm:"type:varchar(255);not null;default:''" json:"branch,omitempty"`
 	Clean            bool      `gorm:"not null;default:false" json:"clean"`
