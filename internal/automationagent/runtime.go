@@ -37,10 +37,15 @@ func LoadRuntimeConfig(lookup func(string) string) (RuntimeConfig, error) {
 		}
 		concurrency = parsed
 	}
+	capabilities, err := parseWorkerCapabilities(value("ITBEM_AI_CAPABILITIES"))
+	if err != nil {
+		return RuntimeConfig{}, err
+	}
 	config := RuntimeConfig{
 		WorkerConfig: WorkerConfig{
 			InputBucket: value("ITBEM_AI_INPUT_BUCKET"), OutputBucket: value("ITBEM_AI_OUTPUT_BUCKET"),
 			Role: agentwork.Role(value("ITBEM_AI_ROLE")), Lane: agentwork.Lane(value("ITBEM_AI_QUEUE_LANE")),
+			AllowedOperations: capabilities, RequireProviderCapabilities: true,
 		},
 		Transport:      strings.ToLower(value("ITBEM_AI_TRANSPORT")),
 		GatewayToken:   value("ITBEM_AI_GATEWAY_TOKEN"),
@@ -105,6 +110,21 @@ func LoadRuntimeConfig(lookup func(string) string) (RuntimeConfig, error) {
 		return RuntimeConfig{}, fmt.Errorf("ITBEM_AI_S3_ENDPOINT: %w", err)
 	}
 	return config, nil
+}
+
+func parseWorkerCapabilities(raw string) ([]string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	parts := strings.Split(raw, ",")
+	capabilities := make([]string, 0, len(parts))
+	for _, part := range parts {
+		capabilities = append(capabilities, strings.TrimSpace(part))
+	}
+	if err := validateWorkerCapabilities(capabilities); err != nil {
+		return nil, fmt.Errorf("ITBEM_AI_CAPABILITIES: %w", err)
+	}
+	return capabilities, nil
 }
 
 func validateQueueURL(raw string) error {

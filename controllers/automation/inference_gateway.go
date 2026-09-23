@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"events-stocks/configuration"
 	"events-stocks/internal/aicredentials"
 	"events-stocks/internal/automationagent"
 	"events-stocks/models"

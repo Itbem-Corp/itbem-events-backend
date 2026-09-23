@@ -33,8 +33,6 @@ func TestDeliveryPlanResultKeyAcceptsOnlyExactTaskRun(t *testing.T) {
 	}
 }
 
-import "github.com/gofrs/uuid"
-
 func TestAgentPlanResultKeyAcceptsRunScopedAndLegacyReferencesOnly(t *testing.T) {
 	taskID := uuid.Must(uuid.NewV4())
 	runID := uuid.Must(uuid.NewV4())

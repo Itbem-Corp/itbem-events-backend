@@ -301,7 +301,7 @@ func TestBrowserQATestEnvironmentExposesOnlyApprovedReferences(t *testing.T) {
 func TestApprovedTestFlowCannotPassValuesToAnUnpinnedQACommand(t *testing.T) {
 	delivery := []byte(`{"approved_plan":{"browser_qa_mode":"approved_test_flow","browser_qa_cases":[{"id":"login","title":"Login","steps":[{"kind":"fill","selector":"input[type=email]","value_env":"ITBEM_QA_LOGIN_EMAIL"}]}]}}`)
 	_, _, err := captureSemanticQA(
-		context.Background(), "task", "http://127.0.0.1:3000/login", delivery, Workspace{ID: "test", Root: t.TempDir(), Config: WorkspaceConfig{SandboxRuntime: WorkspaceSandboxProcess}}, t.TempDir(),
+		context.Background(), "task", "http://127.0.0.1:3000/login", delivery, t.TempDir(),
 		[]string{"go", "run", "not-stagehand.go", "{preview_url}", "{artifact_path}"},
 		func(name string) string {
 			if name == "ITBEM_QA_LOGIN_EMAIL" {

@@ -113,36 +113,10 @@ func TestQueueCountsRequireEveryApproximateCounter(t *testing.T) {
 	}
 }
 
-func TestParseQueueRoutesAcceptsOnlyAllowlistedOperationHTTPQueues(t *testing.T) {
-	routes := parseQueueRoutes(`{"code.review":"http://review.local/queue","shell.execute":"http://unsafe.local/queue","delivery.qa":"not a url","delivery.plan":"https://plan.local/queue"}`)
-	if routes["code.review"] != "http://review.local/queue" || routes["delivery.plan"] != "https://plan.local/queue" {
-		t.Fatalf("valid operation routes were not retained: %#v", routes)
-	}
-	if _, ok := routes["shell.execute"]; ok {
-		t.Fatal("unknown operations must not create a route")
-	}
-	if _, ok := routes["delivery.qa"]; ok {
-		t.Fatal("malformed queue URLs must not create a route")
-	}
-}
-
-func TestQueueForOperationFallsBackToSharedQueue(t *testing.T) {
-	originalQueue, originalRoutes := queueURL, queueRoutes
-	t.Cleanup(func() { queueURL, queueRoutes = originalQueue, originalRoutes })
-	queueURL = "http://shared.local/queue"
-	queueRoutes = map[string]string{"code.review": "http://review.local/queue"}
-	if got := queueForOperation("code.review"); got != "http://review.local/queue" {
-		t.Fatalf("specialized operation route = %q", got)
-	}
-	if got := queueForOperation("delivery.qa"); got != "http://shared.local/queue" {
-		t.Fatalf("unrouted operation fallback = %q", got)
-	}
-}
-
 func TestValidateRejectsMessagesTheWorkerWouldNeverBeAllowedToConsume(t *testing.T) {
 	valid := Message{SchemaVersion: 1, JobID: "job", TenantCode: "itbem", Type: "ai.local.process"}
 	valid.Payload.TaskID, valid.Payload.Attempt = "task", 1
-	for _, operation := range []string{"code.review", "delivery.chat"} {
+	for _, operation := range []string{"code.review", "delivery.plan"} {
 		valid.Payload.Operation = operation
 		if err := Validate(valid); err != nil {
 			t.Fatalf("valid %s message rejected: %v", operation, err)

@@ -3,6 +3,7 @@ package automationagent
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -730,6 +731,12 @@ func validateAllowedPathsWithin(raw any, maximum []string) error {
 		}
 	}
 	return nil
+}
+
+func workspacePathWithin(root, candidate string) bool {
+	root = strings.Trim(strings.TrimSpace(filepath.ToSlash(root)), "/")
+	candidate = strings.Trim(strings.TrimSpace(filepath.ToSlash(candidate)), "/")
+	return root != "" && (candidate == root || strings.HasPrefix(candidate, root+"/"))
 }
 
 // ValidateStagehandBrowserQAContract ensures a configured browser harness is

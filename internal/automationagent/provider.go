@@ -63,6 +63,58 @@ type Completion struct {
 	Model      string         `json:"model"`
 }
 
+// ProviderCapabilities describes the runtime guarantees required by the
+// harness, independent of a vendor's marketing feature list.
+type ProviderCapabilities struct {
+	ContractVersion      int      `json:"contract_version"`
+	Provider             Provider `json:"provider"`
+	Model                string   `json:"model"`
+	SupportsJSONActions  bool     `json:"supports_json_actions"`
+	SupportsUsageLedger  bool     `json:"supports_usage_ledger"`
+	SupportsCancellation bool     `json:"supports_cancellation"`
+	SupportsRequestAudit bool     `json:"supports_request_audit"`
+	MaxCompletionTokens  int      `json:"max_completion_tokens"`
+	MaxRequestBytes      int      `json:"max_request_bytes"`
+}
+
+type ProviderCapabilityReader interface{ Capabilities() ProviderCapabilities }
+
+const providerCapabilityContractVersion = 1
+
+func ValidateProviderCapabilities(capabilities ProviderCapabilities, operation string, requestedCompletionTokens int) error {
+	if capabilities.ContractVersion != providerCapabilityContractVersion || capabilities.Provider == "" || strings.TrimSpace(capabilities.Model) == "" {
+		return fmt.Errorf("provider capability contract is invalid")
+	}
+	if !capabilities.SupportsJSONActions || !capabilities.SupportsUsageLedger || !capabilities.SupportsCancellation || !capabilities.SupportsRequestAudit {
+		return fmt.Errorf("provider %s/%s cannot satisfy the automation harness contract", capabilities.Provider, capabilities.Model)
+	}
+	if requestedCompletionTokens < MinCompletionTokens || requestedCompletionTokens > capabilities.MaxCompletionTokens {
+		return fmt.Errorf("provider %s/%s cannot satisfy %d completion tokens for %s", capabilities.Provider, capabilities.Model, requestedCompletionTokens, operation)
+	}
+	if capabilities.MaxRequestBytes < 1 || capabilities.MaxRequestBytes > AgentMaxRequestBytes {
+		return fmt.Errorf("provider %s/%s exposes an invalid request-byte bound", capabilities.Provider, capabilities.Model)
+	}
+	return nil
+}
+
+func validateProviderContract(provider ProviderClient, operation string, requestedCompletionTokens int, requireCapabilities bool) error {
+	reader, ok := provider.(ProviderCapabilityReader)
+	if !ok {
+		if requireCapabilities {
+			return fmt.Errorf("provider capability contract is required for runtime workers")
+		}
+		return nil
+	}
+	return ValidateProviderCapabilities(reader.Capabilities(), operation, requestedCompletionTokens)
+}
+
+func providerCapabilitiesSnapshot(provider ProviderClient) any {
+	if reader, ok := provider.(ProviderCapabilityReader); ok {
+		return reader.Capabilities()
+	}
+	return nil
+}
+
 // ProviderResponseError retains the billable, provider-authenticated response
 // metadata when the transport succeeded but the response cannot be used as an
 // assistant answer. Callers must persist this through the private execution
@@ -89,6 +141,34 @@ type ProviderConfig struct {
 	Endpoint       string
 	secret         string
 	requestTimeout time.Duration
+}
+
+func DefaultProviderEndpoint(provider Provider) (string, bool) {
+	switch provider {
+	case ProviderMiniMax:
+		return miniMaxDirectCompletionEndpoint, true
+	case ProviderOpenAI:
+		return "https://api.openai.com/v1/chat/completions", true
+	case ProviderAnthropic:
+		return "https://api.anthropic.com/v1/messages", true
+	default:
+		return "", false
+	}
+}
+
+func NewProviderConfig(provider Provider, model, endpoint, secret string) (ProviderConfig, error) {
+	provider = Provider(strings.ToLower(strings.TrimSpace(string(provider))))
+	if _, ok := DefaultProviderEndpoint(provider); !ok {
+		return ProviderConfig{}, fmt.Errorf("provider is not supported")
+	}
+	config := ProviderConfig{Provider: provider, Model: strings.TrimSpace(model), Endpoint: strings.TrimSpace(endpoint), secret: strings.TrimSpace(secret), requestTimeout: providerRequestTimeout}
+	if config.Model == "" || len(config.Model) > 200 || config.secret == "" {
+		return ProviderConfig{}, fmt.Errorf("provider configuration is incomplete")
+	}
+	if err := validateProviderEndpoint(config.Endpoint); err != nil {
+		return ProviderConfig{}, err
+	}
+	return config, nil
 }
 
 // ProviderAuthProbe is credential-redacted evidence about one read-only provider
@@ -447,6 +527,17 @@ func (p *httpProviderClient) Complete(ctx context.Context, messages []Message, m
 		return completion, err
 	}
 	return completion, nil
+}
+
+func (p *httpProviderClient) Capabilities() ProviderCapabilities {
+	maximum := MaxCompletionTokens
+	if p.config.Provider == ProviderMiniMax {
+		maximum = miniMaxM3CompletionLimit
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(p.config.Model)), "minimax-m2") {
+			maximum = miniMaxM2CompletionLimit
+		}
+	}
+	return ProviderCapabilities{ContractVersion: providerCapabilityContractVersion, Provider: p.config.Provider, Model: p.config.Model, SupportsJSONActions: true, SupportsUsageLedger: true, SupportsCancellation: true, SupportsRequestAudit: true, MaxCompletionTokens: maximum, MaxRequestBytes: AgentMaxRequestBytes}
 }
 
 // providerRetryAfter treats the provider's retry hint as an upper-level

@@ -36,12 +36,12 @@ func (s *checkpointStore) PutEncryptedJSON(_ context.Context, bucket, key string
 	return nil
 }
 
-type sequenceProvider struct {
+type loopSequenceProvider struct {
 	responses []string
 	calls     int
 }
 
-func (p *sequenceProvider) Complete(_ context.Context, _ []Message, _ int) (Completion, error) {
+func (p *loopSequenceProvider) Complete(_ context.Context, _ []Message, _ int) (Completion, error) {
 	p.calls++
 	if p.calls > len(p.responses) {
 		return Completion{}, errors.New("unexpected provider call")
@@ -49,10 +49,10 @@ func (p *sequenceProvider) Complete(_ context.Context, _ []Message, _ int) (Comp
 	return Completion{Provider: ProviderMiniMax, Model: "MiniMax-M3", Content: p.responses[p.calls-1], Usage: map[string]any{"prompt_tokens": 10, "completion_tokens": 20}, ResponseID: fmt.Sprint(p.calls)}, nil
 }
 
-func agentFixture(t *testing.T) (*Worker, *checkpointStore, *sequenceProvider, *fakeCallback, TaskMessage, TaskInput, agentCheckpoint) {
+func agentFixture(t *testing.T) (*Worker, *checkpointStore, *loopSequenceProvider, *fakeCallback, TaskMessage, TaskInput, agentCheckpoint) {
 	t.Helper()
 	store := &checkpointStore{objects: map[string][]byte{}}
-	provider := &sequenceProvider{}
+	provider := &loopSequenceProvider{}
 	callback := &fakeCallback{}
 	worker, err := NewWorker(WorkerConfig{InputBucket: "itbem-ai-inputs-test", OutputBucket: "itbem-ai-outputs-test"}, store, callback, provider)
 	if err != nil {

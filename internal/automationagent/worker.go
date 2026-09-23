@@ -54,9 +54,10 @@ type TaskMessage struct {
 }
 
 type TaskInput struct {
-	Prompt   string          `json:"prompt"`
-	System   string          `json:"system,omitempty"`
-	Delivery json.RawMessage `json:"delivery,omitempty"`
+	AgentExecution bool            `json:"agent_execution,omitempty"`
+	Prompt         string          `json:"prompt"`
+	System         string          `json:"system,omitempty"`
+	Delivery       json.RawMessage `json:"delivery,omitempty"`
 }
 
 type ObjectStore interface {
@@ -79,8 +80,10 @@ type TaskCallback interface {
 }
 
 type TaskUpdate struct {
-	Status string `json:"status"`
-	RunID  string `json:"run_id,omitempty"`
+	ProgressStep string `json:"progress_step,omitempty"`
+	ProgressCall int    `json:"progress_call,omitempty"`
+	Status       string `json:"status"`
+	RunID        string `json:"run_id,omitempty"`
 	// RecoveryRunID identifies the original immutable provider run when a
 	// redelivered queue message is only publishing a result that already exists.
 	// The callback keeps the new lease in RunID but assigns cost and private
@@ -138,8 +141,15 @@ type ArtifactReference struct {
 type WorkerConfig struct {
 	InputBucket  string
 	OutputBucket string
-	Role         agentwork.Role
-	Lane         agentwork.Lane
+	// RequireProviderCapabilities makes runtime workers reject adapters that
+	// cannot prove the guarantees the harness relies on. Test doubles remain
+	// compatible unless this is explicitly enabled.
+	RequireProviderCapabilities bool
+	// AllowedOperations is an optional, fail-closed secondary admission policy.
+	// Role/lane routing remains the primary production constraint.
+	AllowedOperations []string
+	Role              agentwork.Role
+	Lane              agentwork.Lane
 }
 
 type Worker struct {
@@ -160,7 +170,37 @@ func NewWorker(config WorkerConfig, store ObjectStore, callback TaskCallback, pr
 	if (config.Role == "") != (config.Lane == "") || (config.Role != "" && !agentwork.IsKnownRoleLane(config.Role, config.Lane)) {
 		return nil, fmt.Errorf("worker role and queue lane must form a known assignment")
 	}
+	if err := validateWorkerCapabilities(config.AllowedOperations); err != nil {
+		return nil, err
+	}
 	return &Worker{config: config, store: store, callback: callback, provider: provider, now: time.Now}, nil
+}
+
+func validateWorkerCapabilities(operations []string) error {
+	seen := map[string]struct{}{}
+	for _, operation := range operations {
+		operation = strings.TrimSpace(operation)
+		if operation == "" || !agentwork.IsSupportedOperation(operation) {
+			return fmt.Errorf("worker capability is not an allowlisted operation: %q", operation)
+		}
+		if _, exists := seen[operation]; exists {
+			return fmt.Errorf("worker capability is duplicated: %s", operation)
+		}
+		seen[operation] = struct{}{}
+	}
+	return nil
+}
+
+func (w *Worker) canProcess(operation string) bool {
+	if len(w.config.AllowedOperations) == 0 {
+		return true
+	}
+	for _, candidate := range w.config.AllowedOperations {
+		if candidate == operation {
+			return true
+		}
+	}
+	return false
 }
 
 func ValidateMessage(message TaskMessage, inputBucket string) error {
@@ -245,6 +285,9 @@ func isLowerAlphaNumeric(character rune) bool {
 func (w *Worker) Process(ctx context.Context, message TaskMessage) error {
 	if err := ValidateMessage(message, w.config.InputBucket); err != nil {
 		return err
+	}
+	if !w.canProcess(message.Payload.Operation) {
+		return &RetryableError{Message: "automation operation is outside this worker capability contract", RetryAfter: time.Minute}
 	}
 	if w.config.Role != "" {
 		assignment, _ := agentwork.AssignmentForOperation(message.Payload.Operation)
@@ -489,7 +532,7 @@ func (w *Worker) Process(ctx context.Context, message TaskMessage) error {
 		execution = implementationHandoff(implementation)
 	}
 	if message.Payload.Operation == "delivery.qa" {
-		artifacts, artifactReferences, err = w.uploadArtifacts(ctx, message.Payload.TaskID, qaResult, qaArtifacts)
+		artifacts, artifactReferences, err = w.uploadArtifacts(ctx, message.Payload.TaskID, runID, qaResult, qaArtifacts)
 		if err != nil {
 			// Artifact persistence happens after the model response. Do not lose
 			// accounting merely because one evidence upload could not complete.
@@ -761,8 +804,15 @@ func (w *Worker) storeExecutionResult(ctx context.Context, taskID, runID string,
 // provider-neutral representation is retained for constrained adapters and
 // tests. API keys, authorization headers and endpoints are never persisted.
 func (w *Worker) storeExecutionRequest(ctx context.Context, taskID, runID, operation string, maxTokens int, messages []Message) (string, error) {
+	return w.storeStepRequest(ctx, taskID, runID, "", operation, maxTokens, messages)
+}
+
+func (w *Worker) storeStepRequest(ctx context.Context, taskID, runID, step, operation string, maxTokens int, messages []Message) (string, error) {
 	if _, err := uuid.FromString(runID); err != nil {
 		return "", fmt.Errorf("execution request run ID is invalid")
+	}
+	if step != "" && !toolCallKeyPattern.MatchString(step) {
+		return "", fmt.Errorf("execution step is invalid")
 	}
 	request := map[string]any{
 		"messages":              messages,
@@ -788,7 +838,11 @@ func (w *Worker) storeExecutionRequest(ctx context.Context, taskID, runID, opera
 	if err != nil {
 		return "", fmt.Errorf("execution request could not be encoded")
 	}
-	runKey := "automation/" + taskID + "/runs/" + runID + "/request.json"
+	prefix := "automation/" + taskID + "/runs/" + runID
+	if step != "" {
+		prefix += "/steps/" + step
+	}
+	runKey := prefix + "/request.json"
 	if err := w.store.PutEncryptedJSON(ctx, w.config.OutputBucket, runKey, body); err != nil {
 		return "", err
 	}
@@ -918,7 +972,7 @@ func appendQAExecution(delivery json.RawMessage, qa map[string]any) (json.RawMes
 	return encoded, nil
 }
 
-func (w *Worker) uploadArtifacts(ctx context.Context, taskID string, result map[string]any, artifacts []LocalArtifact) (map[string]any, []ArtifactReference, error) {
+func (w *Worker) uploadArtifacts(ctx context.Context, taskID, runID string, result map[string]any, artifacts []LocalArtifact) (map[string]any, []ArtifactReference, error) {
 	store, ok := w.store.(ArtifactStore)
 	if !ok && len(artifacts) > 0 {
 		return nil, nil, fmt.Errorf("configured private storage cannot upload QA artifacts")
@@ -927,7 +981,7 @@ func (w *Worker) uploadArtifacts(ctx context.Context, taskID string, result map[
 	references := make([]ArtifactReference, 0, len(artifacts))
 	for index, artifact := range artifacts {
 		name := fmt.Sprintf("%02d-%s", index+1, artifact.Name)
-		key := "automation/" + taskID + "/artifacts/" + name
+		key := "automation/" + taskID + "/runs/" + runID + "/artifacts/" + name
 		if err := store.PutEncryptedObject(ctx, w.config.OutputBucket, key, artifact.Body, artifact.ContentType); err != nil {
 			return nil, nil, err
 		}
