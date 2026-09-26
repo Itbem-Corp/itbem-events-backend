@@ -396,6 +396,9 @@ jobs:
           SQS_AUTOMATION_ROLE_DEAD_LETTER_QUEUE_URL: ${{ secrets.SQS_AUTOMATION_ROLE_DEAD_LETTER_QUEUE_URL }}
           AUTOMATION_INPUT_BUCKET: ${{ secrets.AUTOMATION_INPUT_BUCKET }}
           AUTOMATION_OUTPUT_BUCKET: ${{ secrets.AUTOMATION_OUTPUT_BUCKET }}
+          # Identifier only: provider keys remain in Secrets Manager and are
+          # resolved exclusively by the cloud inference gateway.
+          AI_PROVIDER_CREDENTIALS_SECRET_ID: ${{ vars.AI_PROVIDER_CREDENTIALS_SECRET_ID }}
           AUTOMATION_CALLBACK_SECRET: ${{ secrets.AUTOMATION_CALLBACK_SECRET }}
           ITBEM_GITHUB_APP_ID: ${{ secrets.ITBEM_GITHUB_APP_ID }}
           ITBEM_GITHUB_INSTALLATION_IDS: ${{ secrets.ITBEM_GITHUB_INSTALLATION_IDS }}
@@ -454,6 +457,7 @@ jobs:
             --required SQS_AUTOMATION_ROLE_DEAD_LETTER_QUEUE_URL \
             --required AUTOMATION_INPUT_BUCKET \
             --required AUTOMATION_OUTPUT_BUCKET \
+            --optional AI_PROVIDER_CREDENTIALS_SECRET_ID \
             --required AUTOMATION_CALLBACK_SECRET \
             --required ITBEM_GITHUB_APP_ID \
             --required ITBEM_GITHUB_INSTALLATION_IDS \
