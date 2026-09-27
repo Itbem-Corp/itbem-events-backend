@@ -222,7 +222,7 @@ func parsePlanStepDependencyPatchCallback(c echo.Context) (uuid.UUID, authentica
 }
 
 func validatePlanStepDependencyPatchLease(tx *gorm.DB, stepID uuid.UUID, tuple planStepRuntimeTuple, fence int64, callbackIdentity authenticatedAgentCallback, now time.Time) (*models.AutomationTask, models.DeliveryPlanStep, models.DeliveryPlan, error) {
-	task, err := validatePlanStepRuntimeTask(tx, tuple, now)
+	task, err := validatePlanStepRuntimeTask(tx, tuple)
 	if err != nil {
 		return nil, models.DeliveryPlanStep{}, models.DeliveryPlan{}, err
 	}
@@ -463,7 +463,9 @@ func validDeliveryPlanPatchSHA256(value string) bool {
 		return false
 	}
 	for _, char := range value {
-		if !(char >= '0' && char <= '9' || char >= 'a' && char <= 'f') {
+		switch {
+		case char >= '0' && char <= '9', char >= 'a' && char <= 'f':
+		default:
 			return false
 		}
 	}

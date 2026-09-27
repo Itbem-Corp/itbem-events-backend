@@ -79,13 +79,13 @@ func TestFetchProjectProviderUsageUsesExplicitProjectCredentialsAndSafeProviderP
 	var seen []string
 	client := &http.Client{Transport: providerUsageRoundTripper(func(request *http.Request) (*http.Response, error) {
 		seen = append(seen, request.URL.Host+request.URL.Path)
-		switch {
-		case request.URL.Path == "/user/balance":
+		switch request.URL.Path {
+		case "/user/balance":
 			if request.Header.Get("Authorization") != "Bearer "+deepSeekKey {
 				t.Errorf("DeepSeek request did not use the selected project's key")
 			}
 			return providerUsageHTTPResponse(http.StatusOK, `{"is_available":true,"balance_infos":[{"currency":"CNY","total_balance":"110.00","granted_balance":"10.00","topped_up_balance":"100.00"},{"currency":"USD","total_balance":"12.30","granted_balance":"2.30","topped_up_balance":"10.00"}]}`), nil
-		case request.URL.Path == "/v1/token_plan/remains":
+		case "/v1/token_plan/remains":
 			if request.Header.Get("Authorization") != "Bearer "+miniMaxKey {
 				t.Errorf("MiniMax request did not use the selected project's key")
 			}

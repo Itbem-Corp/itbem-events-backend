@@ -910,9 +910,10 @@ func workspaceHarness(config WorkspaceConfig) WorkspaceHarness {
 		sandboxMode = WorkspaceSandboxProcess
 	}
 	resourcePolicy := "process-group-timeout-output-bounded"
-	if sandboxMode == WorkspaceSandboxDocker {
+	switch sandboxMode {
+	case WorkspaceSandboxDocker:
 		resourcePolicy = fmt.Sprintf("docker:cpus=%s,memory=%s,pids=%d", config.SandboxCPUs, config.SandboxMemory, config.SandboxPIDsLimit)
-	} else if sandboxMode == WorkspaceSandboxFirecracker {
+	case WorkspaceSandboxFirecracker:
 		resourcePolicy = "firecracker:operator-supervisor-per-task"
 	}
 	return WorkspaceHarness{

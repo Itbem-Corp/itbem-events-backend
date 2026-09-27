@@ -26,7 +26,13 @@ func normalizeLocalQueueURL(queueURL, localEndpoint string) (string, error) {
 		return "", fmt.Errorf("queue URL must be an absolute endpoint with a queue path and no credentials, query, or fragment")
 	}
 	localStackHost := strings.HasSuffix(strings.ToLower(queue.Hostname()), ".localhost.localstack.cloud")
-	if queue.Scheme != "https" && !(queue.Scheme == "http" && (isLoopbackHost(queue.Hostname()) || (strings.TrimSpace(localEndpoint) != "" && localStackHost))) {
+	switch queue.Scheme {
+	case "https":
+	case "http":
+		if !isLoopbackHost(queue.Hostname()) && (strings.TrimSpace(localEndpoint) == "" || !localStackHost) {
+			return "", fmt.Errorf("queue URL must use HTTPS or loopback HTTP")
+		}
+	default:
 		return "", fmt.Errorf("queue URL must use HTTPS or loopback HTTP")
 	}
 	if strings.TrimSpace(localEndpoint) == "" {

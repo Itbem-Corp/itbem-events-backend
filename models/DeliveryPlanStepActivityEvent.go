@@ -211,7 +211,7 @@ func validDeliveryPlanStepCommitSHA(value string) bool {
 		return false
 	}
 	for _, char := range value {
-		if !(char >= '0' && char <= '9' || char >= 'a' && char <= 'f') {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
 			return false
 		}
 	}
@@ -236,7 +236,7 @@ func validDeliveryPlanStepSHA256(value string) bool {
 		return false
 	}
 	for _, char := range value {
-		if !(char >= '0' && char <= '9' || char >= 'a' && char <= 'f') {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
 			return false
 		}
 	}
@@ -254,7 +254,8 @@ func validDeliveryPlanStepActivityResourceReference(reference string) bool {
 		return false
 	}
 	for _, char := range workspaceID {
-		if !(char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '_' || char == '-' || char == '.') {
+		valid := char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '_' || char == '-' || char == '.'
+		if !valid {
 			return false
 		}
 	}

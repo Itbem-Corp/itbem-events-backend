@@ -130,7 +130,7 @@ func RecordDeliveryPlanStepActivity(c echo.Context) error {
 		}
 
 		tuple := planStepRuntimeTuple{TaskID: parsed.TaskID, RunID: parsed.RunID, WorkerID: parsed.WorkerID, AgentKey: parsed.AgentKey, MachineID: parsed.MachineID}
-		task, err := validatePlanStepRuntimeTask(tx, tuple, now)
+		task, err := validatePlanStepRuntimeTask(tx, tuple)
 		if err != nil {
 			return err
 		}

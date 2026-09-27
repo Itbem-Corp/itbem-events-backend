@@ -1658,7 +1658,7 @@ func GetToolExecutionReportDownload(c echo.Context) error {
 		return err
 	}
 	c.Response().Header().Set(echo.HeaderContentDisposition, `attachment; filename="automation-tool-execution-report.json"`)
-	return c.Blob(http.StatusOK, echo.MIMEApplicationJSONCharsetUTF8, content)
+	return c.Blob(http.StatusOK, echo.MIMEApplicationJSON, content)
 }
 
 func readAuthorizedToolExecutionReport(c echo.Context) ([]byte, error) {
@@ -2035,10 +2035,10 @@ func CostOverview(c echo.Context) error {
 		baseQuery = applyAutomationCostActorScope(baseQuery, requestedBy, projectIDs, false)
 	}
 	filteredQuery := applyAutomationCostFilters(baseQuery.Session(&gorm.Session{}), costQuery)
-	summary := automationCostSummary{}
 	// Keep the statements independent: the aggregate and the breakdown have
 	// different select/group shapes and must never leak state into one another.
-	if summary, err = aggregateAutomationCostSummary(filteredQuery); err != nil {
+	summary, err := aggregateAutomationCostSummary(filteredQuery)
+	if err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Automation costs unavailable", "")
 	}
 	var byOperation []automationCostBreakdown

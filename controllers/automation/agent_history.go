@@ -900,7 +900,8 @@ func queryAgentHistory(c echo.Context, db *gorm.DB, agentKey string, filters age
 		}
 		row.Operation = safeAgentHistoryOperation(row.Operation)
 		row.Status = safeAgentHistoryStatus(row.Kind, row.Status)
-		if row.Kind == "task_event" {
+		switch row.Kind {
+		case "task_event":
 			row.EventType = safeAgentHistoryTaskEventType(row.EventType)
 			if !agentProfileKeyPattern.MatchString(strings.TrimSpace(row.CurrentAgentKey)) {
 				row.CurrentAgentKey = ""
@@ -929,7 +930,7 @@ func queryAgentHistory(c echo.Context, db *gorm.DB, agentKey string, filters age
 			if row.PreviousAgentInstanceID != nil && *row.PreviousAgentInstanceID == uuid.Nil {
 				row.PreviousAgentInstanceID = nil
 			}
-		} else if row.Kind == "assignment_event" {
+		case "assignment_event":
 			row.EventType = safeAgentHistoryAssignmentEventType(row.EventType)
 			if row.PreviousStatus != "" {
 				row.PreviousStatus = safeAgentHistoryStatus("assignment_event", row.PreviousStatus)
@@ -949,7 +950,7 @@ func queryAgentHistory(c echo.Context, db *gorm.DB, agentKey string, filters age
 			row.PreviousRunID = ""
 			row.PreviousWorkerID = ""
 			row.PreviousAgentInstanceID = nil
-		} else if row.Kind == "gate_decision" {
+		case "gate_decision":
 			row.EventType = safeAgentHistoryGateKind(row.EventType)
 			row.AttemptCount = nil
 			row.EventSequence = 0
@@ -959,7 +960,7 @@ func queryAgentHistory(c echo.Context, db *gorm.DB, agentKey string, filters age
 			row.PreviousAgentKey = ""
 			row.PreviousMachineID = ""
 			row.PreviousAgentInstanceID = nil
-		} else {
+		default:
 			legacyAttemptCount := int64(0)
 			if row.AttemptCount != nil {
 				legacyAttemptCount = int64(*row.AttemptCount)

@@ -556,7 +556,7 @@ func loadEpicWorkItemPage(epicID, projectID uuid.UUID, limit int, state string, 
 }
 
 func epicSummaryFromRow(row deliveryEpicListRow) deliveryEpicSummary {
-	return deliveryEpicSummary{ID: row.ID, ProjectID: row.ProjectID, Title: row.Title, Summary: row.Summary, Status: row.Status, TaskCount: row.TaskCount, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}
+	return deliveryEpicSummary(row)
 }
 
 func epicSummaryFromModel(epic models.DeliveryEpic, taskCount int64) deliveryEpicSummary {

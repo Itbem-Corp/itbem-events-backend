@@ -407,7 +407,7 @@ func run() {
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)
 	workerID := uuid.Must(uuid.NewV4()).String()
-	runtimeConfig.WorkerConfig.WorkerID = workerID
+	runtimeConfig.WorkerID = workerID
 	var store automationagent.ObjectStore
 	var queue automationagent.Queue
 	if runtimeConfig.Transport == "gateway" {

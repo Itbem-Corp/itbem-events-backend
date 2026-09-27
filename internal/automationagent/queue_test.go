@@ -528,7 +528,8 @@ func TestQueueBusyRunRedeliverySurvivesUntilRecovery(t *testing.T) {
 			writer.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		if update.Status == "running" {
+		switch update.Status {
+		case "running":
 			claims++
 			if claims == 1 {
 				// Another worker still holds the durable lease. Its eventual
@@ -548,7 +549,7 @@ func TestQueueBusyRunRedeliverySurvivesUntilRecovery(t *testing.T) {
 				return
 			}
 			writer.Header().Set(inferencecapability.HeaderName, token)
-		} else if update.Status == "completed" {
+		case "completed":
 			completions++
 		}
 		writer.WriteHeader(http.StatusNoContent)

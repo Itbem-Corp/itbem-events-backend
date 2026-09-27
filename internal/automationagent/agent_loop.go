@@ -267,7 +267,7 @@ func sanitizeAgentStoredValue(value any, inUsage bool) any {
 				cleaned[key] = "<redacted>"
 				continue
 			}
-			if isPrivateReasoningField(key) && !(inUsage && isTokenCountMetric(key, item)) {
+			if isPrivateReasoningField(key) && (!inUsage || !isTokenCountMetric(key, item)) {
 				continue
 			}
 			cleaned[key] = sanitizeAgentStoredValue(item, inUsage || strings.EqualFold(key, "usage") || strings.EqualFold(key, "completion_tokens_details") || strings.EqualFold(key, "prompt_tokens_details"))
@@ -1081,7 +1081,7 @@ func validAgentSHA256(value string) bool {
 		return false
 	}
 	for _, char := range value {
-		if !(char >= '0' && char <= '9' || char >= 'a' && char <= 'f') {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
 			return false
 		}
 	}

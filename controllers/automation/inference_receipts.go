@@ -179,7 +179,9 @@ func sanitizeProviderUsage(raw map[string]any) map[string]any {
 
 func safeProviderFinishReason(value string) bool {
 	for _, char := range value {
-		if !(char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '_' || char == '-') {
+		switch {
+		case char >= 'a' && char <= 'z', char >= 'A' && char <= 'Z', char >= '0' && char <= '9', char == '_', char == '-':
+		default:
 			return false
 		}
 	}

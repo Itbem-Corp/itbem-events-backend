@@ -615,7 +615,7 @@ func TestStepLeaseKeeperRenewsTaskAndStepWhileWorkIsRunning(t *testing.T) {
 		}
 		callback.mu.Unlock()
 		callback.fakeCallback.mu.Lock()
-		updates := len(callback.fakeCallback.updates)
+		updates := len(callback.updates)
 		callback.fakeCallback.mu.Unlock()
 		if renewed == 1 && updates > 0 {
 			if leaseRequest.AgentKey != "generalist" || leaseRequest.MachineID != worker.config.MachineID {

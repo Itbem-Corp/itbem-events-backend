@@ -31,7 +31,7 @@ const aiCredentialBundleAdvisoryLockKey = "itbem/ai-credential-bundle/v1"
 // exits while talking to Secrets Manager; it adds no cloud service or key.
 func withAICredentialBundleWriteLock(ctx context.Context, write func() error) error {
 	db := configuration.DB
-	if db == nil || write == nil || db.Dialector.Name() != "postgres" {
+	if db == nil || write == nil || db.Name() != "postgres" {
 		return errors.New("AI credential bundle write lock is unavailable")
 	}
 	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {

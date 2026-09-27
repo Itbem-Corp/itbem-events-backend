@@ -93,7 +93,7 @@ func AssessFanIn(requiredStepIDs []uuid.UUID, assignments []models.DeliveryPlanS
 // complete, so readiness may advance across machines without sharing a
 // worktree. It serializes scheduling using the same parent -> execution lock
 // order as ReserveReadyAssignmentsInTransaction.
-func ReadyPlanStepsInTransaction(tx *gorm.DB, executionID uuid.UUID, now time.Time) (models.DeliveryPlanExecution, []models.DeliveryPlanStep, error) {
+func ReadyPlanStepsInTransaction(tx *gorm.DB, executionID uuid.UUID, _ time.Time) (models.DeliveryPlanExecution, []models.DeliveryPlanStep, error) {
 	if tx == nil || executionID == uuid.Nil {
 		return models.DeliveryPlanExecution{}, nil, invalidStepInput("transaction and execution_id are required")
 	}
@@ -129,9 +129,6 @@ func ReadyPlanStepsInTransaction(tx *gorm.DB, executionID uuid.UUID, now time.Ti
 	capacity := execution.MaxConcurrency - int(activeCount)
 	if capacity <= 0 {
 		return execution, []models.DeliveryPlanStep{}, nil
-	}
-	if now.IsZero() {
-		now = time.Now().UTC()
 	}
 	var steps []models.DeliveryPlanStep
 	err := tx.Model(&models.DeliveryPlanStep{}).

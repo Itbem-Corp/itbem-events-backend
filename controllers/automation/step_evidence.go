@@ -132,11 +132,10 @@ func UploadDeliveryPlanStepEvidence(c echo.Context) error {
 	if configuration.DB == nil {
 		return utils.Error(c, http.StatusServiceUnavailable, "Automation unavailable", "Database is unavailable")
 	}
-	now := time.Now().UTC()
 	var existing *models.DeliveryPlanStepEvidence
 	var planVersion int
 	err = configuration.DB.WithContext(planStepCallbackContext(c, identity.InstanceID)).Transaction(func(tx *gorm.DB) error {
-		if err := validatePlanStepEvidenceLease(tx, upload, now, &planVersion); err != nil {
+		if err := validatePlanStepEvidenceLease(tx, upload, &planVersion); err != nil {
 			return err
 		}
 		var lookup models.DeliveryPlanStepEvidence
@@ -179,7 +178,7 @@ func UploadDeliveryPlanStepEvidence(c echo.Context) error {
 	var response *models.DeliveryPlanStepEvidence
 	idempotent := false
 	err = configuration.DB.WithContext(planStepCallbackContext(c, identity.InstanceID)).Transaction(func(tx *gorm.DB) error {
-		if err := validatePlanStepEvidenceLease(tx, upload, time.Now().UTC(), &planVersion); err != nil {
+		if err := validatePlanStepEvidenceLease(tx, upload, &planVersion); err != nil {
 			return err
 		}
 		var lookup models.DeliveryPlanStepEvidence
@@ -238,9 +237,9 @@ func UploadDeliveryPlanStepEvidence(c echo.Context) error {
 	return utils.Success(c, status, message, safeStepEvidenceUploadResponse(*response, idempotent))
 }
 
-func validatePlanStepEvidenceLease(tx *gorm.DB, upload deliveryPlanStepEvidenceUploadIdentity, now time.Time, planVersion *int) error {
+func validatePlanStepEvidenceLease(tx *gorm.DB, upload deliveryPlanStepEvidenceUploadIdentity, planVersion *int) error {
 	tuple := planStepRuntimeTuple{TaskID: upload.TaskID, RunID: upload.RunID, WorkerID: upload.WorkerID, AgentKey: upload.AgentKey, MachineID: upload.MachineID}
-	task, err := validatePlanStepRuntimeTask(tx, tuple, now)
+	task, err := validatePlanStepRuntimeTask(tx, tuple)
 	if err != nil {
 		return err
 	}
@@ -251,7 +250,7 @@ func validatePlanStepEvidenceLease(tx *gorm.DB, upload deliveryPlanStepEvidenceU
 	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&step, "id = ?", upload.StepID).Error; err != nil {
 		return err
 	}
-	now = time.Now().UTC()
+	now := time.Now().UTC()
 	if !planStepActivityLeaseMatches(step, *task, upload.RunID, upload.WorkerID, upload.AgentKey, upload.MachineID, upload.Fence, now) {
 		return deliveryplansteps.ErrStepLeaseConflict
 	}
@@ -320,7 +319,9 @@ func validStepEvidenceRequirementKey(value string) bool {
 		return false
 	}
 	for index, char := range value {
-		if !(char >= 'a' && char <= 'z' || index > 0 && char >= '0' && char <= '9' || index > 0 && (char == '_' || char == '-')) {
+		switch {
+		case char >= 'a' && char <= 'z', index > 0 && char >= '0' && char <= '9', index > 0 && (char == '_' || char == '-'):
+		default:
 			return false
 		}
 	}

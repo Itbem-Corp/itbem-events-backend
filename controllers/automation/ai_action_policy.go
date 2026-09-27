@@ -329,7 +329,7 @@ func validatedActionRoutes(c echo.Context, request aiActionPolicyRequest) ([]mod
 		routes = []models.AutomationAIActionRoute{{Provider: string(request.Provider), Model: request.Model, ReasoningEnabled: request.ReasoningEnabled, ReasoningEffort: request.ReasoningEffort}}
 	}
 	if len(routes) == 0 || len(routes) > models.MaxAutomationAIActionRoutes {
-		return nil, errors.New("Selecciona entre una y tres rutas de IA")
+		return nil, errors.New("selecciona entre una y tres rutas de IA")
 	}
 	seen := make(map[string]struct{}, len(routes))
 	for index := range routes {
@@ -344,19 +344,19 @@ func validatedActionRoutes(c echo.Context, request aiActionPolicyRequest) ([]mod
 			route.ReasoningEffort = "high"
 		}
 		if route.Provider == "" || len(route.Model) == 0 || len(route.Model) > 200 || !validReasoningEffort(route.ReasoningEffort) {
-			return nil, errors.New("Proveedor, modelo o nivel de razonamiento inválido")
+			return nil, errors.New("proveedor, modelo o nivel de razonamiento inválido")
 		}
 		if _, configured := automationagent.DefaultProviderEndpoint(provider); !configured {
-			return nil, errors.New("Proveedor de IA no permitido")
+			return nil, errors.New("proveedor de IA no permitido")
 		}
 		if provider == automationagent.ProviderOpenCodeGo {
 			if _, supported := automationagent.OpenCodeGoModelAPI(route.Model); !supported {
-				return nil, errors.New("El modelo de OpenCode Go no usa una familia de API compatible")
+				return nil, errors.New("el modelo de OpenCode Go no usa una familia de API compatible")
 			}
 		}
 		if provider == automationagent.ProviderOpenAI {
 			if _, supported := automationagent.OpenAIModelAPI(route.Model); !supported {
-				return nil, errors.New("El modelo de OpenAI no usa una familia de API compatible")
+				return nil, errors.New("el modelo de OpenAI no usa una familia de API compatible")
 			}
 		}
 		if !route.ReasoningEnabled {
@@ -364,28 +364,28 @@ func validatedActionRoutes(c echo.Context, request aiActionPolicyRequest) ([]mod
 		}
 		identity := route.Provider + "\x00" + route.Model
 		if _, duplicate := seen[identity]; duplicate {
-			return nil, errors.New("Una ruta de fallback no puede repetir proveedor y modelo")
+			return nil, errors.New("una ruta de fallback no puede repetir proveedor y modelo")
 		}
 		seen[identity] = struct{}{}
 		apiKey, err := inferenceCredentials.APIKey(c.Request().Context(), route.Provider)
 		if err != nil {
-			return nil, errors.New("Primero autentica cada proveedor en la sección de credenciales")
+			return nil, errors.New("primero autentica cada proveedor en la sección de credenciales")
 		}
 		// Re-read the provider catalogue at save time. Browser state can be
 		// stale and the catalog is the authoritative per-model capability source.
 		catalogue, err := automationagent.ListProviderModels(c.Request().Context(), provider, apiKey, nil)
 		if err != nil {
-			return nil, errors.New("No se pudo validar el catálogo actual del proveedor")
+			return nil, errors.New("no se pudo validar el catálogo actual del proveedor")
 		}
 		selected, variant := providerModelSelector(catalogue, provider, route.Model)
 		if selected == nil || !selected.Supported {
-			return nil, errors.New("El modelo seleccionado ya no es compatible; recarga el catálogo")
+			return nil, errors.New("el modelo seleccionado ya no es compatible; recarga el catálogo")
 		}
 		if variant != "" && !providerModelHasVariant(*selected, variant) {
-			return nil, errors.New("La variante del modelo ya no está disponible; recarga el catálogo")
+			return nil, errors.New("la variante del modelo ya no está disponible; recarga el catálogo")
 		}
 		if route.ReasoningEnabled && !containsReasoningEffort(selected.ReasoningEfforts, route.ReasoningEffort) {
-			return nil, errors.New("Ese modelo no admite el nivel de razonamiento seleccionado")
+			return nil, errors.New("ese modelo no admite el nivel de razonamiento seleccionado")
 		}
 	}
 	return routes, nil

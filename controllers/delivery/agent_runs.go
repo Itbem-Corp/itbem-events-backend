@@ -64,7 +64,9 @@ func validApprovedPlanHash(value string) bool {
 		return false
 	}
 	for _, char := range value {
-		if !(char >= '0' && char <= '9' || char >= 'a' && char <= 'f') {
+		switch {
+		case char >= '0' && char <= '9', char >= 'a' && char <= 'f':
+		default:
 			return false
 		}
 	}

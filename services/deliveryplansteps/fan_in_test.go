@@ -84,7 +84,9 @@ func TestReadyPlanStepsCanDispatchDependentAfterParentCompletion(t *testing.T) {
 
 func TestPlanStepChildIDsAreStableAcrossOutboxRedelivery(t *testing.T) {
 	executionID, stepID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
-	if ChildAutomationTaskID(executionID, stepID) != ChildAutomationTaskID(executionID, stepID) || ChildAutomationJobID(executionID, stepID) != ChildAutomationJobID(executionID, stepID) {
+	firstTaskID, retryTaskID := ChildAutomationTaskID(executionID, stepID), ChildAutomationTaskID(executionID, stepID)
+	firstJobID, retryJobID := ChildAutomationJobID(executionID, stepID), ChildAutomationJobID(executionID, stepID)
+	if firstTaskID != retryTaskID || firstJobID != retryJobID {
 		t.Fatal("retrying plan-step materialization must preserve deterministic child and outbox identities")
 	}
 	if ChildAutomationTaskID(executionID, stepID) == ChildAutomationTaskID(uuid.Must(uuid.NewV4()), stepID) || ChildAutomationJobID(executionID, stepID) == ChildAutomationJobID(executionID, uuid.Must(uuid.NewV4())) {

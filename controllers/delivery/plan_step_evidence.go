@@ -205,7 +205,11 @@ func validPlanStepEvidenceRequirementKey(value string) bool {
 		return false
 	}
 	for index, char := range value {
-		if !(char >= 'a' && char <= 'z' || index > 0 && char >= '0' && char <= '9' || index > 0 && (char == '_' || char == '-')) {
+		valid := char >= 'a' && char <= 'z'
+		if index > 0 {
+			valid = valid || char >= '0' && char <= '9' || char == '_' || char == '-'
+		}
+		if !valid {
 			return false
 		}
 	}
@@ -217,7 +221,8 @@ func validPlanStepEvidenceFilename(value string) bool {
 		return false
 	}
 	for _, char := range value {
-		if !(char >= 'A' && char <= 'Z' || char >= 'a' && char <= 'z' || char >= '0' && char <= '9' || strings.ContainsRune("._ -", char)) {
+		valid := char >= 'A' && char <= 'Z' || char >= 'a' && char <= 'z' || char >= '0' && char <= '9' || strings.ContainsRune("._ -", char)
+		if !valid {
 			return false
 		}
 	}

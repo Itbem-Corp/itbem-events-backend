@@ -417,7 +417,7 @@ func parseMiniMaxTokenPlanUsage(raw []byte, base providerUsageAccount) []provide
 	if json.Unmarshal(raw, &response) != nil || len(response.ModelRemains) == 0 || len(response.ModelRemains) > 16 || response.BaseResp.StatusCode != "0" {
 		return nil
 	}
-	accounts := make([]providerUsageAccount, 1, 1)
+	accounts := make([]providerUsageAccount, 1)
 	base.Status = providerUsageStatusAvailable
 	base.ErrorCode = ""
 	for _, remain := range response.ModelRemains {

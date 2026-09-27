@@ -125,7 +125,7 @@ func ClaimDeliveryPlanStep(c echo.Context) error {
 		if err := deliveryplansteps.ValidateStepProtocolWorker(tx, identity.WorkerID, identity.AgentKey, identity.MachineID, callbackIdentity.InstanceID, now); err != nil {
 			return err
 		}
-		task, taskErr := validatePlanStepRuntimeTask(tx, planStepRuntimeTuple{TaskID: taskID, RunID: runID, WorkerID: identity.WorkerID, AgentKey: identity.AgentKey, MachineID: identity.MachineID}, now)
+		task, taskErr := validatePlanStepRuntimeTask(tx, planStepRuntimeTuple{TaskID: taskID, RunID: runID, WorkerID: identity.WorkerID, AgentKey: identity.AgentKey, MachineID: identity.MachineID})
 		if taskErr != nil {
 			return taskErr
 		}
@@ -300,7 +300,7 @@ func RenewDeliveryPlanStepLease(c echo.Context) error {
 	}
 	var expiresAt time.Time
 	err = configuration.DB.WithContext(models.WithDeliveryPlanStepAgentInstanceID(c.Request().Context(), callbackIdentity.InstanceID)).Transaction(func(tx *gorm.DB) error {
-		task, taskErr := validatePlanStepRuntimeTask(tx, planStepRuntimeTuple{TaskID: taskID, RunID: runID, WorkerID: identity.WorkerID, AgentKey: identity.AgentKey, MachineID: identity.MachineID}, now)
+		task, taskErr := validatePlanStepRuntimeTask(tx, planStepRuntimeTuple{TaskID: taskID, RunID: runID, WorkerID: identity.WorkerID, AgentKey: identity.AgentKey, MachineID: identity.MachineID})
 		if taskErr != nil {
 			return taskErr
 		}
@@ -384,7 +384,7 @@ func TransitionDeliveryPlanStep(c echo.Context) error {
 			plan = replayPlan
 			return nil
 		}
-		task, taskErr := validatePlanStepRuntimeTask(tx, planStepRuntimeTuple{TaskID: taskID, RunID: runID, WorkerID: identity.WorkerID, AgentKey: identity.AgentKey, MachineID: identity.MachineID}, now)
+		task, taskErr := validatePlanStepRuntimeTask(tx, planStepRuntimeTuple{TaskID: taskID, RunID: runID, WorkerID: identity.WorkerID, AgentKey: identity.AgentKey, MachineID: identity.MachineID})
 		if taskErr != nil {
 			return taskErr
 		}
@@ -854,7 +854,7 @@ func rejectLegacyPlanClaimDuringActiveExecution(tx *gorm.DB, planID uuid.UUID) e
 	return nil
 }
 
-func validatePlanStepRuntimeTask(tx *gorm.DB, tuple planStepRuntimeTuple, now time.Time) (*models.AutomationTask, error) {
+func validatePlanStepRuntimeTask(tx *gorm.DB, tuple planStepRuntimeTuple) (*models.AutomationTask, error) {
 	if tx == nil {
 		return nil, gorm.ErrInvalidDB
 	}
@@ -864,7 +864,7 @@ func validatePlanStepRuntimeTask(tx *gorm.DB, tuple planStepRuntimeTuple, now ti
 	}
 	// The SELECT above may wait on another callback's task lock. Never compare
 	// an expiring lease with a timestamp captured before that wait.
-	now = time.Now().UTC()
+	now := time.Now().UTC()
 	if task.Status != "running" || task.RunID != tuple.RunID || task.LeaseExpiresAt == nil || !task.LeaseExpiresAt.After(now) {
 		return nil, deliveryplansteps.ErrStepLeaseConflict
 	}

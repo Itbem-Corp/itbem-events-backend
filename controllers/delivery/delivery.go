@@ -568,7 +568,8 @@ func CreateContext(c echo.Context) error {
 	metadataValue := request.Metadata
 	status := "ready"
 	var syncedAt *time.Time
-	if kind == "repository" {
+	switch kind {
+	case "repository":
 		var validationErr error
 		metadataValue, validationErr = normalizeRepositoryContextMetadata(reference, metadataValue)
 		if validationErr != nil {
@@ -624,7 +625,7 @@ func CreateContext(c echo.Context) error {
 			// refreshes it through the GitHub App or records a concrete revision.
 			status = "pending_sync"
 		}
-	} else if kind == "environment" {
+	case "environment":
 		var validationErr error
 		metadataValue, validationErr = normalizeEnvironmentContextMetadata(metadataValue)
 		if validationErr != nil {

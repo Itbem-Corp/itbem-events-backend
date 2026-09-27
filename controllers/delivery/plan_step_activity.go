@@ -263,7 +263,9 @@ func validPlanStepInferencePricingBasis(value string) bool {
 		return false
 	}
 	for _, char := range value {
-		if !(char >= 'a' && char <= 'z' || char >= '0' && char <= '9' || char == '_' || char == '-') {
+		switch {
+		case char >= 'a' && char <= 'z', char >= '0' && char <= '9', char == '_', char == '-':
+		default:
 			return false
 		}
 	}
