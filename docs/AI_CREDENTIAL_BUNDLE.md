@@ -252,7 +252,7 @@ are fetched live by the gateway exactly as in local mode; no provider key or
 model list is bundled into the dashboard. The deployment workflow passes the
 following protected-environment settings through its reviewed env-file renderer:
 
-- GitHub Secret: `AI_PROVIDER_CREDENTIALS_SECRET_ID`
+- GitHub Variable: `AI_PROVIDER_CREDENTIALS_SECRET_ID` (the secret ARN/name is an identifier, not a provider credential)
 - GitHub Secret: `AUTOMATION_ATTEMPT_POLICY_SIGNING_KEY` (required for the
   automation queue); optionally configure
   `AUTOMATION_ATTEMPT_POLICY_SIGNING_KEY_PREVIOUS` during rotation.
