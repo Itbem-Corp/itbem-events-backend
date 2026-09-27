@@ -44,23 +44,33 @@ For Linux amd64, download `itbem-ai-agent-linux-amd64` and verify with
 ## Configure and run
 
 The binary does not read `.env.ai.local` or contain configuration. Configure
-the worker using the deployment's approved environment mechanism and a
-least-privilege AWS identity before starting it. The required runtime settings
-are `ITBEM_AI_QUEUE_URL`, `AWS_REGION`, `ITBEM_API_BASE_URL`,
-`ITBEM_AGENT_INSTANCE_ID`, `ITBEM_AI_INPUT_BUCKET`, `ITBEM_AI_OUTPUT_BUCKET`,
-and `ITBEM_AI_GATEWAY_URL`. The machine identity is initialized in the local
-state directory on first use; `ITBEM_AI_STATE_DIR` can select that directory.
+the worker through the deployment's approved environment mechanism. For the
+recommended `gateway` transport, configure `ITBEM_API_BASE_URL`,
+`ITBEM_AI_GATEWAY_URL`, `ITBEM_AI_GATEWAY_TOKEN`, the exact
+`ITBEM_AI_ROLE`/`ITBEM_AI_QUEUE_LANE`, `ITBEM_AI_INPUT_BUCKET`, and
+`ITBEM_AI_OUTPUT_BUCKET`. The gateway token is scoped to that lane; do not put
+the callback root secret, provider keys, or AWS credentials on the worker.
+
+Gateway workers no longer need a manually copied `ITBEM_AGENT_INSTANCE_ID`.
+The first `--ensure-registered` prestart creates the machine's protected local
+identity, proves key possession to the backend with the lane token, and saves
+the server-issued ID in `ITBEM_AI_STATE_DIR`. Preserve that private state
+directory across restarts. The systemd unit sets it to its lane-specific
+`StateDirectory`; direct installations can set it explicitly. The separate
+legacy AWS-direct transport still requires its approved least-privilege AWS
+identity, queue URL, region, and primary-root-enrolled instance ID.
+
 Use the environment reference in `docs/ENVIRONMENT.md` and the local setup
 notes in `internal/automationagent/README.md` for the surrounding control-plane,
 queue, bucket, gateway, and registration requirements. Do not put provider API
 keys in the worker environment: the worker calls the configured inference
 gateway, which owns provider credentials.
 
-After downloading and verifying in PowerShell, set the required non-secret
-values through the operator-approved mechanism, confirm the AWS credential
-chain points to the intended worker account, then run:
+After downloading and verifying in PowerShell, set the lane-bound gateway
+configuration through the operator-approved mechanism, then run:
 
 ```powershell
+& .\itbem-ai-agent-windows-amd64\itbem-ai-agent.exe --ensure-registered
 & .\itbem-ai-agent-windows-amd64\itbem-ai-agent.exe -doctor
 ```
 
@@ -72,10 +82,11 @@ are ready, start the continuous worker with:
 ```
 
 The Linux executable is `itbem-ai-agent`; make it executable if needed, run
-`./itbem-ai-agent -doctor`, then `./itbem-ai-agent` after readiness checks.
-The worker processes queue work and can make billable provider calls through
-the gateway. Do not start it against production queue/storage unless the
-instance is registered and the operator has authorized that worker.
+`./itbem-ai-agent --ensure-registered`, then `./itbem-ai-agent -doctor` before
+`./itbem-ai-agent`. Enrollment is limited to a valid lane token and active
+profile; revoked machines require explicit primary-root re-enrollment. The
+worker processes queue work and can make billable provider calls through the
+gateway, so start it only after its non-mutating doctor and auth probes pass.
 
 ## Security and limits
 

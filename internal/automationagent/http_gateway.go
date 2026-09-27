@@ -132,7 +132,9 @@ func NewHTTPGateway(baseURL, token string, role agentwork.Role, lane agentwork.L
 		return nil, fmt.Errorf("agent gateway requires a token and exact role-lane identity")
 	}
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
+		client = &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		}}
 	}
 	return &HTTPGateway{baseURL: strings.TrimRight(baseURL, "/"), token: strings.TrimSpace(token), role: role, lane: lane, client: client}, nil
 }

@@ -54,13 +54,20 @@ func LoadRuntimeConfig(lookup func(string) string) (RuntimeConfig, error) {
 	if !runtimeAgentKeyPattern.MatchString(agentKey) {
 		return RuntimeConfig{}, fmt.Errorf("ITBEM_AI_AGENT_KEY must be a lowercase stable key")
 	}
-	instanceID, err := uuid.FromString(value("ITBEM_AGENT_INSTANCE_ID"))
-	if err != nil || instanceID == uuid.Nil {
-		return RuntimeConfig{}, fmt.Errorf("ITBEM_AGENT_INSTANCE_ID must be a registered opaque UUID")
-	}
 	identity, err := LoadLocalMachineIdentity(value("ITBEM_AI_MACHINE_ID"), value("ITBEM_AI_STATE_DIR"))
 	if err != nil {
 		return RuntimeConfig{}, err
+	}
+	instanceIDValue := value("ITBEM_AGENT_INSTANCE_ID")
+	if instanceIDValue == "" {
+		instanceIDValue, err = identity.RegisteredAgentInstanceID(agentKey)
+		if err != nil {
+			return RuntimeConfig{}, err
+		}
+	}
+	instanceID, err := uuid.FromString(instanceIDValue)
+	if err != nil || instanceID == uuid.Nil || instanceID.String() != instanceIDValue {
+		return RuntimeConfig{}, fmt.Errorf("registered agent instance ID is missing or invalid; run --ensure-registered using the lane-bound gateway token")
 	}
 	config := RuntimeConfig{
 		WorkerConfig:     WorkerConfig{InputBucket: value("ITBEM_AI_INPUT_BUCKET"), OutputBucket: value("ITBEM_AI_OUTPUT_BUCKET"), AllowedOperations: capabilities, RequireProviderCapabilities: true, AgentKey: agentKey, MachineID: identity.MachineID(), Role: agentwork.Role(value("ITBEM_AI_ROLE")), Lane: agentwork.Lane(value("ITBEM_AI_QUEUE_LANE"))},
@@ -127,6 +134,68 @@ func LoadRuntimeConfig(lookup func(string) string) (RuntimeConfig, error) {
 		return RuntimeConfig{}, fmt.Errorf("ITBEM_AI_S3_ENDPOINT: %w", err)
 	}
 	return config, nil
+}
+
+// EnsureGatewayAgentInstance registers a new machine on first start by using
+// the same role/lane-bound gateway token the worker already needs. AWS-direct
+// migration workers retain their existing administrator-enrollment path.
+func EnsureGatewayAgentInstance(ctx context.Context, lookup func(string) string) (string, error) {
+	value := func(name string) string {
+		if lookup == nil {
+			return ""
+		}
+		return strings.TrimSpace(lookup(name))
+	}
+	transport := strings.ToLower(value("ITBEM_AI_TRANSPORT"))
+	if transport == "" {
+		if value("ITBEM_AI_QUEUE_URL") != "" {
+			transport = "aws"
+		} else {
+			transport = "gateway"
+		}
+	}
+	if transport == "aws" {
+		return "", nil
+	}
+	if transport != "gateway" {
+		return "", fmt.Errorf("ITBEM_AI_TRANSPORT must be gateway or aws")
+	}
+	agentKey := value("ITBEM_AI_AGENT_KEY")
+	if agentKey == "" {
+		agentKey = "generalist"
+	}
+	if !runtimeAgentKeyPattern.MatchString(agentKey) {
+		return "", fmt.Errorf("ITBEM_AI_AGENT_KEY must be a lowercase stable key")
+	}
+	role := agentwork.Role(value("ITBEM_AI_ROLE"))
+	lane := agentwork.Lane(value("ITBEM_AI_QUEUE_LANE"))
+	apiBaseURL := strings.TrimRight(value("ITBEM_API_BASE_URL"), "/")
+	if err := validateAPIBaseURL(apiBaseURL); err != nil {
+		return "", err
+	}
+	if !agentwork.IsKnownRoleLane(role, lane) {
+		return "", fmt.Errorf("gateway auto-enrollment requires an exact registered ITBEM_AI_ROLE and ITBEM_AI_QUEUE_LANE")
+	}
+	identity, err := LoadLocalMachineIdentity(value("ITBEM_AI_MACHINE_ID"), value("ITBEM_AI_STATE_DIR"))
+	if err != nil {
+		return "", err
+	}
+	gateway, err := NewHTTPGateway(apiBaseURL, value("ITBEM_AI_GATEWAY_TOKEN"), role, lane, nil)
+	if err != nil {
+		return "", err
+	}
+	instanceID, err := gateway.EnrollAgentInstance(ctx, agentKey, identity)
+	if err != nil {
+		return "", err
+	}
+	configuredID := value("ITBEM_AGENT_INSTANCE_ID")
+	if configuredID != "" && configuredID != instanceID {
+		return "", fmt.Errorf("configured instance ID does not match the authenticated control-plane enrollment")
+	}
+	if err := identity.StoreRegisteredAgentInstanceID(agentKey, instanceID); err != nil {
+		return "", err
+	}
+	return instanceID, nil
 }
 
 func parseWorkerCapabilities(raw string) ([]string, error) {

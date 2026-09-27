@@ -33,6 +33,7 @@ func main() {
 	doctor := flag.Bool("doctor", false, "validate the local workspace registry without calling a provider")
 	syncWorkspaces := flag.Bool("sync-workspaces", false, "clone or fast-forward operator-managed workspace base checkouts")
 	showMachineIdentity := flag.Bool("show-machine-identity", false, "display the local machine ID and public key for administrator registration")
+	ensureRegistered := flag.Bool("ensure-registered", false, "automatically register this machine using its role/lane gateway token")
 	flag.Parse()
 	if *showMachineIdentity {
 		report, err := machineIdentityReport(os.Getenv)
@@ -40,6 +41,18 @@ func main() {
 			fail(err)
 		}
 		_ = json.NewEncoder(os.Stdout).Encode(report)
+		return
+	}
+	if *ensureRegistered {
+		instanceID, err := automationagent.EnsureGatewayAgentInstance(context.Background(), os.Getenv)
+		if err != nil {
+			fail(err)
+		}
+		status := "registered"
+		if instanceID == "" {
+			status = "not_required_for_aws_transport"
+		}
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"ready": true, "status": status, "instance_id": instanceID})
 		return
 	}
 	if *syncWorkspaces {
@@ -384,6 +397,9 @@ func providerNotRequired(config automationagent.RuntimeConfig) bool {
 }
 
 func run() {
+	if _, err := automationagent.EnsureGatewayAgentInstance(context.Background(), os.Getenv); err != nil {
+		fail(err)
+	}
 	runtimeConfig, err := automationagent.LoadRuntimeConfig(os.Getenv)
 	if err != nil {
 		fail(err)

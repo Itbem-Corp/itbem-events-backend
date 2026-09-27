@@ -18,12 +18,13 @@ import (
 )
 
 const (
-	InstanceIDHeader = "X-ITBEM-Agent-Instance-ID"
-	TimestampHeader  = "X-ITBEM-Agent-Timestamp"
-	NonceHeader      = "X-ITBEM-Agent-Nonce"
-	SignatureHeader  = "X-ITBEM-Agent-Signature"
-	ProtocolVersion  = "ITBEM-AGENT-CALLBACK-V1"
-	MaxClockSkew     = 90 * time.Second
+	InstanceIDHeader          = "X-ITBEM-Agent-Instance-ID"
+	TimestampHeader           = "X-ITBEM-Agent-Timestamp"
+	NonceHeader               = "X-ITBEM-Agent-Nonce"
+	SignatureHeader           = "X-ITBEM-Agent-Signature"
+	ProtocolVersion           = "ITBEM-AGENT-CALLBACK-V1"
+	MaxClockSkew              = 90 * time.Second
+	EnrollmentProtocolVersion = "ITBEM-AGENT-INSTANCE-ENROLL-V1"
 )
 
 var errInvalidCallbackSignature = errors.New("agent callback signature is invalid")
@@ -113,6 +114,30 @@ func PublicKeyFingerprint(publicKey ed25519.PublicKey) (string, error) {
 	}
 	digest := sha256.Sum256(publicKey)
 	return "sha256:" + hex.EncodeToString(digest[:]), nil
+}
+
+// AgentInstanceEnrollmentMessage returns the domain-separated proof payload
+// signed by a machine before it can self-enroll using its lane-bound gateway
+// credential. The enrollment endpoint separately validates each field and
+// accepts only canonical public-key encodings.
+func AgentInstanceEnrollmentMessage(agentKey, machineID, publicKey string) ([]byte, error) {
+	fields := []string{strings.TrimSpace(agentKey), strings.TrimSpace(machineID), strings.TrimSpace(publicKey)}
+	for _, field := range fields {
+		if field == "" || strings.ContainsAny(field, "\r\n") {
+			return nil, errInvalidCallbackSignature
+		}
+	}
+	return []byte(strings.Join(append([]string{EnrollmentProtocolVersion}, fields...), "\n")), nil
+}
+
+// VerifyAgentInstanceEnrollment proves possession of the private key
+// corresponding to the public key being registered.
+func VerifyAgentInstanceEnrollment(publicKey, signature []byte, agentKey, machineID, encodedPublicKey string) error {
+	message, err := AgentInstanceEnrollmentMessage(agentKey, machineID, encodedPublicKey)
+	if err != nil || len(publicKey) != ed25519.PublicKeySize || len(signature) != ed25519.SignatureSize || !ed25519.Verify(ed25519.PublicKey(publicKey), message, signature) {
+		return errInvalidCallbackSignature
+	}
+	return nil
 }
 
 func canonicalRequest(instanceID, method, requestURI string, timestamp int64, nonce string, body []byte) ([]byte, error) {

@@ -26,8 +26,9 @@ const (
 // the stable machine ID and public key, but can only use the private key by
 // constructing a signed callback through this package.
 type MachineIdentity struct {
-	machineID  string
-	privateKey ed25519.PrivateKey
+	machineID      string
+	privateKey     ed25519.PrivateKey
+	stateDirectory string
 }
 
 func (identity MachineIdentity) MachineID() string { return identity.machineID }
@@ -229,7 +230,7 @@ func readPersistedMachineIdentity(path string) (MachineIdentity, bool, error) {
 		return MachineIdentity{}, true, fmt.Errorf("could not unlock local machine signing key")
 	}
 	defer eraseMachineIdentityKey(privateKey)
-	return MachineIdentity{machineID: parsedID.String(), privateKey: append(ed25519.PrivateKey(nil), privateKey...)}, true, nil
+	return MachineIdentity{machineID: parsedID.String(), privateKey: append(ed25519.PrivateKey(nil), privateKey...), stateDirectory: filepath.Dir(path)}, true, nil
 }
 
 func eraseMachineIdentityKey(key []byte) {
