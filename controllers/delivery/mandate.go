@@ -67,6 +67,7 @@ var deliveryMandateHumanActions = map[string]struct{}{
 var deliveryMandatePhaseTools = map[string][]string{
 	"plan":           {"context.read", "evidence.read", "plan.propose"},
 	"chat":           {"context.read", "evidence.read", "conversation.respond"},
+	"assessment":     {"context.read", "evidence.read", "repository.read", "report.write"},
 	"implementation": {"context.read", "repository.read", "worktree.create", "patch.apply", "test.run", "evidence.record"},
 	"publish":        {"context.read", "evidence.read", "git.commit", "github.pr.create", "evidence.record"},
 	"qa":             {"context.read", "repository.read", "test.run", "artifact.capture", "evidence.record"},
@@ -88,7 +89,7 @@ func defaultDeliveryMandate(item models.DeliveryWorkItem, repositoryRefs []strin
 		ExcludedScope:  decodeDeliveryStringList(item.ExcludedScopeJSON),
 		RepositoryRefs: uniqueDeliveryStrings(repositoryRefs),
 		AllowedTools:   sortedDeliveryKeys(deliveryMandateAllowedTools),
-		MaxConcurrency: 1,
+		MaxConcurrency: models.DefaultDeliveryMandateMaxConcurrency,
 		BudgetMicros:   item.BudgetMicros,
 		AutonomyPolicy: "bounded_autonomy",
 		StopConditions: sortedDeliveryKeys(deliveryMandateStopConditions),

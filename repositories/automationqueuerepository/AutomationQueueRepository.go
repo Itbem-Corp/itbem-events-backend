@@ -8,7 +8,8 @@ import (
 	"events-stocks/internal/agentwork"
 	"fmt"
 	"io"
-	"strconv"
+	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
+	"strconv"
+
+	"github.com/gofrs/uuid"
+	"gorm.io/gorm"
 )
 
 const publishTimeout = 5 * time.Second
@@ -49,7 +54,17 @@ type Message struct {
 	CorrelationID string `json:"correlation_id"`
 	Type          string `json:"type"`
 	Payload       struct {
-		TaskID              string `json:"task_id"`
+		TaskID string `json:"task_id"`
+		// ProjectID is an optional scheduler fairness hint. It does not grant
+		// access and is revalidated by the control plane when the task runs.
+		ProjectID string `json:"project_id,omitempty"`
+		AgentKey  string `json:"agent_key,omitempty"`
+		// PlanStepID is an optional step-scoped child-task intent. Persisted
+		// assignment authorization remains the control plane's responsibility.
+		PlanStepID string `json:"plan_step_id,omitempty"`
+		// TargetMachineID is hydrated from the persisted plan-step assignment at
+		// publish time. An outbox/client value is never authoritative.
+		TargetMachineID     string `json:"target_machine_id,omitempty"`
 		Operation           string `json:"operation"`
 		MaxCompletionTokens int    `json:"max_completion_tokens,omitempty"`
 		InputRef            string `json:"input_ref"`
@@ -82,9 +97,11 @@ type queueTargets struct {
 	laneURLs      map[agentwork.Lane]string
 }
 
-func Init(region, accessKeyID, secretAccessKey, url, deadLetterURL, lanesJSON, roleDeadLetterURL, endpoint string) error {
+var planStepAgentKeyPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{1,63}$`)
+
+func Init(region, accessKeyID, secretAccessKey, legacyURL, deadLetterURL, lanesJSON, roleDeadLetterURL, endpoint string) error {
 	once.Do(func() {
-		targets, initErr = parseQueueTargets(url, deadLetterURL, lanesJSON, roleDeadLetterURL)
+		targets, initErr = parseQueueTargets(legacyURL, deadLetterURL, lanesJSON, roleDeadLetterURL)
 		if initErr != nil || !targets.configured() {
 			return
 		}
@@ -104,6 +121,11 @@ func parseQueueTargets(legacyURL, legacyDeadLetterURL, lanesJSON, roleDeadLetter
 	result := queueTargets{legacyURL: strings.TrimSpace(legacyURL), deadLetterURL: strings.TrimSpace(legacyDeadLetterURL)}
 	raw := strings.TrimSpace(lanesJSON)
 	roleDeadLetterURL = strings.TrimSpace(roleDeadLetterURL)
+	for _, configured := range []string{result.legacyURL, result.deadLetterURL, roleDeadLetterURL} {
+		if configured != "" && !validQueueURL(configured) {
+			return queueTargets{}, fmt.Errorf("automation queue target must be HTTPS or a loopback development URL")
+		}
+	}
 	if raw == "" {
 		if roleDeadLetterURL != "" {
 			return queueTargets{}, fmt.Errorf("role dead-letter queue requires the complete role-lane map")
@@ -145,7 +167,7 @@ func parseQueueTargets(legacyURL, legacyDeadLetterURL, lanesJSON, roleDeadLetter
 	}
 	for _, lane := range orderedLanes() {
 		queueURL := result.laneURLs[lane]
-		if queueURL == "" {
+		if queueURL == "" || !validQueueURL(queueURL) {
 			return queueTargets{}, fmt.Errorf("role-lane queue map is missing %s", lane)
 		}
 		if previous, duplicate := seen[queueURL]; duplicate {
@@ -158,6 +180,17 @@ func parseQueueTargets(legacyURL, legacyDeadLetterURL, lanesJSON, roleDeadLetter
 	}
 	result.deadLetterURL = roleDeadLetterURL
 	return result, nil
+}
+
+func validQueueURL(raw string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Path == "" || parsed.Path == "/" {
+		return false
+	}
+	if parsed.Scheme == "https" {
+		return true
+	}
+	return parsed.Scheme == "http" && (parsed.Hostname() == "localhost" || parsed.Hostname() == "127.0.0.1" || parsed.Hostname() == "::1" || strings.HasSuffix(strings.ToLower(parsed.Hostname()), ".localhost.localstack.cloud"))
 }
 
 func orderedLanes() []agentwork.Lane {
@@ -353,6 +386,13 @@ func Publish(message Message) error {
 	if !IsConfigured() {
 		return fmt.Errorf("ITBEM automation queue is unavailable")
 	}
+	if strings.TrimSpace(message.Payload.PlanStepID) != "" {
+		var err error
+		message, err = hydratePersistedPlanStepTarget(configuration.DB, message)
+		if err != nil {
+			return err
+		}
+	}
 	if err := Validate(message); err != nil {
 		return err
 	}
@@ -365,6 +405,44 @@ func Publish(message Message) error {
 		return err
 	}
 	return publishBody(queueURL, string(body))
+}
+
+// hydratePersistedPlanStepTarget treats the database assignment as the only
+// source of routing authority. Values present in the serialized outbox body
+// are overwritten, so a stale or forged target cannot move work to another
+// local machine/profile.
+func hydratePersistedPlanStepTarget(db *gorm.DB, message Message) (Message, error) {
+	if db == nil {
+		return Message{}, fmt.Errorf("plan-step machine target is unavailable")
+	}
+	taskID, taskErr := uuid.FromString(strings.TrimSpace(message.Payload.TaskID))
+	stepID, stepErr := uuid.FromString(strings.TrimSpace(message.Payload.PlanStepID))
+	if taskErr != nil || taskID == uuid.Nil || stepErr != nil || stepID == uuid.Nil {
+		return Message{}, fmt.Errorf("plan-step machine target is invalid")
+	}
+	var assignment struct {
+		TargetMachineID string `gorm:"column:target_machine_id"`
+		TargetAgentKey  string `gorm:"column:target_agent_key"`
+	}
+	if err := db.Table("delivery_plan_step_assignments").
+		Select("target_machine_id, target_agent_key").
+		Where("child_automation_task_id = ? AND delivery_plan_step_id = ? AND status IN ?", taskID, stepID, []string{
+			"pending", "queued", "dispatched", "running",
+		}).Take(&assignment).Error; err != nil {
+		return Message{}, fmt.Errorf("persisted plan-step machine target is unavailable: %w", err)
+	}
+	if strings.TrimSpace(assignment.TargetMachineID) == "" || strings.TrimSpace(assignment.TargetAgentKey) == "" ||
+		!uuidValid(assignment.TargetMachineID) || assignment.TargetAgentKey != strings.TrimSpace(assignment.TargetAgentKey) || !planStepAgentKeyPattern.MatchString(assignment.TargetAgentKey) {
+		return Message{}, fmt.Errorf("persisted plan-step machine target is incomplete")
+	}
+	message.Payload.AgentKey = assignment.TargetAgentKey
+	message.Payload.TargetMachineID = assignment.TargetMachineID
+	return message, nil
+}
+
+func uuidValid(value string) bool {
+	parsed, err := uuid.FromString(strings.TrimSpace(value))
+	return err == nil && parsed != uuid.Nil
 }
 
 // PublishSerialized delivers a previously validated outbox payload. It
@@ -385,13 +463,47 @@ func Validate(message Message) error {
 	if !agentwork.IsSupportedOperation(message.Payload.Operation) {
 		return fmt.Errorf("automation operation is not allowlisted")
 	}
+	if agentKey := message.Payload.AgentKey; agentKey != "" {
+		if agentKey != strings.TrimSpace(agentKey) || !planStepAgentKeyPattern.MatchString(agentKey) {
+			return fmt.Errorf("automation agent profile is invalid")
+		}
+	}
+	if planStepID := message.Payload.PlanStepID; planStepID != "" {
+		if planStepID != strings.TrimSpace(planStepID) || !validUUID(planStepID) || message.Payload.Operation != "delivery.implementation" ||
+			!uuidValid(message.Payload.TargetMachineID) || strings.TrimSpace(message.Payload.AgentKey) == "" {
+			return fmt.Errorf("automation plan-step target is invalid")
+		}
+	} else if strings.TrimSpace(message.Payload.TargetMachineID) != "" {
+		return fmt.Errorf("automation machine target requires a plan-step assignment")
+	}
 	return nil
 }
 
-func publishBody(queueURL, body string) error {
+func validUUID(value string) bool {
+	parsed, err := uuid.FromString(value)
+	return err == nil && parsed != uuid.Nil
+}
+
+// Keep the transport admission contract aligned with the isolated worker.
+// The worker revalidates its decoded body as defense in depth; rejecting an
+// invalid operation here prevents a malformed durable outbox payload from
+// wasting receives and eventually occupying the shared automation DLQ.
+func allowedOperation(operation string) bool {
+	switch operation {
+	case agentwork.OperationAIChat, agentwork.OperationDocumentAnalyze, agentwork.OperationCodeReview,
+		agentwork.OperationProductIdeate, agentwork.OperationDeliveryPlan, agentwork.OperationDeliveryImplementation,
+		agentwork.OperationDeliveryAssessment, agentwork.OperationDeliveryOnboardingProbe, agentwork.OperationDeliveryPublish,
+		agentwork.OperationDeliveryReleaseGate, agentwork.OperationDeliveryQA, agentwork.OperationDeliverySummary:
+		return true
+	default:
+		return false
+	}
+}
+
+func publishBody(routedQueue, body string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), publishTimeout)
 	defer cancel()
-	_, err := client.SendMessage(ctx, &sqs.SendMessageInput{QueueUrl: aws.String(queueURL), MessageBody: aws.String(body)})
+	_, err := client.SendMessage(ctx, &sqs.SendMessageInput{QueueUrl: aws.String(routedQueue), MessageBody: aws.String(body)})
 	if err != nil {
 		return fmt.Errorf("publish automation message: %w", err)
 	}

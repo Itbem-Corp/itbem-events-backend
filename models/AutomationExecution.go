@@ -19,25 +19,34 @@ type AutomationExecution struct {
 	// RunID is the immutable worker lease that produced this call. It is the
 	// ledger idempotency boundary: providers such as MiniMax may omit a stable
 	// response ID, while a task may validly have multiple calls or retries.
-	RunID                string `gorm:"type:varchar(64);not null;default:'';uniqueIndex:automation_execution_run" json:"-"`
-	StepKey              string `gorm:"type:varchar(64);not null;default:'';index" json:"step_key,omitempty"`
-	Provider             string `gorm:"type:varchar(48);not null" json:"provider"`
-	Model                string `gorm:"type:varchar(128);not null" json:"model"`
-	ProviderResponseID   string `gorm:"type:varchar(128);not null;default:'';index" json:"provider_response_id,omitempty"`
-	InputTokens          int64  `gorm:"not null;default:0" json:"input_tokens"`
-	OutputTokens         int64  `gorm:"not null;default:0" json:"output_tokens"`
-	CachedInputTokens    int64  `gorm:"not null;default:0" json:"cached_input_tokens"`
-	CacheWriteTokens     int64  `gorm:"not null;default:0" json:"cache_write_tokens"`
-	ReasoningTokens      int64  `gorm:"not null;default:0" json:"reasoning_tokens"`
-	TotalTokens          int64  `gorm:"not null;default:0" json:"total_tokens"`
-	InputCostMicros      int64  `gorm:"not null;default:0" json:"input_cost_microusd"`
-	OutputCostMicros     int64  `gorm:"not null;default:0" json:"output_cost_microusd"`
-	CachedCostMicros     int64  `gorm:"not null;default:0" json:"cached_cost_microusd"`
-	CacheWriteCostMicros int64  `gorm:"not null;default:0" json:"cache_write_cost_microusd"`
-	TotalCostMicros      int64  `gorm:"not null;default:0;index" json:"total_cost_microusd"`
-	Currency             string `gorm:"type:char(3);not null;default:'USD'" json:"currency"`
-	PricingBasis         string `gorm:"type:varchar(32);not null;default:'unpriced'" json:"pricing_basis"`
-	PricingSnapshotJSON  string `gorm:"type:jsonb;not null;default:'{}'" json:"pricing_snapshot,omitempty"`
+	RunID              string     `gorm:"type:varchar(64);not null;default:'';uniqueIndex:automation_execution_run" json:"-"`
+	InferenceReceiptID *uuid.UUID `gorm:"type:uuid;uniqueIndex" json:"inference_receipt_id,omitempty"`
+	// Worker attribution is immutable with the provider call and is intentionally
+	// projected only by the root-only agent directory.
+	WorkerID  string `gorm:"type:varchar(64);not null;default:'';index" json:"-"`
+	AgentKey  string `gorm:"type:varchar(64);not null;default:'';index" json:"-"`
+	MachineID string `gorm:"type:varchar(64);not null;default:'';index" json:"-"`
+	// AgentInstanceID is populated from the signed callback identity, never a
+	// callback body field. It is nullable for executions written by older agents.
+	AgentInstanceID      *uuid.UUID `gorm:"type:uuid;index" json:"-"`
+	StepKey              string     `gorm:"type:varchar(64);not null;default:'';index" json:"step_key,omitempty"`
+	Provider             string     `gorm:"type:varchar(48);not null" json:"provider"`
+	Model                string     `gorm:"type:varchar(128);not null" json:"model"`
+	ProviderResponseID   string     `gorm:"type:varchar(128);not null;default:'';index" json:"provider_response_id,omitempty"`
+	InputTokens          int64      `gorm:"not null;default:0" json:"input_tokens"`
+	OutputTokens         int64      `gorm:"not null;default:0" json:"output_tokens"`
+	CachedInputTokens    int64      `gorm:"not null;default:0" json:"cached_input_tokens"`
+	CacheWriteTokens     int64      `gorm:"not null;default:0" json:"cache_write_tokens"`
+	ReasoningTokens      int64      `gorm:"not null;default:0" json:"reasoning_tokens"`
+	TotalTokens          int64      `gorm:"not null;default:0" json:"total_tokens"`
+	InputCostMicros      int64      `gorm:"not null;default:0" json:"input_cost_microusd"`
+	OutputCostMicros     int64      `gorm:"not null;default:0" json:"output_cost_microusd"`
+	CachedCostMicros     int64      `gorm:"not null;default:0" json:"cached_cost_microusd"`
+	CacheWriteCostMicros int64      `gorm:"not null;default:0" json:"cache_write_cost_microusd"`
+	TotalCostMicros      int64      `gorm:"not null;default:0;index" json:"total_cost_microusd"`
+	Currency             string     `gorm:"type:char(3);not null;default:'USD'" json:"currency"`
+	PricingBasis         string     `gorm:"type:varchar(32);not null;default:'unpriced'" json:"pricing_basis"`
+	PricingSnapshotJSON  string     `gorm:"type:jsonb;not null;default:'{}'" json:"pricing_snapshot,omitempty"`
 	// UsageJSON is internal provider accounting metadata. The trace endpoint
 	// projects an explicitly allow-listed outcome from it; never serialize the
 	// raw object because provider-specific extensions are not a browser API.

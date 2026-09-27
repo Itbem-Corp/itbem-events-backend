@@ -22,6 +22,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// The integration cases below call controller handlers directly instead of
+// running applicationaccess.Require. Model the middleware's resolved platform
+// workspace explicitly so these controller-level tests exercise the same
+// authorization scope as a root user's platform request.
+func setDeliveryPlatformWorkspace(c echo.Context) {
+	c.Set("workspace_mode", "platform")
+}
+
 // TestDeliveryLifecycleThroughController traverses the local control-plane
 // handlers with a real database. It provides stronger evidence than the pure
 // state-machine test: every review gate requires the same persisted plan,
@@ -79,6 +87,7 @@ func TestDeliveryLifecycleThroughController(t *testing.T) {
 		c.SetParamValues(item.ID.String())
 		c.Set("cognito_sub", subject)
 		c.Set("tenant_code", "itbem")
+		setDeliveryPlatformWorkspace(c)
 		require.NoError(t, delivery.TransitionWorkItem(c))
 		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 		require.NoError(t, db.First(&item, item.ID).Error)
@@ -198,6 +207,7 @@ func TestDeliveryMultiRepositoryLifecycleRequiresIntegratedPreview(t *testing.T)
 		c.SetParamValues(item.ID.String())
 		c.Set("cognito_sub", subject)
 		c.Set("tenant_code", "itbem")
+		setDeliveryPlatformWorkspace(c)
 		require.NoError(t, delivery.TransitionWorkItem(c))
 		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 		require.NoError(t, db.First(&item, item.ID).Error)

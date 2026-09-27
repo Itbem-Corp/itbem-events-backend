@@ -700,6 +700,8 @@ func executionGraphOperationSummary(operation string) string {
 		return "Plan"
 	case "delivery.implementation":
 		return "Implementación"
+	case "delivery.assessment":
+		return "Evaluación de solo lectura"
 	case "delivery.qa":
 		return "QA"
 	case "delivery.publish":

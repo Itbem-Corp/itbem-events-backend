@@ -298,20 +298,16 @@ Initialize-ComposeLocalPostgreSQLDatabase $composeFile $DatabaseUser $DatabaseNa
 Test-LocalPostgreSQL $composeFile $DatabaseUser $DatabaseName $DatabaseProbeContainer $DatabaseProbeInWSL.IsPresent $WSLDistribution
 # The control plane owns remote context synchronization and publication grants,
 # while the local agent owns model execution. Keep their development setup
-# aligned without loading provider credentials into the API process. The three
+# aligned without loading provider credentials into the worker process. The local
+# test bundle is read only by this API process; the three
 # GitHub App values mint a short-lived installation token, while the workspace
 # registry is non-secret local topology required to validate and freeze
-# `workspace://` references. The provider key never crosses this boundary.
+# `workspace://` references. A production Secrets Manager ID never crosses
+# into this local launcher.
 $agentSettingsPath = Join-Path $repositoryRoot '.env.ai.local'
 if (Test-Path -LiteralPath $agentSettingsPath -PathType Leaf) {
     $agentSettings = Read-EnvironmentFile $agentSettingsPath
-    foreach ($name in @(
-        'ITBEM_GITHUB_SOURCE_APP_ID', 'ITBEM_GITHUB_SOURCE_INSTALLATION_ID', 'ITBEM_GITHUB_SOURCE_INSTALLATION_IDS',
-        'ITBEM_GITHUB_SOURCE_APP_PRIVATE_KEY', 'ITBEM_GITHUB_SOURCE_APP_PRIVATE_KEY_FILE', 'ITBEM_GITHUB_SOURCE_API_BASE_URL',
-        'ITBEM_GITHUB_APP_ID', 'ITBEM_GITHUB_INSTALLATION_ID', 'ITBEM_GITHUB_INSTALLATION_IDS',
-        'ITBEM_GITHUB_APP_PRIVATE_KEY', 'ITBEM_GITHUB_APP_PRIVATE_KEY_FILE', 'ITBEM_GITHUB_API_BASE_URL',
-        'GITHUB_REVIEW_WEBHOOK_SECRET', 'GITHUB_REVIEW_REPOSITORIES', 'ITBEM_AI_WORKSPACES_JSON'
-    )) {
+    foreach ($name in @('ITBEM_GITHUB_APP_ID', 'ITBEM_GITHUB_INSTALLATION_ID', 'ITBEM_GITHUB_INSTALLATION_IDS', 'ITBEM_GITHUB_APP_PRIVATE_KEY', 'ITBEM_GITHUB_APP_PRIVATE_KEY_FILE', 'ITBEM_GITHUB_API_BASE_URL', 'ITBEM_GITHUB_SOURCE_APP_ID', 'ITBEM_GITHUB_SOURCE_INSTALLATION_ID', 'ITBEM_GITHUB_SOURCE_INSTALLATION_IDS', 'ITBEM_GITHUB_SOURCE_APP_PRIVATE_KEY', 'ITBEM_GITHUB_SOURCE_APP_PRIVATE_KEY_FILE', 'ITBEM_GITHUB_SOURCE_API_BASE_URL', 'GITHUB_REVIEW_WEBHOOK_SECRET', 'GITHUB_REVIEW_REPOSITORIES', 'ITBEM_AI_WORKSPACES_JSON', 'AUTOMATION_CALLBACK_SECRET', 'AUTOMATION_ATTEMPT_POLICY_SIGNING_KEY', 'AUTOMATION_ATTEMPT_POLICY_SIGNING_KEY_PREVIOUS', 'AI_PROVIDER_CREDENTIALS_LOCAL_FILE', 'AUTOMATION_PRICING_JSON', 'AUTOMATION_PROVIDER_CATALOG_SYNC_HOURS')) {
         if (-not [string]::IsNullOrWhiteSpace($agentSettings[$name])) {
             Set-Item -Path "Env:$name" -Value $agentSettings[$name]
         }
@@ -324,12 +320,29 @@ if (Test-Path -LiteralPath $agentSettingsPath -PathType Leaf) {
 	$budgetModel = switch ($budgetProvider.Trim().ToLowerInvariant()) {
 		'minimax' { $agentSettings['MINIMAX_MODEL'] }
 		'openai' { $agentSettings['OPENAI_MODEL'] }
+		'deepseek' { $agentSettings['DEEPSEEK_MODEL'] }
+		'openrouter' { $agentSettings['OPENROUTER_MODEL'] }
 		'anthropic' { $agentSettings['ANTHROPIC_MODEL'] }
+		'opencode-go' { $agentSettings['OPENCODE_GO_MODEL'] }
 		default { '' }
 	}
 	if ([string]::IsNullOrWhiteSpace($budgetModel) -and $budgetProvider.Trim().ToLowerInvariant() -eq 'minimax') { $budgetModel = 'MiniMax-M3' }
+	if ([string]::IsNullOrWhiteSpace($budgetModel) -and $budgetProvider.Trim().ToLowerInvariant() -eq 'deepseek') { $budgetModel = 'deepseek-flash' }
 	$env:AUTOMATION_BUDGET_PROVIDER = $budgetProvider.Trim()
 	$env:AUTOMATION_BUDGET_MODEL = $budgetModel.Trim()
+	$localCredentialFile = $agentSettings['AI_PROVIDER_CREDENTIALS_LOCAL_FILE']
+	if (-not [string]::IsNullOrWhiteSpace($localCredentialFile)) {
+		if (-not [System.IO.Path]::IsPathRooted($localCredentialFile)) {
+			$localCredentialFile = Join-Path $repositoryRoot $localCredentialFile
+		}
+		$localCredentialDirectory = Split-Path -Parent $localCredentialFile
+		if (-not (Test-Path -LiteralPath $localCredentialFile -PathType Leaf)) {
+			New-Item -ItemType Directory -Force -Path $localCredentialDirectory | Out-Null
+			[System.IO.File]::WriteAllText($localCredentialFile, '{"schema_version":1,"credentials":{}}', (New-Object System.Text.UTF8Encoding($false)))
+			Write-Host 'Initialized an empty ignored local AI credential bundle. Add a disposable test key through Settings.'
+		}
+		$env:AI_PROVIDER_CREDENTIALS_LOCAL_FILE = $localCredentialFile
+	}
 }
 if ($hasOIDCIssuer) {
     # These values satisfy the shared Config shape only. The local-only token
@@ -400,6 +413,7 @@ foreach ($name in $awsCredentialEnvironment.Keys) {
 # to .env files, and it uses a fresh database name by default to avoid touching
 # the existing local events database.
 $env:ENV = 'local'
+$env:AI_PROVIDER_CREDENTIALS_SECRET_ID = ''
 $env:ALLOW_LOCAL_USER_SYNC_FALLBACK = 'true'
 $env:LOCAL_BOOTSTRAP_ROOT_EMAILS = $BootstrapRootEmails.Trim()
 $env:JWT_CLOCK_SKEW_SECONDS = "$JwtClockSkewSeconds"
@@ -451,8 +465,32 @@ if ($RoleLanes) {
 }
 $env:AUTOMATION_INPUT_BUCKET = $inputBucket
 $env:AUTOMATION_OUTPUT_BUCKET = $outputBucket
-$env:SQS_ENDPOINT = $AwsEmulatorEndpoint
-$env:AUTOMATION_CALLBACK_SECRET = 'local-automation-callback-secret'
+$env:SQS_ENDPOINT = $LocalStackEndpoint
+$callbackSecret = [Environment]::GetEnvironmentVariable('AUTOMATION_CALLBACK_SECRET', 'Process')
+if ([string]::IsNullOrWhiteSpace($callbackSecret)) {
+    $callbackSecret = 'local-automation-callback-secret'
+}
+$env:AUTOMATION_CALLBACK_SECRET = $callbackSecret
+$attemptPolicySigningKey = [Environment]::GetEnvironmentVariable('AUTOMATION_ATTEMPT_POLICY_SIGNING_KEY', 'Process')
+if ([string]::IsNullOrWhiteSpace($attemptPolicySigningKey)) {
+    $signingKeyPath = Join-Path $repositoryRoot '.local/ai-attempt-policy-signing-key'
+    $signingKeyDirectory = Split-Path -Parent $signingKeyPath
+    if (-not (Test-Path -LiteralPath $signingKeyDirectory -PathType Container)) {
+        New-Item -ItemType Directory -Force -Path $signingKeyDirectory | Out-Null
+    }
+    if (-not (Test-Path -LiteralPath $signingKeyPath -PathType Leaf)) {
+        $signingKeyBytes = New-Object byte[] 48
+        $randomGenerator = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+        try { $randomGenerator.GetBytes($signingKeyBytes) } finally { $randomGenerator.Dispose() }
+        $generatedSigningKey = [Convert]::ToBase64String($signingKeyBytes)
+        [System.IO.File]::WriteAllText($signingKeyPath, $generatedSigningKey, (New-Object System.Text.UTF8Encoding($false)))
+    }
+    $attemptPolicySigningKey = [System.IO.File]::ReadAllText($signingKeyPath).Trim()
+}
+if ($attemptPolicySigningKey.Length -lt 32) {
+    throw 'AUTOMATION_ATTEMPT_POLICY_SIGNING_KEY must contain at least 32 bytes.'
+}
+$env:AUTOMATION_ATTEMPT_POLICY_SIGNING_KEY = $attemptPolicySigningKey
 
 Write-Host "Starting isolated AI control plane on port $Port (database: $DatabaseName)."
 Push-Location $repositoryRoot

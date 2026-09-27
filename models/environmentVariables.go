@@ -116,10 +116,18 @@ type Config struct {
 	// Manager bundle consumed only by the cloud inference gateway. It contains
 	// provider API keys and must never be injected into workers or browsers.
 	AIProviderCredentialsSecretID string `required:"false"`
+	// AIProviderCredentialsLocalFile is a disposable, git-ignored test bundle.
+	// It is accepted only when ENV is local/development/test and never causes an
+	// AWS Secrets Manager client to be initialized.
+	AIProviderCredentialsLocalFile string `required:"false"`
 	// AutomationPricingJSON is a server-owned, versioned price catalog. It may
 	// be empty for subscription-backed environments, where execution usage is
 	// still recorded but cost is intentionally marked unpriced rather than guessed.
 	AutomationPricingJSON string `required:"false"`
+	// AutomationProviderCatalogSyncHours controls how often the backend refreshes
+	// provider model metadata (models, prices and declared capabilities). Zero or
+	// an out-of-range value uses the safe weekly default.
+	AutomationProviderCatalogSyncHours int `required:"false"`
 	// AutomationBudgetProvider and AutomationBudgetModel declare the non-secret
 	// provider/model pair used for conservative admission reservations. They
 	// must mirror the local worker deployment; an enforced budget fails closed

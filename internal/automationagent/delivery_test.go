@@ -622,7 +622,7 @@ func TestRunImplementationUsesIsolatedWorktree(t *testing.T) {
 			t.Fatalf("git base advance failed: %#v, %v", result, runErr)
 		}
 	}
-	workspaceJSON := `{"repo":{"path":"` + filepath.ToSlash(root) + `"}}`
+	workspaceJSON := `{"repo":{"path":"` + filepath.ToSlash(root) + `","capabilities":["` + WorkspaceCapabilityReadRepository + `","` + WorkspaceCapabilityCreateWorktree + `","` + WorkspaceCapabilityApplyPatch + `"]}}`
 	lookup := func(name string) string {
 		if name == "ITBEM_AI_WORKSPACES_JSON" {
 			return workspaceJSON

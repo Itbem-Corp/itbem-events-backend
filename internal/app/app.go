@@ -122,16 +122,15 @@ func Run() error {
 		}
 	}
 	configuration.InitAwsServices(cfg)
-	if secretID := strings.TrimSpace(cfg.AIProviderCredentialsSecretID); secretID != "" {
-		store, err := aicredentials.NewSecretsManagerStore(context.Background(), cfg.AwsRegion)
-		if err != nil {
-			return fmt.Errorf("configure AI provider credential store: %w", err)
-		}
-		resolver, err := aicredentials.NewResolver(store, secretID, 5*time.Minute)
-		if err != nil {
-			return fmt.Errorf("configure AI provider credential resolver: %w", err)
-		}
+	resolver, err := aicredentials.NewResolverForEnvironment(context.Background(), os.Getenv("ENV"), cfg.AwsRegion, cfg.AIProviderCredentialsSecretID, cfg.AIProviderCredentialsLocalFile, nil)
+	if err != nil {
+		return fmt.Errorf("configure AI provider credential store: %w", err)
+	}
+	if resolver != nil {
 		automationController.ConfigureInferenceCredentials(resolver)
+	}
+	if !aicredentials.IsLocalEnvironment(os.Getenv("ENV")) && strings.TrimSpace(cfg.SQSAutomationQueueURL) != "" && resolver == nil {
+		return errors.New("AI_PROVIDER_CREDENTIALS_SECRET_ID is required when the deployed automation queue is enabled")
 	}
 	sqsrepository.Init(cfg.AwsRegion, cfg.S3ClientId, cfg.S3ClientSecret, cfg.SQSImageQueueURL, cfg.SQSVideoQueueURL, cfg.SQSEndpoint)
 	jobqueuerepository.Init(cfg.AwsRegion, cfg.S3ClientId, cfg.S3ClientSecret, cfg.SQSWorkerQueueURL, cfg.SNSWorkerTopicARN)
@@ -140,8 +139,12 @@ func Run() error {
 	}
 	dispatcherCtx, stopDispatcher := context.WithCancel(context.Background())
 	defer stopDispatcher()
+	if resolver != nil {
+		automationController.StartProviderCatalogSynchronizer(dispatcherCtx, cfg.AutomationProviderCatalogSyncHours)
+	}
 	outboxService.StartDispatcher(dispatcherCtx, configuration.DB)
 	deliveryController.StartContinuationDispatcher(dispatcherCtx, configuration.DB, cfg)
+	deliveryController.StartDeliveryScheduleDispatcher(dispatcherCtx, configuration.DB)
 	metricsCollector := productmetricsService.NewCollector(configuration.DB)
 	productmetricsService.Configure(metricsCollector)
 	metricsCollector.Start(dispatcherCtx)

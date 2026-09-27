@@ -9,6 +9,7 @@
 itbem-events-backend/
 ├── cmd/api/              # API entrypoint
 ├── internal/app/         # Composition root, server setup, dependency wiring
+├── internal/aicredentials/ # Central Secrets Manager credential-bundle boundary
 ├── internal/authz/       # Shared authorization helpers for protected handlers
 ├── internal/projectvault/# Generic static onboarding and curated Vault proposal domain
 ├── configuration/        # DB, Redis, CORS, env setup
@@ -31,7 +32,10 @@ itbem-events-backend/
 | `cmd/api/main.go` | Small executable entrypoint |
 | `cmd/itbem-local-oidc/main.go` | Disposable loopback-only signed identity fixture for authenticated local qualification |
 | `internal/app/app.go` | startup, middleware, dependency wiring, graceful shutdown |
+| `internal/aicredentials/bundle.go` | Strict, cached, versioned provider credential-bundle schema; never serialize values from this package. |
+| `internal/aicredentials/environment.go` | Selects the local ignored test bundle or deployed Secrets Manager boundary; cross-environment stores are rejected before AWS initialization. |
 | `internal/authz/authz.go` | Shared user/event/client/resource authorization helpers |
+| `controllers/automation/cost_filters.go` | Validates and applies authorization-preserving server-side cost filters and keyset cursors |
 | `routes/routes.go` | All API routes — `ConfigurarRutas` |
 | `configuration/gorm.go` | GORM setup, auto-migrate, model registration |
 | `configuration/environmentVariables.go` | Env var loading into Config |
@@ -64,8 +68,8 @@ itbem-events-backend/
 | ResourceType | `models/ResourceType.go` |
 | DesignTemplate | `models/DesignTemplate.go` |
 | DeliveryProject / work-item workflow | `models/DeliveryWorkflow.go` |
-| DeliveryRepositoryOnboarding / DeliveryProjectVaultRevision | `models/DeliveryProjectVault.go` |
-| Append-only repository capability probe evidence | `models/DeliveryRepositoryCapabilityProbe.go`, `internal/automationagent/onboarding_probe.go`, `controllers/delivery/onboarding.go`, `controllers/automation/automation.go` |
+| DeliveryPlanStepAssignmentEvent | `models/DeliveryPlanStepAssignmentEvent.go` |
+| DeliveryPlanStepEvidence | `models/DeliveryPlanStepEvidence.go` |
 | AutomationTask | `models/AutomationTask.go` |
 | Exact-SHA idempotent GitHub review publication | `models/AutomationCodeReviewPublication.go`, `internal/automationagent/github_review_publish.go`, `controllers/automation/automation.go` |
 | AutomationAgentHeartbeat | `models/AutomationAgentHeartbeat.go` |
@@ -104,7 +108,8 @@ itbem-events-backend/
 | clienttypes | `controllers/clienttypes/clientTypes.go` | `/api/catalogs/client-types` |
 | clientroles | `controllers/clientroles/clientRoles.go` | `/api/catalogs/roles` |
 | cache | `controllers/cache/cache.go` | `/api/cache*` |
-| delivery | `controllers/delivery/delivery.go`, `controllers/delivery/agent_runs.go`, `controllers/delivery/onboarding.go` | `/api/automation/projects*`, `/api/automation/work-items*` |
+| delivery | `controllers/delivery/delivery.go`, `controllers/delivery/agent_runs.go`, `controllers/delivery/plan_step_assignment_events.go`, `controllers/delivery/plan_step_evidence.go` | `/api/automation/projects*`, `/api/automation/work-items*`, `/api/automation/plans/:id/steps/:stepId/evidence*` |
+| automation | `controllers/automation/automation.go`, `controllers/automation/cost_filters.go`, `controllers/automation/step_evidence.go` | `/api/automation/costs`, signed step-evidence callback, agent runtime and inference gateway APIs |
 
 ## Services (`services/<domain>/`)
 
@@ -112,6 +117,7 @@ itbem-events-backend/
 |------|---------|
 | `services/events/EventService.go` | Event CRUD |
 | `services/events/EventTypeService.go` | EventType catalog |
+| `services/deliveryplansteps/steps.go` | Versioned plan-step and evidence-requirement validation, immutable DAG normalization, safe DTO projection |
 | `services/events/EventConfigService.go` | Event config |
 | `services/events/EventSectionService.go` | Event sections |
 | `services/events/EventAnalyticsService.go` | Analytics |

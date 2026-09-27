@@ -32,18 +32,21 @@ standard traces expose only metadata and totals; an authorized reviewer opens
 the exact inspector for a specific call. Failed provider calls remain in the
 ledger when usage exists, so retries cannot hide cost.
 
-## Segmented exact-SHA reviews
+The global `GET /api/automation/costs` endpoint accepts project, work-item,
+agent profile, provider, model and time-range filters. Its summary,
+breakdowns and paginated execution rows use the same filter scope; rows can be
+continued with an opaque keyset cursor ordered by `(completed_at, id)`. Agent
+cost attribution comes from the immutable `agent_key` captured on each
+execution, not the task's mutable current lease. Project/work-item budget
+guardrails intentionally remain current portfolio limits rather than being
+recalculated by the historical filters.
 
-A large `code.review` persists an encrypted task-scoped progress object before
-the first provider call, after each validated segment, and after an invalid
-candidate is bound to its single repair request. The checkpoint is bound to the
-task ID, base SHA, head SHA, full patch digest, each segment digest and the
-original immutable request reference. A retry may reuse only those completed
-segments and may resume only the stored repair; it never re-infers an observed
-completion. A missing, mismatched or malformed checkpoint fails closed before
-inference. The checkpoint is not a terminal result and cannot be published as
-a GitHub review; the normal exact-SHA aggregate and result evidence remain
-required before any external side effect.
+Epic-filtered totals follow the project-scoped task-to-epic membership interval
+that was active when each execution completed: `created_at <= completed_at`
+and (`deleted_at` is null or `deleted_at > completed_at`). Moving a task
+therefore leaves completed calls in the former epic and attributes calls
+completed at or after the move to the new epic, without counting either call
+twice at the boundary.
 
 ## Stagehand
 

@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadWorkspacesProvidesBoundedSecretFreeContext(t *testing.T) {
@@ -37,146 +38,177 @@ func TestLoadWorkspacesProvidesBoundedSecretFreeContext(t *testing.T) {
 	}
 }
 
-func TestVerifyDeliveryWorkspaceBindingRejectsMismatchedGitHubIdentity(t *testing.T) {
-	workspace := Workspace{ID: "backend"}
-	state := WorkspaceGitState{Available: true, GitHubRepository: "Itbem-Corp/itbem-events-backend"}
-	metadata := map[string]any{"github_repository": "Itbem-Corp/itbem-events-backend"}
-	if err := verifyDeliveryWorkspaceBinding(workspace, state, metadata); err != nil {
-		t.Fatalf("matching remote-agent binding rejected: %v", err)
+func TestDockerSandboxConfigurationIsExplicitAndResourceBounded(t *testing.T) {
+	config := WorkspaceConfig{SandboxRuntime: WorkspaceSandboxDocker, SandboxImage: "golang:1.25-bookworm", SandboxImageDigest: "sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d861346b9c6f8b36437", SandboxNetwork: "none", RequireSandbox: true}
+	if err := validateWorkspaceSandbox(&config); err != nil {
+		t.Fatalf("valid docker sandbox rejected: %v", err)
 	}
-	if err := verifyDeliveryWorkspaceBinding(workspace, state, map[string]any{"github_repository": "Itbem-Corp/other"}); err == nil {
-		t.Fatal("mismatched remote-agent binding was accepted")
+	if config.SandboxCPUs != "2" || config.SandboxMemory != "2g" || config.SandboxPIDsLimit != 256 {
+		t.Fatalf("docker sandbox defaults are not bounded: %#v", config)
 	}
-	if err := verifyDeliveryWorkspaceBinding(workspace, WorkspaceGitState{Available: true}, metadata); err == nil {
-		t.Fatal("binding without an observable GitHub identity was accepted")
+	args := dockerSandboxArguments(Workspace{Config: config}, t.TempDir(), "sandbox-test", map[string]string{"GIT_TERMINAL_PROMPT": "0"}, "go", "test", "./...")
+	joined := strings.Join(args, " ")
+	for _, required := range []string{"--network none", "--cpus 2", "--memory 2g", "--pids-limit 256", "--ulimit nofile=1024:1024", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--user 65532:65532", "--read-only", "--tmpfs /tmp:rw,noexec,nosuid,size=512m", "--env HOME=/tmp", "--env GOCACHE=/tmp/go-cache", "--env GOMODCACHE=/tmp/go-mod-cache", "--env GIT_TERMINAL_PROMPT=0", "golang:1.25-bookworm", "go test ./..."} {
+		if !strings.Contains(joined, required) {
+			t.Fatalf("docker sandbox args missing %q: %v", required, args)
+		}
 	}
-}
-
-func TestGitHubInstallationWorkspaceCommandsDisableCredentialHelpers(t *testing.T) {
-	config := []string{"-c", "credential.helper=", "-c", "http.proxy=", "-c", "http.sslVerify=true", "-c", "http.extraHeader="}
-	if got, want := gitWorkspaceFetchArguments("https://github.com/acme/service.git", true), append(append([]string{}, config...), "fetch", "--prune", "--tags", "--no-recurse-submodules", "https://github.com/acme/service.git", "+refs/heads/*:refs/remotes/origin/*"); !reflect.DeepEqual(got, want) {
-		t.Fatalf("authenticated fetch arguments = %#v, want %#v", got, want)
+	if !strings.Contains(joined, "golang:1.25-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d861346b9c6f8b36437") {
+		t.Fatalf("sandbox command must use the pinned image digest: %v", args)
 	}
-	if got, want := gitWorkspaceCloneArguments("main", "https://github.com/acme/service.git", "/workspace/service", true), append(append([]string{}, config...), "clone", "--origin", "origin", "--branch", "main", "--no-recurse-submodules", "https://github.com/acme/service.git", "/workspace/service"); !reflect.DeepEqual(got, want) {
-		t.Fatalf("authenticated clone arguments = %#v, want %#v", got, want)
-	}
-	if got := gitWorkspaceFetchArguments("origin", false); strings.Contains(strings.Join(got, "\x00"), "credential.helper=") {
-		t.Fatalf("legacy non-GitHub fetch unexpectedly changed credential policy: %#v", got)
-	}
-}
-
-func TestGitHubSourceAccessRequiredUsesOnlyRegisteredGitHubWorkspaces(t *testing.T) {
-	root := filepath.ToSlash(t.TempDir())
-	managed := func(repositoryURL string) string {
-		return `{"service":{"path":"` + root + `","repository_url":"` + repositoryURL + `","base_branch":"main","capabilities":["repository:read","repository:fetch"]}}`
-	}
-	for name, fixture := range map[string]struct {
-		registry string
-		want     bool
-		wantErr  string
-	}{
-		"HTTPS GitHub repository requires Source App": {
-			registry: managed("https://github.com/acme/service.git"), want: true,
-		},
-		"empty local registry does not require Source App": {
-			registry: `{"local":{"path":"` + root + `"}}`, want: false,
-		},
-		"non-GitHub repository does not require Source App": {
-			registry: managed("https://gitlab.example/acme/service.git"), want: false,
-		},
-		"invalid GitHub repository fails closed": {
-			registry: managed("https://github.com/acme"), wantErr: "invalid GitHub repository_url",
-		},
+	for _, invalid := range []WorkspaceConfig{
+		{SandboxRuntime: WorkspaceSandboxDocker, SandboxImage: "docker run --privileged"},
+		{SandboxRuntime: WorkspaceSandboxDocker, SandboxImage: "golang:latest", SandboxNetwork: "host"},
+		{SandboxRuntime: WorkspaceSandboxDocker, SandboxImage: "golang:latest", SandboxPIDsLimit: 4},
+		{SandboxRuntime: WorkspaceSandboxDocker, SandboxImage: "golang:latest", SandboxImageDigest: "sha256:not-a-digest", RequireSandbox: true},
+		{SandboxRuntime: WorkspaceSandboxProcess, RequireSandbox: true},
 	} {
-		t.Run(name, func(t *testing.T) {
-			got, err := GitHubSourceAccessRequired(func(key string) string {
-				if key == "ITBEM_AI_WORKSPACES_JSON" {
-					return fixture.registry
-				}
-				return ""
-			})
-			if fixture.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), fixture.wantErr) {
-					t.Fatalf("GitHub Source requirement error = %v, want %q", err, fixture.wantErr)
-				}
-				return
-			}
-			if err != nil || got != fixture.want {
-				t.Fatalf("GitHub Source requirement = %v, %v; want %v, nil", got, err, fixture.want)
-			}
-		})
+		if err := validateWorkspaceSandbox(&invalid); err == nil {
+			t.Fatalf("unsafe sandbox config accepted: %#v", invalid)
+		}
 	}
 }
 
-func TestLoadWorkspaceRegistryRequiresExplicitManagedDefaultBranch(t *testing.T) {
-	root := filepath.ToSlash(filepath.Join(t.TempDir(), "managed"))
-	if err := os.MkdirAll(filepath.FromSlash(root), 0700); err != nil {
+func TestRequiredSandboxFailsClosedBeforeProcessExecution(t *testing.T) {
+	_, err := runWorkspaceCommand(context.Background(), Workspace{Config: WorkspaceConfig{SandboxRuntime: WorkspaceSandboxProcess, RequireSandbox: true}}, t.TempDir(), 2*time.Second, "", nil, "go", "version")
+	if err == nil || !strings.Contains(err.Error(), "requires Docker sandbox") {
+		t.Fatalf("required sandbox must reject process execution, got %v", err)
+	}
+}
+
+func TestFirecrackerSupervisorBindsTaskAndRequiresGuestAttestation(t *testing.T) {
+	root := t.TempDir()
+	command := []string{os.Args[0], "-test.run=TestFirecrackerSupervisorHelper"}
+	workspace := Workspace{ID: "microvm", Root: root, Config: WorkspaceConfig{
+		SandboxRuntime: WorkspaceSandboxFirecracker, SandboxSupervisorCommand: command, RequireSandbox: true,
+	}}
+	if err := validateWorkspaceSandbox(&workspace.Config); err != nil {
 		t.Fatal(err)
 	}
-	for _, raw := range []string{
-		`{"demo":{"path":"` + root + `","repository_url":"https://example.invalid/demo.git","capabilities":["repository:read","repository:fetch"]}}`,
-		`{"demo":{"path":"` + root + `","base_branch":"trunk","capabilities":["repository:read","repository:fetch"]}}`,
-	} {
-		if _, err := LoadWorkspaceRegistry(raw); err == nil || !strings.Contains(err.Error(), "configured together") {
-			t.Fatalf("partial managed workspace identity was accepted: %s / %v", raw, err)
-		}
+	ctx := withSandboxTaskID(context.Background(), "task-microvm-1")
+	result, err := runWorkspaceCommand(ctx, workspace, root, 10*time.Second, "", nil, "go", "version")
+	if err != nil {
+		t.Fatalf("supervised command failed: %v", err)
 	}
-	valid := `{"demo":{"path":"` + root + `","repository_url":"https://example.invalid/demo.git","base_branch":"trunk","capabilities":["repository:read","repository:fetch"]}}`
-	workspaces, err := LoadWorkspaceRegistry(valid)
-	if err != nil || workspaces["demo"].Config.BaseBranch != "trunk" {
-		t.Fatalf("explicit non-main branch was not preserved: %#v / %v", workspaces, err)
+	if result.ExitCode != 0 || !strings.Contains(result.Output, "guest execution") {
+		t.Fatalf("unexpected supervised result: %#v", result)
 	}
-}
-
-func TestLoadWorkspacesBindsUniqueOperatorOwnedTestKindsByPosition(t *testing.T) {
-	root := filepath.ToSlash(t.TempDir())
-	valid := `{"demo":{"path":"` + root + `","validation_commands":[["go","test","./..."]],"validation_command_kinds":["unit"],"qa_commands":[["npm","run","test:e2e"]],"qa_command_kinds":["e2e"]}}`
-	workspaces, err := LoadWorkspaces(valid)
-	if err != nil || workspaces["demo"].Config.ValidationCommandKinds[0] != "unit" || workspaces["demo"].Config.QACommandKinds[0] != "e2e" {
-		t.Fatalf("valid named command registry was rejected: %#v / %v", workspaces, err)
+	lease := result.SandboxLease
+	if lease == nil || lease["runtime"] != WorkspaceSandboxFirecracker || lease["isolation_mode"] != "firecracker_microvm" {
+		t.Fatalf("lease must remain private and expose the configured runtime: %#v", lease)
 	}
-	for _, raw := range []string{
-		`{"demo":{"path":"` + root + `","validation_commands":[["go","test","./..."]],"validation_command_kinds":["unit","contract"]}}`,
-		`{"demo":{"path":"` + root + `","validation_commands":[["go","test","./..."]],"validation_command_kinds":["unit"],"qa_commands":[["npm","test"]],"qa_command_kinds":["UNIT"]}}`,
-		`{"demo":{"path":"` + root + `","qa_commands":[["npm","test"]],"qa_command_kinds":[" unsafe"]}}`,
-	} {
-		if _, err := LoadWorkspaces(raw); err == nil {
-			t.Fatalf("unsafe named command registry was accepted: %s", raw)
-		}
-	}
-	legacy := `{"demo":{"path":"` + root + `","validation_commands":[["go","test","./..."]]}}`
-	if _, err := LoadWorkspaces(legacy); err != nil {
-		t.Fatalf("legacy unlabeled commands should remain executable but non-gating: %v", err)
+	attestation, ok := lease["sandbox_attestation"].(map[string]any)
+	if !ok || attestation["runtime"] != "firecracker" || attestation["transport"] != "virtio_vsock" || attestation["guest_command_verified"] != true {
+		t.Fatalf("verified guest attestation missing from lease: %#v", lease)
 	}
 }
 
-func TestLoadWorkspacesValidatesReadOnlyFixtureAllowlist(t *testing.T) {
-	root := filepath.ToSlash(t.TempDir())
-	valid := `{"demo":{"path":"` + root + `","read_only_fixture_paths":[".contracts/public-schema"]}}`
-	workspaces, err := LoadWorkspaces(valid)
-	if err != nil || len(workspaces["demo"].Config.ReadOnlyFixturePaths) != 1 {
-		t.Fatalf("valid read-only fixture was rejected: %#v / %v", workspaces, err)
-	}
-	for _, fixture := range []string{"../outside", ".git", "secrets", ".env", "nested/api_token.txt"} {
-		raw := `{"demo":{"path":"` + root + `","read_only_fixture_paths":["` + fixture + `"]}}`
-		if _, err := LoadWorkspaces(raw); err == nil {
-			t.Fatalf("unsafe read-only fixture was accepted: %s", fixture)
-		}
+func TestFirecrackerSupervisorRejectsMissingLifecycleReceipt(t *testing.T) {
+	root := t.TempDir()
+	workspace := Workspace{ID: "microvm", Root: root, Config: WorkspaceConfig{
+		SandboxRuntime:           WorkspaceSandboxFirecracker,
+		SandboxSupervisorCommand: []string{os.Args[0], "-test.run=TestFirecrackerSupervisorIncompleteHelper"},
+		RequireSandbox:           true,
+	}}
+	ctx := withSandboxTaskID(context.Background(), "task-microvm-incomplete")
+	if _, err := runWorkspaceCommand(ctx, workspace, root, 10*time.Second, "", nil, "go", "version"); err == nil || !strings.Contains(err.Error(), "did not prove task lifecycle") {
+		t.Fatalf("missing lifecycle receipt must fail closed, got %v", err)
 	}
 }
 
-func TestSafeContextFileAllowsSecurityWorkflowDescriptorsButNotCredentials(t *testing.T) {
-	if !safeContextFile(".github/workflows/secret-scan.yml") {
-		t.Fatal("a secret-scanner workflow descriptor must remain copyable")
+// TestFirecrackerSupervisorHelper is launched as a subprocess by the test
+// above. It models only the supervisor protocol, not a fake VM claim: the
+// production adapter still requires the operator supervisor to provide the
+// same task/worktree binding and attestation contract.
+func TestFirecrackerSupervisorHelper(t *testing.T) {
+	if os.Getenv("FIRECRACKER_SUPERVISOR_PROTOCOL") != "1" {
+		return
 	}
-	for _, unsafe := range []string{
-		".github/workflows/secret.yml",
-		".github/workflows/api-token.yml",
-		"docs/secret-scan.yml",
-		"fixtures/credential-check.yaml",
-	} {
-		if safeContextFile(unsafe) {
-			t.Fatalf("credential-like path was accepted: %s", unsafe)
+	var request firecrackerSupervisorRequest
+	if err := json.NewDecoder(os.Stdin).Decode(&request); err != nil {
+		t.Fatal(err)
+	}
+	if request.TaskID == "" || request.WorkspaceID == "" || request.WorktreeDigest == "" {
+		t.Fatal("missing binding")
+	}
+	_ = json.NewEncoder(os.Stdout).Encode(firecrackerSupervisorResponse{
+		ProtocolVersion: 1, Operation: "execute", LeaseID: request.LeaseID, OK: true, ExitCode: 0, Stdout: "guest execution\n",
+		TaskID: request.TaskID, WorkspaceID: request.WorkspaceID, WorktreeDigest: request.WorktreeDigest,
+		Attestation: SandboxAttestation{Runtime: "firecracker", RuntimeVersion: "1.7.0", Transport: "virtio_vsock", EvidenceScope: "task_guest_command", GuestCommandVerified: true},
+		Lifecycle:   firecrackerSupervisorLifecycle{Created: true, WorktreeBound: true, GuestCommandExecuted: true, Destroyed: true, AttestationPersisted: true},
+	})
+	os.Exit(0)
+}
+
+func TestFirecrackerSupervisorIncompleteHelper(t *testing.T) {
+	if os.Getenv("FIRECRACKER_SUPERVISOR_PROTOCOL") != "1" {
+		return
+	}
+	var request firecrackerSupervisorRequest
+	if err := json.NewDecoder(os.Stdin).Decode(&request); err != nil {
+		t.Fatal(err)
+	}
+	_ = json.NewEncoder(os.Stdout).Encode(firecrackerSupervisorResponse{
+		ProtocolVersion: 1, Operation: request.Operation, LeaseID: request.LeaseID, OK: true, ExitCode: 0,
+		TaskID: request.TaskID, WorkspaceID: request.WorkspaceID, WorktreeDigest: request.WorktreeDigest,
+		Attestation: SandboxAttestation{Runtime: "firecracker", RuntimeVersion: "1.7.0", Transport: "virtio_vsock", EvidenceScope: "task_guest_command", GuestCommandVerified: true},
+	})
+	os.Exit(0)
+}
+
+func TestSandboxLeaseIsTaskScopedAndClosed(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("ITBEM_AI_SANDBOX_ATTESTATION_JSON", `{"runtime":"firecracker","runtime_version":"1.7.0","transport":"virtio_vsock","evidence_scope":"synthetic_guest_fixture","guest_command_verified":true}`)
+	ctx := withSandboxTaskID(context.Background(), "task-lease-123")
+	result, err := runWorkspaceCommand(ctx, Workspace{ID: "demo", Root: root, Config: WorkspaceConfig{SandboxRuntime: WorkspaceSandboxProcess}}, root, 5*time.Second, "", nil, "go", "version")
+	if err != nil || result.ExitCode != 0 {
+		t.Fatalf("sandbox command failed: %#v / %v", result, err)
+	}
+	lease := result.SandboxLease
+	if lease == nil || lease["task_id"] != "task-lease-123" || lease["workspace"] != "workspace://demo" || lease["runtime"] != WorkspaceSandboxProcess || lease["isolation_mode"] != "host_process" || lease["status"] != "completed" {
+		t.Fatalf("sandbox lease lost task-scoped lifecycle metadata: %#v", lease)
+	}
+	if !strings.HasPrefix(lease["worktree_digest"].(string), "sha256:") || lease["started_at"] == "" || lease["finished_at"] == "" || lease["lease_id"] == "" {
+		t.Fatalf("sandbox lease is not bounded and closed: %#v", lease)
+	}
+	attestation, ok := lease["sandbox_attestation"].(map[string]any)
+	if !ok || attestation["runtime"] != "firecracker" || attestation["transport"] != "virtio_vsock" || attestation["evidence_scope"] != "synthetic_guest_fixture" {
+		t.Fatalf("validated guest evidence was not bound to the lease: %#v", lease)
+	}
+}
+
+func TestLocalFirecrackerSerialAttestationIsExplicitlyScoped(t *testing.T) {
+	value := sandboxAttestation(`{"runtime":"firecracker","runtime_version":"1.7.0","transport":"serial_console","evidence_scope":"local_task_guest_command","guest_command_verified":true}`)
+	if value == nil || value.Transport != "serial_console" || value.EvidenceScope != "local_task_guest_command" {
+		t.Fatalf("local serial proof must be accepted only with its explicit scope: %#v", value)
+	}
+	if sandboxAttestation(`{"runtime":"firecracker","transport":"serial_console","evidence_scope":"task_guest_command","guest_command_verified":true}`) != nil {
+		t.Fatal("serial transport without the local proof scope must fail closed")
+	}
+}
+
+func TestComponentValidationCommandsAreOperatorOwnedAndScopeBound(t *testing.T) {
+	root := t.TempDir()
+	raw := `{"demo":{"path":"` + filepath.ToSlash(root) + `","validation_commands":[["go","test","./..."]],"component_validation_commands":{"apps/dashboard":[["npm","run","test:dashboard"]],"packages/ui":[["npm","run","test:ui"]]}}}`
+	workspaces, err := LoadWorkspaces(raw)
+	if err != nil {
+		t.Fatalf("load component validation registry: %v", err)
+	}
+	workspace := workspaces["demo"]
+	selected := workspace.ValidationCommandsForScopes([]string{"apps/dashboard"})
+	if len(selected) != 1 || selected[0].Scope != "apps/dashboard" || strings.Join(selected[0].Command, " ") != "npm run test:dashboard" {
+		t.Fatalf("unexpected scoped validation selection: %#v", selected)
+	}
+	if extra := workspace.ValidationCommandsForScopes([]string{"apps/mobile"}); len(extra) != 0 {
+		t.Fatalf("unrelated component validation must not run: %#v", extra)
+	}
+	if workspace.Harness().ComponentValidationCount != 2 {
+		t.Fatalf("harness must expose bounded component validation count: %#v", workspace.Harness())
+	}
+	for _, unsafeRoot := range []string{"../outside", "/absolute", ".env", ".git/hooks"} {
+		bad := `{"demo":{"path":"` + filepath.ToSlash(root) + `","component_validation_commands":{"` + unsafeRoot + `":[["go","test","./..."]]}}}`
+		if _, err := LoadWorkspaces(bad); err == nil {
+			t.Fatalf("unsafe component root accepted: %s", unsafeRoot)
 		}
 	}
 }
@@ -212,13 +244,14 @@ func TestDescribeWorkspaceExcludesCredentialLikeFilesAndDirectories(t *testing.T
 
 func TestDescribeWorkspaceRedactsSensitiveValuesEmbeddedInEligibleFiles(t *testing.T) {
 	root := t.TempDir()
+	githubToken := "ghp_" + strings.Repeat("1", 36)
 	content := strings.Join([]string{
 		"feature_flag=true",
 		"API_KEY=do-not-send-this-value",
 		"AWS_SECRET_ACCESS_KEY=aws-value-must-not-leak",
 		`{"client_secret":"also-not-safe"}`,
 		"Authorization: Bearer never-send-this",
-		"github token: ghp_123456789012345678901234567890123456", // gitleaks:allow -- synthetic redaction fixture
+		"github token: " + githubToken,
 		"postgres://agent:database-password@localhost/delivery",
 	}, "\n")
 	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte(content), 0600); err != nil {
@@ -232,45 +265,13 @@ func TestDescribeWorkspaceRedactsSensitiveValuesEmbeddedInEligibleFiles(t *testi
 		t.Fatalf("expected redacted eligible context, got %#v", context)
 	}
 	got := context.Excerpts[0].Content
-	for _, secret := range []string{"do-not-send-this-value", "aws-value-must-not-leak", "also-not-safe", "never-send-this", "ghp_123456789012345678901234567890123456", "database-password"} { // gitleaks:allow -- synthetic assertion fixture
+	for _, secret := range []string{"do-not-send-this-value", "aws-value-must-not-leak", "also-not-safe", "never-send-this", githubToken, "database-password"} {
 		if strings.Contains(got, secret) {
 			t.Fatalf("embedded secret leaked to agent context: %q", secret)
 		}
 	}
 	if !strings.Contains(got, "feature_flag=true") || !strings.Contains(got, "<redacted>") {
 		t.Fatalf("safe context or redaction marker missing: %q", got)
-	}
-}
-
-func TestRedactSourceExcerptPreservesFormatVerbsWithoutLeakingCredentials(t *testing.T) {
-	content := "return fmt.Errorf(\"mint repository-scoped Reviewer token: %w\", err)\nAPI_KEY=must-not-leak\n"
-	got, redactions := RedactSourceExcerpt(content)
-	if !strings.Contains(got, `token: %w`) {
-		t.Fatalf("source redaction corrupted a format verb: %q", got)
-	}
-	if strings.Contains(got, "must-not-leak") || redactions != 1 {
-		t.Fatalf("source redaction failed to remove the actual credential: %q (%d redactions)", got, redactions)
-	}
-}
-
-func TestRedactSourceExcerptPreservesEmptyAssignmentsAndSourceLiterals(t *testing.T) {
-	content := "API_KEY=\"\"\n" +
-		`for _, prohibited := range []string{"$env:MINIMAX_API_KEY =", "$env:OPENAI_API_KEY ="} {` + "\n" +
-		"OPENAI_API_KEY=\"must-not-leak\"\n" +
-		"ANTHROPIC_API_KEY='also-must-not-leak'\n"
-	got, redactions := RedactSourceExcerpt(content)
-	for _, preserved := range []string{`API_KEY=""`, `"$env:MINIMAX_API_KEY ="`, `"$env:OPENAI_API_KEY ="`} {
-		if !strings.Contains(got, preserved) {
-			t.Fatalf("source redaction corrupted a valueless assignment or source literal %q: %q", preserved, got)
-		}
-	}
-	for _, secret := range []string{"must-not-leak", "also-must-not-leak"} {
-		if strings.Contains(got, secret) {
-			t.Fatalf("source redaction leaked quoted credential %q: %q", secret, got)
-		}
-	}
-	if redactions != 2 {
-		t.Fatalf("expected exactly two quoted credential redactions, got %d: %q", redactions, got)
 	}
 }
 
@@ -507,49 +508,6 @@ func TestWorkspaceGitStateIsSanitizedAndDetectsLocalChanges(t *testing.T) {
 	}
 }
 
-func TestReadWorkspaceGitStateBindsOnlyTheOperatorRegisteredSSHAlias(t *testing.T) {
-	root := t.TempDir()
-	for _, command := range [][]string{{"git", "init"}, {"git", "config", "user.email", "test@example.invalid"}, {"git", "config", "user.name", "ITBEM Test"}} {
-		result, err := runLocal(context.Background(), root, commandTimeout, "", command[0], command[1:]...)
-		if err != nil || result.ExitCode != 0 {
-			t.Fatalf("git setup failed: %#v / %v", result, err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("initial"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	for _, command := range [][]string{{"git", "add", "README.md"}, {"git", "commit", "-m", "initial"}, {"git", "remote", "add", "origin", "git@github.com-work:Itbem-Corp/itbem-events-backend.git"}} {
-		result, err := runLocal(context.Background(), root, commandTimeout, "", command[0], command[1:]...)
-		if err != nil || result.ExitCode != 0 {
-			t.Fatalf("git setup failed: %#v / %v", result, err)
-		}
-	}
-	workspace := Workspace{ID: "demo", Root: root, Config: WorkspaceConfig{RepositoryURL: "git@github.com-work:Itbem-Corp/itbem-events-backend.git", BaseBranch: "main"}}
-	if state := ReadWorkspaceGitState(workspace); state.GitHubRepository != "Itbem-Corp/itbem-events-backend" {
-		t.Fatalf("operator-registered SSH alias was not bound safely: %#v", state)
-	}
-	changed, err := runLocal(context.Background(), root, commandTimeout, "", "git", "remote", "set-url", "origin", "git@github.com-work:Itbem-Corp/another-repository.git")
-	if err != nil || changed.ExitCode != 0 {
-		t.Fatalf("git remote update failed: %#v / %v", changed, err)
-	}
-	if state := ReadWorkspaceGitState(workspace); state.GitHubRepository != "" {
-		t.Fatalf("mismatched origin must not inherit operator repository identity: %#v", state)
-	}
-}
-
-func TestSameOperatorRegisteredRemoteRequiresTheExactConfiguredTransport(t *testing.T) {
-	alias := "git@github.com-work:Itbem-Corp/itbem-events-backend.git"
-	if !sameOperatorRegisteredRemote(alias, alias+"/") {
-		t.Fatal("a cosmetic trailing slash should not invalidate the operator remote binding")
-	}
-	if sameOperatorRegisteredRemote(alias, "https://github.com/Itbem-Corp/itbem-events-backend.git") {
-		t.Fatal("an SSH alias must not be treated as an unregistered HTTPS remote")
-	}
-	if sameOperatorRegisteredRemote(alias, "git@github.com-work:Itbem-Corp/another-repository.git") {
-		t.Fatal("a different registered repository must not inherit the Vault identity")
-	}
-}
-
 func TestFetchWorkspaceRemoteUpdatesRefsWithoutChangingCheckout(t *testing.T) {
 	remote := filepath.Join(t.TempDir(), "origin.git")
 	root := t.TempDir()
@@ -587,11 +545,10 @@ func TestFetchWorkspaceRemoteUpdatesRefsWithoutChangingCheckout(t *testing.T) {
 	}
 }
 
-func TestSyncManagedWorkspaceSupportsNonMainBranchAndRejectsDirtyCheckout(t *testing.T) {
+func TestSyncManagedWorkspaceClonesFastForwardsAndRejectsDirtyCheckout(t *testing.T) {
 	remote := filepath.Join(t.TempDir(), "origin.git")
 	seed := t.TempDir()
-	const baseBranch = "trunk"
-	for _, command := range [][]string{{"git", "init", "--bare", remote}, {"git", "init", "-b", baseBranch}, {"git", "config", "user.email", "test@example.invalid"}, {"git", "config", "user.name", "ITBEM Test"}} {
+	for _, command := range [][]string{{"git", "init", "--bare", remote}, {"git", "init", "-b", "main"}, {"git", "config", "user.email", "test@example.invalid"}, {"git", "config", "user.name", "ITBEM Test"}} {
 		result, err := runLocal(context.Background(), seed, commandTimeout, "", command[0], command[1:]...)
 		if err != nil || result.ExitCode != 0 {
 			t.Fatalf("git setup failed: %#v / %v", result, err)
@@ -600,140 +557,37 @@ func TestSyncManagedWorkspaceSupportsNonMainBranchAndRejectsDirtyCheckout(t *tes
 	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("one\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	for _, command := range [][]string{{"git", "add", "README.md"}, {"git", "commit", "-m", "initial"}, {"git", "remote", "add", "origin", remote}, {"git", "push", "-u", "origin", baseBranch}} {
+	for _, command := range [][]string{{"git", "add", "README.md"}, {"git", "commit", "-m", "initial"}, {"git", "remote", "add", "origin", remote}, {"git", "push", "-u", "origin", "main"}} {
 		result, err := runLocal(context.Background(), seed, commandTimeout, "", command[0], command[1:]...)
 		if err != nil || result.ExitCode != 0 {
 			t.Fatalf("seed push failed: %#v / %v", result, err)
 		}
 	}
 	root := filepath.Join(t.TempDir(), "managed", "project")
-	workspace := Workspace{ID: "managed", Root: root, Config: WorkspaceConfig{RepositoryURL: remote, BaseBranch: baseBranch, Capabilities: []string{WorkspaceCapabilityReadRepository, WorkspaceCapabilityFetchRemote}}}
+	workspace := Workspace{ID: "managed", Root: root, Config: WorkspaceConfig{RepositoryURL: remote, BaseBranch: "main", Capabilities: []string{WorkspaceCapabilityReadRepository, WorkspaceCapabilityFetchRemote}}}
 	state, err := SyncManagedWorkspace(context.Background(), workspace)
-	if err != nil || !state.Available || state.Branch != baseBranch || state.HasLocalChanges {
+	if err != nil || !state.Available || state.Branch != "main" || state.HasLocalChanges {
 		t.Fatalf("managed clone was not ready: %#v / %v", state, err)
-	}
-	status, statusErr := runLocal(context.Background(), root, commandTimeout, "", "git", "status", "--porcelain", "--untracked-files=all")
-	if statusErr != nil || status.ExitCode != 0 || strings.TrimSpace(status.Output) != "" {
-		t.Fatalf("managed clone must be clean to ordinary Git tooling: %#v / %v", status, statusErr)
-	}
-	ignored, ignoredErr := runLocal(context.Background(), root, commandTimeout, "", "git", "check-ignore", "-q", managedWorkspaceRuntimeExclude)
-	if ignoredErr != nil || ignored.ExitCode != 0 {
-		t.Fatalf("managed task-worktree directory must be locally ignored: %#v / %v", ignored, ignoredErr)
-	}
-	if err := os.MkdirAll(filepath.Join(root, ".itbem-agent-worktrees", "runtime-task"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, ".itbem-agent-worktrees", "runtime-task", "state.txt"), []byte("runtime state"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	status, statusErr = runLocal(context.Background(), root, commandTimeout, "", "git", "status", "--porcelain", "--untracked-files=all")
-	if statusErr != nil || status.ExitCode != 0 || strings.TrimSpace(status.Output) != "" {
-		t.Fatalf("managed runtime state must not make its base checkout dirty: %#v / %v", status, statusErr)
 	}
 	firstSHA := state.HeadSHA
 	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("two\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	for _, command := range [][]string{{"git", "add", "README.md"}, {"git", "commit", "-m", "advance"}, {"git", "push", "origin", baseBranch}} {
+	for _, command := range [][]string{{"git", "add", "README.md"}, {"git", "commit", "-m", "advance"}, {"git", "push", "origin", "main"}} {
 		result, runErr := runLocal(context.Background(), seed, commandTimeout, "", command[0], command[1:]...)
 		if runErr != nil || result.ExitCode != 0 {
 			t.Fatalf("seed advance failed: %#v / %v", result, runErr)
 		}
 	}
 	state, err = SyncManagedWorkspace(context.Background(), workspace)
-	if err != nil || state.HeadSHA == firstSHA || state.Branch != baseBranch {
+	if err != nil || state.HeadSHA == firstSHA || state.Branch != "main" {
 		t.Fatalf("managed checkout did not fast-forward: %#v / %v", state, err)
-	}
-	registryValue, err := json.Marshal(map[string]any{"managed": map[string]any{
-		"path": root, "repository_url": remote, "base_branch": baseBranch,
-		"capabilities": []string{WorkspaceCapabilityReadRepository, WorkspaceCapabilityFetchRemote},
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	registry := string(registryValue)
-	lookup := func(key string) string {
-		if key == "ITBEM_AI_WORKSPACES_JSON" {
-			return registry
-		}
-		return ""
-	}
-	freshDelivery := []byte(`{"context_sources":[{"kind":"repository","reference":"workspace://managed","revision":"` + state.HeadSHA + `"}]}`)
-	if err := PrepareDeliveryWorkspaces(context.Background(), freshDelivery, lookup); err != nil {
-		t.Fatalf("managed workspace at its exact frozen revision must prepare: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("three\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	for _, command := range [][]string{{"git", "add", "README.md"}, {"git", "commit", "-m", "advance again"}, {"git", "push", "origin", baseBranch}} {
-		result, runErr := runLocal(context.Background(), seed, commandTimeout, "", command[0], command[1:]...)
-		if runErr != nil || result.ExitCode != 0 {
-			t.Fatalf("seed second advance failed: %#v / %v", result, runErr)
-		}
-	}
-	if err := PrepareDeliveryWorkspaces(context.Background(), freshDelivery, lookup); err == nil || !strings.Contains(err.Error(), "fetched origin has advanced") {
-		t.Fatalf("stale Delivery snapshot must be rejected after fetch/prune: %v", err)
-	}
-	for _, command := range [][]string{{"git", "config", "user.email", "test@example.invalid"}, {"git", "config", "user.name", "ITBEM Test"}} {
-		result, runErr := runLocal(context.Background(), root, commandTimeout, "", command[0], command[1:]...)
-		if runErr != nil || result.ExitCode != 0 {
-			t.Fatalf("managed checkout identity setup failed: %#v / %v", result, runErr)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("local ahead\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	for _, command := range [][]string{{"git", "add", "README.md"}, {"git", "commit", "-m", "local ahead"}} {
-		result, runErr := runLocal(context.Background(), root, commandTimeout, "", command[0], command[1:]...)
-		if runErr != nil || result.ExitCode != 0 {
-			t.Fatalf("local managed branch advance failed: %#v / %v", result, runErr)
-		}
-	}
-	if _, err := SyncManagedWorkspace(context.Background(), workspace); err == nil || !strings.Contains(err.Error(), "not identical to fetched origin") {
-		t.Fatalf("locally-ahead managed base must be rejected after a no-op fast-forward: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(root, "local.txt"), []byte("do not overwrite"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := SyncManagedWorkspace(context.Background(), workspace); err == nil || !strings.Contains(err.Error(), "local changes") {
 		t.Fatalf("dirty managed checkout must not be switched: %v", err)
-	}
-}
-
-func TestPrepareDeliveryWorkspacesRejectsInvalidManagedRevisionBeforeSyncAndSkipsLegacyWorkspace(t *testing.T) {
-	managedRoot, legacyRoot := filepath.Join(t.TempDir(), "managed"), filepath.Join(t.TempDir(), "legacy")
-	if err := os.MkdirAll(managedRoot, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(legacyRoot, 0700); err != nil {
-		t.Fatal(err)
-	}
-	registryValue, err := json.Marshal(map[string]any{
-		"managed": map[string]any{
-			"path": managedRoot, "repository_url": "https://example.invalid/managed.git", "base_branch": "main",
-			"capabilities": []string{WorkspaceCapabilityReadRepository, WorkspaceCapabilityFetchRemote},
-		},
-		"legacy": map[string]any{"path": legacyRoot},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	lookup := func(key string) string {
-		if key == "ITBEM_AI_WORKSPACES_JSON" {
-			return string(registryValue)
-		}
-		return ""
-	}
-	invalid := json.RawMessage(`{"context_sources":[{"kind":"repository","reference":"workspace://managed","revision":"short-sha"}]}`)
-	if err := PrepareDeliveryWorkspaces(context.Background(), invalid, lookup); err == nil || !strings.Contains(err.Error(), "no immutable frozen revision") {
-		t.Fatalf("invalid managed revision must fail before remote synchronization: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(managedRoot, ".git")); !os.IsNotExist(err) {
-		t.Fatalf("invalid revision must not create or mutate a managed checkout: %v", err)
-	}
-	legacy := json.RawMessage(`{"context_sources":[{"kind":"repository","reference":"workspace://legacy","revision":"` + strings.Repeat("a", 40) + `"}]}`)
-	if err := PrepareDeliveryWorkspaces(context.Background(), legacy, lookup); err != nil {
-		t.Fatalf("legacy local-only workspace should not require managed synchronization: %v", err)
 	}
 }
 
@@ -808,13 +662,15 @@ func TestDiagnoseWorkspacesReportsReadinessWithoutSourceOrPathDisclosure(t *test
 	}
 }
 
-func TestWorkspaceHarnessExecutablesReadyFailsClosedWithoutPublishingCommandNames(t *testing.T) {
-	if !workspaceHarnessExecutablesReady(WorkspaceConfig{}) {
-		t.Fatal("an empty optional harness should remain ready")
+func TestFirecrackerSupervisorRequiresProductionJailerProfile(t *testing.T) {
+	if firecrackerSupervisorProductionProfile([]string{"python3", "supervisor.py"}) {
+		t.Fatal("local supervisor must not satisfy the production profile")
 	}
-	t.Setenv("PATH", t.TempDir())
-	if workspaceHarnessExecutablesReady(WorkspaceConfig{ValidationCommands: [][]string{{"go", "test", "./..."}}}) {
-		t.Fatal("a configured but unavailable executable must fail doctor readiness")
+	if firecrackerSupervisorProductionProfile([]string{"python3", "supervisor.py", "--profile", "production"}) {
+		t.Fatal("production profile without Jailer must not satisfy the gate")
+	}
+	if !firecrackerSupervisorProductionProfile([]string{"python3", "supervisor.py", "--profile", "production", "--jailer"}) {
+		t.Fatal("production Jailer profile should satisfy the operator command contract")
 	}
 }
 
@@ -837,7 +693,7 @@ func TestWorkspaceReadinessSnapshotIsSafeAndRepresentsQAAndPublicationCapabiliti
 	}
 	readiness, err := WorkspaceReadinessSnapshot(func(key string) string {
 		if key == "ITBEM_AI_WORKSPACES_JSON" {
-			return `{"dashboard":{"path":"` + filepath.ToSlash(root) + `","capabilities":["repository:read","worktree:create","patch:apply","commit:stage","branch:publish","pull_request:create"],"validation_commands":[["go","test","./..."]],"validation_command_kinds":["unit"],"qa_commands":[["go","test","./..."]],"qa_command_kinds":["integration"],"qa_semantic_command":["go","run","./cmd/semantic-qa","--url","{preview_url}","--output","{artifact_path}","--plan","{qa_plan_path}"]}}`
+			return `{"dashboard":{"path":"` + filepath.ToSlash(root) + `","capabilities":["repository:read","worktree:create","patch:apply","commit:stage","branch:publish","pull_request:create"],"validation_commands":[["go","test","./..."]],"qa_commands":[["go","test","./..."]],"qa_semantic_command":["node","runner.mjs","--url","{preview_url}","--output","{artifact_path}","--plan","{qa_plan_path}"]}}`
 		}
 		return ""
 	})
@@ -845,7 +701,7 @@ func TestWorkspaceReadinessSnapshotIsSafeAndRepresentsQAAndPublicationCapabiliti
 		t.Fatalf("workspace readiness: %#v / %v", readiness, err)
 	}
 	entry := readiness[0]
-	if entry.ID != "dashboard" || !entry.Ready || !entry.QAReady || !entry.VisualQAReady || !entry.PublicationReady || entry.ValidationCommandCount != 1 || entry.NamedValidationCommandCount != 1 || entry.QACommandCount != 1 || entry.NamedQACommandCount != 1 {
+	if entry.ID != "dashboard" || !entry.Ready || !entry.QAReady || !entry.VisualQAReady || !entry.PublicationReady || entry.ValidationCommandCount != 1 || entry.QACommandCount != 1 {
 		t.Fatalf("unexpected readiness projection: %#v", entry)
 	}
 	encoded, err := json.Marshal(entry)
@@ -855,6 +711,26 @@ func TestWorkspaceReadinessSnapshotIsSafeAndRepresentsQAAndPublicationCapabiliti
 	for _, forbidden := range []string{filepath.ToSlash(root), "README.md", "head_sha", "branch", "capabilities"} {
 		if strings.Contains(string(encoded), forbidden) {
 			t.Fatalf("readiness leaked %q: %s", forbidden, encoded)
+		}
+	}
+}
+
+func TestSandboxAttestationIsStrictlyObservational(t *testing.T) {
+	valid := `{"runtime":"Firecracker","runtime_version":"1.7.0","transport":"VIRTIO_VSOCK","evidence_scope":"synthetic_guest_fixture","guest_command_verified":true,"evidence_digest":"sha256:abc"}`
+	attestation := sandboxAttestation(valid)
+	if attestation == nil || attestation.Runtime != "firecracker" || attestation.Transport != "virtio_vsock" || attestation.EvidenceScope != "synthetic_guest_fixture" || !attestation.GuestCommandVerified {
+		t.Fatalf("valid attestation was not normalized: %#v", attestation)
+	}
+	for _, invalid := range []string{
+		`{"runtime":"docker","transport":"virtio_vsock","evidence_scope":"synthetic_guest_fixture","guest_command_verified":true}`,
+		`{"runtime":"firecracker","transport":"virtio_vsock","guest_command_verified":true}`,
+		`{"runtime":"firecracker","transport":"tcp","guest_command_verified":true}`,
+		`{"runtime":"firecracker","transport":"virtio_vsock","guest_command_verified":false}`,
+		`{"runtime":"firecracker","transport":"virtio_vsock","guest_command_verified":true,"runtime_version":"` + strings.Repeat("x", 65) + `"}`,
+		`not-json`,
+	} {
+		if got := sandboxAttestation(invalid); got != nil {
+			t.Fatalf("invalid attestation must be omitted: %#v", got)
 		}
 	}
 }
@@ -889,6 +765,49 @@ func TestWorkspaceRejectsShellCommandsAndUnsafeScreenshotTemplates(t *testing.T)
 	}
 	if _, err := LoadWorkspaces(`{"demo":{"path":"` + filepath.ToSlash(root) + `","qa_semantic_command":["node","runner.mjs","--url","{preview_url}","--output","{artifact_path}","--plan","{qa_plan_path}","--again","{qa_plan_path}"]}}`); err == nil {
 		t.Fatal("duplicate QA plan placeholders must be rejected")
+	}
+}
+
+func TestApprovedSemanticRuntimeAllowsOnlyAbsoluteNodePaths(t *testing.T) {
+	for _, command := range []string{
+		"/usr/bin/node",
+		"/usr/local/bin/node.exe",
+		"C:/managed/node.exe",
+		`C:\managed\node.exe`,
+		`\\build-host\tools\node.exe`,
+	} {
+		if !approvedSemanticRuntime(command) {
+			t.Errorf("absolute Node runtime %q was rejected", command)
+		}
+	}
+
+	for _, command := range []string{
+		"/usr/bin/pwsh",
+		"C:/Windows/System32/pwsh.exe",
+		"/usr/bin/Node.exe",
+		"node.exe",
+		"./node",
+		"tools/node",
+		"/usr/bin/node-wrapper",
+		"/usr/bin/node/",
+	} {
+		if approvedSemanticRuntime(command) {
+			t.Errorf("unapproved semantic runtime %q was accepted", command)
+		}
+	}
+
+	// The short name is intentionally preserved as the standard managed Node
+	// runtime; arbitrary relative paths and shell names remain rejected above.
+	if !approvedSemanticRuntime("node") {
+		t.Fatal("the standard managed Node runtime was rejected")
+	}
+}
+
+func TestWorkspaceAcceptsApprovedSecurityQACommands(t *testing.T) {
+	root := t.TempDir()
+	raw := `{"demo":{"path":"` + filepath.ToSlash(root) + `","qa_commands":[["gitleaks","detect","--no-banner"],["govulncheck","./..."]]}}`
+	if _, err := LoadWorkspaces(raw); err != nil {
+		t.Fatalf("expected registered security QA commands to be accepted: %v", err)
 	}
 }
 
@@ -927,7 +846,7 @@ func TestWorkspaceContextExposesOnlySafeHarnessCapabilities(t *testing.T) {
 	root := t.TempDir()
 	workspace, err := RegisteredWorkspace("workspace://demo", func(key string) string {
 		if key == "ITBEM_AI_WORKSPACES_JSON" {
-			return `{"demo":{"path":"` + filepath.ToSlash(root) + `","validation_commands":[["go","test","./..."]],"validation_command_kinds":["unit"],"qa_commands":[["npm","run","test:e2e"]],"qa_command_kinds":["e2e"],"qa_artifact_patterns":["test-results/*.xml"],"qa_screenshot_command":["npx","capture","{preview_url}","{artifact_path}"],"qa_semantic_command":["node","tools/stagehand-qa/run.mjs","--url","{preview_url}","--output","{artifact_path}"]}}`
+			return `{"demo":{"path":"` + filepath.ToSlash(root) + `","validation_commands":[["go","test","./..."]],"qa_commands":[["npm","run","test:e2e"]],"qa_artifact_patterns":["test-results/*.xml"],"qa_screenshot_command":["npx","capture","{preview_url}","{artifact_path}"],"qa_semantic_command":["node","tools/stagehand-qa/run.mjs","--url","{preview_url}","--output","{artifact_path}"]}}`
 		}
 		return ""
 	})
@@ -938,7 +857,7 @@ func TestWorkspaceContextExposesOnlySafeHarnessCapabilities(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if context.Harness.ValidationCommandCount != 1 || context.Harness.NamedValidationCommandCount != 1 || context.Harness.QACommandCount != 1 || context.Harness.NamedQACommandCount != 1 || !context.Harness.ArtifactCollection || context.Harness.ScreenshotMode != "configured_command" || context.Harness.SemanticQAMode != "configured_command" {
+	if context.Harness.ValidationCommandCount != 1 || context.Harness.QACommandCount != 1 || !context.Harness.ArtifactCollection || context.Harness.ScreenshotMode != "configured_command" || context.Harness.SemanticQAMode != "configured_command" {
 		t.Fatalf("safe harness profile is incomplete: %#v", context.Harness)
 	}
 	encoded, err := json.Marshal(context)

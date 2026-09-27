@@ -2,6 +2,7 @@ package delivery
 
 import (
 	"encoding/json"
+	"errors"
 	"events-stocks/configuration"
 	"events-stocks/internal/automationagent"
 	"events-stocks/internal/deliveryledger"
@@ -11,6 +12,7 @@ import (
 	"events-stocks/models"
 	automationqueue "events-stocks/repositories/automationqueuerepository"
 	awsrepository "events-stocks/repositories/awsrepository"
+	"events-stocks/services/deliveryplansteps"
 	"events-stocks/services/deliveryworkflow"
 	outboxService "events-stocks/services/outbox"
 	"events-stocks/utils"
@@ -57,6 +59,20 @@ var agentRunSpecs = map[string]agentRunSpec{
 	"summary":      {operation: "delivery.summary", states: stateSet(deliveryworkflow.StateReleaseReview)},
 }
 
+func validApprovedPlanHash(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, char := range value {
+		switch {
+		case char >= '0' && char <= '9', char >= 'a' && char <= 'f':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 type deliveryAgentInput struct {
 	SchemaVersion int    `json:"schema_version"`
 	Prompt        string `json:"prompt"`
@@ -82,6 +98,9 @@ type deliveryAgentInput struct {
 		// workflow; the implementation phase is still independently gated by
 		// state and a recorded human decision.
 		ApprovedPlan   map[string]any              `json:"approved_plan,omitempty"`
+		PlanSteps      []deliveryplansteps.StepDTO `json:"plan_steps,omitempty"`
+		PlanExecution  *deliveryAgentPlanExecution `json:"plan_execution,omitempty"`
+		Mandate        deliveryAutonomyMandate     `json:"mandate"`
 		AutonomyPolicy deliveryAgentAutonomyPolicy `json:"autonomy_policy"`
 		ContextSources []deliveryAgentContext      `json:"context_sources"`
 		// RepositoryTopology gives the planner an explicit dependency map for a
@@ -106,6 +125,13 @@ type deliveryAgentInput struct {
 		Gatekeeper         *releasegate.Input                          `json:"gatekeeper,omitempty"`
 		ReleaseEnvironment []releasegatecontrol.EnvironmentRequirement `json:"release_environment,omitempty"`
 	} `json:"delivery"`
+}
+
+type deliveryAgentPlanExecution struct {
+	ParentTaskID string `json:"parent_task_id"`
+	PlanID       string `json:"plan_id"`
+	PlanVersion  int    `json:"plan_version"`
+	PlanHash     string `json:"plan_hash"`
 }
 
 type deliveryAgentChangeSet struct {
@@ -205,6 +231,21 @@ var genericContextMetadataKeys = map[string]struct{}{
 	"updated_at": {}, "version": {}, "summary": {}, "tags": {}, "scope": {}, "owner_team": {},
 }
 
+var epicContextMetadataKeys = map[string]struct{}{
+	"epic_id": {}, "status": {}, "summary": {},
+}
+
+var environmentContextMetadataKeys = map[string]struct{}{
+	"excerpt": {}, "branch": {}, "deployment": {}, "url": {}, "promotion": {},
+}
+
+var runbookContextMetadataKeys = map[string]struct{}{
+	"excerpt": {}, "technologies": {}, "issue_workflow": {}, "branch_workflow": {},
+	"pull_request_workflow": {}, "release_workflow": {},
+	"source_type": {}, "language": {}, "format": {}, "status": {}, "updated_at": {},
+	"version": {}, "summary": {}, "tags": {}, "scope": {}, "owner_team": {},
+}
+
 type deliveryAgentRepository struct {
 	Name                string   `json:"name"`
 	Reference           string   `json:"reference"`
@@ -276,9 +317,214 @@ func StartAgentRun(c echo.Context) error {
 	return enqueueAgentRun(c, workItemID, actor.CognitoSub, request, nil)
 }
 
-// enqueueAgentRun is shared by a human request and a persisted continuation.
-// Continuations remain bound to their epoch so an old automatic instruction
-// cannot resurrect work after a human has changed the workflow.
+func enqueueApprovedPlanStepChildrenInTransaction(
+	c echo.Context,
+	tx *gorm.DB,
+	parent *models.AutomationTask,
+	inputRef string,
+	item models.DeliveryWorkItem,
+	planID uuid.UUID,
+	steps []deliveryplansteps.StepDTO,
+	planHash string,
+	maxConcurrency int,
+	now time.Time,
+) error {
+	if c == nil || tx == nil || parent == nil || parent.ID == uuid.Nil || planID == uuid.Nil || len(steps) == 0 || !validApprovedPlanHash(planHash) || maxConcurrency < 1 || maxConcurrency > models.DeliveryPlanExecutionMaxConcurrency {
+		return fmt.Errorf("approved plan-step fan-out contract is incomplete")
+	}
+	if item.ID == uuid.Nil || item.ProjectID == uuid.Nil || parent.DeliveryWorkItemID == nil || *parent.DeliveryWorkItemID != item.ID || parent.Operation != "delivery.implementation" || inputRef == "" || inputRef != parent.InputRef {
+		return fmt.Errorf("approved plan-step parent identity is invalid")
+	}
+	now = now.UTC()
+	execution, executionCreated, err := deliveryplansteps.CreateExecutionInTransaction(tx, parent.ID, planID, maxConcurrency, "delivery-plan-execution:"+parent.ID.String(), now)
+	if err != nil {
+		return fmt.Errorf("create frozen approved-plan execution: %w", err)
+	}
+	if execution.PlanHash != planHash {
+		return fmt.Errorf("implementation input hash differs from the persisted approved-plan execution")
+	}
+	var frozenPlan models.DeliveryPlan
+	if err := tx.First(&frozenPlan, "id = ? AND work_item_id = ?", execution.PlanID, item.ID).Error; err != nil {
+		return err
+	}
+	var frozenStepRows []models.DeliveryPlanStep
+	if err := tx.Where("plan_id = ?", frozenPlan.ID).Order("display_order ASC, id ASC").Find(&frozenStepRows).Error; err != nil {
+		return err
+	}
+	var frozenDependencies []models.DeliveryPlanStepDependency
+	if err := tx.Where("plan_id = ?", frozenPlan.ID).Order("step_id ASC, depends_on_step_id ASC").Find(&frozenDependencies).Error; err != nil {
+		return err
+	}
+	frozenSteps, err := deliveryplansteps.DTOs(frozenStepRows, frozenDependencies, frozenPlan.Version)
+	if err != nil || !sameApprovedPlanStepDefinitions(steps, frozenSteps) {
+		return fmt.Errorf("implementation input differs from the frozen approved-plan snapshot")
+	}
+	stepByID := make(map[uuid.UUID]deliveryplansteps.StepDTO, len(frozenSteps))
+	for _, step := range frozenSteps {
+		stepID, parseErr := uuid.FromString(strings.TrimSpace(step.ID))
+		stepPlanID, planParseErr := uuid.FromString(strings.TrimSpace(step.PlanID))
+		if parseErr != nil || planParseErr != nil || stepID == uuid.Nil || stepPlanID != planID || step.PlanVersion != execution.PlanVersion {
+			return fmt.Errorf("normalized implementation steps do not match the frozen approved-plan snapshot")
+		}
+		if _, duplicate := stepByID[stepID]; duplicate {
+			return fmt.Errorf("normalized implementation steps contain a duplicate identity")
+		}
+		stepByID[stepID] = step
+		child := models.AutomationTask{
+			ID:          deliveryplansteps.ChildAutomationTaskID(execution.ID, stepID),
+			JobID:       deliveryplansteps.ChildAutomationJobID(execution.ID, stepID),
+			RequestedBy: parent.RequestedBy, DeliveryWorkItemID: parent.DeliveryWorkItemID,
+			CorrelationID: parent.CorrelationID, Operation: parent.Operation,
+			MaxCompletionTokens: parent.MaxCompletionTokens, InputRef: inputRef,
+			// Steps not yet reserved remain inert: only root assignments are
+			// promoted to queued and written to the outbox below.
+			Status: "pending", CreatedAt: now, UpdatedAt: now,
+		}
+		result := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "id"}}, DoNothing: true}).Create(&child)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			var existing models.AutomationTask
+			if err := tx.Select("id", "job_id", "delivery_work_item_id", "operation", "input_ref", "status").First(&existing, "id = ?", child.ID).Error; err != nil {
+				return err
+			}
+			if existing.JobID != child.JobID || existing.DeliveryWorkItemID == nil || *existing.DeliveryWorkItemID != item.ID || existing.Operation != child.Operation || existing.InputRef != inputRef || (existing.Status != "pending" && existing.Status != "queued" && existing.Status != "running" && existing.Status != "completed" && existing.Status != "failed" && existing.Status != "cancelled") {
+				return fmt.Errorf("deterministic plan-step child task conflicts with the frozen execution")
+			}
+		}
+	}
+	execution, readySteps, err := deliveryplansteps.ReadyPlanStepsInTransaction(tx, execution.ID, now)
+	if err != nil {
+		return fmt.Errorf("resolve ready plan roots: %w", err)
+	}
+	if len(readySteps) == 0 {
+		if !executionCreated {
+			var existingAssignments int64
+			if err := tx.Model(&models.DeliveryPlanStepAssignment{}).Where("execution_id = ?", execution.ID).Count(&existingAssignments).Error; err != nil {
+				return err
+			}
+			if existingAssignments > 0 {
+				// A replay sees the stable execution and its prior reservations. The
+				// original task+outbox transaction is atomic, so it must not create a
+				// second child/message set.
+				return nil
+			}
+		}
+		return fmt.Errorf("approved plan has no ready step to dispatch")
+	}
+	childTaskIDs := make(map[uuid.UUID]uuid.UUID, len(readySteps))
+	for _, step := range readySteps {
+		if _, exists := stepByID[step.ID]; !exists {
+			return fmt.Errorf("ready step is not present in the frozen step input")
+		}
+		childTaskIDs[step.ID] = deliveryplansteps.ChildAutomationTaskID(execution.ID, step.ID)
+	}
+	assignments, err := deliveryplansteps.ReserveReadyAssignmentsInTransaction(tx, execution.ID, execution.MaxConcurrency, childTaskIDs, now)
+	if err != nil {
+		return fmt.Errorf("reserve ready plan-step assignments: %w", err)
+	}
+	if len(assignments) != len(childTaskIDs) {
+		return fmt.Errorf("reserved plan-step assignment set differs from ready steps")
+	}
+	for _, assignment := range assignments {
+		step, found := stepByID[assignment.DeliveryPlanStepID]
+		if !found || assignment.ChildAutomationTaskID != childTaskIDs[assignment.DeliveryPlanStepID] {
+			return fmt.Errorf("reserved plan-step assignment does not match its child task")
+		}
+		queuedAt := now
+		result := tx.Model(&models.DeliveryPlanStepAssignment{}).
+			Where("id = ? AND status IN ?", assignment.ID, []string{models.DeliveryPlanStepAssignmentPending, models.DeliveryPlanStepAssignmentQueued}).
+			Updates(map[string]any{"status": models.DeliveryPlanStepAssignmentQueued, "queued_at": queuedAt, "updated_at": now})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return fmt.Errorf("plan-step assignment was not queueable")
+		}
+		var child models.AutomationTask
+		if err := tx.First(&child, "id = ?", assignment.ChildAutomationTaskID).Error; err != nil {
+			return err
+		}
+		queuedChild := tx.Model(&models.AutomationTask{}).Where("id = ? AND status IN ?", child.ID, []string{"pending", "queued"}).Updates(map[string]any{"status": "queued", "updated_at": now})
+		if queuedChild.Error != nil {
+			return queuedChild.Error
+		}
+		if queuedChild.RowsAffected != 1 {
+			return fmt.Errorf("precreated child task is not eligible for first dispatch")
+		}
+		message := approvedPlanStepQueueMessage(item, child, step)
+		message.Payload.AgentKey = assignment.TargetAgentKey
+		message.Payload.TargetMachineID = assignment.TargetMachineID
+		enqueued, err := outboxService.EnqueueAutomationProcess(c.Request().Context(), tx, message)
+		if err != nil {
+			return err
+		}
+		_ = enqueued // A deterministic outbox dedupe is a successful replay.
+	}
+	dispatchedAt := now
+	result := tx.Model(&models.DeliveryPlanExecution{}).
+		Where("id = ? AND status IN ?", execution.ID, []string{models.DeliveryPlanExecutionPending, models.DeliveryPlanExecutionDispatching}).
+		Updates(map[string]any{"status": models.DeliveryPlanExecutionDispatching, "dispatched_at": dispatchedAt, "updated_at": now})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return fmt.Errorf("approved-plan execution is no longer dispatchable")
+	}
+	return nil
+}
+
+func approvedPlanStepQueueMessage(item models.DeliveryWorkItem, child models.AutomationTask, step deliveryplansteps.StepDTO) automationqueue.Message {
+	message := automationqueue.Message{SchemaVersion: 1, JobID: child.JobID.String(), TenantCode: "itbem", CorrelationID: child.CorrelationID, Type: "ai.local.process"}
+	message.Payload.TaskID = child.ID.String()
+	message.Payload.ProjectID = item.ProjectID.String()
+	message.Payload.AgentKey = strings.TrimSpace(step.AgentKey)
+	message.Payload.PlanStepID = strings.TrimSpace(step.ID)
+	message.Payload.Operation = child.Operation
+	message.Payload.MaxCompletionTokens = child.MaxCompletionTokens
+	message.Payload.InputRef = child.InputRef
+	message.Payload.Attempt = 1
+	return message
+}
+
+func sameApprovedPlanStepDefinitions(expected, frozen []deliveryplansteps.StepDTO) bool {
+	if len(expected) == 0 || len(expected) != len(frozen) {
+		return false
+	}
+	for index := range expected {
+		left, right := expected[index], frozen[index]
+		if left.ID != right.ID || left.PlanID != right.PlanID || left.PlanVersion != right.PlanVersion || left.StepKey != right.StepKey || left.Order != right.Order || left.Title != right.Title || left.Objective != right.Objective || left.AgentKey != right.AgentKey || !sameDeliveryStrings(left.AcceptanceCriteria, right.AcceptanceCriteria) || !sameDeliveryStrings(left.DependsOn, right.DependsOn) {
+			return false
+		}
+	}
+	return true
+}
+
+func sameDeliveryStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func aggregatePlanStepBudgetReservation(perChildMicros int64, childCount int) (int64, error) {
+	if perChildMicros < 0 || childCount < 1 || childCount > models.DeliveryPlanExecutionMaxConcurrency {
+		return 0, fmt.Errorf("implementation aggregate budget inputs are invalid")
+	}
+	if perChildMicros > int64(^uint64(0)>>1)/int64(childCount) {
+		return 0, fmt.Errorf("implementation aggregate budget exceeds supported range")
+	}
+	return perChildMicros * int64(childCount), nil
+}
+
+// Authorization is performed by the HTTP caller or a persisted continuation
+// issued during a human transition. Both paths share admission and outbox logic.
 func enqueueAgentRun(c echo.Context, workItemID uuid.UUID, requestedBy string, request agentRunRequest, continuation *models.DeliveryContinuation) error {
 	phase := strings.ToLower(strings.TrimSpace(request.Phase))
 	spec, allowed := agentRunSpecs[phase]
@@ -300,6 +546,9 @@ func enqueueAgentRun(c echo.Context, workItemID uuid.UUID, requestedBy string, r
 
 	var item models.DeliveryWorkItem
 	var project models.DeliveryProject
+	var approvedPlanID uuid.UUID
+	var approvedPlanVersion int
+	var approvedPlanHash string
 	var snapshots []models.DeliveryContextSnapshot
 	var vaultRevisions []models.DeliveryProjectVaultRevision
 	var changeSets []models.DeliveryChangeSet
@@ -307,6 +556,7 @@ func enqueueAgentRun(c echo.Context, workItemID uuid.UUID, requestedBy string, r
 	var evidence []models.DeliveryEvidence
 	var gates []models.DeliveryGate
 	var publicationGrant *models.DeliveryPublicationGrant
+	var agentPlanSteps []deliveryplansteps.StepDTO
 	if err := configuration.DB.Transaction(func(tx *gorm.DB) error {
 		// Keep the phase check and task enqueue decision in the same serialized
 		// work-item timeline as human transitions and publication grants.
@@ -375,6 +625,42 @@ func enqueueAgentRun(c echo.Context, workItemID uuid.UUID, requestedBy string, r
 			}
 			publicationGrant = &grant
 		}
+		if phase != "plan" && phase != "chat" {
+			var approvedPlan models.DeliveryPlan
+			if err := tx.Where("work_item_id = ? AND status = ?", item.ID, "approved").Order("version DESC").First(&approvedPlan).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return fmt.Errorf("a persisted approved plan version is required before this agent run")
+				}
+				return err
+			}
+			if phase == "implementation" {
+				approvedPlanID = approvedPlan.ID
+			}
+			// The approved version row is the source of truth for both the raw
+			// structured proposal and the normalized execution graph.
+			item.PlanJSON = approvedPlan.StructuredJSON
+			stepRows, _, ensureErr := ensureDeliveryPlanStepsTx(tx, approvedPlan, "agent:"+phase)
+			if ensureErr != nil {
+				return fmt.Errorf("approved plan steps are unavailable: %w", ensureErr)
+			}
+			if phase == "implementation" {
+				var dependencies []models.DeliveryPlanStepDependency
+				if err := tx.Where("plan_id = ?", approvedPlan.ID).Order("step_id ASC, depends_on_step_id ASC").Find(&dependencies).Error; err != nil {
+					return err
+				}
+				planHash, hashErr := deliveryplansteps.ApprovedPlanContentHash(approvedPlan, stepRows, dependencies)
+				if hashErr != nil {
+					return fmt.Errorf("approved plan execution hash is unavailable: %w", hashErr)
+				}
+				approvedPlanHash = planHash
+				approvedPlanVersion = approvedPlan.Version
+			}
+			var err error
+			agentPlanSteps, err = loadDeliveryPlanStepDTOs(tx, approvedPlan)
+			if err != nil {
+				return fmt.Errorf("approved plan steps are unavailable")
+			}
+		}
 		return nil
 	}); err != nil {
 		if err == gorm.ErrRecordNotFound {
@@ -392,14 +678,23 @@ func enqueueAgentRun(c echo.Context, workItemID uuid.UUID, requestedBy string, r
 	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Agent run rejected", err.Error())
 	}
-	if phase == "assessment" {
-		if err := requireReadOnlyAssessmentPlan(input.Delivery.ApprovedPlan); err != nil {
-			return utils.Error(c, http.StatusConflict, "Agent run rejected", err.Error())
-		}
+	mandate, err := resolveDeliveryMandate(item, snapshots)
+	if err != nil {
+		return utils.Error(c, http.StatusConflict, "Agent run rejected", err.Error())
 	}
+	input.Delivery.Mandate = effectiveDeliveryMandate(mandate, phase)
 	applyFrozenAutonomyPolicy(&input, autonomySnapshot)
-	if err := attachExactProjectVaults(&input, snapshots, vaultRevisions); err != nil {
-		return utils.Error(c, http.StatusConflict, "Vault-first agent run rejected", err.Error())
+	input.Delivery.PlanSteps = agentPlanSteps
+	if phase == "implementation" && len(agentPlanSteps) == 0 {
+		return utils.Error(c, http.StatusConflict, "Agent run rejected", "The approved implementation plan has no normalized steps; refusing an unscoped implementation run")
+	}
+	maxStepConcurrency := 0
+	if len(agentPlanSteps) > 0 && phase == "implementation" {
+		maxStepConcurrency = input.Delivery.Mandate.MaxConcurrency
+		if maxStepConcurrency < 1 || maxStepConcurrency > models.DeliveryPlanExecutionMaxConcurrency {
+			return utils.Error(c, http.StatusConflict, "Agent run rejected", "The approved implementation concurrency limit is invalid")
+		}
+		input.Prompt += " Execute the normalized delivery.plan_steps graph, satisfy each step's acceptance criteria, and do not begin a dependent step until all of its declared dependencies are complete. Steps without dependencies are independent; do not invent dependencies. Preserve the human gates and autonomy boundary."
 	}
 	evidenceSubjectDigest := ""
 	if phase == "qa" || phase == "release_gate" {
@@ -419,6 +714,15 @@ func enqueueAgentRun(c echo.Context, workItemID uuid.UUID, requestedBy string, r
 		}
 	}
 	taskID, jobID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
+	if phase == "implementation" {
+		if approvedPlanID == uuid.Nil || approvedPlanVersion < 1 || approvedPlanHash == "" {
+			return utils.Error(c, http.StatusConflict, "Agent run rejected", "The approved implementation snapshot has no executable content hash")
+		}
+		input.Delivery.PlanExecution = &deliveryAgentPlanExecution{
+			ParentTaskID: taskID.String(), PlanID: approvedPlanID.String(),
+			PlanVersion: approvedPlanVersion, PlanHash: approvedPlanHash,
+		}
+	}
 	inputJSON, err := json.Marshal(input)
 	if err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Agent run failed", "Could not prepare private agent input")
@@ -461,9 +765,21 @@ func enqueueAgentRun(c echo.Context, workItemID uuid.UUID, requestedBy string, r
 			return fmt.Errorf("an active %s run already exists", phase)
 		}
 		if spec.operation != "delivery.publish" && (lockedProject.MonthlyBudgetMicros > 0 || lockedItem.BudgetMicros > 0) {
-			reservation, reserveErr := deliveryRunBudgetReservation(cfg, spec.operation, len(inputJSON), maxCompletionTokens)
+			routes, routeErr := automationPolicyRoutes(tx, spec.operation)
+			if routeErr != nil {
+				return fmt.Errorf("could not load fallback routing for budget admission: %w", routeErr)
+			}
+			reservation, reserveErr := deliveryRunBudgetReservationForRoutes(cfg, routes, spec.operation, len(inputJSON), maxCompletionTokens)
 			if reserveErr != nil {
 				return fmt.Errorf("could not price this run for project budget admission: %w", reserveErr)
+			}
+			if phase == "implementation" {
+				// One parent holds the conservative aggregate for every targeted
+				// child. Child rows deliberately carry no duplicate reservation.
+				reservation, reserveErr = aggregatePlanStepBudgetReservation(reservation, len(agentPlanSteps))
+				if reserveErr != nil {
+					return reserveErr
+				}
 			}
 			if err := rejectRunWhenWorkItemBudgetReached(tx, lockedItem, time.Now().UTC(), reservation); err != nil {
 				return err
@@ -478,6 +794,12 @@ func enqueueAgentRun(c echo.Context, workItemID uuid.UUID, requestedBy string, r
 		if err := tx.Create(task).Error; err != nil {
 			return err
 		}
+		if phase == "implementation" {
+			if err := enqueueApprovedPlanStepChildrenInTransaction(c, tx, task, inputRef, item, approvedPlanID, agentPlanSteps, approvedPlanHash, maxStepConcurrency, time.Now().UTC()); err != nil {
+				return err
+			}
+			return nil
+		}
 		enqueued, err := outboxService.EnqueueAutomationProcess(c.Request().Context(), tx, message)
 		if err != nil || !enqueued {
 			if err != nil {
@@ -487,48 +809,108 @@ func enqueueAgentRun(c echo.Context, workItemID uuid.UUID, requestedBy string, r
 		}
 		return nil
 	}); err != nil {
+		if handled, responseErr := handlePlanExecutionConflict(c, err); handled {
+			return responseErr
+		}
+		if errors.Is(err, deliveryplansteps.ErrNoEligibleAgentMachine) {
+			reason := retryableMachineDispatchReason(err)
+			if persistErr := persistRetryableMachineDispatchBlock(configuration.DB, item.ID, continuation, reason, time.Now().UTC()); persistErr != nil {
+				return utils.Error(c, http.StatusInternalServerError, "Agent run blocked", "The work item could not record why no local machine is ready")
+			}
+			return utils.Error(c, http.StatusConflict, "No hay un agente local listo", reason)
+		}
+		if errors.Is(err, errTaskBudgetAdmission) || errors.Is(err, errProjectBudgetAdmission) {
+			code := "task_budget_insufficient"
+			if errors.Is(err, errProjectBudgetAdmission) {
+				code = "project_budget_insufficient"
+			}
+			return utils.Error(c, http.StatusConflict, "No hay presupuesto disponible para reservar esta ejecución", code)
+		}
+		if errors.Is(err, errAutomationQueueAdmission) || errors.Is(err, errAutomationGlobalAdmission) || errors.Is(err, errAutomationProjectAdmission) {
+			return utils.Error(c, http.StatusTooManyRequests, "La capacidad de automatización está temporalmente saturada", err.Error())
+		}
 		return utils.Error(c, http.StatusInternalServerError, "Agent run failed", "Could not persist agent run delivery")
 	}
 	return utils.Success(c, http.StatusAccepted, "Agent run queued", task)
 }
 
-// requireReadOnlyAssessmentPlan keeps the mode selection deterministic. A
-// missing or malformed matrix is not assumed to be read-only; legacy plans
-// must use the normal implementation path and therefore fail closed if they
-// cannot supply a patch.
-func requireReadOnlyAssessmentPlan(plan map[string]any) error {
-	raw, present := plan["repository_impact"]
-	if !present {
-		return fmt.Errorf("read-only assessment requires an explicit repository impact matrix")
+const planExecutionConflictCode = "plan_execution_conflict"
+
+// handlePlanExecutionConflict keeps scheduler ownership races visible as a
+// retryable client conflict instead of disguising them as an internal error.
+func handlePlanExecutionConflict(c echo.Context, err error) (bool, error) {
+	if !errors.Is(err, deliveryplansteps.ErrPlanExecutionConflict) {
+		return false, nil
 	}
-	entries, ok := raw.([]any)
-	if !ok || len(entries) == 0 {
-		return fmt.Errorf("read-only assessment requires a non-empty repository impact matrix")
+	return true, utils.Error(c, http.StatusConflict, "Conflicto en la ejecución del plan", planExecutionConflictCode)
+}
+
+// persistRetryableMachineDispatchBlock runs only after the queue/task
+// transaction has rolled back. It records the operational reason without a
+// partially queued task or outbox event, while leaving the work item in its
+// existing workflow state so a later retry can be admitted.
+func persistRetryableMachineDispatchBlock(db *gorm.DB, workItemID uuid.UUID, continuation *models.DeliveryContinuation, reason string, now time.Time) error {
+	if db == nil || workItemID == uuid.Nil {
+		return fmt.Errorf("work item scope is required to persist a retryable machine block")
 	}
-	for _, rawEntry := range entries {
-		entry, ok := rawEntry.(map[string]any)
-		if !ok {
-			return fmt.Errorf("read-only assessment repository impact is invalid")
-		}
-		reference, _ := entry["reference"].(string)
-		impact, _ := entry["impact"].(string)
-		reference = strings.TrimSpace(reference)
-		// A plan is created from the immutable repository snapshot and therefore
-		// names repositories with their GitHub reference. A local workspace
-		// reference is also valid for an offline-only project. Both forms remain
-		// read-only here; the impact value still determines whether this bounded
-		// assessment may run.
-		if (!strings.HasPrefix(reference, "workspace://") && !strings.HasPrefix(reference, "github://")) || strings.TrimSpace(impact) == "" {
-			return fmt.Errorf("read-only assessment repository impact is invalid")
-		}
-		if strings.EqualFold(strings.TrimSpace(impact), "changes") {
-			return fmt.Errorf("read-only assessment is unavailable because the approved plan requires repository changes")
-		}
-		if !strings.EqualFold(strings.TrimSpace(impact), "consulted") && !strings.EqualFold(strings.TrimSpace(impact), "untouched") {
-			return fmt.Errorf("read-only assessment repository impact is invalid")
-		}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "No hay un agente local reciente con el perfil y todos los workspaces congelados listos en Docker."
 	}
-	return nil
+	if len(reason) > 512 {
+		reason = reason[:512]
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		updated := tx.Model(&models.DeliveryWorkItem{}).Where("id = ?", workItemID).Updates(map[string]any{
+			"agent_progress": "blocked", "blocked_reason": reason, "updated_at": now,
+		})
+		if updated.Error != nil {
+			return updated.Error
+		}
+		if updated.RowsAffected != 1 {
+			return fmt.Errorf("work item disappeared while recording the machine block")
+		}
+		if continuation != nil && continuation.ID != uuid.Nil {
+			if err := tx.Model(&models.DeliveryContinuation{}).
+				Where("id = ? AND work_item_id = ? AND status IN ?", continuation.ID, workItemID, []string{"claimed", "dispatched"}).
+				Updates(map[string]any{"status": "dispatched", "available_at": now.Add(time.Minute), "updated_at": now}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func retryableMachineDispatchReason(err error) string {
+	reason := strings.TrimSpace(err.Error())
+	if reason == "" {
+		reason = "No hay un agente local reciente con el perfil y todos los workspaces congelados listos en Docker. Se puede reintentar cuando haya un heartbeat compatible."
+	}
+	if len(reason) > 512 {
+		reason = reason[:512]
+	}
+	return reason
+}
+
+// automationPolicyRoutes reads the same ordered route chain the inference
+// gateway will use. Keeping it in budget admission prevents fallbacks from
+// becoming an unreserved path around a project's monetary ceiling.
+func automationPolicyRoutes(tx *gorm.DB, operation string) ([]models.AutomationAIActionRoute, error) {
+	if tx == nil {
+		return nil, fmt.Errorf("automation policy database is unavailable")
+	}
+	var policy models.AutomationAIActionPolicy
+	if err := tx.Where("operation = ?", operation).First(&policy).Error; err != nil {
+		return nil, err
+	}
+	return policy.Routes()
+}
+
+// agentRunUpdatesWorkflowProgress separates a queued delivery phase from a
+// queued informational answer. The latter is observable in its task and
+// conversation receipt, never by mutating the work item's delivery progress.
+func agentRunUpdatesWorkflowProgress(phase string) bool {
+	return strings.TrimSpace(phase) != "chat"
 }
 
 // validatePublicationGrantReviewBinding rechecks every immutable review
@@ -621,6 +1003,45 @@ func storedReleaseGateCandidate(item models.DeliveryWorkItem, changes []models.D
 	}, nil
 }
 
+// requireReadOnlyAssessmentPlan enforces the zero-change branch of Delivery:
+// an assessment can consult immutable repositories, but cannot be admitted
+// when any repository is marked as a change target.
+func requireReadOnlyAssessmentPlan(plan map[string]any) error {
+	raw, exists := plan["repository_impact"]
+	entries, ok := raw.([]any)
+	if !exists || !ok || len(entries) == 0 {
+		return fmt.Errorf("a read-only assessment requires an explicit repository impact matrix")
+	}
+	seen := make(map[string]struct{}, len(entries))
+	for _, rawEntry := range entries {
+		entry, ok := rawEntry.(map[string]any)
+		if !ok {
+			return fmt.Errorf("the read-only assessment repository impact matrix is invalid")
+		}
+		reference, _ := entry["reference"].(string)
+		reference = canonicalDeliveryRepositoryReference(strings.TrimSpace(reference))
+		impact, _ := entry["impact"].(string)
+		impact = strings.ToLower(strings.TrimSpace(impact))
+		if !isDeliveryRepositoryReference(reference) || (impact != "consulted" && impact != "untouched") {
+			return fmt.Errorf("a read-only assessment may include only consulted or untouched repositories")
+		}
+		key := strings.ToLower(reference)
+		if _, duplicate := seen[key]; duplicate {
+			return fmt.Errorf("the read-only assessment repository impact matrix contains a duplicate repository")
+		}
+		seen[key] = struct{}{}
+	}
+	return nil
+}
+
+func requireReadOnlyAssessmentPlanJSON(raw string) error {
+	var plan map[string]any
+	if strings.TrimSpace(raw) == "" || json.Unmarshal([]byte(raw), &plan) != nil || plan == nil {
+		return fmt.Errorf("the approved assessment plan is invalid")
+	}
+	return requireReadOnlyAssessmentPlan(plan)
+}
+
 func releaseGateChangeRepository(change models.DeliveryChangeSet) (string, string, error) {
 	metadata := map[string]any{}
 	if err := json.Unmarshal([]byte(change.MetadataJSON), &metadata); err != nil {
@@ -682,7 +1103,17 @@ func buildDeliveryAgentInput(item models.DeliveryWorkItem, project models.Delive
 			return input, fmt.Errorf("work item approved plan is invalid")
 		}
 	}
+	if phase == "assessment" {
+		if err := requireReadOnlyAssessmentPlan(input.Delivery.ApprovedPlan); err != nil {
+			return input, err
+		}
+	}
 	input.Delivery.AutonomyPolicy = deliveryAutonomyPolicy(phase)
+	mandate, err := resolveDeliveryMandate(item, snapshots)
+	if err != nil {
+		return input, err
+	}
+	input.Delivery.Mandate = effectiveDeliveryMandate(mandate, phase)
 	if raw := strings.TrimSpace(item.ClientContextJSON); raw != "" && raw != "{}" {
 		if err := json.Unmarshal([]byte(raw), &input.Delivery.ClientContext); err != nil {
 			return input, fmt.Errorf("work item client context snapshot is invalid")
@@ -775,9 +1206,20 @@ func buildDeliveryAgentInput(item models.DeliveryWorkItem, project models.Delive
 				return input, fmt.Errorf("frozen context metadata is invalid")
 			}
 		}
+		if strings.EqualFold(strings.TrimSpace(snapshot.Kind), "epic") {
+			if err := validateFrozenEpicContextSnapshot(snapshot, metadata); err != nil {
+				// Snapshot values are deliberately not included in this error: old
+				// snapshots may contain credentials and errors can reach API callers.
+				return input, fmt.Errorf("frozen epic context snapshot is invalid")
+			}
+		}
 		contextSource := deliveryAgentContext{
 			Kind: snapshot.Kind, Name: snapshot.Name, Reference: snapshot.Reference, Revision: snapshot.Revision,
 			Metadata: sanitizedDeliveryContextMetadata(snapshot.Kind, metadata),
+		}
+		if strings.EqualFold(strings.TrimSpace(snapshot.Kind), "epic") {
+			contextSource.Name = strings.TrimSpace(snapshot.Name)
+			contextSource.Reference = strings.TrimSpace(snapshot.Reference)
 		}
 		if !snapshot.CapturedAt.IsZero() {
 			contextSource.SnapshotAt = snapshot.CapturedAt.UTC().Format(time.RFC3339)
@@ -896,6 +1338,12 @@ func sanitizedDeliveryContextMetadata(kind string, raw map[string]any) map[strin
 	allowed := genericContextMetadataKeys
 	if strings.EqualFold(strings.TrimSpace(kind), "repository") {
 		allowed = repositoryContextMetadataKeys
+	} else if strings.EqualFold(strings.TrimSpace(kind), "epic") {
+		allowed = epicContextMetadataKeys
+	} else if strings.EqualFold(strings.TrimSpace(kind), "environment") {
+		allowed = environmentContextMetadataKeys
+	} else if strings.EqualFold(strings.TrimSpace(kind), "runbook") {
+		allowed = runbookContextMetadataKeys
 	}
 	result := make(map[string]any, len(raw))
 	keys := make([]string, 0, len(raw))
@@ -918,6 +1366,55 @@ func sanitizedDeliveryContextMetadata(kind string, raw map[string]any) map[strin
 		}
 	}
 	return result
+}
+
+// validateFrozenEpicContextSnapshot checks the legacy fields before projecting
+// them into inference. Epic title and summary are user-authored and older
+// snapshots predate credential rejection, so they must be screened again at
+// this boundary. The reference is validated as an opaque epic identifier and
+// is never rewritten in the persisted snapshot.
+func validateFrozenEpicContextSnapshot(snapshot models.DeliveryContextSnapshot, metadata map[string]any) error {
+	title := strings.TrimSpace(snapshot.Name)
+	reference := strings.TrimSpace(snapshot.Reference)
+	revision := strings.TrimSpace(snapshot.Revision)
+	summary, summaryPresent := metadata["summary"]
+	if summaryPresent {
+		if _, ok := summary.(string); !ok {
+			return fmt.Errorf("invalid epic summary")
+		}
+	}
+	summaryText, _ := summary.(string)
+	if containsEpicSensitiveMaterial(title) || containsEpicSensitiveMaterial(reference) || containsEpicSensitiveMaterial(revision) || containsEpicSensitiveMaterial(summaryText) {
+		return fmt.Errorf("epic context contains sensitive material")
+	}
+	if title == "" || len(title) > 180 || len(revision) > 80 || len(summaryText) > 4000 {
+		return fmt.Errorf("invalid epic context text")
+	}
+	const referencePrefix = "epic://"
+	if !strings.HasPrefix(reference, referencePrefix) {
+		return fmt.Errorf("invalid epic reference")
+	}
+	referenceID, err := uuid.FromString(strings.TrimPrefix(reference, referencePrefix))
+	if err != nil || referenceID == uuid.Nil {
+		return fmt.Errorf("invalid epic reference")
+	}
+	if rawID, present := metadata["epic_id"]; present {
+		idText, ok := rawID.(string)
+		if !ok {
+			return fmt.Errorf("invalid epic identity")
+		}
+		metadataID, parseErr := uuid.FromString(strings.TrimSpace(idText))
+		if parseErr != nil || metadataID == uuid.Nil || metadataID != referenceID {
+			return fmt.Errorf("invalid epic identity")
+		}
+	}
+	if rawStatus, present := metadata["status"]; present {
+		status, ok := rawStatus.(string)
+		if !ok || !validDeliveryEpicStatus(strings.ToLower(strings.TrimSpace(status))) {
+			return fmt.Errorf("invalid epic status")
+		}
+	}
+	return nil
 }
 
 // sanitizeGitHubCodeContextMetadata treats remote source excerpts as a
@@ -1231,6 +1728,10 @@ func deliveryAutonomyPolicy(phase string) deliveryAgentAutonomyPolicy {
 		policy.Allowed = []string{"prepare a patch in an isolated registered worktree", "run allowlisted local validations", "report diff and validation evidence"}
 		policy.RequiredEvidence = []string{"approved plan used", "worktree reference", "diff check", "validation output"}
 		policy.HumanGateRequiredFor = []string{"issue a bounded publication grant for the validated worktree; an independent exact-SHA code review is still required before preview"}
+	case "assessment":
+		policy.Allowed = []string{"read frozen context and report a bounded assessment"}
+		policy.RequiredEvidence = []string{"repository impact matrix declares no changes", "observations are grounded in frozen context", "risks and limitations are explicit"}
+		policy.HumanGateRequiredFor = []string{"review the assessment; this path cannot publish, enter QA, or release"}
 	case "publish":
 		policy.Prohibited = []string{
 			"advance or approve a human gate", "deploy or merge remotely",

@@ -86,6 +86,7 @@ func TestDeliveryMessageConcurrentIdempotentAttachment(t *testing.T) {
 			ctx.SetParamValues(item.ID.String())
 			ctx.Set("cognito_sub", subject)
 			ctx.Set("tenant_code", "itbem")
+			setDeliveryPlatformWorkspace(ctx)
 			err = delivery.CreateMessage(ctx)
 			if err != nil {
 				responses <- result{status: http.StatusInternalServerError, err: err}
@@ -132,6 +133,7 @@ func TestDeliveryMessageConcurrentIdempotentAttachment(t *testing.T) {
 	ctx.SetParamValues(item.ID.String())
 	ctx.Set("cognito_sub", subject)
 	ctx.Set("tenant_code", "itbem")
+	setDeliveryPlatformWorkspace(ctx)
 	require.NoError(t, delivery.GetWorkItem(ctx))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	var response map[string]any

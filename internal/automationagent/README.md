@@ -11,123 +11,101 @@ commit, publish one reviewed branch and create its pull request only when a
 GitHub App identity and a matching short-lived human publication grant are both
 present.
 
-The release lane also accepts `delivery.release_gate`, a providerless operation
-that evaluates a control-plane-built exact revision candidate and returns a
-bounded structured handoff. It cannot invent a human approval: the signed API
-callback binds the authenticated task requester and appends the immutable
-Gatekeeper event after re-evaluating the same subject.
+## Continuous single-queue operation
 
-Remote publication resolves the repository's GitHub App installation with an
-App assertion, verifies that installation is in the configured allow-list, and
-mints a short-lived token restricted to that one repository. This supports
-authorized repositories across organizations without accidentally selecting
-the first configured installation or falling back to a user PAT/SSH key.
+### Durable delivery execution
 
-Before a release-gate callback, the release worker also rereads every published
-PR with that repository-scoped token. A changed head, closed/draft PR,
-ambiguous change set or unbounded review history fails the run. Current base
-branch and decisive reviews replace stored mutable claims. The worker then
-combines classic protection and all active rulesets for that base branch, and
-collects bounded App check runs plus legacy commit statuses for the exact head.
-An unprotected branch, missing permission, truncated response, wrong SHA, or
-malformed integration identity fails closed instead of being treated as an
-empty requirement set.
+New delivery implementation inputs enable `agent_execution`. The worker can
+read bounded, redacted files from frozen registered repositories, apply an
+incremental diff in its task worktree, run operator-owned validation/acceptance
+commands, and feed observed failures back to the model for repair. It cannot
+choose a shell command, publish, deploy, merge, or approve its own work.
 
-The worker deliberately does not read PostgreSQL and cannot assert project
-policy or Vault state. On callback, the control plane replaces those candidate
-fields from its append-only policy/Vault stores, computes one canonical
-multi-repository policy digest, validates every Vault manifest and reconciles
-each one to the exact GitHub head before it binds the authenticated human
-requester to the Gatekeeper subject.
+The hard limits are **six model calls, 256 KiB per provider request, and fifteen
+minutes elapsed per task**, including recovery time. Budget admission reserves
+all six calls. Every extra call has separate usage and private request/response
+references in the tool ledger. Outputs are bounded while streaming. The review
+fingerprint hashes the entire binary Git diff, not truncated command logs.
 
-Publication records the GitHub default branch observed before creating the PR.
-At release time the control plane reconstructs every repository/target/SHA from
-the approved impact matrix, the GitHub App publication row, and its consumed
-human grant, then requires the fresh PR read to match it exactly. The callback
-also removes worker-supplied QA, security, compatibility, migration,
-dependency, environment, and recovery claims; those fields remain blocking
-until separate immutable evidence resolvers attach them.
+An encrypted `automation/<task-id>/agent-checkpoint.json` retains the input
+digest, original run ID, messages, call results, pending request, and completed
+action index. Restart resumes the same worktree and audit run. A stored response
+is reused; a request with an uncertain outcome is **not called again**. It blocks
+for investigation and reconciliation with provider billing. Checkpoint storage
+outages also stop inference. This is at-most-once automatic inference after an
+ambiguous interruption, not a promise of exactly-once external execution.
 
-For `delivery.release_gate`, the backend also resolves each repository's
-approved workflow, GitHub environment, and explicit secret/variable reference
-names before enqueue. The providerless release worker verifies the workflow at
-the exact head SHA and checks environment metadata/names with a repository-
-scoped installation token. Its schema-v2 callback appends
-`delivery.environment.observed.v1`; the backend then re-resolves current policy,
-task provenance and matrix before setting environment evidence. A changed
-policy/SHA is stale, a missing required name is failed, and no secret value or
-complete GitHub inventory crosses the boundary.
+For non-implementation operations, the worker also writes the small encrypted
+`automation/<task-id>/provider-intent.json` immediately after the canonical
+request and immediately before inference. If a redelivery sees that intent but
+no durable result, it records an explicit `outcome uncertain` failure and
+consumes no provider call. This closes the crash window between provider
+completion and result/callback persistence; an operator must reconcile the
+private request/provider account before authorizing a fresh task.
 
-For `delivery.qa`, the control plane fixes the current multi-repository matrix
-digest on the task before enqueue. The runner's callback handoff contains only
-that task/matrix identity, preview status, repository execution order, reviewed
-worktree references, operator-owned test identities, and validation/QA
-pass/fail flags. It excludes commands, output, URLs, screenshots and the
-model-authored QA narrative. A task or model cannot label its own result. The
-backend strictly validates the handoff and appends `delivery.qa.observed.v2`;
-changing any release SHA leaves the historical QA event intact but makes it
-ineligible for the new matrix. The release resolver also binds every workspace
-and reviewed worktree branch to its exact GitHub App publication before a
-named test can satisfy that repository's policy.
+Before inference, every changed repository must have `validation_commands`,
+and every work-item acceptance criterion must match an operator-owned check:
 
-The isolated QA lane also runs the operator-configured commands identified as
-`security:secrets` and `security:high-critical` in every exact reviewed
-worktree. These identities are fixed by workspace configuration; the model
-cannot create or rename them. The completed exact-matrix callback promotes only
-their bounded pass/fail state into `delivery.security.observed.v1`. Missing
-commands yield no event, and failed scans become Gatekeeper blockers. Commands,
-output and findings stay private. This uses neither GitHub Actions nor GitHub
-Advanced Security and requires no additional GitHub App permission.
+```json
+{
+  "acceptance_checks": [
+    {
+      "criterion": "The approved endpoint rejects unauthorized requests",
+      "command": ["go", "test", "./controllers/example", "-run", "TestUnauthorized"]
+    }
+  ]
+}
+```
 
-The same operator-owned registry may identify commands as
-`assurance:compatibility` and `assurance:migrations`. Both must execute in every
-reviewed worktree for their coordinated Gatekeeper matrix to exist. One failure
-fails the matrix; one missing identity keeps the evidence missing. The handoff
-still exposes only command identity and pass/fail, never command text or output.
+This example is a registry fragment, not a command to run in this repository.
+Configure actual project tests; never register a no-op just to pass a gate.
+Missing coverage blocks **before** paying for inference. Commands must be safe
+to rerun after interruption. Their code runs under the local worker OS account;
+environment filtering is defense in depth, not a container security boundary.
+Approved `files_impacted` entries must be exact relative paths (or
+`workspace://id#relative/path` for multi-repository plans), not directory names.
 
-Dependency readiness is not a command identity. The control plane combines the
-frozen repository DAG with the exact QA execution order and current states of
-declared prerequisite work items. Changed dependencies must run before their
-consumers and every prerequisite task must already be released; model prose or
-a worker-authored dependency verdict cannot satisfy this gate.
+The API owns a durable `DeliveryContinuation` dispatcher. It stores continuation
+intent in the same transaction as creation/approval/rework and links at most one
+automation task to each intent. Decision epochs supersede stale results. It
+promotes verified results into the next human review and prepares the delivery
+summary, but never approves a human gate. Dependency waits reuse the completed
+plan instead of paying for another plan.
 
-Recovery is also control-plane-owned. Every repository's independently approved
-effective policy contributes its configured default; the resolver promotes the
-most constrained posture across the matrix. A worker cannot supply or downgrade
-it, and an irreversible composite remains blocked until a separate human grant
-is bound to that exact release subject.
+Code approval waits for publication and preview readiness. A publication grant
+queues only its exact authorized branch. Preview/CI readiness is attached via
+the existing authorized change-set endpoint using the exact published repository,
+branch and commit; the published provenance is preserved. All currently reviewed
+changed repositories need a passed CI record and at least one valid preview URL
+before QA is queued. These records are readiness reports, **not independent proof
+that CI executed**: the worker then observes the preview and runs registered QA.
+Deploying a preview still requires the project's deployment/CI integration;
+this dispatcher does not create infrastructure or obtain deployment credentials.
 
-## Continuous role-lane operation
+Rollout requires the API's normal database migration (new continuation table,
+work-item epoch/progress, task continuation unique index), matching API/worker
+binaries, and configured private storage/queue/workspace tests. The dashboard
+shows queued, blocked, waiting-for-preview, and human-review states. No cloud
+resources, running workers, secrets, grants, or model selection are changed merely
+by updating this code. Existing queued inputs without `agent_execution` retain
+the legacy one-call implementation contract.
 
-Each long-lived worker declares one exact identity with `ITBEM_AI_ROLE` and
-`ITBEM_AI_QUEUE_LANE`: `orchestrator/orchestration`,
-`principal_engineer/engineering`, `reviewer/review`, `qa/qa`, or
-`release_manager/release`. A cross-role or partial identity fails doctor and
-startup. A message whose allow-listed operation belongs to another identity is
-rejected before input retrieval, callback lease acquisition or provider use.
-The empty identity remains accepted only while draining the retained combined
-queue during migration.
-
-The `release_manager/release` worker is deterministic and starts without any
-model API key. Its provider/model heartbeat fields must remain empty. Every
-other role, including the temporary combined worker, still requires its scoped
-model provider because it can execute at least one inference operation. This
-keeps GitHub publication authority and model credentials out of the same
-release process unless a future reviewed operation explicitly needs both.
-
-SQS leases, idempotent callbacks, output reuse and visibility heartbeats make
-redelivery safe. Set `ITBEM_AI_CONCURRENCY=1` for a strictly serial role, or
-raise it only for independent workspaces with available provider capacity. The
-worker never shares a writable worktree between tasks.
-
-Each heartbeat is followed by a short-lived, authenticated workspace
-attestation when a control plane is hosted separately. It contains only the
-logical workspace ID, GitHub identity, checked-out SHA/branch, clean/freshness
-signals and declared capabilities—never a filesystem path, remote URL, command,
-source content or secret. The control plane accepts it only from the same live
-role/lane and only uses it after reconciling it with that project's exact
-GitHub App checkpoint. It is a context observation, not implementation,
-publication, review, merge or release authority.
+One local worker consumes the single private automation queue continuously.
+Every message is validated against an operation allow-list before it can reach
+the provider; SQS leases, idempotent callbacks, output reuse and visibility
+heartbeats make redelivery safe. Set `ITBEM_AI_CONCURRENCY=1` for a strictly
+serial local agent, or raise it only for independent workspaces with available
+provider capacity. The worker never shares a writable worktree between tasks.
+Workers can additionally declare a specialist capability contract with
+`ITBEM_AI_CAPABILITIES`, a comma-separated list such as
+`delivery.plan,delivery.qa`. A non-empty list is fail-closed: the worker checks
+the operation before claiming the task and retains unsupported work for a
+capable worker. On SQS, an incompatible delivery is deferred for a bounded 45
+seconds before admission, so a specialist does not hold a lease or occupy a
+provider slot for work it cannot execute. Transports without a visibility/defer
+primitive retain the retry-safe path. An empty value keeps the explicit
+generalist profile for local compatibility; it does not grant new server-side
+permissions or change the workflow gates.
 The transport is strict: it accepts exactly one schema-versioned JSON message,
 with no unknown fields and a positive delivery attempt, before scheduling it.
 Malformed messages do not consume a model call or acquire review priority;
@@ -138,6 +116,13 @@ scheduled ahead of ordinary queue work once received, but only by their
 allow-listed operation (there is no caller-controlled priority). The queue
 serves a bounded burst of three reviews before giving a waiting non-review job
 a turn, so an active PR stream cannot starve QA, planning or implementation.
+Within each bounded receive batch, ordinary operations use a round-robin lane
+over the optional project identifier and decoded operation name; a flood from
+one project, chat or QA operation therefore cannot monopolize a generalist's
+local slots while another eligible project or operation waits. Legacy messages
+without `project_id` retain operation-level lanes. This is a scheduling
+fairness guarantee, not an authorization grant:
+capabilities, leases, project admission and workflow gates remain authoritative.
 Each review
 must return a compact JSON record with a verdict, exact changed-file line
 locations, severity, category, grounded evidence, a concrete recommendation,
@@ -179,17 +164,39 @@ request and the normal context, plan, code, QA, and release gates.
 
 ## Local run
 
-1. Start the local control plane.
-2. For local development, copy `.env.ai.local.example` to `.env.ai.local` and
-   set the selected provider secret there (for example `MINIMAX_API_KEY`). By
-   default the launcher gives that ignored local file priority over a stale
-   Windows User/process variable; use `-PreferProcessEnvironment` only when
-   an operator deliberately wants the process environment to win. Never
-   commit the local file.
+1. Start the local control plane and configure the selected provider key only
+   in its ignored local credential bundle or project-scoped Settings. Do not
+   place provider API keys in the worker environment or `.env.ai.local`.
+2. Copy `.env.ai.local.example` to `.env.ai.local`; configure
+   `ITBEM_AI_GATEWAY_URL` for the local control plane. The worker fails closed
+   without that gateway and receives only a short-lived, task/run/operation
+   scoped inference capability, never a provider key.
 3. Optionally register local repositories in `ITBEM_AI_WORKSPACES_JSON` in
    `.env.ai.local` (or in the deployment environment). References from tasks
    use `workspace://<id>` and cannot contain paths.
 4. Run `scripts/Start-LocalAIAgent.ps1` from this backend repository.
+
+### Agent harness and model evaluation
+
+`scripts/Test-AgentHarness.ps1` is an offline regression runner. Its provider
+fakes and local HTTP gateway tests exercise runtime contracts without loading
+provider credentials, contacting a model vendor, or consuming a real queue.
+Before starting its Go child, it temporarily clears provider keys, model and
+endpoint overrides, provider selectors, and live-harness flags from that child
+environment; the parent process values are restored afterward and never
+printed. `scripts/Test-AgentHarnessIsolation.ps1` checks this boundary with
+synthetic sentinels and a fake Go command, without invoking the real test suite.
+The old `-LiveMiniMax` and `-LiveProvider` modes were retired because they
+constructed provider clients in the test process and bypassed the central
+inference gateway; those selectors now fail before Go starts. `-ScoreReportPath`
+only replays an existing report and never triggers inference. Treat replay input
+and output as sensitive because reports can contain prompts and model responses.
+
+For a real model-quality evaluation, create and authorize a normal synthetic
+work item in the platform and let an assigned worker call the configured
+provider through the central gateway. This preserves the normal task/run lease,
+provider policy, usage receipt, cost ledger, and redaction boundaries. The test
+harness must not mint a capability, read a provider key, or call a vendor API.
 
 For a dedicated workstation that should continuously serve the one automation
 queue, use service mode instead of a fragile terminal/session wrapper:
@@ -211,32 +218,8 @@ silently start another worker against the same local queue. `-Doctor` and
 `-SyncWorkspaces` remain concurrent, read-only/operator commands.
 
 The paired dead-letter queue is never auto-replayed. Platform health reports
-its approximate depth plus safe per-lane counters and role/lane heartbeats, so
-an operator can inspect and explicitly decide how to recover poisoned messages
-without silently re-running a stale review.
-
-For the dedicated Linux host, use the reviewed unit, installer and activation
-runbook in `deploy/systemd/`. The installer stages a SHA-addressed binary and
-root-only configuration but intentionally never starts or enables a service.
-Every lane has a private `0700` workspace root and its own registry; sharing a
-checkout across Engineer, Reviewer, QA or Release is unsupported. Preflight
-uses the separate oneshot `itbem-ai-agent-doctor@.service`, which cannot poll
-SQS or mutate the checkout. The long-lived unit subsequently runs
-`--runtime-auth-probe`; on the physical host this is an outbound HTTPS gateway
-probe. It verifies the exact role/lane token plus backend queue/storage readiness without
-leasing work. Review and Release each fail closed when their own,
-distinct GitHub App identity is absent; Release intentionally has no model key.
-On an on-premises host, each lane receives only a distinct HMAC-derived gateway
-token. The backend retains SQS/S3 authority and seals expiring task leases, so
-AWS profiles, receipt handles and the callback root never cross onto Linux.
-
-For a signed `code.review` webhook task, the Reviewer freezes repository, PR,
-installation, head SHA and patch digest before inference. Its deterministic
-relay validates all inline line ranges, rechecks the live head, mints a
-repository-scoped installation token, and publishes exactly one idempotent
-GitHub review. Model output never calls GitHub itself. Release credentials are
-not present in the Review service, and Review credentials are not present in
-Release.
+only its approximate depth, so an operator can inspect and explicitly decide
+how to recover poisoned messages without silently re-running a stale review.
 
 The only billable connectivity command is explicit and guarded:
 
@@ -259,9 +242,7 @@ them before refreshing Delivery checkpoints:
 ```
 
 This command clones a missing configured checkout, or fetches `origin`, safely
-switches it to the explicitly configured `base_branch` and fast-forwards it. A
-managed registry entry must copy the branch detected during onboarding (or an
-approved override); the agent never assumes `main`. It refuses
+switches it to `base_branch` (default `main`) and fast-forwards it. It refuses
 local changes or divergent history and never uses reset, rebase, pull or a
 task-provided remote. Refresh the project's local context afterwards so a plan
 freezes the resulting SHA. Every approved implementation still gets a distinct
@@ -283,13 +264,21 @@ available behind their normal human gates.
     "path": "C:\\path\\to\\a\\dashboard-git-checkout",
 	"repository_url": "https://github.com/example/dashboard.git",
 	"base_branch": "main",
-	"capabilities": ["repository:read", "repository:fetch", "worktree:create", "patch:apply"],
-    "validation_commands": [["npm", "run", "test:unit"], ["npm", "run", "test:contract"]],
-    "validation_command_kinds": ["unit", "contract"],
+    "capabilities": ["repository:read", "repository:fetch", "worktree:create", "patch:apply"],
+    "validation_commands": [["npm", "run", "lint"], ["npm", "run", "typecheck"]],
+    "component_validation_commands": {
+      "apps/dashboard": [["npm", "run", "test:dashboard"]],
+      "packages/ui": [["npm", "run", "test:ui"]]
+    },
     "qa_commands": [["npm", "run", "test:e2e"]],
-    "qa_command_kinds": ["e2e"],
     "qa_artifact_patterns": ["test-results/*.png"],
-    "qa_semantic_command": ["node", "/opt/itbem-ai-agent/tools/stagehand-qa/run.mjs", "--url", "{preview_url}", "--output", "{artifact_path}"]
+    "qa_semantic_command": ["node", "tools/stagehand-qa/run.mjs", "--url", "{preview_url}", "--output", "{artifact_path}"],
+    "sandbox_runtime": "docker",
+    "sandbox_image": "node:22-bookworm",
+    "sandbox_network": "none",
+    "sandbox_cpus": "2",
+    "sandbox_memory": "2g",
+    "sandbox_pids_limit": 256
   }
 }
 ```
@@ -297,23 +286,47 @@ available behind their normal human gates.
 The registry is operator-owned. `repository_url` is only used by the explicit
 managed-sync command; runtime task inputs can never choose it. Commands are arrays with allow-listed
 executables; no shell, arbitrary path, task prompt, or model response can add
-one. Each `*_command_kinds` list must be empty or have exactly one unique,
-policy-compatible identity for every matching command. Empty lists preserve
-legacy execution but cannot satisfy named release gates. Implementation uses
-`git worktree` under the registered repository and
+one. `component_validation_commands` is the optional monorepo map: when a
+human-approved plan scopes a repository to an overlapping component root, the
+harness runs that operator-owned command in addition to the repository-wide
+suite and records its scope in validation evidence. It never executes a
+component command for an unrelated scope. Implementation uses `git worktree` under the registered repository and
 leaves a reviewable branch for the human code-review gate.
 
 `qa_semantic_command` is optional. It runs the pinned, read-only Stagehand
 probe only after a preview is healthy and preserves its JSON report and
-screenshot as normal private QA evidence. Its script must be the absolute,
-operator-owned runner declared by `ITBEM_STAGEHAND_RUNNER_PATH`, outside the
-reviewed workspace, with the matching `ITBEM_STAGEHAND_RUNNER_SHA256`; otherwise
-the command never receives the provider credential. See `docs/STAGEHAND_QA.md`
-for the local provider configuration and operational boundaries.
+screenshot as normal private QA evidence. See `docs/STAGEHAND_QA.md` for the
+local provider configuration and operational boundaries.
 
 The default MiniMax model is `MiniMax-M3`. `MINIMAX_MODEL` lets an operator
 select another model such as `MiniMax-M2.7` when needed; M2.7 requests retain
 its documented 2,048 completion-token bound.
+
+Every validation/QA command runs with a reduced credential-free environment,
+bounded output, a hard timeout, and (on Linux workers) a dedicated process
+group that is killed on timeout so child test runners cannot leak into later
+tasks. This is process-tree hygiene, not a hostile-code sandbox: a registered
+workspace must still run inside the operator's container/VM boundary before it
+is trusted with customer code. The API exposes three explicit admission knobs
+for fleet backpressure: `AUTOMATION_GLOBAL_ACTIVE_LIMIT`,
+`AUTOMATION_PROJECT_ACTIVE_LIMIT`, and `AUTOMATION_QUEUE_DEPTH_LIMIT`. When
+configured, task creation takes a PostgreSQL advisory lock and fails with a
+retryable 429 instead of allowing a burst to exhaust the worker fleet or grow
+an unbounded durable queue.
+
+For higher-risk repositories, set `sandbox_runtime` to `docker` and pin an
+operator-approved image. Registered validation, QA, screenshot and semantic
+commands then run with a read-only container root, only the reviewed worktree
+mounted writable, a fixed non-root UID, dropped Linux capabilities,
+no-new-privileges, bounded CPU/memory/PIDs/file descriptors, bounded tmpfs
+caches and `network=none` by default. Set `sandbox_image_digest` to an
+operator-pinned `sha256:` value for reproducible images; when present the
+runner executes that exact image reference and readiness verifies it locally.
+A browser QA
+workspace may explicitly use `network=bridge` only when its operator-owned
+runner needs to reach the recorded preview URL. Docker availability and image
+pulling are operator prerequisites; the worker fails closed rather than
+silently falling back to the host process when Docker mode is selected.
 
 In deployed environments, invoke the Go binary directly and inject every
 setting through the runtime environment or secret manager. It never reads a

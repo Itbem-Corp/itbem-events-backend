@@ -16,11 +16,20 @@ type AutomationToolExecution struct {
 	AutomationTaskID   uuid.UUID  `gorm:"type:uuid;not null;index;uniqueIndex:automation_tool_execution_call" json:"automation_task_id"`
 	DeliveryWorkItemID *uuid.UUID `gorm:"type:uuid;index" json:"delivery_work_item_id,omitempty"`
 	RunID              string     `gorm:"type:varchar(64);not null;default:'';uniqueIndex:automation_tool_execution_call" json:"-"`
-	Tool               string     `gorm:"type:varchar(64);not null;uniqueIndex:automation_tool_execution_call" json:"tool"`
+	// Worker attribution is immutable with the provider call and is intentionally
+	// projected only by the root-only agent directory.
+	WorkerID  string `gorm:"type:varchar(64);not null;default:'';index" json:"-"`
+	AgentKey  string `gorm:"type:varchar(64);not null;default:'';index" json:"-"`
+	MachineID string `gorm:"type:varchar(64);not null;default:'';index" json:"-"`
+	// AgentInstanceID is populated from the signed callback identity, never a
+	// callback body field. It is nullable for executions written by older agents.
+	AgentInstanceID *uuid.UUID `gorm:"type:uuid;index" json:"-"`
+	Tool            string     `gorm:"type:varchar(64);not null;uniqueIndex:automation_tool_execution_call" json:"tool"`
 	// CallKey identifies one provider call within a tool run. A semantic QA
 	// runner can therefore record each inference separately (for example an
 	// assessment and a bounded retry) without merging their cost or evidence.
-	CallKey string `gorm:"type:varchar(64);not null;default:'';uniqueIndex:automation_tool_execution_call" json:"call_key"`
+	CallKey            string     `gorm:"type:varchar(64);not null;default:'';uniqueIndex:automation_tool_execution_call" json:"call_key"`
+	InferenceReceiptID *uuid.UUID `gorm:"type:uuid;uniqueIndex" json:"inference_receipt_id,omitempty"`
 	// CallStatus describes this individual provider call, independent from the
 	// enclosing QA task. A rejected structured response can still be a real,
 	// billable inference and must remain auditable as failed rather than vanish

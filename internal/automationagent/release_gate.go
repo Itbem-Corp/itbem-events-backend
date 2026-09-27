@@ -22,7 +22,7 @@ func RunReleaseGate(delivery json.RawMessage) (releasegate.Input, error) {
 		return releasegate.Input{}, fmt.Errorf("release Gatekeeper input is invalid")
 	}
 	allowed := map[string]struct{}{
-		"project": {}, "work_item": {}, "approved_plan": {}, "autonomy_policy": {}, "context_sources": {},
+		"project": {}, "work_item": {}, "approved_plan": {}, "mandate": {}, "autonomy_policy": {}, "context_sources": {},
 		"repository_topology": {}, "client_context": {}, "conversation": {}, "change_sets": {}, "evidence": {},
 		"gates": {}, "human_request": {}, "publication": {}, "gatekeeper": {}, "release_environment": {},
 	}

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"events-stocks/configuration"
 	"events-stocks/internal/authz"
 	"events-stocks/models"
@@ -14,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/gofrs/uuid"
 	"github.com/labstack/echo/v4"
@@ -25,10 +28,14 @@ import (
 // a living portfolio in one request, while every detailed resource keeps its
 // existing, separately-authorized endpoint.
 const (
-	automationPortfolioSchemaVersion          = 3
-	automationPortfolioMaxWorkItemsPerProject = 24
-	automationPortfolioMaxTasksPerWorkItem    = 12
-	automationPortfolioMaxReviewTasks         = 50
+	automationPortfolioSchemaVersion                   = 5
+	automationPortfolioMaxWorkItemsPerProject          = 24
+	automationPortfolioMaxTasksPerWorkItem             = 12
+	automationPortfolioMaxTechnologyTagsPerProject     = 24
+	automationPortfolioMaxRuntimeHintsPerProject       = 24
+	automationPortfolioMaxProjectSignalLength          = 96
+	automationPortfolioMaxTechnologyMetadataCharacters = 1200
+	automationPortfolioMaxRuntimeHintsJSONBytes        = 4096
 )
 
 var automationPortfolioReviewCorrelation = regexp.MustCompile(`^github-pr:([a-z0-9][a-z0-9_.-]*/[a-z0-9][a-z0-9_.-]*):([1-9][0-9]*):([a-f0-9]{40})$`)
@@ -47,25 +54,29 @@ type automationPortfolioSnapshot struct {
 }
 
 type automationPortfolioTotals struct {
-	Projects          int64 `json:"projects"`
-	WorkItems         int64 `json:"work_items"`
-	ActiveWorkItems   int64 `json:"active_work_items"`
-	DecisionsRequired int64 `json:"decisions_required"`
-	BlockedWorkItems  int64 `json:"blocked_work_items"`
-	AutomationTasks   int64 `json:"automation_tasks"`
-	QueuedTasks       int64 `json:"queued_tasks"`
-	RunningTasks      int64 `json:"running_tasks"`
-	AttentionTasks    int64 `json:"attention_tasks"`
-	ReviewTasks       int64 `json:"review_tasks"`
-	QueuedReviews     int64 `json:"queued_reviews"`
-	RunningReviews    int64 `json:"running_reviews"`
-	AttentionReviews  int64 `json:"attention_reviews"`
-	PublishedReviews  int64 `json:"published_reviews"`
+	Projects                     int64 `json:"projects"`
+	WorkItems                    int64 `json:"work_items"`
+	ActiveWorkItems              int64 `json:"active_work_items"`
+	DecisionsRequired            int64 `json:"decisions_required"`
+	BlockedWorkItems             int64 `json:"blocked_work_items"`
+	AutomationTasks              int64 `json:"automation_tasks"`
+	QueuedTasks                  int64 `json:"queued_tasks"`
+	RunningTasks                 int64 `json:"running_tasks"`
+	AttentionTasks               int64 `json:"attention_tasks"`
+	ReviewTasks                  int64 `json:"review_tasks"`
+	QueuedReviews                int64 `json:"queued_reviews"`
+	RunningReviews               int64 `json:"running_reviews"`
+	AttentionReviews             int64 `json:"attention_reviews"`
+	PublishedReviews             int64 `json:"published_reviews"`
+	TotalCostMicros              int64 `json:"total_cost_microusd"`
+	CostLast30DaysMicros         int64 `json:"cost_last_30_days_microusd"`
+	UnpricedExecutions           int64 `json:"unpriced_executions"`
+	UnpricedExecutionsLast30Days int64 `json:"unpriced_executions_last_30_days"`
 }
 
-// automationPortfolioReview is the public, platform-admin-only lifecycle of
-// one webhook review. It contains no prompt, patch, finding, object reference,
-// error prose, installation ID or credential material.
+// This platform-admin-only projection contains lifecycle and published review
+// identity only. Prompts, diffs, findings, object references, errors and
+// installation credentials remain task-scoped and private.
 type automationPortfolioReview struct {
 	TaskID        uuid.UUID  `json:"task_id"`
 	Repository    string     `json:"repository"`
@@ -83,23 +94,31 @@ type automationPortfolioReview struct {
 	PublishedAt   *time.Time `json:"published_at,omitempty"`
 }
 
+const automationPortfolioMaxReviewTasks = 50
+
 type automationPortfolioProject struct {
-	ID                 uuid.UUID                     `json:"id"`
-	ClientID           uuid.UUID                     `json:"client_id"`
-	Name               string                        `json:"name"`
-	Status             string                        `json:"status"`
-	UpdatedAt          time.Time                     `json:"updated_at"`
-	Client             automationPortfolioClient     `json:"client"`
-	WorkItemCount      int64                         `json:"work_item_count"`
-	ActiveWorkItems    int64                         `json:"active_work_items"`
-	DecisionsRequired  int64                         `json:"decisions_required"`
-	BlockedWorkItems   int64                         `json:"blocked_work_items"`
-	AutomationTasks    int64                         `json:"automation_tasks"`
-	QueuedTasks        int64                         `json:"queued_tasks"`
-	RunningTasks       int64                         `json:"running_tasks"`
-	AttentionTasks     int64                         `json:"attention_tasks"`
-	WorkItemsTruncated bool                          `json:"work_items_truncated"`
-	WorkItems          []automationPortfolioWorkItem `json:"work_items"`
+	ID                           uuid.UUID                     `json:"id"`
+	ClientID                     uuid.UUID                     `json:"client_id"`
+	Name                         string                        `json:"name"`
+	Status                       string                        `json:"status"`
+	UpdatedAt                    time.Time                     `json:"updated_at"`
+	Client                       automationPortfolioClient     `json:"client"`
+	TechnologyTags               []string                      `json:"technology_tags"`
+	RuntimeHints                 []string                      `json:"runtime_hints"`
+	WorkItemCount                int64                         `json:"work_item_count"`
+	ActiveWorkItems              int64                         `json:"active_work_items"`
+	DecisionsRequired            int64                         `json:"decisions_required"`
+	BlockedWorkItems             int64                         `json:"blocked_work_items"`
+	AutomationTasks              int64                         `json:"automation_tasks"`
+	QueuedTasks                  int64                         `json:"queued_tasks"`
+	RunningTasks                 int64                         `json:"running_tasks"`
+	AttentionTasks               int64                         `json:"attention_tasks"`
+	TotalCostMicros              int64                         `json:"total_cost_microusd"`
+	CostLast30DaysMicros         int64                         `json:"cost_last_30_days_microusd"`
+	UnpricedExecutions           int64                         `json:"unpriced_executions"`
+	UnpricedExecutionsLast30Days int64                         `json:"unpriced_executions_last_30_days"`
+	WorkItemsTruncated           bool                          `json:"work_items_truncated"`
+	WorkItems                    []automationPortfolioWorkItem `json:"work_items"`
 }
 
 type automationPortfolioClient struct {
@@ -177,6 +196,14 @@ type automationPortfolioProjectTaskTotals struct {
 	AttentionTasks  int64
 }
 
+type automationPortfolioProjectCost struct {
+	ProjectID                    uuid.UUID
+	TotalCostMicros              int64
+	CostLast30DaysMicros         int64 `gorm:"column:cost_last_30_days_micros"`
+	UnpricedExecutions           int64 `gorm:"column:unpriced_executions"`
+	UnpricedExecutionsLast30Days int64 `gorm:"column:unpriced_executions_last_30_days"`
+}
+
 type automationPortfolioWorkItemTaskTotals struct {
 	WorkItemID      uuid.UUID
 	AutomationTasks int64
@@ -213,6 +240,21 @@ type automationPortfolioReviewRow struct {
 	PublishedAt            *time.Time
 }
 
+// The project overview reads only two safe context signals. In particular,
+// source references and the rest of context metadata are never selected into
+// this high-frequency read model.
+type automationPortfolioProjectSignalRow struct {
+	ProjectID        uuid.UUID
+	Kind             string
+	Technologies     string
+	RuntimeHintsJSON string
+}
+
+type automationPortfolioProjectSignals struct {
+	TechnologyTags []string
+	RuntimeHints   []string
+}
+
 type automationPortfolioBuildInput struct {
 	GeneratedAt               time.Time
 	Projects                  []models.DeliveryProject
@@ -220,6 +262,8 @@ type automationPortfolioBuildInput struct {
 	Tasks                     []automationPortfolioTaskRow
 	WorkItemTotals            []automationPortfolioWorkItemTotals
 	ProjectTaskTotals         []automationPortfolioProjectTaskTotals
+	ProjectCosts              []automationPortfolioProjectCost
+	ProjectSignals            []automationPortfolioProjectSignalRow
 	WorkItemTaskTotals        []automationPortfolioWorkItemTaskTotals
 	GateTotals                []automationPortfolioGateTotals
 	EvidenceTotals            []automationPortfolioEvidenceTotals
@@ -237,11 +281,18 @@ func GetAutomationPortfolio(c echo.Context) error {
 	}
 	viewer, err := authz.CurrentUser(c)
 	if err != nil {
-		return authz.Respond(c, err)
+		return deliveryRespondAuthzAndStop(c, err)
+	}
+	workspaceMode, organizationID, err := deliveryWorkspaceScope(c, viewer)
+	if err != nil {
+		return err
 	}
 
-	input, err := loadAutomationPortfolio(viewer)
+	input, err := loadAutomationPortfolio(viewer, workspaceMode, organizationID)
 	if err != nil {
+		if errors.Is(err, errDeliveryOrganizationNotFound) {
+			return deliveryResourceNotFound(c)
+		}
 		return utilsError(c, err)
 	}
 	snapshot := buildAutomationPortfolio(input)
@@ -254,7 +305,7 @@ func GetAutomationPortfolio(c echo.Context) error {
 	return success(c, "Automation portfolio", snapshot)
 }
 
-func loadAutomationPortfolio(viewer *models.User) (automationPortfolioBuildInput, error) {
+func loadAutomationPortfolio(viewer *models.User, workspaceMode string, organizationID uuid.UUID) (automationPortfolioBuildInput, error) {
 	input := automationPortfolioBuildInput{GeneratedAt: time.Now().UTC()}
 	if viewer == nil {
 		return input, gorm.ErrRecordNotFound
@@ -270,6 +321,13 @@ func loadAutomationPortfolio(viewer *models.User) (automationPortfolioBuildInput
 		Select("delivery_projects.id", "delivery_projects.client_id", "delivery_projects.name", "delivery_projects.status", "delivery_projects.updated_at").
 		Preload("Client", func(db *gorm.DB) *gorm.DB { return db.Select("id", "name") }).
 		Order("delivery_projects.updated_at DESC, delivery_projects.id DESC")
+	if workspaceMode == "organization" {
+		clientIDs, err := deliveryOrganizationClientIDs(organizationID)
+		if err != nil {
+			return input, err
+		}
+		projectQuery = projectQuery.Where("delivery_projects.client_id IN ?", clientIDs)
+	}
 
 	if !viewer.IsPlatformAdmin() {
 		projectIDs, err := automationPortfolioViewableProjectIDs(viewer.CognitoSub)
@@ -293,6 +351,12 @@ func loadAutomationPortfolio(viewer *models.User) (automationPortfolioBuildInput
 	projectIDs := make([]uuid.UUID, 0, len(input.Projects))
 	for _, project := range input.Projects {
 		projectIDs = append(projectIDs, project.ID)
+	}
+	if err := loadAutomationPortfolioProjectSignals(projectIDs, &input); err != nil {
+		return input, err
+	}
+	if err := loadAutomationPortfolioProjectCosts(projectIDs, &input); err != nil {
+		return input, err
 	}
 	if err := loadAutomationPortfolioWorkItemTotals(projectIDs, &input); err != nil {
 		return input, err
@@ -331,9 +395,25 @@ func loadAutomationPortfolio(viewer *models.User) (automationPortfolioBuildInput
 	return input, nil
 }
 
+func loadAutomationPortfolioProjectSignals(projectIDs []uuid.UUID, input *automationPortfolioBuildInput) error {
+	if len(projectIDs) == 0 {
+		input.ProjectSignals = []automationPortfolioProjectSignalRow{}
+		return nil
+	}
+	return configuration.DB.Table("delivery_context_sources").
+		Select(`project_id, kind,
+			LEFT(metadata_json ->> 'technologies', ?) AS technologies,
+			CASE WHEN octet_length(metadata_json #>> '{workspace_architecture,runtime_hints}') <= ?
+				THEN metadata_json #>> '{workspace_architecture,runtime_hints}' ELSE NULL END AS runtime_hints_json`,
+			automationPortfolioMaxTechnologyMetadataCharacters, automationPortfolioMaxRuntimeHintsJSONBytes).
+		Where("project_id IN ? AND kind IN ?", projectIDs, []string{"runbook", "repository"}).
+		Order("project_id, kind, id").
+		Scan(&input.ProjectSignals).Error
+}
+
 func loadAutomationPortfolioReviewQueue(input *automationPortfolioBuildInput) error {
 	var rows []automationPortfolioReviewRow
-	if err := configuration.DB.Raw(`
+	err := configuration.DB.Raw(`
 		SELECT task.id AS task_id, task.correlation_id, task.status, task.attempt_count,
 			task.created_at, task.updated_at, task.completed_at,
 			COALESCE(publication.repository, '') AS publication_repository,
@@ -350,39 +430,41 @@ func loadAutomationPortfolioReviewQueue(input *automationPortfolioBuildInput) er
 		WHERE task.operation = 'code.review' AND task.requested_by = 'github-app-review'
 		ORDER BY task.created_at DESC, task.id DESC
 		LIMIT ?
-	`, automationPortfolioMaxReviewTasks).Scan(&rows).Error; err != nil {
+	`, automationPortfolioMaxReviewTasks).Scan(&rows).Error
+	if err != nil {
+		if automationPortfolioOptionalSummaryUnavailable(err, "automation_code_review_publications") {
+			input.SummarySourcesUnavailable = append(input.SummarySourcesUnavailable, "review_queue")
+			return nil
+		}
 		return err
 	}
 	appendAutomationPortfolioReviews(input, rows)
 	return nil
 }
 
-// appendAutomationPortfolioReviews keeps the portfolio available when a
-// historical task cannot be safely projected. The row stays private: one
-// malformed correlation or publication record must not hide other valid
-// exact-SHA reviews from the release operator. The snapshot explicitly marks
-// the review queue as partial instead of pretending that every task was shown.
 func appendAutomationPortfolioReviews(input *automationPortfolioBuildInput, rows []automationPortfolioReviewRow) {
 	if input == nil {
 		return
 	}
-	queueIsPartial := false
+	if input.ReviewQueue == nil {
+		input.ReviewQueue = []automationPortfolioReview{}
+	}
 	for _, row := range rows {
 		review, ok := automationPortfolioReviewFromRow(row)
 		if !ok {
-			queueIsPartial = true
+			if !containsPortfolioString(input.SummarySourcesUnavailable, "review_queue") {
+				input.SummarySourcesUnavailable = append(input.SummarySourcesUnavailable, "review_queue")
+			}
 			continue
 		}
 		input.ReviewQueue = append(input.ReviewQueue, review)
-	}
-	if queueIsPartial {
-		input.SummarySourcesUnavailable = append(input.SummarySourcesUnavailable, "review_queue")
 	}
 }
 
 func automationPortfolioReviewFromRow(row automationPortfolioReviewRow) (automationPortfolioReview, bool) {
 	matches := automationPortfolioReviewCorrelation.FindStringSubmatch(strings.ToLower(strings.TrimSpace(row.CorrelationID)))
-	if row.TaskID == uuid.Nil || len(matches) != 4 || !automationPortfolioTaskStatus(strings.TrimSpace(row.Status)) || row.CreatedAt.IsZero() || row.UpdatedAt.IsZero() {
+	status := strings.TrimSpace(row.Status)
+	if row.TaskID == uuid.Nil || len(matches) != 4 || !automationPortfolioTaskStatus(status) || row.CreatedAt.IsZero() || row.UpdatedAt.IsZero() {
 		return automationPortfolioReview{}, false
 	}
 	pullRequest, err := strconv.Atoi(matches[2])
@@ -391,7 +473,8 @@ func automationPortfolioReviewFromRow(row automationPortfolioReviewRow) (automat
 	}
 	review := automationPortfolioReview{
 		TaskID: row.TaskID, Repository: matches[1], PullRequest: pullRequest, HeadSHA: matches[3],
-		Status: strings.TrimSpace(row.Status), AttemptCount: row.AttemptCount, CreatedAt: row.CreatedAt.UTC(), UpdatedAt: row.UpdatedAt.UTC(), CompletedAt: utcTimePointer(row.CompletedAt),
+		Status: status, AttemptCount: row.AttemptCount, CreatedAt: row.CreatedAt.UTC(), UpdatedAt: row.UpdatedAt.UTC(),
+		CompletedAt: utcTimePointer(row.CompletedAt),
 	}
 	if row.ReviewID == 0 {
 		return review, true
@@ -399,7 +482,9 @@ func automationPortfolioReviewFromRow(row automationPortfolioReviewRow) (automat
 	verdict := strings.ToLower(strings.TrimSpace(row.Verdict))
 	event := strings.ToUpper(strings.TrimSpace(row.Event))
 	actor := strings.ToLower(strings.TrimSpace(row.ReviewerActor))
-	if !strings.EqualFold(row.PublicationRepository, review.Repository) || row.PublicationPullRequest != review.PullRequest || !strings.EqualFold(row.PublicationHeadSHA, review.HeadSHA) || !automationPortfolioReviewVerdictEvent(verdict, event) || actor == "" || row.PublishedAt == nil || !automationPortfolioReviewURL(row.ReviewURL, review.Repository, review.PullRequest, row.ReviewID) {
+	if !strings.EqualFold(row.PublicationRepository, review.Repository) || row.PublicationPullRequest != review.PullRequest ||
+		!strings.EqualFold(row.PublicationHeadSHA, review.HeadSHA) || !automationPortfolioReviewVerdictEvent(verdict, event) ||
+		actor == "" || row.PublishedAt == nil || !automationPortfolioReviewURL(row.ReviewURL, review.Repository, review.PullRequest, row.ReviewID) {
 		return automationPortfolioReview{}, false
 	}
 	review.Verdict, review.Event, review.ReviewURL, review.ReviewerActor = verdict, event, strings.TrimSpace(row.ReviewURL), actor
@@ -424,7 +509,8 @@ func automationPortfolioReviewVerdictEvent(verdict, event string) bool {
 
 func automationPortfolioReviewURL(value, repository string, pullRequest int, reviewID int64) bool {
 	parsed, err := url.Parse(strings.TrimSpace(value))
-	if err != nil || parsed.Scheme != "https" || !strings.EqualFold(parsed.Hostname(), "github.com") || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "pullrequestreview-"+strconv.FormatInt(reviewID, 10) {
+	if err != nil || parsed.Scheme != "https" || !strings.EqualFold(parsed.Hostname(), "github.com") || parsed.User != nil ||
+		parsed.RawQuery != "" || parsed.Fragment != "pullrequestreview-"+strconv.FormatInt(reviewID, 10) {
 		return false
 	}
 	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
@@ -437,6 +523,134 @@ func utcTimePointer(value *time.Time) *time.Time {
 	}
 	utc := value.UTC()
 	return &utc
+}
+
+func containsPortfolioString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+var automationPortfolioSensitiveSignalPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)(?:https?|workspace|github|file|ssh)://|(?:^|\s)www\.`),
+	regexp.MustCompile(`(?i)\b(?:api[_ -]?key|secret(?:[_ -]?key)?|token|password|credential|authorization|bearer|private[_ -]?key|access[_ -]?key)\b\s*[:=]`),
+	regexp.MustCompile(`(?i)\b(?:sk|rk|pk|gh[pousr])[-_][a-z0-9_-]{8,}\b|\bAKIA[A-Z0-9]{16}\b`),
+	regexp.MustCompile(`(?i)\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b`),
+	regexp.MustCompile(`(?i)(?:[a-z]:[\\/]|\\\\|/(?:users|home|tmp|var|etc|root|workspace|app|mnt|opt|private)(?:/|$)|(?:^|\s)\.\.?/)`),
+}
+
+func automationPortfolioProjectSignalsFromRows(rows []automationPortfolioProjectSignalRow) map[uuid.UUID]automationPortfolioProjectSignals {
+	signals := make(map[uuid.UUID]automationPortfolioProjectSignals)
+	technologySeen := make(map[uuid.UUID]map[string]struct{})
+	runtimeSeen := make(map[uuid.UUID]map[string]struct{})
+	for _, row := range rows {
+		projectSignals, exists := signals[row.ProjectID]
+		if !exists {
+			projectSignals = automationPortfolioProjectSignals{
+				TechnologyTags: []string{},
+				RuntimeHints:   []string{},
+			}
+		}
+		switch row.Kind {
+		case "runbook":
+			for _, candidate := range strings.FieldsFunc(row.Technologies, func(r rune) bool {
+				return r == ';' || r == ',' || r == '\n' || r == '\r' || r == '•' || r == '·'
+			}) {
+				projectSignals.TechnologyTags = appendAutomationPortfolioSignal(
+					projectSignals.TechnologyTags, technologySeen, row.ProjectID, candidate,
+					automationPortfolioMaxTechnologyTagsPerProject,
+				)
+			}
+		case "repository":
+			for _, candidate := range automationPortfolioRuntimeHints(row.RuntimeHintsJSON) {
+				projectSignals.RuntimeHints = appendAutomationPortfolioSignal(
+					projectSignals.RuntimeHints, runtimeSeen, row.ProjectID, candidate,
+					automationPortfolioMaxRuntimeHintsPerProject,
+				)
+			}
+		}
+		signals[row.ProjectID] = projectSignals
+	}
+	return signals
+}
+
+func automationPortfolioRuntimeHints(raw string) []string {
+	if len(raw) == 0 || len(raw) > automationPortfolioMaxRuntimeHintsJSONBytes {
+		return nil
+	}
+	var hints []string
+	if err := json.Unmarshal([]byte(raw), &hints); err != nil {
+		return nil
+	}
+	return hints
+}
+
+func appendAutomationPortfolioSignal(
+	values []string,
+	seenByProject map[uuid.UUID]map[string]struct{},
+	projectID uuid.UUID,
+	candidate string,
+	limit int,
+) []string {
+	normalized, ok := normalizeAutomationPortfolioSignal(candidate)
+	if !ok || len(values) >= limit {
+		return values
+	}
+	seen := seenByProject[projectID]
+	if seen == nil {
+		seen = make(map[string]struct{})
+		seenByProject[projectID] = seen
+	}
+	key := strings.ToLower(normalized)
+	if _, exists := seen[key]; exists {
+		return values
+	}
+	seen[key] = struct{}{}
+	return append(values, normalized)
+}
+
+func normalizeAutomationPortfolioSignal(value string) (string, bool) {
+	value = strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+	if value == "" || utf8.RuneCountInString(value) > automationPortfolioMaxProjectSignalLength {
+		return "", false
+	}
+	for _, r := range value {
+		if unicode.IsControl(r) {
+			return "", false
+		}
+	}
+	for _, pattern := range automationPortfolioSensitiveSignalPatterns {
+		if pattern.MatchString(value) {
+			return "", false
+		}
+	}
+	return value, true
+}
+
+func loadAutomationPortfolioProjectCosts(projectIDs []uuid.UUID, input *automationPortfolioBuildInput) error {
+	if !configuration.DB.Migrator().HasTable("automation_executions") || !configuration.DB.Migrator().HasTable("automation_tool_executions") {
+		input.SummarySourcesUnavailable = append(input.SummarySourcesUnavailable, "costs")
+		return nil
+	}
+	cutoff := input.GeneratedAt.Add(-30 * 24 * time.Hour)
+	return automationPortfolioProjectCostsQuery(configuration.DB, projectIDs, cutoff, input.GeneratedAt).
+		Scan(&input.ProjectCosts).Error
+}
+
+func automationPortfolioProjectCostsQuery(db *gorm.DB, projectIDs []uuid.UUID, cutoff, generatedAt time.Time) *gorm.DB {
+	unknownPrice := deliveryCostUnpricedCondition()
+	return db.Table("("+deliveryCostLedgerUnion+") AS execution").
+		Joins("JOIN delivery_work_items AS work_item ON work_item.id = execution.delivery_work_item_id AND work_item.deleted_at IS NULL").
+		Where("work_item.project_id IN ?", projectIDs).
+		Select(`work_item.project_id AS project_id,
+			COALESCE(SUM(execution.total_cost_micros) FILTER (WHERE NOT `+unknownPrice+` AND execution.completed_at <= ?), 0) AS total_cost_micros,
+			COALESCE(SUM(execution.total_cost_micros) FILTER (WHERE NOT `+unknownPrice+` AND execution.completed_at >= ? AND execution.completed_at <= ?), 0) AS cost_last_30_days_micros,
+			COUNT(*) FILTER (WHERE `+unknownPrice+` AND execution.completed_at <= ?) AS unpriced_executions,
+			COUNT(*) FILTER (WHERE `+unknownPrice+` AND execution.completed_at >= ? AND execution.completed_at <= ?) AS unpriced_executions_last_30_days`, generatedAt, cutoff, generatedAt, generatedAt, cutoff, generatedAt).
+		Group("work_item.project_id")
 }
 
 func automationPortfolioViewableProjectIDs(cognitoSub string) ([]uuid.UUID, error) {
@@ -624,6 +838,11 @@ func buildAutomationPortfolio(input automationPortfolioBuildInput) automationPor
 	for _, total := range input.ProjectTaskTotals {
 		projectTaskTotals[total.ProjectID] = total
 	}
+	projectCosts := make(map[uuid.UUID]automationPortfolioProjectCost, len(input.ProjectCosts))
+	for _, cost := range input.ProjectCosts {
+		projectCosts[cost.ProjectID] = cost
+	}
+	projectSignals := automationPortfolioProjectSignalsFromRows(input.ProjectSignals)
 	workItemTaskTotals := make(map[uuid.UUID]automationPortfolioWorkItemTaskTotals, len(input.WorkItemTaskTotals))
 	for _, total := range input.WorkItemTaskTotals {
 		workItemTaskTotals[total.WorkItemID] = total
@@ -692,16 +911,27 @@ func buildAutomationPortfolio(input automationPortfolioBuildInput) automationPor
 	for _, project := range input.Projects {
 		workItemTotal := workItemTotals[project.ID]
 		taskTotal := projectTaskTotals[project.ID]
+		projectCost := projectCosts[project.ID]
+		projectSignal := projectSignals[project.ID]
+		if projectSignal.TechnologyTags == nil {
+			projectSignal.TechnologyTags = []string{}
+		}
+		if projectSignal.RuntimeHints == nil {
+			projectSignal.RuntimeHints = []string{}
+		}
 		workItems := workItemsByProject[project.ID]
 		if workItems == nil {
 			workItems = []automationPortfolioWorkItem{}
 		}
 		projects = append(projects, automationPortfolioProject{
 			ID: project.ID, ClientID: project.ClientID, Name: strings.TrimSpace(project.Name), Status: strings.TrimSpace(project.Status), UpdatedAt: project.UpdatedAt,
-			Client:        automationPortfolioClient{ID: project.Client.ID, Name: strings.TrimSpace(project.Client.Name)},
+			Client:         automationPortfolioClient{ID: project.Client.ID, Name: strings.TrimSpace(project.Client.Name)},
+			TechnologyTags: projectSignal.TechnologyTags, RuntimeHints: projectSignal.RuntimeHints,
 			WorkItemCount: workItemTotal.WorkItemCount, ActiveWorkItems: workItemTotal.ActiveWorkItems, DecisionsRequired: workItemTotal.DecisionsRequired,
 			BlockedWorkItems: workItemTotal.BlockedWorkItems, AutomationTasks: taskTotal.AutomationTasks, QueuedTasks: taskTotal.QueuedTasks,
 			RunningTasks: taskTotal.RunningTasks, AttentionTasks: taskTotal.AttentionTasks,
+			TotalCostMicros: projectCost.TotalCostMicros, CostLast30DaysMicros: projectCost.CostLast30DaysMicros,
+			UnpricedExecutions: projectCost.UnpricedExecutions, UnpricedExecutionsLast30Days: projectCost.UnpricedExecutionsLast30Days,
 			WorkItemsTruncated: workItemTotal.WorkItemCount > int64(len(workItems)), WorkItems: workItems,
 		})
 		totals.WorkItems += workItemTotal.WorkItemCount
@@ -712,6 +942,10 @@ func buildAutomationPortfolio(input automationPortfolioBuildInput) automationPor
 		totals.QueuedTasks += taskTotal.QueuedTasks
 		totals.RunningTasks += taskTotal.RunningTasks
 		totals.AttentionTasks += taskTotal.AttentionTasks
+		totals.TotalCostMicros += projectCost.TotalCostMicros
+		totals.CostLast30DaysMicros += projectCost.CostLast30DaysMicros
+		totals.UnpricedExecutions += projectCost.UnpricedExecutions
+		totals.UnpricedExecutionsLast30Days += projectCost.UnpricedExecutionsLast30Days
 	}
 
 	snapshot := automationPortfolioSnapshot{

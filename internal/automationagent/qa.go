@@ -3,9 +3,9 @@ package automationagent
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/subtle"
-	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"events-stocks/internal/inferencecapability"
 	"fmt"
 	"io"
 	"math"
@@ -16,7 +16,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,10 +25,6 @@ import (
 const (
 	maxQAArtifacts     = 12
 	maxQAArtifactBytes = 25 << 20
-	// The provider-capable browser runner is a small, root-operated entrypoint.
-	// Bound its size before hashing so an accidental or hostile registration
-	// cannot turn the credential admission check into an unbounded file read.
-	maxStagehandRunnerBytes = 8 << 20
 )
 
 type screenshotViewport struct {
@@ -46,6 +41,15 @@ var qaScreenshotViewports = []screenshotViewport{
 var browserQACaseIdentifier = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
 var browserQAEnvironmentReference = regexp.MustCompile(`^ITBEM_QA_[A-Z0-9_]{1,60}$`)
 var toolCallKeyPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{1,63}$`)
+var qaURLInTextPattern = regexp.MustCompile(`https?://[^\s\"'<>]+`)
+var qaSensitiveReportKeyPattern = regexp.MustCompile(`(?i)^(?:` + sensitiveWorkspaceKey + `|(?:[A-Za-z0-9]+[_-])*(?:cookie|set[_-]?cookie|session|credential|credentials|auth)(?:[_-][A-Za-z0-9]+)*)$`)
+
+// RedactSourceExcerpt handles keyed secrets and several established token
+// formats. These extra high-confidence patterns cover provider keys/JWTs that
+// browser tools sometimes print inline without a field name.
+var qaProviderTokenPattern = regexp.MustCompile(`\bsk-(?:proj-|live-|test-|ant-|or-v1-)?[A-Za-z0-9_-]{20,}\b`)
+var qaJWTTokenPattern = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`)
+var qaPrivateReasoningTextPattern = regexp.MustCompile(`(?im)(\b(?:reasoning(?:[\s-]?content)?|hidden[\s_-]*reasoning|private[\s_-]*reasoning|chain[\s_-]*of[\s_-]*thoughts?|cot|thoughts?|thinking|analysis|scratchpad|internal[\s_-]*monologue|deliberation)\b\s*[:=]\s*)[^\r\n]*`)
 
 type LocalArtifact struct {
 	Name        string
@@ -53,13 +57,55 @@ type LocalArtifact struct {
 	ContentType string
 }
 
-func RunQA(ctx context.Context, taskID string, delivery json.RawMessage, lookup func(string) string) (map[string]any, []LocalArtifact, error) {
-	// QA may run well after an implementation branch was created. Re-fetch all
-	// managed bases first so an advanced main invalidates the stale change-set
-	// instead of silently testing it against obsolete repository context.
-	if err := PrepareDeliveryWorkspaces(ctx, delivery, lookup); err != nil {
-		return nil, nil, err
+// QAExecutionError preserves the work already observed before a later
+// repository/tool failure. The caller must keep the task failed; this is a
+// private diagnostic handoff, never a gate-eligible QA result.
+type QAExecutionError struct {
+	Result    map[string]any
+	Artifacts []LocalArtifact
+	Cause     error
+}
+
+var errQACapabilityNotAccepted = errors.New("inference lease was not accepted before Stagehand")
+
+type qaCapabilityRefreshError struct {
+	cause error
+}
+
+func (e *qaCapabilityRefreshError) Error() string {
+	if e == nil || e.cause == nil {
+		return "Stagehand inference capability refresh failed"
 	}
+	return fmt.Sprintf("Stagehand inference capability refresh failed: %v", e.cause)
+}
+
+func (e *qaCapabilityRefreshError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func (e *QAExecutionError) Error() string {
+	if e == nil || e.Cause == nil {
+		return "QA execution failed"
+	}
+	return e.Cause.Error()
+}
+
+func (e *QAExecutionError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
+
+func RunQA(ctx context.Context, taskID, runID string, delivery json.RawMessage, lookup func(string) string) (map[string]any, []LocalArtifact, error) {
+	return runQAWithCapabilityRefresh(ctx, taskID, runID, delivery, lookup, nil)
+}
+
+func runQAWithCapabilityRefresh(ctx context.Context, taskID, runID string, delivery json.RawMessage, lookup func(string) string, refresh func(context.Context) (bool, error)) (map[string]any, []LocalArtifact, error) {
+	ctx = withSandboxTaskID(ctx, taskID)
 	previewURL, err := deliveryPreviewURL(delivery)
 	if err != nil {
 		return nil, nil, err
@@ -106,26 +152,29 @@ func RunQA(ctx context.Context, taskID string, delivery json.RawMessage, lookup 
 		commands := make([]any, 0, len(target.workspace.Config.ValidationCommands)+len(target.workspace.Config.QACommands))
 		if target.execution.RunValidation {
 			for index, command := range target.workspace.Config.ValidationCommands {
-				completed, runErr := runLocal(ctx, target.root, commandTimeout, "", command[0], command[1:]...)
+				completed, runErr := runWorkspaceCommand(ctx, target.workspace, target.root, commandTimeout, "", nil, command[0], command[1:]...)
 				if runErr != nil {
-					return nil, nil, runErr
+					result["repository_runs"] = append(result["repository_runs"].([]any), qaRepositoryRun(target, commands, runErr))
+					return result, artifacts, &QAExecutionError{Result: result, Artifacts: artifacts, Cause: runErr}
 				}
-				commands = append(commands, map[string]any{"kind": configuredCommandKind(target.workspace.Config.ValidationCommandKinds, index), "phase": "validation", "command": command, "passed": completed.ExitCode == 0, "output": completed.Output})
+				commands = append(commands, map[string]any{"phase": "validation", "kind": configuredCommandKind(target.workspace.Config.ValidationCommandKinds, index), "command": command, "passed": completed.ExitCode == 0, "output": completed.Output, "sandbox_lease": completed.SandboxLease})
 			}
 		}
 		if target.execution.RunQA {
 			for index, command := range target.workspace.Config.QACommands {
-				completed, runErr := runLocal(ctx, target.root, commandTimeout, "", command[0], command[1:]...)
+				completed, runErr := runWorkspaceCommand(ctx, target.workspace, target.root, commandTimeout, "", nil, command[0], command[1:]...)
 				if runErr != nil {
-					return nil, nil, runErr
+					result["repository_runs"] = append(result["repository_runs"].([]any), qaRepositoryRun(target, commands, runErr))
+					return result, artifacts, &QAExecutionError{Result: result, Artifacts: artifacts, Cause: runErr}
 				}
-				commands = append(commands, map[string]any{"kind": configuredCommandKind(target.workspace.Config.QACommandKinds, index), "phase": "qa", "command": command, "passed": completed.ExitCode == 0, "output": completed.Output})
+				commands = append(commands, map[string]any{"phase": "qa", "kind": configuredCommandKind(target.workspace.Config.QACommandKinds, index), "command": command, "passed": completed.ExitCode == 0, "output": completed.Output, "sandbox_lease": completed.SandboxLease})
 			}
 		}
 		if target.execution.CollectEvidence {
 			repositoryArtifacts, collectErr := collectQAArtifacts(target.root, target.workspace.Config.QAArtifactPatterns)
 			if collectErr != nil {
-				return nil, nil, collectErr
+				result["repository_runs"] = append(result["repository_runs"].([]any), qaRepositoryRun(target, commands, collectErr))
+				return result, artifacts, &QAExecutionError{Result: result, Artifacts: artifacts, Cause: collectErr}
 			}
 			if remaining := regularArtifactLimit - len(artifacts); remaining > 0 {
 				if len(repositoryArtifacts) > remaining {
@@ -142,28 +191,28 @@ func RunQA(ctx context.Context, taskID string, delivery json.RawMessage, lookup 
 	}
 	if preview, ok := result["preview"].(map[string]any); ok && preview["passed"] == true && captureTarget != nil {
 		if captureTarget.execution.RunStagehand && len(captureTarget.workspace.Config.QASemanticCommand) > 0 {
-			semantic, semanticArtifacts, semanticErr := captureSemanticQA(ctx, taskID, previewURL, delivery, captureTarget.root, captureTarget.workspace.Config.QASemanticCommand, lookup)
+			semantic, semanticArtifacts, semanticErr := captureSemanticQAWithRefresh(ctx, taskID, runID, previewURL, delivery, captureTarget.workspace, captureTarget.root, captureTarget.workspace.Config.QASemanticCommand, lookup, refresh)
 			result["semantic"] = semantic
 			if semanticErr != nil {
-				return nil, nil, semanticErr
+				return result, artifacts, &QAExecutionError{Result: result, Artifacts: artifacts, Cause: semanticErr}
 			}
 			artifacts = append(artifacts, prefixQAArtifacts(semanticArtifacts, captureTarget.workspace.ID)...)
 		}
 		if len(captureTarget.workspace.Config.QAScreenshotCommand) > 0 {
-			screenshot, artifact, captureErr := captureScreenshot(ctx, taskID, previewURL, captureTarget.root, captureTarget.workspace.Config.QAScreenshotCommand)
+			screenshot, artifact, captureErr := captureScreenshot(ctx, taskID, previewURL, captureTarget.workspace, captureTarget.root, captureTarget.workspace.Config.QAScreenshotCommand)
 			result["screenshot"] = screenshot
 			if captureErr != nil {
-				return nil, nil, captureErr
+				return result, artifacts, &QAExecutionError{Result: result, Artifacts: artifacts, Cause: captureErr}
 			}
 			if artifact != nil {
 				artifacts = append(artifacts, prefixQAArtifacts([]LocalArtifact{*artifact}, captureTarget.workspace.ID)...)
 			}
-		} else {
+		} else if !semanticArtifactsContainPNG(artifacts) {
 			captures := make([]any, 0, len(qaScreenshotViewports))
 			for index, viewport := range qaScreenshotViewports {
-				screenshot, artifact, captureErr := captureScreenshotAt(ctx, taskID, previewURL, captureTarget.root, nil, viewport)
+				screenshot, artifact, captureErr := captureScreenshotAt(ctx, taskID, previewURL, captureTarget.workspace, captureTarget.root, nil, viewport)
 				if captureErr != nil {
-					return nil, nil, captureErr
+					return result, artifacts, &QAExecutionError{Result: result, Artifacts: artifacts, Cause: captureErr}
 				}
 				screenshot["viewport"] = map[string]int{"width": viewport.Width, "height": viewport.Height}
 				captures = append(captures, screenshot)
@@ -180,6 +229,30 @@ func RunQA(ctx context.Context, taskID string, delivery json.RawMessage, lookup 
 		}
 	}
 	return result, artifacts, nil
+}
+
+func qaRepositoryRun(target qaTarget, commands []any, cause error) map[string]any {
+	message := "QA command failed before a complete repository run was recorded"
+	if cause != nil && strings.TrimSpace(cause.Error()) != "" {
+		message = cause.Error()
+	}
+	return map[string]any{
+		"workspace":          "workspace://" + target.workspace.ID,
+		"branch":             target.branch,
+		"tested_directory":   target.testedDirectory,
+		"commands":           commands,
+		"execution_contract": target.execution.asMap(),
+		"error":              message,
+	}
+}
+
+func semanticArtifactsContainPNG(artifacts []LocalArtifact) bool {
+	for _, artifact := range artifacts {
+		if artifact.ContentType == "image/png" {
+			return true
+		}
+	}
+	return false
 }
 
 func qaScreenshotArtifactSlots(command []string) int {
@@ -388,30 +461,234 @@ func deliveryPreviewURL(delivery json.RawMessage) (string, error) {
 }
 
 func checkPreview(ctx context.Context, previewURL string) map[string]any {
+	safeURL := sanitizedPreviewURL(previewURL)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, previewURL, nil)
 	if err != nil {
-		return map[string]any{"url": previewURL, "passed": false, "error": "preview request could not be created"}
+		return map[string]any{"url": safeURL, "passed": false, "error": "preview request could not be created"}
 	}
 	request.Header.Set("User-Agent", "ITBEM-Delivery-QA/1.0")
 	client := &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
 	response, err := client.Do(request)
 	if err != nil {
-		return map[string]any{"url": previewURL, "passed": false, "error": "preview request failed"}
+		return map[string]any{"url": safeURL, "passed": false, "error": "preview request failed"}
 	}
 	defer response.Body.Close()
 	_, _ = io.CopyN(io.Discard, response.Body, 2048)
-	return map[string]any{"url": previewURL, "passed": response.StatusCode >= 200 && response.StatusCode < 400, "status": response.StatusCode, "content_type": response.Header.Get("Content-Type")}
+	return map[string]any{"url": safeURL, "passed": response.StatusCode >= 200 && response.StatusCode < 400, "status": response.StatusCode, "content_type": response.Header.Get("Content-Type")}
 }
 
-func captureScreenshot(ctx context.Context, taskID, previewURL, root string, command []string) (map[string]any, *LocalArtifact, error) {
-	return captureScreenshotAt(ctx, taskID, previewURL, root, command, qaScreenshotViewports[0])
+// sanitizedPreviewURL is for logs, reports, command results, and UI payloads.
+// The raw URL remains in memory only for the actual HTTP/browser navigation.
+func sanitizedPreviewURL(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Hostname() == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return "[redacted preview URL]"
+	}
+	parsed.RawQuery = ""
+	parsed.ForceQuery = false
+	parsed.Fragment = ""
+	parsed.RawFragment = ""
+	return parsed.String()
+}
+
+func previewURLHasQueryOrFragment(raw string) bool {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return true
+	}
+	// strings.Contains catches a syntactically present but empty fragment (#),
+	// which is not distinguishable from an absent fragment in url.URL.
+	return parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || strings.Contains(raw, "#")
+}
+
+// sanitizePreviewText removes URL query/fragment material from textual output
+// and also removes the exact preview credential components if a tool echoes
+// them without the URL surrounding them.
+func sanitizePreviewText(value, rawPreviewURL string) string {
+	value = qaURLInTextPattern.ReplaceAllStringFunc(value, func(candidate string) string {
+		trimmed := strings.TrimRight(candidate, ".,;:!?)]}")
+		trailing := candidate[len(trimmed):]
+		parsed, err := url.Parse(trimmed)
+		if err != nil || parsed.Hostname() == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			return candidate
+		}
+		parsed.RawQuery = ""
+		parsed.ForceQuery = false
+		parsed.Fragment = ""
+		parsed.RawFragment = ""
+		return parsed.String() + trailing
+	})
+	if previewURLHasQueryOrFragment(rawPreviewURL) {
+		parsed, err := url.Parse(rawPreviewURL)
+		if err == nil {
+			for _, secret := range []string{parsed.RawQuery, parsed.Fragment, parsed.RawFragment} {
+				if secret != "" {
+					value = strings.ReplaceAll(value, secret, "[REDACTED]")
+				}
+			}
+			if decoded, decodeErr := url.QueryUnescape(parsed.RawQuery); decodeErr == nil && decoded != "" && decoded != parsed.RawQuery {
+				value = strings.ReplaceAll(value, decoded, "[REDACTED]")
+			}
+		}
+	}
+	value, _ = RedactSourceExcerpt(value)
+	value = qaProviderTokenPattern.ReplaceAllString(value, "[REDACTED]")
+	value = qaJWTTokenPattern.ReplaceAllString(value, "[REDACTED]")
+	value = qaPrivateReasoningTextPattern.ReplaceAllString(value, "$1[REDACTED PRIVATE REASONING]")
+	return value
+}
+
+func privateQAReasoningField(key string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(key))
+	normalized = strings.NewReplacer("_", "", "-", "", " ", "", ".", "", "/", "").Replace(normalized)
+	switch normalized {
+	case "analysis", "reasoning", "reasoningcontent", "hiddenreasoning", "privatereasoning",
+		"chainofthought", "chainofthoughts", "cot", "thought", "thoughts", "thinking",
+		"thoughtprocess", "internalmonologue", "scratchpad", "deliberation":
+		return true
+	default:
+		return false
+	}
+}
+
+func sanitizePreviewCommand(command []string, rawPreviewURL string) []string {
+	sanitized := make([]string, 0, len(command))
+	redactNextArgument := false
+	for _, argument := range command {
+		if redactNextArgument {
+			sanitized = append(sanitized, "[REDACTED]")
+			redactNextArgument = false
+			continue
+		}
+		clean := sanitizePreviewText(argument, rawPreviewURL)
+		sanitized = append(sanitized, clean)
+		if !strings.Contains(argument, "=") && workspaceSensitiveCommandArgument.MatchString(strings.TrimSpace(argument)) {
+			redactNextArgument = true
+		}
+	}
+	return sanitized
+}
+
+func sanitizePreviewValue(value any, rawPreviewURL string) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		result := make(map[string]any, len(typed))
+		for key, entry := range typed {
+			if privateQAReasoningField(key) {
+				continue
+			}
+			if qaSensitiveReportKeyPattern.MatchString(strings.TrimSpace(key)) {
+				result[key] = "[REDACTED]"
+				continue
+			}
+			if strings.Contains(strings.ToLower(key), "url") {
+				if rawURL, ok := entry.(string); ok {
+					result[key] = sanitizePreviewText(sanitizedPreviewURL(rawURL), rawPreviewURL)
+					continue
+				}
+			}
+			result[key] = sanitizePreviewValue(entry, rawPreviewURL)
+		}
+		return result
+	case []any:
+		result := make([]any, len(typed))
+		for index, entry := range typed {
+			result[index] = sanitizePreviewValue(entry, rawPreviewURL)
+		}
+		return result
+	case string:
+		return sanitizePreviewText(typed, rawPreviewURL)
+	default:
+		return value
+	}
+}
+
+func sanitizePreviewReport(body []byte, rawPreviewURL string) ([]byte, map[string]any) {
+	var decoded any
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		return []byte(sanitizePreviewText(string(body), rawPreviewURL)), nil
+	}
+	sanitized := sanitizePreviewValue(decoded, rawPreviewURL)
+	encoded, err := json.Marshal(sanitized)
+	if err != nil {
+		return []byte(sanitizePreviewText(string(body), rawPreviewURL)), nil
+	}
+	report, _ := sanitized.(map[string]any)
+	return encoded, report
+}
+
+// stagehandCommandWithPrivatePreviewURL adapts only the pinned Stagehand
+// runner's --url argument to its --url-file contract. The private file is
+// created with restrictive permissions and removed after the subprocess
+// exits; no token-bearing URL is ever placed in argv or a returned command.
+func stagehandCommandWithPrivatePreviewURL(command []string, directory, previewURL string) ([]string, func(), error) {
+	if !isPinnedStagehandCommand(command) {
+		return nil, func() {}, fmt.Errorf("signed preview URLs require the pinned Stagehand URL-file contract")
+	}
+	urlIndex := -1
+	urlArgumentWidth := 1
+	for index, argument := range command {
+		if argument == "--url" {
+			if index+1 >= len(command) {
+				return nil, func() {}, fmt.Errorf("pinned Stagehand URL argument is invalid")
+			}
+			urlIndex = index
+			urlArgumentWidth = 2
+			break
+		}
+		if strings.HasPrefix(argument, "--url=") {
+			urlIndex = index
+			break
+		}
+	}
+	if urlIndex < 0 {
+		return nil, func() {}, fmt.Errorf("pinned Stagehand command must use --url for signed preview navigation")
+	}
+	privateDirectory, err := os.MkdirTemp(directory, ".preview-url-")
+	if err != nil {
+		return nil, func() {}, fmt.Errorf("prepare private preview URL file")
+	}
+	filePath := filepath.Join(privateDirectory, "url")
+	file, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		_ = os.Remove(privateDirectory)
+		return nil, func() {}, fmt.Errorf("create private preview URL file")
+	}
+	_, writeErr := io.WriteString(file, previewURL)
+	if writeErr == nil {
+		writeErr = file.Sync()
+	}
+	closeErr := file.Close()
+	if writeErr != nil || closeErr != nil {
+		_ = os.Remove(filePath)
+		_ = os.Remove(privateDirectory)
+		return nil, func() {}, fmt.Errorf("write private preview URL file")
+	}
+	cleanup := func() {
+		_ = os.Remove(filePath)
+		_ = os.Remove(privateDirectory)
+	}
+	result := make([]string, 0, len(command)-urlArgumentWidth+2)
+	result = append(result, command[:urlIndex]...)
+	result = append(result, "--url-file", filePath)
+	result = append(result, command[urlIndex+urlArgumentWidth:]...)
+	return result, cleanup, nil
+}
+
+func captureScreenshot(ctx context.Context, taskID, previewURL string, workspace Workspace, root string, command []string) (map[string]any, *LocalArtifact, error) {
+	return captureScreenshotAt(ctx, taskID, previewURL, workspace, root, command, qaScreenshotViewports[0])
 }
 
 // captureSemanticQA runs one configured semantic browser probe and records
 // only its bounded JSON report plus its sibling PNG evidence. The worker
 // treats its exit status as a QA check; it never lets a language model decide
 // whether a human gate opens.
-func captureSemanticQA(ctx context.Context, taskID, previewURL string, delivery json.RawMessage, root string, command []string, lookup func(string) string) (map[string]any, []LocalArtifact, error) {
+func captureSemanticQA(ctx context.Context, taskID, runID, previewURL string, delivery json.RawMessage, workspace Workspace, root string, command []string, lookup func(string) string) (map[string]any, []LocalArtifact, error) {
+	return captureSemanticQAWithRefresh(ctx, taskID, runID, previewURL, delivery, workspace, root, command, lookup, nil)
+}
+
+func captureSemanticQAWithRefresh(ctx context.Context, taskID, runID, previewURL string, delivery json.RawMessage, workspace Workspace, root string, command []string, lookup func(string) string, refresh func(context.Context) (bool, error)) (map[string]any, []LocalArtifact, error) {
+	safePreviewURL := sanitizedPreviewURL(previewURL)
 	directory := filepath.Join(root, ".itbem-agent-evidence", taskID)
 	if err := os.MkdirAll(directory, 0700); err != nil {
 		return nil, nil, fmt.Errorf("prepare semantic QA evidence directory: %w", err)
@@ -427,15 +704,24 @@ func captureSemanticQA(ctx context.Context, taskID, previewURL string, delivery 
 	}
 	rendered := make([]string, len(command))
 	for index, part := range command {
-		rendered[index] = strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(part, "{preview_url}", previewURL), "{artifact_path}", path), "{qa_plan_path}", planPath)
+		// Command arguments and any resulting error/report are persisted in the
+		// QA result, so only the query/fragment-free URL may be substituted here.
+		rendered[index] = strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(part, "{preview_url}", safePreviewURL), "{artifact_path}", path), "{qa_plan_path}", planPath)
 	}
 	rendered, err = resolveSemanticQACommand(rendered, lookup)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("resolve semantic QA command: %s", sanitizePreviewText(err.Error(), previewURL))
 	}
-	environment, trustedStagehand, err := semanticQAEnvironment(rendered, root, lookup)
-	if err != nil {
-		return nil, nil, err
+	if previewURLHasQueryOrFragment(previewURL) {
+		if !isPinnedStagehandCommand(rendered) {
+			return nil, nil, fmt.Errorf("signed preview URLs require the pinned Stagehand URL-file contract")
+		}
+		var cleanup func()
+		rendered, cleanup, err = stagehandCommandWithPrivatePreviewURL(rendered, directory, previewURL)
+		if err != nil {
+			return nil, nil, err
+		}
+		defer cleanup()
 	}
 	// Authenticated browser cases name their local test values, never embed
 	// them in a plan, task, command argument or evidence artifact. Supply
@@ -444,27 +730,52 @@ func captureSemanticQA(ctx context.Context, taskID, previewURL string, delivery 
 	if err != nil {
 		return nil, nil, err
 	}
-	if len(testEnvironment) > 0 && !trustedStagehand {
+	if len(testEnvironment) > 0 && !isPinnedStagehandCommand(rendered) {
 		return nil, nil, fmt.Errorf("approved browser QA test flow requires the pinned Stagehand runner")
+	}
+	// Registered validation and QA commands can run for several minutes. Refresh
+	// only after those commands and immediately before preparing the Stagehand
+	// environment, so the child receives a newly issued run capability.
+	if isPinnedStagehandCommand(rendered) && refresh != nil {
+		accepted, refreshErr := refresh(ctx)
+		if refreshErr != nil {
+			return nil, nil, &qaCapabilityRefreshError{cause: refreshErr}
+		}
+		if !accepted {
+			return nil, nil, &qaCapabilityRefreshError{cause: errQACapabilityNotAccepted}
+		}
+	}
+	environment, err := semanticQAEnvironment(rendered, taskID, runID, lookup)
+	if err != nil {
+		return nil, nil, err
 	}
 	for key, value := range testEnvironment {
 		environment[key] = value
 	}
-	completed, err := runLocalWithEnv(ctx, root, 3*time.Minute, "", environment, rendered[0], rendered[1:]...)
+	completed, err := runWorkspaceCommand(ctx, workspace, root, 3*time.Minute, "", environment, rendered[0], rendered[1:]...)
 	if err != nil {
-		return nil, nil, err
+		_ = os.Remove(path)
+		return nil, nil, fmt.Errorf("semantic QA command failed: %s", sanitizePreviewText(err.Error(), previewURL))
 	}
-	result := map[string]any{"command": rendered, "passed": completed.ExitCode == 0, "output": completed.Output}
+	result := map[string]any{"command": sanitizePreviewCommand(rendered, previewURL), "passed": completed.ExitCode == 0, "output": sanitizePreviewText(completed.Output, previewURL)}
 	artifacts := make([]LocalArtifact, 0, qaSemanticArtifactSlots(command))
 	var report map[string]any
 	if body, readErr := readLocalArtifact(path); readErr == nil {
+		body, report = sanitizePreviewReport(body, previewURL)
+		if writeErr := os.WriteFile(path, body, 0600); writeErr != nil {
+			_ = os.Remove(path)
+			return nil, nil, fmt.Errorf("sanitize semantic QA report before persistence")
+		}
 		artifacts = append(artifacts, LocalArtifact{Name: filepath.Base(path), Body: body, ContentType: "application/json"})
-		if json.Unmarshal(body, &report) == nil {
+		if report != nil {
 			result["report"] = report
 		}
-	} else if completed.ExitCode == 0 {
-		result["passed"] = false
-		result["output"] = "semantic QA did not produce its required report"
+	} else {
+		_ = os.Remove(path)
+		if completed.ExitCode == 0 {
+			result["passed"] = false
+			result["output"] = "semantic QA did not produce its required report"
+		}
 	}
 	screenshotPaths, globErr := filepath.Glob(strings.TrimSuffix(path, filepath.Ext(path)) + "*.png")
 	if globErr == nil {
@@ -479,7 +790,7 @@ func captureSemanticQA(ctx context.Context, taskID, previewURL string, delivery 
 		}
 	}
 	if err := verifyStagehandEvidenceManifest(report, artifacts); err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("verify semantic QA evidence: %s", sanitizePreviewText(err.Error(), previewURL))
 	}
 	return result, artifacts, nil
 }
@@ -564,27 +875,30 @@ func resolveSemanticQACommand(command []string, lookup func(string) string) ([]s
 	return resolved, nil
 }
 
-// semanticQAEnvironment keeps provider credentials out of every repository
-// command. The sole exception is an operator-owned Stagehand runner outside
-// the reviewed worktree whose exact content matches the configured SHA-256.
-// A repository can configure a semantic command, but it cannot turn that
-// command into a credential-bearing process by naming a familiar path.
-func semanticQAEnvironment(command []string, workspaceRoot string, lookup func(string) string) (map[string]string, bool, error) {
-	trusted, err := trustedStagehandCommand(command, workspaceRoot, lookup)
-	if err != nil {
-		return nil, false, err
-	}
-	if !trusted {
-		return nil, false, nil
+// semanticQAEnvironment passes the already-issued run capability to the
+// pinned Stagehand runner. It never receives the callback master or signing key.
+func semanticQAEnvironment(command []string, taskID, runID string, lookup func(string) string) (map[string]string, error) {
+	if !isPinnedStagehandCommand(command) {
+		return nil, nil
 	}
 	if lookup == nil {
-		return nil, false, fmt.Errorf("stagehand semantic QA requires a credential lookup")
+		return nil, fmt.Errorf("stagehand semantic QA requires a gateway configuration")
 	}
-	apiKey := strings.TrimSpace(lookup("MINIMAX_API_KEY"))
-	if apiKey == "" {
-		return nil, false, fmt.Errorf("stagehand semantic QA requires the configured MiniMax credential")
+	config, err := LoadGatewayProviderConfig(lookup)
+	if err != nil || strings.TrimSpace(taskID) == "" || strings.TrimSpace(runID) == "" {
+		return nil, fmt.Errorf("stagehand semantic QA requires a bound AI gateway lease")
 	}
-	return map[string]string{"MINIMAX_API_KEY": apiKey}, true, nil
+	capability, ok := inferenceCapabilityForRun(taskID, runID, time.Now().UTC())
+	if !ok {
+		return nil, fmt.Errorf("stagehand requires a current server-issued inference capability")
+	}
+	return map[string]string{
+		"STAGEHAND_QA_INFERENCE_URL":        config.Endpoint,
+		"STAGEHAND_QA_INFERENCE_CAPABILITY": capability,
+		"STAGEHAND_QA_TASK_ID":              taskID,
+		"STAGEHAND_QA_RUN_ID":               runID,
+		"STAGEHAND_QA_OPERATION":            inferencecapability.OperationDeliveryQA,
+	}, nil
 }
 
 // browserQATestEnvironment resolves only explicitly reviewed test-value
@@ -635,89 +949,21 @@ func browserQATestEnvironment(delivery json.RawMessage, lookup func(string) stri
 	return values, nil
 }
 
-// trustedStagehandCommand admits the MiniMax credential only to the runner
-// installed by the execution-plane operator. The runner must be outside the
-// reviewed checkout, named as the Node script argument, and match a digest
-// supplied through machine configuration. This stays generic across projects
-// while preventing a changed repository file from inheriting the credential.
-func trustedStagehandCommand(command []string, workspaceRoot string, lookup func(string) string) (bool, error) {
-	if len(command) < 2 || !approvedSemanticRuntime(command[0]) || (!strings.EqualFold(filepath.Base(command[0]), "node.exe") && command[0] != "node") {
-		return false, nil
+func isPinnedStagehandCommand(command []string) bool {
+	runtimeBase := ""
+	if len(command) > 0 {
+		runtimeBase = filepath.Base(strings.ReplaceAll(command[0], `\`, "/"))
 	}
-	if lookup == nil {
-		return false, nil
-	}
-	runnerSetting := strings.TrimSpace(lookup("ITBEM_STAGEHAND_RUNNER_PATH"))
-	digestSetting := strings.TrimSpace(lookup("ITBEM_STAGEHAND_RUNNER_SHA256"))
-	if runnerSetting == "" && digestSetting == "" {
-		return false, nil
-	}
-	if runnerSetting == "" || digestSetting == "" {
-		return false, fmt.Errorf("stagehand runner configuration requires both path and SHA-256")
-	}
-	expectedDigest, err := hex.DecodeString(digestSetting)
-	if err != nil || len(expectedDigest) != sha256.Size {
-		return false, fmt.Errorf("configured Stagehand runner SHA-256 is invalid")
-	}
-	configuredRunner, err := canonicalExistingAbsolutePath(runnerSetting)
-	if err != nil {
-		return false, fmt.Errorf("configured Stagehand runner path is invalid")
-	}
-	if !filepath.IsAbs(strings.TrimSpace(command[1])) {
-		return false, nil
-	}
-	commandRunner, err := canonicalExistingAbsolutePath(command[1])
-	if err != nil || !sameFilesystemPath(commandRunner, configuredRunner) {
-		return false, nil
-	}
-	workspace, err := canonicalExistingAbsolutePath(workspaceRoot)
-	if err != nil {
-		return false, fmt.Errorf("reviewed workspace path is invalid")
-	}
-	if filesystemPathWithin(workspace, configuredRunner) {
-		return false, fmt.Errorf("configured Stagehand runner must be outside the reviewed workspace")
-	}
-	runner, err := os.Open(configuredRunner)
-	if err != nil {
-		return false, fmt.Errorf("configured Stagehand runner cannot be read")
-	}
-	defer runner.Close()
-	hash := sha256.New()
-	bytesRead, err := io.Copy(hash, io.LimitReader(runner, maxStagehandRunnerBytes+1))
-	if err != nil || bytesRead > maxStagehandRunnerBytes {
-		return false, fmt.Errorf("configured Stagehand runner cannot be verified")
-	}
-	if subtle.ConstantTimeCompare(hash.Sum(nil), expectedDigest) != 1 {
-		return false, fmt.Errorf("configured Stagehand runner SHA-256 does not match")
-	}
-	return true, nil
-}
-
-func canonicalExistingAbsolutePath(value string) (string, error) {
-	path := strings.TrimSpace(value)
-	if !filepath.IsAbs(path) {
-		return "", fmt.Errorf("path must be absolute")
-	}
-	resolved, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Clean(resolved), nil
-}
-
-func sameFilesystemPath(left, right string) bool {
-	if runtime.GOOS == "windows" {
-		return strings.EqualFold(left, right)
-	}
-	return left == right
-}
-
-func filesystemPathWithin(root, target string) bool {
-	relative, err := filepath.Rel(root, target)
-	if err != nil {
+	if len(command) < 2 || !approvedSemanticRuntime(command[0]) || (!strings.EqualFold(runtimeBase, "node.exe") && runtimeBase != "node") {
 		return false
 	}
-	return relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative))
+	for _, part := range command[1:] {
+		clean := strings.ToLower(filepath.ToSlash(strings.TrimSpace(part)))
+		if strings.HasSuffix(clean, "/itbem-events-backend/tools/stagehand-qa/run.mjs") || clean == "tools/stagehand-qa/run.mjs" {
+			return true
+		}
+	}
+	return false
 }
 
 // browserQAPlan compiles the human-approved browser cases from the immutable
@@ -960,7 +1206,11 @@ func safeBrowserQAEnvironmentReference(raw any) bool {
 	return ok && browserQAEnvironmentReference.MatchString(strings.TrimSpace(value))
 }
 
-func captureScreenshotAt(ctx context.Context, taskID, previewURL, root string, command []string, viewport screenshotViewport) (map[string]any, *LocalArtifact, error) {
+func captureScreenshotAt(ctx context.Context, taskID, previewURL string, workspace Workspace, root string, command []string, viewport screenshotViewport) (map[string]any, *LocalArtifact, error) {
+	safePreviewURL := sanitizedPreviewURL(previewURL)
+	if previewURLHasQueryOrFragment(previewURL) {
+		return map[string]any{"url": safePreviewURL, "passed": false, "error": "signed preview URLs cannot be passed to argv-based screenshot runners"}, nil, fmt.Errorf("signed preview URLs cannot be passed to argv-based screenshot runners")
+	}
 	directory := filepath.Join(root, ".itbem-agent-evidence", taskID)
 	if err := os.MkdirAll(directory, 0700); err != nil {
 		return nil, nil, fmt.Errorf("prepare QA evidence directory: %w", err)
@@ -988,20 +1238,20 @@ func captureScreenshotAt(ctx context.Context, taskID, previewURL, root string, c
 	}
 	rendered := make([]string, len(command))
 	for index, part := range command {
-		rendered[index] = strings.ReplaceAll(strings.ReplaceAll(part, "{preview_url}", previewURL), "{artifact_path}", path)
+		rendered[index] = strings.ReplaceAll(strings.ReplaceAll(part, "{preview_url}", safePreviewURL), "{artifact_path}", path)
 	}
-	completed, err := runLocal(ctx, root, 2*time.Minute, "", rendered[0], rendered[1:]...)
+	completed, err := runWorkspaceCommand(ctx, workspace, root, 2*time.Minute, "", nil, rendered[0], rendered[1:]...)
 	if err != nil {
-		return nil, nil, err
+		return map[string]any{"url": safePreviewURL, "command": rendered, "passed": false, "error": sanitizePreviewText(err.Error(), previewURL)}, nil, fmt.Errorf("screenshot command failed: %s", sanitizePreviewText(err.Error(), previewURL))
 	}
-	result := map[string]any{"command": rendered, "passed": completed.ExitCode == 0, "output": completed.Output}
+	result := map[string]any{"url": safePreviewURL, "command": rendered, "passed": completed.ExitCode == 0, "output": sanitizePreviewText(completed.Output, previewURL)}
 	if completed.ExitCode != 0 {
 		return result, nil, nil
 	}
 	body, err := readLocalArtifact(path)
 	if err != nil {
 		result["passed"] = false
-		result["output"] = err.Error()
+		result["output"] = sanitizePreviewText(err.Error(), previewURL)
 		return result, nil, nil
 	}
 	return result, &LocalArtifact{Name: filepath.Base(path), Body: body, ContentType: "image/png"}, nil
@@ -1016,6 +1266,9 @@ func defaultScreenshotCommand(previewURL, outputPath string) ([]string, error) {
 }
 
 func defaultScreenshotCommandAt(previewURL, outputPath string, viewport screenshotViewport) ([]string, error) {
+	if previewURLHasQueryOrFragment(previewURL) {
+		return nil, fmt.Errorf("signed preview URLs cannot be passed to argv-based screenshot runners")
+	}
 	if strings.TrimSpace(viewport.Name) == "" || viewport.Width < 320 || viewport.Width > 4096 || viewport.Height < 320 || viewport.Height > 4096 {
 		return nil, fmt.Errorf("QA screenshot viewport is invalid")
 	}

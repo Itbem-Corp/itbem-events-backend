@@ -20,3 +20,23 @@ func TestPlanMessagesEndWithFrozenReferenceContract(t *testing.T) {
 		t.Fatal("the prompt improvement must not weaken frozen-source validation")
 	}
 }
+
+func TestPlanMessagesMatchRequestLanguageAndPreserveTechnicalTerms(t *testing.T) {
+	input := TaskInput{
+		Prompt:   "Propón un endpoint GET /agents y conserva el nombre Agent Studio.",
+		Delivery: json.RawMessage(`{}`),
+	}
+	messages, err := buildTaskMessages("delivery.plan", input, func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, requirement := range []string{
+		"same language as the latest human request",
+		"use Spanish when the request is in Spanish",
+		"API routes, names and exact evidence quotes unchanged",
+	} {
+		if !strings.Contains(messages[0].Content, requirement) {
+			t.Fatalf("planner is missing language/technical-term guidance %q", requirement)
+		}
+	}
+}

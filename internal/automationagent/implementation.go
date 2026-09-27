@@ -15,14 +15,14 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"events-stocks/models"
 )
 
 const (
-	maxPatchBytes           = 600000
-	maxCommandOutput        = 12000
-	maxReadOnlyFixtureFiles = 5000
-	maxReadOnlyFixtureBytes = 64 << 20
-	commandTimeout          = 10 * time.Minute
+	maxPatchBytes    = 600000
+	maxCommandOutput = 12000
+	commandTimeout   = 10 * time.Minute
 )
 
 var (
@@ -204,9 +204,6 @@ func RunImplementation(ctx context.Context, taskID string, delivery json.RawMess
 	if !taskIDPattern.MatchString(strings.ToLower(taskID)) {
 		return nil, fmt.Errorf("task ID is invalid for a local worktree")
 	}
-	// Worker.Process performs this same check before paying for a model call.
-	// Repeat it immediately before we create a worktree so direct callers and
-	// a branch that advanced while the model was reasoning fail closed too.
 	if err := PrepareDeliveryWorkspaces(ctx, delivery, lookup); err != nil {
 		return nil, err
 	}
@@ -214,20 +211,52 @@ func RunImplementation(ctx context.Context, taskID string, delivery json.RawMess
 	if err != nil {
 		return nil, err
 	}
+	if len(targets) > maxStepPatchArtifacts {
+		return nil, fmt.Errorf("implementation exceeds the supported repository patch count")
+	}
 	changeSets := make([]any, 0, len(targets))
 	executionOrder := make([]string, 0, len(targets))
 	for _, target := range targets {
-		changeSet, runErr := runWorkspaceImplementation(ctx, taskID, target.workspace, target.revision, target.patch)
+		var changeSet map[string]any
+		operationErr, reportErr := runStepActivityWithDetails(ctx, "file_change", "workspace_patch", func(phase string) *models.DeliveryPlanStepActivityDetails {
+			details := &models.DeliveryPlanStepActivityDetails{ResourceReferences: []string{"workspace://" + target.workspace.ID}}
+			if phase == models.DeliveryPlanStepActivityCompleted {
+				files, filesErr := patchChangedFiles(target.patch)
+				if filesErr != nil {
+					return nil
+				}
+				details.ChangedFiles = files
+			}
+			if models.ValidateDeliveryPlanStepActivityDetails(models.DeliveryPlanStepActivityFileChange, phase, details) != nil {
+				return nil
+			}
+			return details
+		}, func() error {
+			var runErr error
+			repositoryRef := strings.TrimSpace(target.reference)
+			if repositoryRef == "" {
+				repositoryRef = "workspace://" + target.workspace.ID
+			}
+			changeSet, runErr = runWorkspaceImplementation(ctx, taskID, target.workspace, repositoryRef, target.revision, target.patch, target.allowedPaths)
+			return runErr
+		})
+		if reportErr != nil {
+			return nil, reportErr
+		}
+		runErr := operationErr
 		if runErr != nil {
-			// Preserve independently completed repositories for reconciliation when
-			// a later dependency fails. The error remains terminal; this evidence
-			// never authorizes publication of the partial implementation.
+			// Preserve completed repositories even when a later repository fails.
+			// The caller still receives the error and keeps the task failed; this
+			// projection is private reconciliation evidence, never a success signal
+			// or permission to retry an external effect.
 			return map[string]any{
-				"summary": proposal.Summary, "change_sets": changeSets,
-				"repository_execution_order": executionOrder, "partial": len(changeSets) > 0,
-				"failed_repository":      "workspace://" + target.workspace.ID,
-				"completed_repositories": executionOrder,
-				"deployment":             "not attempted; implementation failed before all repositories completed",
+				"summary":                    proposal.Summary,
+				"change_sets":                changeSets,
+				"repository_execution_order": executionOrder,
+				"completed_repositories":     append([]string(nil), executionOrder...),
+				"failed_repository":          "workspace://" + target.workspace.ID,
+				"partial":                    len(changeSets) > 0,
+				"deployment":                 "not attempted; partial repository work requires reconciliation before any retry",
 			}, runErr
 		}
 		changeSets = append(changeSets, changeSet)
@@ -246,10 +275,11 @@ func RunImplementation(ctx context.Context, taskID string, delivery json.RawMess
 }
 
 type implementationTarget struct {
-	workspace Workspace
-	reference string
-	revision  string
-	patch     string
+	workspace    Workspace
+	reference    string
+	revision     string
+	patch        string
+	allowedPaths []string
 }
 
 // repositoryTopologyEntry is supplied by the human-frozen project map. It
@@ -329,13 +359,22 @@ func deliveryImplementationTargets(delivery json.RawMessage, proposal ChangeProp
 	if len(proposal.Patches) == 0 {
 		if required, declared := approvedChangedRepositoryReferences(delivery); declared && len(required) > 1 {
 			return nil, fmt.Errorf("implementation must provide a separate repository patch for every repository marked as changed in the approved plan")
+		} else if declared {
+			if len(required) != 1 {
+				return nil, fmt.Errorf("implementation requires an explicitly changed repository")
+			}
+			for reference := range required {
+				proposal.Patches = []RepositoryPatchProposal{{RepositoryRef: reference, Patch: proposal.Patch}}
+			}
+			return deliveryImplementationTargets(delivery, proposal, lookup)
 		}
-		workspace, revision, err := deliveryRepositoryWorkspaceWithRevision(delivery, lookup)
+		workspace, err := deliveryRepositoryWorkspace(delivery, lookup)
 		if err != nil {
 			return nil, err
 		}
-		if revision != "" && !gitCommitPattern.MatchString(revision) {
-			return nil, fmt.Errorf("implementation repository has an invalid frozen revision")
+		revision, err := deliveryWorkspaceRevision(delivery, "workspace://"+workspace.ID)
+		if err != nil {
+			return nil, err
 		}
 		return []implementationTarget{{workspace: workspace, revision: revision, patch: proposal.Patch}}, nil
 	}
@@ -347,8 +386,9 @@ func deliveryImplementationTargets(delivery json.RawMessage, proposal ChangeProp
 		} `json:"context_sources"`
 		ApprovedPlan struct {
 			RepositoryImpact []struct {
-				Reference string `json:"reference"`
-				Impact    string `json:"impact"`
+				Reference    string   `json:"reference"`
+				Impact       string   `json:"impact"`
+				AllowedPaths []string `json:"allowed_paths"`
 			} `json:"repository_impact"`
 		} `json:"approved_plan"`
 		RepositoryTopology []repositoryTopologyEntry `json:"repository_topology"`
@@ -363,9 +403,11 @@ func deliveryImplementationTargets(delivery json.RawMessage, proposal ChangeProp
 		}
 	}
 	required := make(map[string]struct{})
+	allowedPathsByReference := make(map[string][]string)
 	for _, impact := range value.ApprovedPlan.RepositoryImpact {
 		if strings.EqualFold(strings.TrimSpace(impact.Impact), "changes") {
 			required[strings.TrimSpace(impact.Reference)] = struct{}{}
+			allowedPathsByReference[strings.TrimSpace(impact.Reference)] = append([]string(nil), impact.AllowedPaths...)
 		}
 	}
 	if len(required) == 0 || len(required) != len(proposal.Patches) {
@@ -388,7 +430,7 @@ func deliveryImplementationTargets(delivery json.RawMessage, proposal ChangeProp
 		if err != nil {
 			return nil, err
 		}
-		targets = append(targets, implementationTarget{workspace: workspace, reference: reference, revision: revision, patch: proposalPatch.Patch})
+		targets = append(targets, implementationTarget{workspace: workspace, reference: reference, revision: revision, patch: proposalPatch.Patch, allowedPaths: allowedPathsByReference[reference]})
 	}
 	references := make([]string, 0, len(targets))
 	targetByReference := make(map[string]implementationTarget, len(targets))
@@ -405,6 +447,29 @@ func deliveryImplementationTargets(delivery json.RawMessage, proposal ChangeProp
 		orderedTargets = append(orderedTargets, targetByReference[reference])
 	}
 	return orderedTargets, nil
+}
+
+func deliveryWorkspaceRevision(delivery json.RawMessage, reference string) (string, error) {
+	var value struct {
+		ContextSources []struct {
+			Kind      string `json:"kind"`
+			Reference string `json:"reference"`
+			Revision  string `json:"revision"`
+		} `json:"context_sources"`
+	}
+	if err := json.Unmarshal(delivery, &value); err != nil {
+		return "", fmt.Errorf("delivery input must be a JSON object")
+	}
+	for _, source := range value.ContextSources {
+		if source.Kind == "repository" && strings.TrimSpace(source.Reference) == reference {
+			revision := strings.ToLower(strings.TrimSpace(source.Revision))
+			if revision != "" && !gitCommitPattern.MatchString(revision) {
+				return "", fmt.Errorf("frozen repository revision is invalid")
+			}
+			return revision, nil
+		}
+	}
+	return "", nil
 }
 
 // approvedChangedRepositoryReferences intentionally reports whether the plan
@@ -438,11 +503,15 @@ func approvedChangedRepositoryReferences(delivery json.RawMessage) (map[string]s
 	return required, true
 }
 
-func runWorkspaceImplementation(ctx context.Context, taskID string, workspace Workspace, expectedRevision, patch string) (map[string]any, error) {
+func runWorkspaceImplementation(ctx context.Context, taskID string, workspace Workspace, repositoryRef, expectedRevision, patch string, allowedPaths []string) (map[string]any, error) {
+	ctx = withSandboxTaskID(ctx, taskID)
 	if err := workspace.RequireCapability(WorkspaceCapabilityCreateWorktree); err != nil {
 		return nil, err
 	}
 	if err := workspace.RequireCapability(WorkspaceCapabilityApplyPatch); err != nil {
+		return nil, err
+	}
+	if err := validatePatchPaths(patch, allowedPaths); err != nil {
 		return nil, err
 	}
 	worktree, branch, err := isolatedWorktreeAt(ctx, workspace, taskID, expectedRevision)
@@ -508,15 +577,24 @@ func runWorkspaceImplementation(ctx context.Context, taskID string, workspace Wo
 	if err != nil || intent.ExitCode != 0 {
 		return nil, fmt.Errorf("could not prepare new files for reviewed diff")
 	}
-	validations := make([]map[string]any, 0, len(workspace.Config.ValidationCommands))
+	componentValidations := workspace.ValidationCommandsForScopes(allowedPaths)
+	validations := make([]map[string]any, 0, len(workspace.Config.ValidationCommands)+len(componentValidations))
+	validationCtx := withStepActivityAction(ctx, "validation", "registered_validation")
 	for _, command := range workspace.Config.ValidationCommands {
-		result, runErr := runLocal(ctx, worktree, commandTimeout, "", command[0], command[1:]...)
+		result, runErr := runWorkspaceCommand(validationCtx, workspace, worktree, commandTimeout, "", nil, command[0], command[1:]...)
 		if runErr != nil {
 			return nil, runErr
 		}
-		validations = append(validations, map[string]any{"command": command, "passed": result.ExitCode == 0, "output": result.Output})
+		validations = append(validations, map[string]any{"scope": "repository", "command": command, "passed": result.ExitCode == 0, "output": result.Output, "sandbox_lease": result.SandboxLease})
 	}
-	diffCheck, err := runLocal(ctx, worktree, 30*time.Second, "", "git", "diff", "--check")
+	for _, scoped := range componentValidations {
+		result, runErr := runWorkspaceCommand(validationCtx, workspace, worktree, commandTimeout, "", nil, scoped.Command[0], scoped.Command[1:]...)
+		if runErr != nil {
+			return nil, runErr
+		}
+		validations = append(validations, map[string]any{"scope": scoped.Scope, "command": scoped.Command, "passed": result.ExitCode == 0, "output": result.Output, "sandbox_lease": result.SandboxLease})
+	}
+	diffCheck, err := runLocal(withStepActivityAction(ctx, "validation", "diff_check"), worktree, 30*time.Second, "", "git", "diff", "--check")
 	if err != nil {
 		return nil, err
 	}
@@ -528,6 +606,16 @@ func runWorkspaceImplementation(ctx context.Context, taskID string, workspace Wo
 	if err != nil {
 		return nil, err
 	}
+	capturedDiffSHA256, patchBytes, err := captureWorktreePatch(ctx, worktree, baseSHA, maxStepPatchArtifactBytes)
+	if err != nil {
+		return nil, err
+	}
+	if capturedDiffSHA256 != reviewDiffSHA256 {
+		return nil, fmt.Errorf("captured patch digest does not match reviewed worktree diff")
+	}
+	if len(patchBytes) == 0 || len(patchBytes) > maxStepPatchArtifactBytes {
+		return nil, fmt.Errorf("reviewed patch exceeds the supported artifact size")
+	}
 	return map[string]any{
 		"workspace": "workspace://" + workspace.ID,
 		"worktree":  "workspace://" + workspace.ID + "#" + branch, "branch": branch,
@@ -536,8 +624,64 @@ func runWorkspaceImplementation(ctx context.Context, taskID string, workspace Wo
 		"review_diff_sha256":    reviewDiffSHA256,
 		"patch_already_applied": alreadyApplied, "patch_hunk_counts_normalized": patchNormalized, "diff_check_passed": diffCheck.ExitCode == 0,
 		"diff_check": diffCheck.Output, "diff_stat": stat.Output, "validations": validations,
-		"deployment": "not attempted; a human code-review gate is required before preview deployment",
+		"allowed_paths":             allowedPaths,
+		"deployment":                "not attempted; a human code-review gate is required before preview deployment",
+		privateStepPatchArtifactKey: newStepPatchArtifactPayload(repositoryRef, baseSHA, reviewDiffSHA256, patchBytes),
 	}, nil
+}
+
+// validatePatchPaths enforces an approved monorepo/component scope before a
+// worktree is even created. Empty scopes preserve the single-repository
+// contract; non-empty scopes require every touched path to live under one of
+// the exact relative roots approved by the human plan.
+func validatePatchPaths(patch string, allowedPaths []string) error {
+	if len(allowedPaths) == 0 {
+		return nil
+	}
+	allowed := make([]string, 0, len(allowedPaths))
+	for _, raw := range allowedPaths {
+		path := strings.Trim(strings.ReplaceAll(strings.TrimSpace(raw), "\\", "/"), " /")
+		if path != "" {
+			allowed = append(allowed, path)
+		}
+	}
+	if len(allowed) == 0 {
+		return fmt.Errorf("implementation component scope is empty")
+	}
+	seen := map[string]struct{}{}
+	for _, line := range strings.Split(strings.ReplaceAll(patch, "\\", "/"), "\n") {
+		if !strings.HasPrefix(line, "diff --git ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			return fmt.Errorf("implementation diff has an invalid file header")
+		}
+		for _, field := range fields[2:4] {
+			path := strings.TrimPrefix(strings.Trim(field, "\""), "a/")
+			path = strings.TrimPrefix(path, "b/")
+			if path == "/dev/null" {
+				continue
+			}
+			seen[path] = struct{}{}
+		}
+	}
+	if len(seen) == 0 {
+		return fmt.Errorf("implementation diff has no file paths")
+	}
+	for path := range seen {
+		matched := false
+		for _, scope := range allowed {
+			if path == scope || strings.HasPrefix(path, scope+"/") {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return fmt.Errorf("implementation patch touches %s outside approved component scope", path)
+		}
+	}
+	return nil
 }
 
 // worktreeDiffSHA256 pins the exact reviewed change set, including untracked
@@ -550,98 +694,84 @@ func worktreeDiffSHA256(ctx context.Context, worktree, baseSHA string, staged bo
 		args = append(args, "--cached")
 	}
 	args = append(args, "--binary", "--full-index", "--no-ext-diff", strings.ToLower(strings.TrimSpace(baseSHA)))
-	diff, err := runLocal(ctx, worktree, 45*time.Second, "", "git", args...)
-	if err != nil || diff.ExitCode != 0 {
+	commandCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	command := exec.CommandContext(commandCtx, "git", args...)
+	command.Dir = worktree
+	command.Env = repositoryCommandEnvironment(os.Environ(), nil)
+	digest := sha256.New()
+	output := &countedDigest{Writer: digest}
+	command.Stdout = output
+	if err := command.Run(); err != nil {
 		return "", fmt.Errorf("could not calculate reviewed worktree digest")
 	}
-	if strings.TrimSpace(diff.Output) == "" {
+	if output.Bytes == 0 {
 		return "", fmt.Errorf("reviewed worktree has no publishable diff")
 	}
-	digest := sha256.Sum256([]byte(diff.Output))
-	return fmt.Sprintf("%x", digest[:]), nil
+	return fmt.Sprintf("%x", digest.Sum(nil)), nil
+}
+
+type countedDigest struct {
+	io.Writer
+	Bytes int64
+}
+
+func (w *countedDigest) Write(p []byte) (int, error) {
+	n, err := w.Writer.Write(p)
+	w.Bytes += int64(n)
+	return n, err
 }
 
 func deliveryRepositoryWorkspace(delivery json.RawMessage, lookup func(string) string) (Workspace, error) {
-	workspace, _, err := deliveryRepositoryWorkspaceWithRevision(delivery, lookup)
-	return workspace, err
-}
-
-// deliveryRepositoryWorkspaceWithRevision selects the same explicit primary
-// repository as the legacy helper, while retaining the frozen source SHA for
-// implementation. QA and older callers intentionally keep using the wrapper
-// because they select an already-published reviewed worktree instead.
-func deliveryRepositoryWorkspaceWithRevision(delivery json.RawMessage, lookup func(string) string) (Workspace, string, error) {
 	var value struct {
 		ContextSources []struct {
 			Kind      string         `json:"kind"`
 			Reference string         `json:"reference"`
-			Revision  string         `json:"revision"`
 			Metadata  map[string]any `json:"metadata"`
 		} `json:"context_sources"`
 	}
 	if json.Unmarshal(delivery, &value) != nil {
-		return Workspace{}, "", fmt.Errorf("delivery input must be a JSON object")
+		return Workspace{}, fmt.Errorf("delivery input must be a JSON object")
 	}
-	var references []struct{ reference, revision string }
-	var primaryReferences []struct{ reference, revision string }
+	var references []string
+	var primaryReferences []string
 	for _, source := range value.ContextSources {
 		if source.Kind == "repository" {
-			candidate := struct{ reference, revision string }{strings.TrimSpace(source.Reference), strings.ToLower(strings.TrimSpace(source.Revision))}
-			references = append(references, candidate)
+			references = append(references, source.Reference)
 			if role, _ := source.Metadata["repository_role"].(string); strings.EqualFold(strings.TrimSpace(role), "primary") {
-				primaryReferences = append(primaryReferences, candidate)
+				primaryReferences = append(primaryReferences, source.Reference)
 			}
 		}
 	}
 	if len(references) == 1 {
-		workspace, err := RegisteredWorkspace(references[0].reference, lookup)
-		return workspace, references[0].revision, err
+		return RegisteredWorkspace(references[0], lookup)
 	}
 	if len(primaryReferences) == 1 {
-		workspace, err := RegisteredWorkspace(primaryReferences[0].reference, lookup)
-		return workspace, primaryReferences[0].revision, err
+		return RegisteredWorkspace(primaryReferences[0], lookup)
 	}
 	if len(references) == 0 {
-		return Workspace{}, "", fmt.Errorf("implementation requires a registered repository context")
+		return Workspace{}, fmt.Errorf("implementation requires a registered repository context")
 	}
-	return Workspace{}, "", fmt.Errorf("multi-repository implementation requires exactly one context source with metadata.repository_role=primary")
+	return Workspace{}, fmt.Errorf("multi-repository implementation requires exactly one context source with metadata.repository_role=primary")
 }
 
 func isolatedWorktree(ctx context.Context, workspace Workspace, taskID string) (string, string, error) {
-	return isolatedWorktreeAt(ctx, workspace, taskID, "")
-}
-
-// isolatedWorktreeAt never bases an implementation on an ambient local HEAD
-// when the Delivery context froze an immutable revision. The caller has
-// already synchronized managed checkouts; this second exact-SHA selection
-// closes the race between that preparation and worktree creation.
-func isolatedWorktreeAt(ctx context.Context, workspace Workspace, taskID, expectedRevision string) (string, string, error) {
 	inside, err := runLocal(ctx, workspace.Root, 20*time.Second, "", "git", "rev-parse", "--is-inside-work-tree")
 	if err != nil || inside.ExitCode != 0 || strings.TrimSpace(inside.Output) != "true" {
 		return "", "", fmt.Errorf("registered workspace must be a Git worktree")
 	}
 	branch := "itbem-agent/" + taskID
 	directory := filepath.Join(workspace.Root, ".itbem-agent-worktrees", taskID)
-	revision := "HEAD"
-	expectedRevision = strings.ToLower(strings.TrimSpace(expectedRevision))
-	if expectedRevision != "" {
-		if !gitCommitPattern.MatchString(expectedRevision) {
-			return "", "", fmt.Errorf("isolated worktree expected revision is invalid")
-		}
-		known, knownErr := runLocal(ctx, workspace.Root, 20*time.Second, "", "git", "rev-parse", "--verify", "--quiet", expectedRevision+"^{commit}")
-		if knownErr != nil || known.ExitCode != 0 || !strings.EqualFold(strings.TrimSpace(known.Output), expectedRevision) {
-			return "", "", fmt.Errorf("isolated worktree expected revision is unavailable locally")
-		}
-		revision = expectedRevision
-	}
 	if info, statErr := os.Stat(directory); statErr == nil && info.IsDir() {
-		if expectedRevision != "" {
-			head, headErr := runLocal(ctx, directory, 20*time.Second, "", "git", "rev-parse", "HEAD")
-			if headErr != nil || head.ExitCode != 0 || !strings.EqualFold(strings.TrimSpace(head.Output), expectedRevision) {
-				return "", "", fmt.Errorf("existing isolated worktree does not match the frozen revision")
-			}
+		actual, err := filepath.EvalSymlinks(directory)
+		if err != nil || !strings.EqualFold(filepath.Clean(actual), filepath.Clean(directory)) {
+			return "", "", fmt.Errorf("isolated worktree cannot be a linked directory")
 		}
-		if err := copyReadOnlyWorkspaceFixtures(workspace, directory); err != nil {
+		current, err := runLocal(ctx, directory, 20*time.Second, "", "git", "branch", "--show-current")
+		if err != nil || current.ExitCode != 0 || strings.TrimSpace(current.Output) != branch {
+			return "", "", fmt.Errorf("isolated worktree branch no longer matches the task")
+		}
+		if err := copyPinnedContractFixture(workspace.Root, directory); err != nil {
 			return "", "", err
 		}
 		return directory, branch, nil
@@ -649,177 +779,96 @@ func isolatedWorktreeAt(ctx context.Context, workspace Workspace, taskID, expect
 	if err := os.MkdirAll(filepath.Dir(directory), 0700); err != nil {
 		return "", "", fmt.Errorf("prepare isolated worktree: %w", err)
 	}
-	created, err := runLocal(ctx, workspace.Root, 90*time.Second, "", "git", "worktree", "add", "-b", branch, directory, revision)
+	created, err := runLocal(ctx, workspace.Root, 90*time.Second, "", "git", "worktree", "add", "-b", branch, directory, "HEAD")
 	if err != nil {
 		return "", "", err
 	}
 	if created.ExitCode != 0 {
 		return "", "", fmt.Errorf("could not create isolated local worktree: %s", created.Output)
 	}
-	if err := copyReadOnlyWorkspaceFixtures(workspace, directory); err != nil {
+	if err := copyPinnedContractFixture(workspace.Root, directory); err != nil {
 		return "", "", err
 	}
 	return directory, branch, nil
 }
 
-// copyReadOnlyWorkspaceFixtures projects only operator-approved, bounded
-// repository-relative fixtures into an isolated worktree. It intentionally
-// excludes Git metadata, credential-like paths, links and special files.
-func copyReadOnlyWorkspaceFixtures(workspace Workspace, worktreeRoot string) error {
-	if err := validateReadOnlyFixturePaths(workspace.Config.ReadOnlyFixturePaths); err != nil {
-		return err
+// copyPinnedContractFixture makes the repository's explicitly versioned
+// product contract available in an isolated worktree. The contract is kept
+// outside the Git worktree in this workspace, but backend unit tests resolve
+// it through a relative path. Copying only this known, read-only fixture keeps
+// tests representative without exposing arbitrary parent files or secrets.
+func copyPinnedContractFixture(workspaceRoot, worktreeRoot string) error {
+	source := filepath.Join(workspaceRoot, ".contracts", "itbem-product-contract")
+	info, err := os.Stat(source)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
 	}
-	files, bytesCopied := 0, int64(0)
-	for _, relativeRoot := range workspace.Config.ReadOnlyFixturePaths {
-		source := filepath.Join(workspace.Root, relativeRoot)
-		destination := filepath.Join(worktreeRoot, relativeRoot)
-		info, err := os.Lstat(source)
-		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("configured read-only fixture %q does not exist", filepath.ToSlash(relativeRoot))
+	if err != nil {
+		return fmt.Errorf("inspect pinned contract fixture: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("pinned contract fixture is not a directory")
+	}
+	destination := filepath.Join(worktreeRoot, ".contracts", "itbem-product-contract")
+	// The contract source may itself be a Git worktree. Its `.git` metadata
+	// must never be copied into the task worktree: only the pinned files are
+	// required by tests, and nested metadata makes `git diff --check` unsafe.
+	if err := os.Remove(filepath.Join(destination, ".git")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove nested contract metadata: %w", err)
+	}
+	return filepath.WalkDir(source, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
-		if err != nil {
-			return fmt.Errorf("inspect read-only fixture %q: %w", filepath.ToSlash(relativeRoot), err)
+		relative, err := filepath.Rel(source, path)
+		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("invalid pinned contract path")
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("read-only fixture %q must not be a symlink", filepath.ToSlash(relativeRoot))
-		}
-		if err := os.RemoveAll(destination); err != nil {
-			return fmt.Errorf("refresh read-only fixture %q: %w", filepath.ToSlash(relativeRoot), err)
-		}
-		err = filepath.WalkDir(source, func(path string, entry os.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				return walkErr
-			}
-			relative, relErr := filepath.Rel(source, path)
-			if relErr != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-				return fmt.Errorf("invalid read-only fixture path")
-			}
-			if entry.Name() == ".git" {
-				if entry.IsDir() {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if entry.Type()&os.ModeSymlink != 0 {
-				return fmt.Errorf("read-only fixtures must not contain symlinks")
-			}
-			projectedRelative := filepath.Join(relativeRoot, relative)
-			if !safeContextFile(projectedRelative) {
-				return fmt.Errorf("read-only fixture contains a credential-like path")
-			}
-			target := filepath.Join(destination, relative)
+		target := filepath.Join(destination, relative)
+		if entry.Name() == ".git" {
 			if entry.IsDir() {
-				return os.MkdirAll(target, 0700)
+				return filepath.SkipDir
 			}
-			if !entry.Type().IsRegular() {
-				return fmt.Errorf("read-only fixture contains an unsupported file")
-			}
-			files++
-			entryInfo, infoErr := entry.Info()
-			if infoErr != nil {
-				return infoErr
-			}
-			bytesCopied += entryInfo.Size()
-			if files > maxReadOnlyFixtureFiles || bytesCopied > maxReadOnlyFixtureBytes {
-				return fmt.Errorf("read-only fixtures exceed the safe copy budget")
-			}
-			if err := os.MkdirAll(filepath.Dir(target), 0700); err != nil {
-				return err
-			}
-			input, openErr := os.Open(path)
-			if openErr != nil {
-				return openErr
-			}
-			output, createErr := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
-			if createErr != nil {
-				_ = input.Close()
-				return createErr
-			}
-			_, copyErr := io.Copy(output, input)
-			inputCloseErr, outputCloseErr := input.Close(), output.Close()
-			if copyErr != nil {
-				return copyErr
-			}
-			if inputCloseErr != nil {
-				return inputCloseErr
-			}
-			return outputCloseErr
-		})
-		if err != nil {
-			return fmt.Errorf("copy read-only fixture %q: %w", filepath.ToSlash(relativeRoot), err)
+			return nil
 		}
-	}
-	return nil
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("pinned contract fixture must not contain symlinks")
+		}
+		if entry.IsDir() {
+			return os.MkdirAll(target, 0700)
+		}
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("pinned contract fixture contains an unsupported file")
+		}
+		input, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer input.Close()
+		output, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+		if err != nil {
+			return err
+		}
+		_, copyErr := io.Copy(output, input)
+		closeErr := output.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		return closeErr
+	})
 }
 
 type commandResult struct {
-	ExitCode           int
-	Output             string
-	SandboxLease       map[string]any
-	SandboxAttestation *SandboxAttestation
-	SandboxLifecycle   map[string]any
+	ExitCode            int
+	Output              string
+	CapturedOutputBytes int
+	SandboxLease        map[string]any
+	SandboxAttestation  *SandboxAttestation
+	SandboxLifecycle    map[string]any
 }
 
 func runLocal(parent context.Context, directory string, timeout time.Duration, input string, command string, arguments ...string) (commandResult, error) {
 	return runLocalWithEnv(parent, directory, timeout, input, nil, command, arguments...)
-}
-
-// boundedCommandBuffer caps command output while preserving io.Writer's
-// short-write contract. Repository commands can be arbitrarily noisy.
-type boundedCommandBuffer struct{ bytes.Buffer }
-
-func (b *boundedCommandBuffer) ReadFrom(reader io.Reader) (int64, error) {
-	return io.Copy(struct{ io.Writer }{b}, reader)
-}
-
-func (b *boundedCommandBuffer) Write(value []byte) (int, error) {
-	written := len(value)
-	if remaining := maxCommandOutput - b.Len(); remaining > 0 {
-		if len(value) > remaining {
-			value = value[:remaining]
-		}
-		_, _ = b.Buffer.Write(value)
-	}
-	return written, nil
-}
-
-func validatePatchPaths(patch string, allowedPaths []string) error {
-	if len(allowedPaths) == 0 {
-		return nil
-	}
-	seen := map[string]struct{}{}
-	for _, line := range strings.Split(strings.ReplaceAll(patch, "\\", "/"), "\n") {
-		if !strings.HasPrefix(line, "diff --git ") {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 4 {
-			return fmt.Errorf("implementation diff has an invalid file header")
-		}
-		for _, field := range fields[2:4] {
-			path := strings.TrimPrefix(strings.TrimPrefix(strings.Trim(field, "\""), "a/"), "b/")
-			if path != "/dev/null" {
-				seen[path] = struct{}{}
-			}
-		}
-	}
-	if len(seen) == 0 {
-		return fmt.Errorf("implementation diff has no file paths")
-	}
-	for path := range seen {
-		allowed := false
-		for _, root := range allowedPaths {
-			root = strings.Trim(strings.ReplaceAll(strings.TrimSpace(root), "\\", "/"), " /")
-			if root != "" && (path == root || strings.HasPrefix(path, root+"/")) {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
-			return fmt.Errorf("implementation patch touches %s outside approved component scope", path)
-		}
-	}
-	return nil
 }
 
 // runLocalWithEnv runs repository-owned commands with a deliberately reduced
@@ -829,43 +878,145 @@ func validatePatchPaths(patch string, allowedPaths []string) error {
 // overrides are only for a short-lived, explicit operation such as GitHub
 // App askpass; callers must never put credentials in command arguments.
 func runLocalWithEnv(parent context.Context, directory string, timeout time.Duration, input string, environment map[string]string, command string, arguments ...string) (commandResult, error) {
+	var reader io.Reader
+	if input != "" {
+		reader = strings.NewReader(input)
+	}
+	return runLocalWithReader(parent, directory, timeout, reader, environment, command, arguments...)
+}
+
+// runLocalWithBytes pipes binary patch bytes directly to stdin without first
+// converting them into an immutable Go string that cannot be wiped afterward.
+func runLocalWithBytes(parent context.Context, directory string, timeout time.Duration, input []byte, command string, arguments ...string) (commandResult, error) {
+	return runLocalWithReader(parent, directory, timeout, bytes.NewReader(input), nil, command, arguments...)
+}
+
+func runLocalWithReader(parent context.Context, directory string, timeout time.Duration, input io.Reader, environment map[string]string, command string, arguments ...string) (commandResult, error) {
+	if stepActivityFromContext(parent) == nil || stepActivityIsSuppressed(parent) {
+		return runLocalWithReaderUninstrumented(parent, directory, timeout, input, environment, command, arguments...)
+	}
+	action, toolName := activityActionFromContext(parent, "command", "repository_command")
+	var result commandResult
+	observed := false
+	operationErr, reportErr := runStepActivityWithDetails(parent, action, toolName, func(phase string) *models.DeliveryPlanStepActivityDetails {
+		if !observed {
+			return nil
+		}
+		return commandActivityDetails(action, phase, command, arguments, result, "")
+	}, func() error {
+		var runErr error
+		result, runErr = runLocalWithReaderUninstrumented(withStepActivitySuppressed(parent), directory, timeout, input, environment, command, arguments...)
+		observed = runErr == nil
+		if runErr == nil && result.ExitCode != 0 {
+			return errActivityReportedNonzeroExit
+		}
+		return runErr
+	})
+	if reportErr != nil {
+		return result, reportErr
+	}
+	if errors.Is(operationErr, errActivityReportedNonzeroExit) {
+		return result, nil
+	}
+	return result, operationErr
+}
+
+func commandActivityDetails(action, phase, command string, arguments []string, result commandResult, resourceReference string) *models.DeliveryPlanStepActivityDetails {
+	executable := strings.ToLower(filepath.Base(strings.ReplaceAll(strings.TrimSpace(command), "\\", "/")))
+	for _, extension := range []string{".exe", ".cmd", ".bat"} {
+		executable = strings.TrimSuffix(executable, extension)
+	}
+	argumentCount, exitCode := len(arguments), result.ExitCode
+	outputBytes := result.CapturedOutputBytes
+	if outputBytes <= 0 {
+		outputBytes = len([]byte(result.Output))
+	}
+	details := &models.DeliveryPlanStepActivityDetails{
+		ExecutableName: executable, ArgumentCount: &argumentCount, ExitCode: &exitCode, CapturedOutputBytes: &outputBytes,
+	}
+	if resourceReference != "" {
+		details.ResourceReferences = []string{resourceReference}
+	}
+	if models.ValidateDeliveryPlanStepActivityDetails(action, phase, details) != nil {
+		return nil
+	}
+	return details
+}
+
+func runLocalWithEnvUninstrumented(parent context.Context, directory string, timeout time.Duration, input string, environment map[string]string, command string, arguments ...string) (commandResult, error) {
+	var reader io.Reader
+	if input != "" {
+		reader = strings.NewReader(input)
+	}
+	return runLocalWithReaderUninstrumented(parent, directory, timeout, reader, environment, command, arguments...)
+}
+
+func runLocalWithReaderUninstrumented(parent context.Context, directory string, timeout time.Duration, input io.Reader, environment map[string]string, command string, arguments ...string) (commandResult, error) {
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	process := exec.Command(command, arguments...)
+	process := exec.CommandContext(ctx, command, arguments...)
+	// CommandContext stops the direct process when the deadline expires, but
+	// repository-owned tools frequently spawn package managers, test runners,
+	// browsers, or child shells. Keep the whole command tree in a dedicated
+	// process group so a timeout cannot leave orphaned work consuming the
+	// worker indefinitely. This is process-tree cleanup, not a substitute for
+	// a container/VM sandbox; the readiness contract still reports that limit.
+	stopProcessGroup := configureCommandProcessGroup(process)
+	// CommandContext otherwise waits for inherited stdout/stderr pipes to close.
+	// A child such as `sh -c 'sleep 30'` can keep those pipes open after the
+	// shell itself is cancelled, making a nominal timeout block for the full
+	// child lifetime. Cancel the process group immediately and bound the final
+	// pipe-drain wait as a second line of defense.
+	process.Cancel = func() error {
+		stopProcessGroup()
+		return nil
+	}
+	process.WaitDelay = 750 * time.Millisecond
 	process.Dir = directory
 	process.Env = repositoryCommandEnvironment(os.Environ(), environment)
-	if input != "" {
-		process.Stdin = strings.NewReader(input)
+	if input != nil {
+		process.Stdin = input
 	}
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr boundedCommandBuffer
 	process.Stdout, process.Stderr = &stdout, &stderr
-	killProcessGroup := configureCommandProcessGroup(process)
-	if err := process.Start(); err != nil {
-		return commandResult{}, fmt.Errorf("local command failed to start")
-	}
-	done := make(chan error, 1)
-	go func() { done <- process.Wait() }()
-	var err error
-	select {
-	case err = <-done:
-	case <-ctx.Done():
-		killProcessGroup()
-		err = <-done
-	}
+	err := process.Run()
 	output := strings.TrimSpace(stdout.String() + stderr.String())
 	if len(output) > maxCommandOutput {
 		output = output[:maxCommandOutput]
 	}
+	outputBytes := len([]byte(output))
 	if ctx.Err() != nil {
+		stopProcessGroup()
 		return commandResult{}, fmt.Errorf("local command timed out")
 	}
 	if err != nil {
 		if exitError, ok := err.(*exec.ExitError); ok {
-			return commandResult{ExitCode: exitError.ExitCode(), Output: output}, nil
+			return commandResult{ExitCode: exitError.ExitCode(), Output: output, CapturedOutputBytes: outputBytes}, nil
 		}
 		return commandResult{}, fmt.Errorf("local command failed to start")
 	}
-	return commandResult{ExitCode: 0, Output: output}, nil
+	return commandResult{ExitCode: 0, Output: output, CapturedOutputBytes: outputBytes}, nil
+}
+
+// Command logging is bounded while streaming, not after accumulating unlimited
+// output in memory. Cryptographic diffs use their separate full-byte stream.
+type boundedCommandBuffer struct{ bytes.Buffer }
+
+func (b *boundedCommandBuffer) ReadFrom(reader io.Reader) (int64, error) {
+	// Do not inherit bytes.Buffer.ReadFrom: io.Copy may otherwise bypass Write.
+	return io.Copy(struct{ io.Writer }{b}, reader)
+}
+
+func (b *boundedCommandBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	remaining := maxCommandOutput - b.Len()
+	if remaining > 0 {
+		if len(p) > remaining {
+			p = p[:remaining]
+		}
+		_, _ = b.Buffer.Write(p)
+	}
+	return n, nil
 }
 
 // repositoryCommandEnvironment removes credentials before any command touches

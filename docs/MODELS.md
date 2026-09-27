@@ -107,6 +107,13 @@ Event     Event          `gorm:"foreignKey:EventID" json:"event,omitempty"`
 
 ---
 
+### Provider account usage (ITBEM only)
+
+- **File**: `models/AutomationProviderUsageSnapshot.go`
+- **Purpose**: Sanitized, append-only observations of project-scoped provider balance or subscription quota. Rows share a capture ID per refresh and retain only allow-listed native values; no credential or raw provider response is stored.
+- **Access**: Project-scoped reads return the latest capture; refresh requires project-management permission and uses only that project's credential. Database triggers prevent update/delete outside the GORM hooks.
+- **Relationships**: `ProjectID` is an application authorization scope; the snapshot intentionally does not expose provider payloads or project credentials through model serialization.
+
 ### Delivery workflow (ITBEM only)
 
 - **Files**: `models/DeliveryWorkflow.go`, `models/AutomationTask.go`
@@ -143,64 +150,35 @@ Event     Event          `gorm:"foreignKey:EventID" json:"event,omitempty"`
   the approver and timestamp.
 - **DeliveryEvidence**: Reference to a private screenshot, test result, diff,
   report or other artifact. Large payloads never live in Postgres.
+- **DeliveryPlanStep**: Normalized DAG node within one immutable plan version.
+  Its typed `evidence_requirements_json` is bounded and participates in the
+  approved-plan hash when non-empty. Empty requirements are omitted from the
+  canonical hash payload to preserve existing approved-plan digest bytes.
+- **DeliveryPlanStepEvidence** (`models/DeliveryPlanStepEvidence.go`):
+  Append-only verified private-file metadata linked to plan/version/step,
+  requirement key, task/run, worker/registered instance, and lease fence. File
+  bytes remain in private S3 with AES-256 server-side encryption; database
+  metadata stores the storage coordinates plus MIME, size, and SHA-256. API
+  projections omit bucket/object key and downloads use the project-authorized
+  backend proxy. PostgreSQL rejects update/delete.
 - **DeliveryMessage**: Human or agent message tied to the work item and the
   active phase, preserving change requests in context.
 - **AutomationTask**: Existing local-agent queue record. It may link to a
   `DeliveryWorkItem` or repository onboarding checkpoint; standalone legacy
   automation tasks remain valid. A
   completed delivery task is recorded as immutable private report evidence
-  before its plan, code, or QA review can be opened. Evidence-producing tasks
-  carry an optional `EvidenceSubjectDigest` fixed at enqueue time; QA uses it
-  to bind observations to the exact multi-repository release matrix without
-  granting the task merge or release authority.
-- **AutomationCodeReviewPublication**
-  (`models/AutomationCodeReviewPublication.go`): Append-only public proof that
-  the isolated Reviewer App published one validated GitHub review for an exact
-  repository, PR, head SHA and patch digest. It stores actor, event, review URL
-  plus the exact-SHA check run identity/conclusion and deterministic
-  subject/payload digests; findings and model prose stay in private evidence.
-  The nullable check columns preserve rolling compatibility with v1 rows, but
-  every new v2 publication requires a validated check. Update/delete hooks
-  reject history rewriting.
-- **DeliveryEvent** QA observation (`delivery.qa.observed.v2`): Append-only,
-  sequence-bearing result for one exact QA task and matrix digest. It stores
-  only repository execution order plus operator-owned test identities and
-  bounded validation/QA pass/fail facts; commands, output, URLs, screenshots
-  and model prose remain private objects. The release resolver accepts only a
-  completed matching task, exact workspace-to-publication/worktree mapping,
-  and each repository's effective required-test policy.
-- **DeliveryEvent** security observation (`delivery.security.observed.v1`):
-  Append-only projection of operator-configured local scanner results from a
-  completed exact-matrix QA task. It stores reviewed workspace/branch identity,
-  bounded high/critical counts, and the secret-scan result; command text,
-  output, findings, tokens, and model prose never enter the public ledger.
-  Resolution maps that identity through the consumed publication grant to each
-  exact remote repository/SHA immediately before Gatekeeper evaluation.
-  Reserved `assurance:compatibility` and `assurance:migrations` QA identities
-  are resolved from the same event into separate exact-matrix Gatekeeper
-  fields; missing per-repository commands remain missing evidence.
-  Dependency assurance combines its repository execution order with frozen
-  `DeliveryContextSnapshot` dependency edges and current released states from
-  `DeliveryWorkItemDependency`; no worker-provided dependency verdict is used.
-  Recovery evidence is reconstructed from every effective repository policy;
-  the most constrained classification becomes the exact-matrix composite and
-  irreversible recovery still requires a distinct exact-subject human grant.
-  Release policy also carries explicit, canonical names for required GitHub
-  environment secrets and variables. Empty lists are meaningful and must be
-  approved explicitly; secret values are never stored in policy, Postgres,
-  Vault manifests, event payloads, or API responses.
-- **DeliveryEvent** environment observation (`delivery.environment.observed.v1`):
-  Append-only, task- and matrix-bound readiness from the deterministic release
-  worker. It records the exact repository SHA, approved workflow/environment,
-  required names and only required names that are missing. It never stores
-  secret/variable values or GitHub's complete environment inventory. Replayed
-  callbacks are idempotent only when the canonical payload is identical.
-- **AutomationAgentHeartbeat** (`models/AutomationAgentHeartbeat.go`): Short-
-  lived, anonymized execution-plane presence. It records the declared worker
-  role/lane, provider/model, concurrency and bounded workspace readiness, but
-  never a hostname, queue URL, prompt, result, repository path or credential.
-  Empty role/lane identifies only the temporary combined worker during queue
-  migration.
+  before its plan, code, or QA review can be opened.
+- **AutomationInferenceAttemptPolicy**: Credential-free, append-only snapshot
+  of the action route captured atomically with a worker claim and keyed by
+  `(automation_task_id, run_id)`. It binds operation, derived project scope,
+  policy revision, canonical provider/model/fallback routes, output-token
+  ceiling, route/snapshot hashes, and a server-only HMAC key ID/signature.
+  Renewals reuse that row; a recovered
+  attempt with a new `run_id` captures the then-current policy. The inference
+  gateway fails closed if the row is missing, inconsistent, or has no route.
+  It is internal persistence, not an API serialization model; no credentials
+  are stored or returned.
+- **DeliveryPlanStepAssignmentEvent** (`models/DeliveryPlanStepAssignmentEvent.go`): Credential-free append-only history generated by PostgreSQL whenever a step assignment is inserted or its status/target agent/target machine changes. Each event snapshots the execution, plan/version, step, parent and child task IDs, previous/current status and target, and database timestamp. No prompts, payloads, paths, provider data, or arbitrary metadata are stored. Updates, deletes, and truncation are rejected by database triggers. Existing assignments are preserved during migration; events begin at migration time and there is no fabricated backfill of historical transitions.
 
 ---
 

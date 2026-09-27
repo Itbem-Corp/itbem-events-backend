@@ -16,38 +16,76 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"events-stocks/internal/inferencecapability"
+	"github.com/gofrs/uuid"
 )
 
 const (
-	DefaultCompletionTokens = 4096
-	MinCompletionTokens     = 1
-	MaxCompletionTokens     = 131072
-	// Current M2.x endpoints accept max_completion_tokens above their 10,240
-	// default. Keep the worker's explicit ceiling aligned with M3 so reasoning
-	// plus a bounded structured result can complete for large frozen patches.
-	miniMaxM2CompletionLimit  = 32768
-	miniMaxM3CompletionLimit  = 32768
+	DefaultCompletionTokens   = 4096
+	MinCompletionTokens       = 1
+	MaxCompletionTokens       = 131072
+	miniMaxM2CompletionLimit  = 2048
+	miniMaxM3CompletionLimit  = 8192
 	maxProviderResponseSize   = 8 << 20
-	providerRequestMinTimeout = 30 * time.Second
-	providerRequestTimeout    = 10 * time.Minute
-	providerRequestMaxTimeout = 15 * time.Minute
 	providerRetryMinDelay     = 30 * time.Second
 	providerRetryDefaultDelay = 2 * time.Minute
 	providerRetryMaxDelay     = 15 * time.Minute
-	providerAuthProbeTimeout  = 8 * time.Second
-	maxProviderProbeBodySize  = 64 << 10
-	// MiniMax-M3's documented direct interface. Operators that deliberately
-	// need the OpenAI-compatible route can still set MINIMAX_API_BASE_URL;
-	// the default must not silently select the legacy compatibility contract.
-	miniMaxDirectCompletionEndpoint = "https://api.minimax.io/v1/text/chatcompletion_v2"
 )
+
+type inferenceLeaseContextKey struct{}
+type inferenceCapabilityContextKey struct{}
+
+// InferenceLease binds a cloud-gateway call to the opaque run lease already
+// accepted by the control plane. It is request metadata, never a credential.
+type InferenceLease struct {
+	TaskID    string
+	RunID     string
+	Operation string
+	StepID    string
+}
+
+func WithInferenceLease(ctx context.Context, taskID, runID, operation, stepID string) context.Context {
+	taskID, runID, operation = strings.TrimSpace(taskID), strings.TrimSpace(runID), strings.TrimSpace(operation)
+	stepID = strings.TrimSpace(stepID)
+	ctx = context.WithValue(ctx, inferenceLeaseContextKey{}, InferenceLease{TaskID: taskID, RunID: runID, Operation: operation, StepID: stepID})
+	if capability, ok := inferenceCapabilityForRun(taskID, runID, time.Now().UTC()); ok {
+		ctx = context.WithValue(ctx, inferenceCapabilityContextKey{}, capability)
+	}
+	return ctx
+}
+
+func InferenceLeaseFromContext(ctx context.Context) (InferenceLease, bool) {
+	lease, ok := ctx.Value(inferenceLeaseContextKey{}).(InferenceLease)
+	if !ok || lease.TaskID == "" || lease.RunID == "" || lease.Operation == "" {
+		return lease, false
+	}
+	if lease.StepID != "" {
+		stepID, err := uuid.FromString(lease.StepID)
+		if err != nil || stepID == uuid.Nil || stepID.String() != lease.StepID {
+			return lease, false
+		}
+	}
+	return lease, true
+}
+
+func InferenceCapabilityFromContext(ctx context.Context) (string, bool) {
+	capability, ok := ctx.Value(inferenceCapabilityContextKey{}).(string)
+	return capability, ok && strings.TrimSpace(capability) != ""
+}
 
 type Provider string
 
 const (
-	ProviderMiniMax   Provider = "minimax"
-	ProviderOpenAI    Provider = "openai"
-	ProviderAnthropic Provider = "anthropic"
+	ProviderMiniMax    Provider = "minimax"
+	ProviderOpenAI     Provider = "openai"
+	ProviderDeepSeek   Provider = "deepseek"
+	ProviderOpenRouter Provider = "openrouter"
+	ProviderAnthropic  Provider = "anthropic"
+	// ProviderOpenCodeGo uses the OpenCode Go subscription endpoint. It is
+	// intentionally distinct from OpenAI: OpenCode Go routes models across
+	// Chat Completions, Responses, and Messages APIs.
+	ProviderOpenCodeGo Provider = "opencode-go"
 )
 
 type Message struct {
@@ -61,58 +99,8 @@ type Completion struct {
 	ResponseID string         `json:"response_id"`
 	Usage      map[string]any `json:"usage"`
 	Model      string         `json:"model"`
-}
-
-// ProviderCapabilities describes the runtime guarantees required by the
-// harness, independent of a vendor's marketing feature list.
-type ProviderCapabilities struct {
-	ContractVersion      int      `json:"contract_version"`
-	Provider             Provider `json:"provider"`
-	Model                string   `json:"model"`
-	SupportsJSONActions  bool     `json:"supports_json_actions"`
-	SupportsUsageLedger  bool     `json:"supports_usage_ledger"`
-	SupportsCancellation bool     `json:"supports_cancellation"`
-	SupportsRequestAudit bool     `json:"supports_request_audit"`
-	MaxCompletionTokens  int      `json:"max_completion_tokens"`
-	MaxRequestBytes      int      `json:"max_request_bytes"`
-}
-
-type ProviderCapabilityReader interface{ Capabilities() ProviderCapabilities }
-
-const providerCapabilityContractVersion = 1
-
-func ValidateProviderCapabilities(capabilities ProviderCapabilities, operation string, requestedCompletionTokens int) error {
-	if capabilities.ContractVersion != providerCapabilityContractVersion || capabilities.Provider == "" || strings.TrimSpace(capabilities.Model) == "" {
-		return fmt.Errorf("provider capability contract is invalid")
-	}
-	if !capabilities.SupportsJSONActions || !capabilities.SupportsUsageLedger || !capabilities.SupportsCancellation || !capabilities.SupportsRequestAudit {
-		return fmt.Errorf("provider %s/%s cannot satisfy the automation harness contract", capabilities.Provider, capabilities.Model)
-	}
-	if requestedCompletionTokens < MinCompletionTokens || requestedCompletionTokens > capabilities.MaxCompletionTokens {
-		return fmt.Errorf("provider %s/%s cannot satisfy %d completion tokens for %s", capabilities.Provider, capabilities.Model, requestedCompletionTokens, operation)
-	}
-	if capabilities.MaxRequestBytes < 1 || capabilities.MaxRequestBytes > AgentMaxRequestBytes {
-		return fmt.Errorf("provider %s/%s exposes an invalid request-byte bound", capabilities.Provider, capabilities.Model)
-	}
-	return nil
-}
-
-func validateProviderContract(provider ProviderClient, operation string, requestedCompletionTokens int, requireCapabilities bool) error {
-	reader, ok := provider.(ProviderCapabilityReader)
-	if !ok {
-		if requireCapabilities {
-			return fmt.Errorf("provider capability contract is required for runtime workers")
-		}
-		return nil
-	}
-	return ValidateProviderCapabilities(reader.Capabilities(), operation, requestedCompletionTokens)
-}
-
-func providerCapabilitiesSnapshot(provider ProviderClient) any {
-	if reader, ok := provider.(ProviderCapabilityReader); ok {
-		return reader.Capabilities()
-	}
-	return nil
+	CallID     string         `json:"call_id,omitempty"`
+	ReceiptID  string         `json:"receipt_id,omitempty"`
 }
 
 // ProviderResponseError retains the billable, provider-authenticated response
@@ -131,39 +119,83 @@ func (e *ProviderResponseError) Error() string { return e.Message }
 type RetryableError struct {
 	Message    string
 	RetryAfter time.Duration
+	// StatusCode is present only for an explicit provider HTTP response. A
+	// network failure remains ambiguous and must not automatically fail over to
+	// another billable provider.
+	StatusCode int
 }
 
 func (e *RetryableError) Error() string { return e.Message }
 
 type ProviderConfig struct {
-	Provider       Provider
-	Model          string
-	Endpoint       string
-	secret         string
-	requestTimeout time.Duration
+	Provider Provider
+	Model    string
+	Endpoint string
+	// SessionID is a non-secret, stable per-task identifier used only by
+	// OpenCode Go for routing and prompt-cache affinity.
+	SessionID        string
+	ReasoningEnabled bool
+	ReasoningEffort  string
+	secret           string
 }
 
+// String deliberately omits the provider credential so accidental structured
+// logging of the in-memory cloud configuration cannot print it.
+func (c ProviderConfig) String() string {
+	return fmt.Sprintf("ProviderConfig{Provider:%q Model:%q CredentialConfigured:%t}", c.Provider, c.Model, c.secret != "")
+}
+
+// GoString keeps %#v diagnostics safe as well as the ordinary %v/%+v forms.
+func (c ProviderConfig) GoString() string { return c.String() }
+
+// GatewayProviderConfig contains no provider or control-plane signing secret.
+// A server-issued run capability is attached to each inference context; the
+// gateway obtains the actual provider key from the server-side secret bundle.
+type GatewayProviderConfig struct {
+	Provider Provider
+	Model    string
+	Endpoint string
+}
+
+// DefaultProviderEndpoint returns an operator-owned endpoint. Callers must not
+// accept an endpoint from a work item or a worker request.
 func DefaultProviderEndpoint(provider Provider) (string, bool) {
 	switch provider {
 	case ProviderMiniMax:
-		return miniMaxDirectCompletionEndpoint, true
+		return "https://api.minimax.io/v1/chat/completions", true
 	case ProviderOpenAI:
 		return "https://api.openai.com/v1/chat/completions", true
+	case ProviderDeepSeek:
+		return "https://api.deepseek.com/chat/completions", true
+	case ProviderOpenRouter:
+		return "https://openrouter.ai/api/v1/chat/completions", true
 	case ProviderAnthropic:
 		return "https://api.anthropic.com/v1/messages", true
+	case ProviderOpenCodeGo:
+		return "https://opencode.ai/zen/go/v1", true
 	default:
 		return "", false
 	}
 }
 
+// NewProviderConfig builds an in-memory provider configuration for the cloud
+// gateway. The credential is deliberately unexported and never serializable.
 func NewProviderConfig(provider Provider, model, endpoint, secret string) (ProviderConfig, error) {
 	provider = Provider(strings.ToLower(strings.TrimSpace(string(provider))))
 	if _, ok := DefaultProviderEndpoint(provider); !ok {
 		return ProviderConfig{}, fmt.Errorf("provider is not supported")
 	}
-	config := ProviderConfig{Provider: provider, Model: strings.TrimSpace(model), Endpoint: strings.TrimSpace(endpoint), secret: strings.TrimSpace(secret), requestTimeout: providerRequestTimeout}
-	if config.Model == "" || len(config.Model) > 200 || config.secret == "" {
-		return ProviderConfig{}, fmt.Errorf("provider configuration is incomplete")
+	config := ProviderConfig{Provider: provider, Model: strings.TrimSpace(model), Endpoint: strings.TrimSpace(endpoint), secret: strings.TrimSpace(secret)}
+	if config.Model == "" || len(config.Model) > 200 {
+		return ProviderConfig{}, fmt.Errorf("provider model is invalid")
+	}
+	if provider == ProviderOpenCodeGo {
+		if _, ok := OpenCodeGoModelAPI(config.Model); !ok {
+			return ProviderConfig{}, fmt.Errorf("opencode-go model is not supported by a known API family")
+		}
+	}
+	if config.secret == "" {
+		return ProviderConfig{}, fmt.Errorf("provider credential is unavailable")
 	}
 	if err := validateProviderEndpoint(config.Endpoint); err != nil {
 		return ProviderConfig{}, err
@@ -171,18 +203,89 @@ func NewProviderConfig(provider Provider, model, endpoint, secret string) (Provi
 	return config, nil
 }
 
-// ProviderAuthProbe is credential-redacted evidence about one read-only provider
-// authentication check. It deliberately excludes response bodies, account
-// balances, quota values, request headers and credential material.
-type ProviderAuthProbe struct {
-	Ready               bool     `json:"ready"`
-	Status              string   `json:"status"`
-	Provider            Provider `json:"provider"`
-	ConfiguredRegion    string   `json:"configured_region,omitempty"`
-	DetectedRegion      string   `json:"detected_region,omitempty"`
-	RecommendedEndpoint string   `json:"recommended_endpoint,omitempty"`
-	NetworkChecksMade   bool     `json:"network_checks_made"`
-	Billable            bool     `json:"billable"`
+// ProviderCapabilities is the adapter contract that keeps the harness rules
+// independent from a model vendor.  It is intentionally small and describes
+// guarantees the runtime can enforce, not marketing features advertised by a
+// provider.  A provider that cannot make one of these guarantees must fail
+// admission instead of silently changing the worker's semantics.
+type ProviderCapabilities struct {
+	ContractVersion      int      `json:"contract_version"`
+	Provider             Provider `json:"provider"`
+	Model                string   `json:"model"`
+	SupportsJSONActions  bool     `json:"supports_json_actions"`
+	SupportsUsageLedger  bool     `json:"supports_usage_ledger"`
+	SupportsCancellation bool     `json:"supports_cancellation"`
+	SupportsRequestAudit bool     `json:"supports_request_audit"`
+	MaxCompletionTokens  int      `json:"max_completion_tokens"`
+	MaxRequestBytes      int      `json:"max_request_bytes"`
+}
+
+// ProviderCapabilityReader is implemented by real provider adapters. It is a
+// separate interface so deterministic unit-test doubles remain lightweight;
+// production adapters created by NewProviderClient always implement it.
+type ProviderCapabilityReader interface {
+	Capabilities() ProviderCapabilities
+}
+
+const providerCapabilityContractVersion = 1
+
+// ValidateProviderCapabilities rejects a provider before a billable call when
+// it cannot uphold the worker contract for the requested operation. The
+// operation is recorded in the error so the dashboard can show an actionable
+// admission failure without exposing credentials or provider response text.
+func ValidateProviderCapabilities(capabilities ProviderCapabilities, operation string, requestedCompletionTokens int) error {
+	operation = strings.TrimSpace(operation)
+	if capabilities.ContractVersion != providerCapabilityContractVersion {
+		return fmt.Errorf("provider capability contract version %d is unsupported", capabilities.ContractVersion)
+	}
+	if capabilities.Provider == "" || strings.TrimSpace(capabilities.Model) == "" {
+		return fmt.Errorf("provider capability contract must identify provider and model")
+	}
+	if !capabilities.SupportsJSONActions {
+		return fmt.Errorf("provider %s/%s cannot guarantee JSON actions for %s", capabilities.Provider, capabilities.Model, operation)
+	}
+	if !capabilities.SupportsUsageLedger {
+		return fmt.Errorf("provider %s/%s cannot provide usage ledger metadata", capabilities.Provider, capabilities.Model)
+	}
+	if !capabilities.SupportsCancellation {
+		return fmt.Errorf("provider %s/%s cannot honor request cancellation", capabilities.Provider, capabilities.Model)
+	}
+	if !capabilities.SupportsRequestAudit {
+		return fmt.Errorf("provider %s/%s cannot produce a credential-free request audit", capabilities.Provider, capabilities.Model)
+	}
+	if capabilities.MaxCompletionTokens < MinCompletionTokens {
+		return fmt.Errorf("provider %s/%s exposes no usable completion-token capacity", capabilities.Provider, capabilities.Model)
+	}
+	if requestedCompletionTokens < MinCompletionTokens || requestedCompletionTokens > capabilities.MaxCompletionTokens {
+		return fmt.Errorf("provider %s/%s cannot satisfy %d completion tokens for %s (maximum %d)", capabilities.Provider, capabilities.Model, requestedCompletionTokens, operation, capabilities.MaxCompletionTokens)
+	}
+	if capabilities.MaxRequestBytes < 1 || capabilities.MaxRequestBytes > AgentMaxRequestBytes {
+		return fmt.Errorf("provider %s/%s exposes an invalid request-byte bound", capabilities.Provider, capabilities.Model)
+	}
+	return nil
+}
+
+func validateProviderContract(provider ProviderClient, operation string, requestedCompletionTokens int, requireCapabilities bool) error {
+	reader, ok := provider.(ProviderCapabilityReader)
+	if !ok {
+		if requireCapabilities {
+			return fmt.Errorf("provider capability contract is required for runtime workers")
+		}
+		// Deterministic test doubles and legacy adapters are allowed to keep the
+		// narrow ProviderClient surface. The built-in HTTP adapter is capability
+		// aware; unknown production adapters should implement the reader before
+		// being admitted to a worker.
+		return nil
+	}
+	return ValidateProviderCapabilities(reader.Capabilities(), operation, requestedCompletionTokens)
+}
+
+func providerCapabilitiesSnapshot(provider ProviderClient) any {
+	reader, ok := provider.(ProviderCapabilityReader)
+	if !ok {
+		return nil
+	}
+	return reader.Capabilities()
 }
 
 func (c ProviderConfig) SecretConfigured() bool { return c.secret != "" }
@@ -196,24 +299,22 @@ func LoadProviderConfig(lookup func(string) string) (ProviderConfig, error) {
 		provider = ProviderMiniMax
 	}
 	defaults := map[Provider]struct{ secret, modelName, model, endpointName, endpoint string }{
-		ProviderMiniMax:   {"MINIMAX_API_KEY", "MINIMAX_MODEL", "MiniMax-M3", "MINIMAX_API_BASE_URL", miniMaxDirectCompletionEndpoint},
-		ProviderOpenAI:    {"OPENAI_API_KEY", "OPENAI_MODEL", "gpt-4.1-mini", "OPENAI_API_BASE_URL", "https://api.openai.com/v1/chat/completions"},
-		ProviderAnthropic: {"ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "claude-sonnet-4-20250514", "ANTHROPIC_API_BASE_URL", "https://api.anthropic.com/v1/messages"},
+		ProviderMiniMax:    {"MINIMAX_API_KEY", "MINIMAX_MODEL", "MiniMax-M3", "MINIMAX_API_BASE_URL", "https://api.minimax.io/v1/chat/completions"},
+		ProviderOpenAI:     {"OPENAI_API_KEY", "OPENAI_MODEL", "gpt-4.1-mini", "OPENAI_API_BASE_URL", "https://api.openai.com/v1/chat/completions"},
+		ProviderDeepSeek:   {"DEEPSEEK_API_KEY", "DEEPSEEK_MODEL", "deepseek-flash", "DEEPSEEK_API_BASE_URL", "https://api.deepseek.com/chat/completions"},
+		ProviderOpenRouter: {"OPENROUTER_API_KEY", "OPENROUTER_MODEL", "openai/gpt-4.1-mini", "OPENROUTER_API_BASE_URL", "https://openrouter.ai/api/v1/chat/completions"},
+		ProviderAnthropic:  {"ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "claude-sonnet-4-20250514", "ANTHROPIC_API_BASE_URL", "https://api.anthropic.com/v1/messages"},
+		ProviderOpenCodeGo: {"OPENCODE_GO_API_KEY", "OPENCODE_GO_MODEL", "glm-5.3-flash", "OPENCODE_GO_API_BASE_URL", "https://opencode.ai/zen/go/v1"},
 	}
 	value, ok := defaults[provider]
 	if !ok {
-		return ProviderConfig{}, fmt.Errorf("ITBEM_AI_PROVIDER must be minimax, openai, or anthropic")
-	}
-	requestTimeout, err := configuredProviderRequestTimeout(lookup("ITBEM_AI_PROVIDER_TIMEOUT_SECONDS"))
-	if err != nil {
-		return ProviderConfig{}, err
+		return ProviderConfig{}, fmt.Errorf("ITBEM_AI_PROVIDER must be minimax, openai, deepseek, openrouter, anthropic, or opencode-go")
 	}
 	config := ProviderConfig{
-		Provider:       provider,
-		Model:          firstNonEmpty(lookup(value.modelName), value.model),
-		Endpoint:       firstNonEmpty(lookup(value.endpointName), value.endpoint),
-		secret:         strings.TrimSpace(lookup(value.secret)),
-		requestTimeout: requestTimeout,
+		Provider: provider,
+		Model:    firstNonEmpty(lookup(value.modelName), value.model),
+		Endpoint: firstNonEmpty(lookup(value.endpointName), value.endpoint),
+		secret:   strings.TrimSpace(lookup(value.secret)),
 	}
 	if config.secret == "" {
 		return ProviderConfig{}, fmt.Errorf("%s is required for the local %s provider", value.secret, provider)
@@ -221,25 +322,60 @@ func LoadProviderConfig(lookup func(string) string) (ProviderConfig, error) {
 	if len(config.Model) > 200 {
 		return ProviderConfig{}, fmt.Errorf("%s must be a bounded model identifier", value.modelName)
 	}
+	if config.Provider == ProviderOpenCodeGo {
+		if _, ok := OpenCodeGoModelAPI(config.Model); !ok {
+			return ProviderConfig{}, fmt.Errorf("OPENCODE_GO_MODEL is not supported by a known API family")
+		}
+	}
 	if err := validateProviderEndpoint(config.Endpoint); err != nil {
 		return ProviderConfig{}, err
 	}
 	return config, nil
 }
 
-func configuredProviderRequestTimeout(raw string) (time.Duration, error) {
-	if strings.TrimSpace(raw) == "" {
-		return providerRequestTimeout, nil
+func GatewayProviderEnabled(lookup func(string) string) bool {
+	if lookup == nil {
+		lookup = os.Getenv
 	}
-	seconds, err := strconv.Atoi(strings.TrimSpace(raw))
-	if err != nil {
-		return 0, fmt.Errorf("ITBEM_AI_PROVIDER_TIMEOUT_SECONDS must be an integer")
+	return strings.TrimSpace(lookup("ITBEM_AI_GATEWAY_URL")) != ""
+}
+
+func LoadGatewayProviderConfig(lookup func(string) string) (GatewayProviderConfig, error) {
+	if lookup == nil {
+		lookup = os.Getenv
 	}
-	timeout := time.Duration(seconds) * time.Second
-	if timeout < providerRequestMinTimeout || timeout > providerRequestMaxTimeout {
-		return 0, fmt.Errorf("ITBEM_AI_PROVIDER_TIMEOUT_SECONDS must be between %d and %d", int(providerRequestMinTimeout/time.Second), int(providerRequestMaxTimeout/time.Second))
+	provider := Provider(strings.ToLower(strings.TrimSpace(lookup("ITBEM_AI_PROVIDER"))))
+	if provider == "" {
+		provider = ProviderMiniMax
 	}
-	return timeout, nil
+	defaults := map[Provider]struct{ modelName, model string }{
+		ProviderMiniMax:    {"MINIMAX_MODEL", "MiniMax-M3"},
+		ProviderOpenAI:     {"OPENAI_MODEL", "gpt-4.1-mini"},
+		ProviderDeepSeek:   {"DEEPSEEK_MODEL", "deepseek-flash"},
+		ProviderOpenRouter: {"OPENROUTER_MODEL", "openai/gpt-4.1-mini"},
+		ProviderAnthropic:  {"ANTHROPIC_MODEL", "claude-sonnet-4-20250514"},
+		ProviderOpenCodeGo: {"OPENCODE_GO_MODEL", "glm-5.3-flash"},
+	}
+	value, ok := defaults[provider]
+	if !ok {
+		return GatewayProviderConfig{}, fmt.Errorf("ITBEM_AI_PROVIDER must be minimax, openai, deepseek, openrouter, anthropic, or opencode-go")
+	}
+	config := GatewayProviderConfig{
+		Provider: provider, Model: firstNonEmpty(lookup(value.modelName), value.model),
+		Endpoint: strings.TrimSpace(lookup("ITBEM_AI_GATEWAY_URL")),
+	}
+	if config.Model == "" || len(config.Model) > 200 {
+		return GatewayProviderConfig{}, fmt.Errorf("AI gateway configuration is incomplete")
+	}
+	if config.Provider == ProviderOpenCodeGo {
+		if _, ok := OpenCodeGoModelAPI(config.Model); !ok {
+			return GatewayProviderConfig{}, fmt.Errorf("OPENCODE_GO_MODEL is not supported by a known API family")
+		}
+	}
+	if err := validateProviderEndpoint(config.Endpoint); err != nil {
+		return GatewayProviderConfig{}, fmt.Errorf("ITBEM_AI_GATEWAY_URL: %w", err)
+	}
+	return config, nil
 }
 
 func firstNonEmpty(value, fallback string) string {
@@ -253,6 +389,13 @@ func validateProviderEndpoint(raw string) error {
 	endpoint, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || endpoint.Hostname() == "" {
 		return fmt.Errorf("provider endpoint must be an absolute HTTPS URL or loopback HTTP test endpoint")
+	}
+	// Credentials in URLs are routinely copied into access logs, traces and
+	// transport errors. Reject them (and query/fragment data, which commonly
+	// carries tokens) before either the worker gateway or provider adapter can
+	// issue a request.
+	if endpoint.User != nil || endpoint.RawQuery != "" || endpoint.ForceQuery || endpoint.Fragment != "" {
+		return fmt.Errorf("provider endpoint must not contain credentials, query parameters, or fragments")
 	}
 	if endpoint.Scheme == "https" {
 		return nil
@@ -279,188 +422,144 @@ type ProviderRequestAuditor interface {
 }
 
 type httpProviderClient struct {
-	config ProviderConfig
-	client *http.Client
+	config        ProviderConfig
+	client        *http.Client
+	resolveLimits inferenceModelLimitsResolver
 }
 
 func NewProviderClient(config ProviderConfig, client *http.Client) ProviderClient {
 	if client == nil {
-		timeout := config.requestTimeout
-		if timeout < providerRequestMinTimeout || timeout > providerRequestMaxTimeout {
-			timeout = providerRequestTimeout
-		}
-		client = &http.Client{Timeout: timeout}
+		client = &http.Client{Timeout: 120 * time.Second}
+	} else {
+		// Do not mutate a shared caller client. Provider credentials are attached
+		// to every inference request, so an upstream redirect must never be
+		// allowed to carry them to another URL (including a provider subdomain).
+		clientCopy := *client
+		client = &clientCopy
 	}
-	return &httpProviderClient{config: config, client: client}
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &httpProviderClient{config: config, client: client, resolveLimits: resolveProviderModelLimits}
 }
 
-type providerProbeAttempt struct {
-	authorized   bool
-	unauthorized bool
-	unreachable  bool
+type gatewayProviderClient struct {
+	config        GatewayProviderConfig
+	client        *http.Client
+	resolveLimits inferenceModelLimitsResolver
 }
 
-type miniMaxRegionEndpoints struct {
-	name      string
-	base      string
-	probeBase string
-}
-
-func miniMaxAuthRegions(host, baseURL string) (string, []miniMaxRegionEndpoints) {
-	switch strings.ToLower(host) {
-	case "api.minimax.io":
-		return "global", []miniMaxRegionEndpoints{
-			{name: "global", base: "https://api.minimax.io", probeBase: "https://www.minimax.io"},
-			{name: "cn", base: "https://api.minimaxi.com", probeBase: "https://www.minimaxi.com"},
-		}
-	case "api.minimaxi.com":
-		return "cn", []miniMaxRegionEndpoints{
-			{name: "cn", base: "https://api.minimaxi.com", probeBase: "https://www.minimaxi.com"},
-			{name: "global", base: "https://api.minimax.io", probeBase: "https://www.minimax.io"},
-		}
-	default:
-		return "custom", []miniMaxRegionEndpoints{{name: "custom", base: baseURL, probeBase: baseURL}}
-	}
-}
-
-// ProbeProviderAuth verifies that the configured credential is accepted by a
-// provider's read-only metadata/quota endpoint. It never sends a prompt or
-// creates a completion. MiniMax keys are checked using the same regional,
-// dual-header contract as the official CLI so a valid CN key is not mistaken
-// for an invalid Global key.
-func ProbeProviderAuth(ctx context.Context, config ProviderConfig, client *http.Client) (ProviderAuthProbe, error) {
-	result := ProviderAuthProbe{Provider: config.Provider, Status: "inconclusive", NetworkChecksMade: true, Billable: false}
-	if !config.SecretConfigured() {
-		result.Status = "not_configured"
-		return result, nil
-	}
+func NewGatewayProviderClient(config GatewayProviderConfig, client *http.Client) ProviderClient {
 	if client == nil {
-		client = &http.Client{Timeout: providerAuthProbeTimeout}
+		client = &http.Client{Timeout: 120 * time.Second}
+	} else {
+		// Do not mutate the caller's shared HTTP client, but enforce the
+		// gateway-auth boundary even when a caller supplies a client with its
+		// own redirect policy. A redirect must never carry X-Automation-Secret
+		// to a different endpoint.
+		clientCopy := *client
+		client = &clientCopy
 	}
-	endpoint, err := url.Parse(config.Endpoint)
-	if err != nil || endpoint.Hostname() == "" {
-		return result, fmt.Errorf("provider authentication probe requires a valid configured endpoint")
-	}
-	baseURL := endpoint.Scheme + "://" + endpoint.Host
-
-	switch config.Provider {
-	case ProviderMiniMax:
-		configuredRegion, regions := miniMaxAuthRegions(endpoint.Hostname(), baseURL)
-		result.ConfiguredRegion = configuredRegion
-		sawUnauthorized, sawUnreachable := false, false
-		for _, region := range regions {
-			attempt := probeMiniMaxAuth(ctx, client, region.probeBase, config.secret)
-			sawUnauthorized = sawUnauthorized || attempt.unauthorized
-			sawUnreachable = sawUnreachable || attempt.unreachable
-			if !attempt.authorized {
-				continue
-			}
-			result.DetectedRegion = region.name
-			if region.name == configuredRegion || region.name == "custom" {
-				result.Ready, result.Status = true, "authenticated"
-				return result, nil
-			}
-			result.Status = "region_mismatch"
-			result.RecommendedEndpoint = region.base + "/v1/text/chatcompletion_v2"
-			return result, nil
-		}
-		if sawUnauthorized {
-			result.Status = "rejected"
-		} else if sawUnreachable {
-			result.Status = "unreachable"
-		}
-		return result, nil
-	case ProviderOpenAI:
-		attempt := probeSimpleProviderAuth(ctx, client, providerMetadataEndpoint(endpoint, "/chat/completions"), "Authorization", "Bearer "+config.secret, "")
-		return finishSimpleProviderProbe(result, attempt), nil
-	case ProviderAnthropic:
-		attempt := probeSimpleProviderAuth(ctx, client, providerMetadataEndpoint(endpoint, "/messages"), "x-api-key", config.secret, "2023-06-01")
-		return finishSimpleProviderProbe(result, attempt), nil
-	default:
-		return result, fmt.Errorf("provider authentication probe is unsupported")
-	}
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &gatewayProviderClient{config: config, client: client, resolveLimits: resolvePublicProviderModelLimits}
 }
 
-func providerMetadataEndpoint(configured *url.URL, completionSuffix string) string {
-	probe := *configured
-	probe.RawQuery, probe.Fragment = "", ""
-	path := strings.TrimSuffix(strings.TrimRight(probe.Path, "/"), completionSuffix)
-	probe.Path = strings.TrimRight(path, "/") + "/models"
-	return probe.String()
-}
-
-func finishSimpleProviderProbe(result ProviderAuthProbe, attempt providerProbeAttempt) ProviderAuthProbe {
-	switch {
-	case attempt.authorized:
-		result.Ready, result.Status = true, "authenticated"
-	case attempt.unauthorized:
-		result.Status = "rejected"
-	case attempt.unreachable:
-		result.Status = "unreachable"
+func (p *gatewayProviderClient) Complete(ctx context.Context, messages []Message, maxTokens int) (Completion, error) {
+	if len(messages) == 0 {
+		return Completion{}, fmt.Errorf("at least one provider message is required")
 	}
-	return result
-}
-
-func probeMiniMaxAuth(ctx context.Context, client *http.Client, baseURL, secret string) providerProbeAttempt {
-	path := "/v1/token_plan/remains"
-	if strings.HasPrefix(secret, "sk-api-") {
-		path = "/account/query_balance"
+	lease, ok := InferenceLeaseFromContext(ctx)
+	if !ok {
+		return Completion{}, fmt.Errorf("AI gateway execution lease is required")
 	}
-	combined := providerProbeAttempt{}
-	for _, auth := range []struct{ name, value string }{{"Authorization", "Bearer " + secret}, {"x-api-key", secret}} {
-		attempt := probeSimpleProviderAuth(ctx, client, baseURL+path, auth.name, auth.value, "")
-		combined.unauthorized = combined.unauthorized || attempt.unauthorized
-		combined.unreachable = combined.unreachable || attempt.unreachable
-		if attempt.authorized {
-			return attempt
-		}
-		if !attempt.unauthorized && !attempt.unreachable {
-			combined.unauthorized = false
-		}
+	capability, ok := InferenceCapabilityFromContext(ctx)
+	if !ok {
+		return Completion{}, fmt.Errorf("server-issued AI gateway capability is required")
 	}
-	return combined
-}
-
-func probeSimpleProviderAuth(ctx context.Context, client *http.Client, endpoint, header, value, anthropicVersion string) providerProbeAttempt {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	limits, err := p.resolveLimits(ctx, p.config.Provider, p.config.Model, "", p.client)
 	if err != nil {
-		return providerProbeAttempt{}
+		return Completion{}, errors.New("provider model limits are unavailable")
 	}
-	req.Header.Set(header, value)
-	req.Header.Set("Accept", "application/json")
-	if anthropicVersion != "" {
-		req.Header.Set("anthropic-version", anthropicVersion)
-	}
-	response, err := client.Do(req)
+	maxTokens, err = completionTokensWithinModelLimits(p.config.Provider, p.config.Model, maxTokens, limits)
 	if err != nil {
-		return providerProbeAttempt{unreachable: true}
+		return Completion{}, err
+	}
+	if err := validatePromptContext(messages, maxTokens, limits); err != nil {
+		return Completion{}, err
+	}
+	callID, err := uuid.NewV4()
+	if err != nil {
+		return Completion{}, fmt.Errorf("AI gateway call identity could not be created")
+	}
+	payload, err := json.Marshal(struct {
+		CallID              string    `json:"call_id"`
+		Provider            Provider  `json:"provider"`
+		Model               string    `json:"model"`
+		Messages            []Message `json:"messages"`
+		MaxCompletionTokens int       `json:"max_completion_tokens"`
+		TaskID              string    `json:"task_id"`
+		RunID               string    `json:"run_id"`
+		Operation           string    `json:"operation"`
+		PlanStepID          string    `json:"plan_step_id,omitempty"`
+	}{callID.String(), p.config.Provider, p.config.Model, messages, maxTokens, lease.TaskID, lease.RunID, lease.Operation, lease.StepID})
+	if err != nil {
+		return Completion{}, fmt.Errorf("AI gateway request could not be encoded")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, p.config.Endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return Completion{}, fmt.Errorf("AI gateway request could not be created")
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(inferencecapability.HeaderName, capability)
+	response, err := p.client.Do(request)
+	if err != nil {
+		if isNetworkError(err) {
+			return Completion{}, &RetryableError{Message: "AI gateway network request failed", RetryAfter: providerRetryDefaultDelay}
+		}
+		return Completion{}, fmt.Errorf("AI gateway request failed")
 	}
 	defer response.Body.Close()
-	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
-		return providerProbeAttempt{unauthorized: true}
+	if response.StatusCode == http.StatusRequestTimeout || response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500 {
+		return Completion{}, &RetryableError{Message: fmt.Sprintf("AI gateway temporarily unavailable (%d)", response.StatusCode), RetryAfter: providerRetryAfter(response.Header, time.Now().UTC()), StatusCode: response.StatusCode}
+	}
+	if response.StatusCode == http.StatusUnprocessableEntity {
+		var completion Completion
+		if err := json.NewDecoder(io.LimitReader(response.Body, maxProviderResponseSize)).Decode(&completion); err != nil || !providerConfigured(completion.Provider) || strings.TrimSpace(completion.Model) == "" || completion.CallID != callID.String() || !validReceiptUUID(completion.ReceiptID) || completion.Usage == nil {
+			return Completion{}, fmt.Errorf("AI gateway returned an invalid billable rejection")
+		}
+		return completion, &ProviderResponseError{Completion: completion, Message: "AI provider response was rejected by the gateway contract"}
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxProviderProbeBodySize))
-		return providerProbeAttempt{}
+		return Completion{}, fmt.Errorf("AI gateway request rejected (%d)", response.StatusCode)
 	}
-	if strings.Contains(endpoint, "minimax") || strings.Contains(endpoint, "minimaxi") || strings.Contains(endpoint, "/token_plan/") || strings.Contains(endpoint, "/account/query_balance") {
-		var payload struct {
-			BaseResponse struct {
-				StatusCode int `json:"status_code"`
-			} `json:"base_resp"`
-		}
-		if err := json.NewDecoder(io.LimitReader(response.Body, maxProviderProbeBodySize)).Decode(&payload); err != nil || payload.BaseResponse.StatusCode != 0 {
-			return providerProbeAttempt{unauthorized: payload.BaseResponse.StatusCode == 1004 || payload.BaseResponse.StatusCode == 2049}
-		}
-		return providerProbeAttempt{authorized: true}
+	var completion Completion
+	if err := json.NewDecoder(io.LimitReader(response.Body, maxProviderResponseSize)).Decode(&completion); err != nil || !providerConfigured(completion.Provider) || strings.TrimSpace(completion.Model) == "" || strings.TrimSpace(completion.Content) == "" || completion.CallID != callID.String() || !validReceiptUUID(completion.ReceiptID) {
+		return Completion{}, fmt.Errorf("AI gateway returned an invalid completion")
 	}
-	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxProviderProbeBodySize))
-	return providerProbeAttempt{authorized: true}
+	return completion, nil
+}
+
+func (p *gatewayProviderClient) Capabilities() ProviderCapabilities {
+	maximum, _ := boundedCompletionTokens(p.config.Provider, p.config.Model, MaxCompletionTokens)
+	return ProviderCapabilities{ContractVersion: providerCapabilityContractVersion, Provider: p.config.Provider, Model: p.config.Model, SupportsJSONActions: true, SupportsUsageLedger: true, SupportsCancellation: true, SupportsRequestAudit: true, MaxCompletionTokens: maximum, MaxRequestBytes: AgentMaxRequestBytes}
+}
+
+func (p *gatewayProviderClient) AuditRequest(messages []Message, maxTokens int) (json.RawMessage, error) {
+	limits, err := p.resolveLimits(context.Background(), p.config.Provider, p.config.Model, "", p.client)
+	if err != nil {
+		return nil, errors.New("provider model limits are unavailable")
+	}
+	maxTokens, err = completionTokensWithinModelLimits(p.config.Provider, p.config.Model, maxTokens, limits)
+	if err != nil {
+		return nil, err
+	}
+	if err := validatePromptContext(messages, maxTokens, limits); err != nil {
+		return nil, err
+	}
+	return json.Marshal(map[string]any{"provider": p.config.Provider, "model": p.config.Model, "messages": messages, "max_completion_tokens": maxTokens})
 }
 
 func boundedCompletionTokens(provider Provider, model string, value int) (int, error) {
 	if value == 0 {
-		return DefaultCompletionTokens, nil
+		value = DefaultCompletionTokens
 	}
 	if value < 0 {
 		return 0, fmt.Errorf("max completion tokens must not be negative")
@@ -481,12 +580,159 @@ func boundedCompletionTokens(provider Provider, model string, value int) (int, e
 	return value, nil
 }
 
+// completionTokensWithinModelLimits rejects explicit requests above either
+// the provider adapter's hard ceiling or the selected model's output ceiling.
+// A zero request means "use the default" and may resolve to a lower default;
+// an explicit value is never silently truncated.
+func completionTokensWithinModelLimits(provider Provider, model string, requested int, limits inferenceModelLimits) (int, error) {
+	if limits.ContextWindowTokens < 1 || limits.MaxOutputTokens < 1 {
+		return 0, errors.New("provider model limits are unavailable")
+	}
+	if requested < 0 {
+		return 0, errors.New("provider completion-token request is invalid")
+	}
+	defaulted := requested == 0
+	if defaulted {
+		requested = DefaultCompletionTokens
+	}
+	maximum := min(limits.MaxOutputTokens, MaxCompletionTokens)
+	if provider == ProviderMiniMax {
+		adapterMaximum := miniMaxM3CompletionLimit
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "minimax-m2") {
+			adapterMaximum = miniMaxM2CompletionLimit
+		}
+		maximum = min(maximum, adapterMaximum)
+	}
+	if maximum < MinCompletionTokens {
+		return 0, errors.New("provider model limits are unavailable")
+	}
+	if defaulted && requested > maximum {
+		requested = maximum
+	}
+	if requested < MinCompletionTokens || requested > maximum {
+		return 0, errors.New("requested completion tokens exceed the selected model limit")
+	}
+	return requested, nil
+}
+
+// validatePromptContext uses UTF-8 byte length as a conservative upper bound
+// for text tokens, plus bounded chat framing overhead. It rejects rather than
+// truncates; exact provider tokenization is not available in this dependency-
+// light worker package.
+func validatePromptContext(messages []Message, completionTokens int, limits inferenceModelLimits) error {
+	if limits.ContextWindowTokens < 1 || completionTokens < 1 || len(messages) == 0 {
+		return errors.New("provider model limits are unavailable")
+	}
+	const (
+		conversationFramingUpperBound int64 = 256
+		messageFramingUpperBound      int64 = 32
+	)
+	inputUpperBound := conversationFramingUpperBound
+	for _, message := range messages {
+		contentBytes := int64(len([]byte(message.Content)))
+		roleBytes := int64(len([]byte(message.Role)))
+		if contentBytes > int64(limits.ContextWindowTokens)-inputUpperBound || roleBytes+messageFramingUpperBound > int64(limits.ContextWindowTokens)-inputUpperBound-contentBytes {
+			return errors.New("provider request exceeds the selected model context window")
+		}
+		inputUpperBound += contentBytes + roleBytes + messageFramingUpperBound
+	}
+	if inputUpperBound+int64(completionTokens) > int64(limits.ContextWindowTokens) {
+		return errors.New("provider request exceeds the selected model context window")
+	}
+	return nil
+}
+
+const (
+	openCodeGoChatAPI      = "chat_completions"
+	openCodeGoResponsesAPI = "responses"
+	openCodeGoMessagesAPI  = "messages"
+)
+
+// OpenCodeGoModelAPI maps the current Go model families to their documented
+// wire API. The live catalogue intentionally supplies availability only; this
+// explicit routing table fails closed for a newly introduced family rather
+// than sending a model request to an incompatible endpoint.
+func OpenCodeGoModelAPI(model string) (string, bool) {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if base, variant, hasVariant := strings.Cut(model, "#"); hasVariant {
+		if base == "" || variant == "" || strings.ContainsAny(variant, "#\t\r\n") {
+			return "", false
+		}
+		model = base
+	}
+	switch {
+	case strings.HasPrefix(model, "glm-"), strings.HasPrefix(model, "kimi-"), strings.HasPrefix(model, "longcat-"), strings.HasPrefix(model, "deepseek-"), strings.HasPrefix(model, "mimo-"), strings.HasPrefix(model, "space-bunny-"), strings.HasPrefix(model, "hy3"), strings.HasPrefix(model, "hy4"):
+		return openCodeGoChatAPI, true
+	case strings.HasPrefix(model, "gpt-"), strings.HasPrefix(model, "grok-"), strings.HasPrefix(model, "muse-"):
+		return openCodeGoResponsesAPI, true
+	case strings.HasPrefix(model, "minimax-"), strings.HasPrefix(model, "qwen"):
+		return openCodeGoMessagesAPI, true
+	default:
+		return "", false
+	}
+}
+
+// OpenAIModelAPI keeps direct OpenAI routing fail-closed. The public model
+// listing endpoint is an availability inventory, not an API-contract list;
+// embeddings, image-only and unknown future models must not be sent through a
+// text inference route merely because they appear in that inventory.
+func OpenAIModelAPI(model string) (string, bool) {
+	model = strings.ToLower(strings.TrimSpace(model))
+	switch {
+	case strings.HasPrefix(model, "gpt-6"), strings.HasPrefix(model, "gpt-5"), strings.HasPrefix(model, "o1"), strings.HasPrefix(model, "o3"), strings.HasPrefix(model, "o4"), strings.HasPrefix(model, "computer-use"):
+		return openCodeGoResponsesAPI, true
+	case strings.HasPrefix(model, "gpt-4"), strings.HasPrefix(model, "gpt-3.5"):
+		return openCodeGoChatAPI, true
+	default:
+		return "", false
+	}
+}
+
+func providerRequestEndpoint(config ProviderConfig) (string, error) {
+	if config.Provider == ProviderOpenAI {
+		api, supported := OpenAIModelAPI(config.Model)
+		if !supported {
+			return "", fmt.Errorf("openai model is not supported by a known API family")
+		}
+		if api == openCodeGoResponsesAPI {
+			base := strings.TrimSuffix(strings.TrimRight(config.Endpoint, "/"), "/chat/completions")
+			return base + "/responses", nil
+		}
+		return config.Endpoint, nil
+	}
+	if config.Provider != ProviderOpenCodeGo {
+		return config.Endpoint, nil
+	}
+	api, ok := OpenCodeGoModelAPI(config.Model)
+	if !ok {
+		return "", fmt.Errorf("opencode-go model is not supported by a known API family")
+	}
+	base := strings.TrimRight(config.Endpoint, "/")
+	switch api {
+	case openCodeGoChatAPI:
+		return base + "/chat/completions", nil
+	case openCodeGoResponsesAPI:
+		return base + "/responses", nil
+	case openCodeGoMessagesAPI:
+		return base + "/messages", nil
+	default:
+		return "", fmt.Errorf("opencode-go model API family is invalid")
+	}
+}
+
 func (p *httpProviderClient) Complete(ctx context.Context, messages []Message, maxTokens int) (Completion, error) {
 	if len(messages) == 0 {
 		return Completion{}, fmt.Errorf("at least one provider message is required")
 	}
-	maxTokens, err := boundedCompletionTokens(p.config.Provider, p.config.Model, maxTokens)
+	limits, err := p.resolveLimits(ctx, p.config.Provider, p.config.Model, p.config.secret, p.client)
 	if err != nil {
+		return Completion{}, errors.New("provider model limits are unavailable")
+	}
+	maxTokens, err = completionTokensWithinModelLimits(p.config.Provider, p.config.Model, maxTokens, limits)
+	if err != nil {
+		return Completion{}, err
+	}
+	if err := validatePromptContext(messages, maxTokens, limits); err != nil {
 		return Completion{}, err
 	}
 	payload, headers := p.payload(messages, maxTokens)
@@ -494,7 +740,11 @@ func (p *httpProviderClient) Complete(ctx context.Context, messages []Message, m
 	if err != nil {
 		return Completion{}, fmt.Errorf("provider request could not be encoded")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.config.Endpoint, bytes.NewReader(raw))
+	endpoint, err := providerRequestEndpoint(p.config)
+	if err != nil {
+		return Completion{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(raw))
 	if err != nil {
 		return Completion{}, fmt.Errorf("provider request could not be created")
 	}
@@ -510,7 +760,7 @@ func (p *httpProviderClient) Complete(ctx context.Context, messages []Message, m
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusRequestTimeout || response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500 {
-		return Completion{}, &RetryableError{Message: fmt.Sprintf("provider temporarily unavailable (%d)", response.StatusCode), RetryAfter: providerRetryAfter(response.Header, time.Now().UTC())}
+		return Completion{}, &RetryableError{Message: fmt.Sprintf("provider temporarily unavailable (%d)", response.StatusCode), RetryAfter: providerRetryAfter(response.Header, time.Now().UTC()), StatusCode: response.StatusCode}
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return Completion{}, fmt.Errorf("provider request rejected (%d)", response.StatusCode)
@@ -537,7 +787,17 @@ func (p *httpProviderClient) Capabilities() ProviderCapabilities {
 			maximum = miniMaxM2CompletionLimit
 		}
 	}
-	return ProviderCapabilities{ContractVersion: providerCapabilityContractVersion, Provider: p.config.Provider, Model: p.config.Model, SupportsJSONActions: true, SupportsUsageLedger: true, SupportsCancellation: true, SupportsRequestAudit: true, MaxCompletionTokens: maximum, MaxRequestBytes: AgentMaxRequestBytes}
+	return ProviderCapabilities{
+		ContractVersion:      providerCapabilityContractVersion,
+		Provider:             p.config.Provider,
+		Model:                p.config.Model,
+		SupportsJSONActions:  true,
+		SupportsUsageLedger:  true,
+		SupportsCancellation: true,
+		SupportsRequestAudit: true,
+		MaxCompletionTokens:  maximum,
+		MaxRequestBytes:      AgentMaxRequestBytes,
+	}
 }
 
 // providerRetryAfter treats the provider's retry hint as an upper-level
@@ -568,8 +828,15 @@ func (p *httpProviderClient) AuditRequest(messages []Message, maxTokens int) (js
 	if len(messages) == 0 {
 		return nil, fmt.Errorf("at least one provider message is required")
 	}
-	maxTokens, err := boundedCompletionTokens(p.config.Provider, p.config.Model, maxTokens)
+	limits, err := p.resolveLimits(context.Background(), p.config.Provider, p.config.Model, p.config.secret, p.client)
 	if err != nil {
+		return nil, errors.New("provider model limits are unavailable")
+	}
+	maxTokens, err = completionTokensWithinModelLimits(p.config.Provider, p.config.Model, maxTokens, limits)
+	if err != nil {
+		return nil, err
+	}
+	if err := validatePromptContext(messages, maxTokens, limits); err != nil {
 		return nil, err
 	}
 	payload, _ := p.payload(messages, maxTokens)
@@ -581,6 +848,47 @@ func (p *httpProviderClient) AuditRequest(messages []Message, maxTokens int) (js
 }
 
 func (p *httpProviderClient) payload(messages []Message, maxTokens int) (map[string]any, map[string]string) {
+	if p.config.Provider == ProviderOpenAI {
+		api, supported := OpenAIModelAPI(p.config.Model)
+		if !supported {
+			return nil, nil
+		}
+		headers := map[string]string{"Authorization": "Bearer " + p.config.secret, "Content-Type": "application/json"}
+		if api == openCodeGoResponsesAPI {
+			payload := map[string]any{"model": p.config.Model, "input": messages, "max_output_tokens": maxTokens}
+			if p.config.ReasoningEnabled && IsAllowedReasoningEffort(p.config.ReasoningEffort) {
+				payload["reasoning"] = map[string]string{"effort": strings.ToLower(strings.TrimSpace(p.config.ReasoningEffort))}
+			}
+			return payload, headers
+		}
+		return map[string]any{"model": p.config.Model, "messages": messages, "max_completion_tokens": maxTokens, "temperature": 0.2}, headers
+	}
+	if p.config.Provider == ProviderOpenCodeGo {
+		api, ok := OpenCodeGoModelAPI(p.config.Model)
+		if !ok {
+			return nil, nil
+		}
+		headers := map[string]string{"Authorization": "Bearer " + p.config.secret, "Content-Type": "application/json", "User-Agent": "itbem-ai-agent/1.0"}
+		if p.config.SessionID != "" {
+			headers["X-OpenCode-Session"] = p.config.SessionID
+		}
+		if api == openCodeGoMessagesAPI {
+			system, conversation := make([]string, 0), make([]Message, 0, len(messages))
+			for _, message := range messages {
+				switch message.Role {
+				case "system":
+					system = append(system, message.Content)
+				case "user", "assistant":
+					conversation = append(conversation, message)
+				}
+			}
+			return map[string]any{"model": p.config.Model, "system": strings.Join(system, "\n\n"), "messages": conversation, "max_tokens": maxTokens, "temperature": 0.2}, headers
+		}
+		if api == openCodeGoResponsesAPI {
+			return map[string]any{"model": p.config.Model, "input": messages, "max_output_tokens": maxTokens}, headers
+		}
+		return map[string]any{"model": p.config.Model, "messages": messages, "max_completion_tokens": maxTokens, "temperature": 0.2}, headers
+	}
 	if p.config.Provider == ProviderAnthropic {
 		system, conversation := make([]string, 0), make([]Message, 0, len(messages))
 		for _, message := range messages {
@@ -593,50 +901,132 @@ func (p *httpProviderClient) payload(messages []Message, maxTokens int) (map[str
 		}
 		return map[string]any{"model": p.config.Model, "system": strings.Join(system, "\n\n"), "messages": conversation, "max_tokens": maxTokens, "temperature": 0.2}, map[string]string{"x-api-key": p.config.secret, "anthropic-version": "2023-06-01", "content-type": "application/json"}
 	}
-	payload := map[string]any{"model": p.config.Model, "messages": messages, "max_completion_tokens": maxTokens, "temperature": 0.2}
-	if p.config.Provider == ProviderMiniMax && !usesMiniMaxDirectCompletionEndpoint(p.config.Endpoint) {
+	payload := map[string]any{"model": p.config.Model, "messages": messages, "max_completion_tokens": maxTokens}
+	// OpenRouter's live catalogue contains models with different optional
+	// generation controls. Omitting temperature keeps a text-chat request
+	// compatible with more of that catalogue while retaining each model's
+	// provider-side default. Direct providers keep the explicit deterministic
+	// temperature used by the existing automation flow.
+	if p.config.Provider != ProviderOpenRouter {
+		payload["temperature"] = 0.2
+	}
+	if p.config.Provider == ProviderMiniMax {
 		payload["reasoning_split"] = true
-		if strings.EqualFold(strings.TrimSpace(p.config.Model), "MiniMax-M3") {
-			// M3 defaults to adaptive thinking, whose private reasoning consumes
-			// max_completion_tokens. Delivery calls require a compact, schema-bound
-			// answer in one turn; the official direct mode avoids exhausting the
-			// entire allowance before content is emitted. Deterministic parsers and
-			// exact-SHA gates remain the authority after inference.
-			payload["thinking"] = map[string]any{"type": "disabled"}
+	}
+	if p.config.Provider == ProviderDeepSeek && p.config.ReasoningEnabled {
+		payload["thinking"] = map[string]string{"type": "enabled"}
+		if effort := normalizeDeepSeekReasoningEffort(p.config.ReasoningEffort); effort != "" {
+			payload["reasoning_effort"] = effort
+		}
+	}
+	if p.config.Provider == ProviderOpenRouter && p.config.ReasoningEnabled {
+		if effort := normalizeOpenRouterReasoningEffort(p.config.ReasoningEffort); effort != "" {
+			payload["reasoning"] = map[string]string{"effort": effort}
 		}
 	}
 	return payload, map[string]string{"Authorization": "Bearer " + p.config.secret, "Content-Type": "application/json"}
 }
 
-// usesMiniMaxDirectCompletionEndpoint distinguishes MiniMax's documented
-// direct API from an operator-selected OpenAI-compatible override. The direct
-// contract intentionally receives only portable completion fields; reasoning
-// controls remain on the compatibility path where their wire behavior is
-// explicitly known.
-func usesMiniMaxDirectCompletionEndpoint(raw string) bool {
-	endpoint, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil {
-		return false
+// normalizeDeepSeekReasoningEffort preserves old saved policies while using
+// the current API vocabulary. "medium" was accepted by earlier UI versions;
+// DeepSeek now documents low, high and max.
+func normalizeDeepSeekReasoningEffort(effort string) string {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "medium":
+		return "high"
+	case "low", "high", "max":
+		return strings.ToLower(strings.TrimSpace(effort))
+	default:
+		return ""
 	}
-	return strings.TrimRight(endpoint.Path, "/") == "/v1/text/chatcompletion_v2"
+}
+
+func normalizeOpenRouterReasoningEffort(effort string) string {
+	effort = strings.ToLower(strings.TrimSpace(effort))
+	if IsAllowedReasoningEffort(effort) {
+		return effort
+	}
+	return ""
 }
 
 func parseCompletion(config ProviderConfig, body map[string]any) (Completion, error) {
 	completion := Completion{Provider: config.Provider, Model: stringValue(body["model"], config.Model), ResponseID: stringValue(body["id"], ""), Usage: providerUsageWithOutcome(body)}
-	if config.Provider == ProviderAnthropic {
+	api, _ := OpenCodeGoModelAPI(config.Model)
+	if config.Provider == ProviderAnthropic || (config.Provider == ProviderOpenCodeGo && api == openCodeGoMessagesAPI) {
 		for _, block := range sliceValue(body["content"]) {
 			if blockMap := mapValue(block); stringValue(blockMap["type"], "") == "text" {
 				completion.Content += stringValue(blockMap["text"], "")
 			}
 		}
+	} else if (config.Provider == ProviderOpenCodeGo && api == openCodeGoResponsesAPI) || (config.Provider == ProviderOpenAI && func() bool {
+		candidate, ok := OpenAIModelAPI(config.Model)
+		return ok && candidate == openCodeGoResponsesAPI
+	}()) {
+		completion.Content = responseText(body)
 	} else if choices := sliceValue(body["choices"]); len(choices) > 0 {
 		message := mapValue(mapValue(choices[0])["message"])
 		completion.Content = stringValue(message["content"], "")
 	}
+	completion = redactCompletionCredential(completion, config.secret)
 	if strings.TrimSpace(completion.Content) == "" {
 		return completion, &ProviderResponseError{Completion: completion, Message: emptyCompletionMessage(config.Provider, body)}
 	}
 	return completion, nil
+}
+
+// redactCompletionCredential is a final output boundary: even if an upstream
+// provider accidentally echoes its Authorization value, that value must not
+// flow back through the gateway to a local agent or into persisted usage data.
+func redactCompletionCredential(completion Completion, secret string) Completion {
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		return completion
+	}
+	completion.Model = strings.ReplaceAll(completion.Model, secret, "[REDACTED]")
+	completion.ResponseID = strings.ReplaceAll(completion.ResponseID, secret, "[REDACTED]")
+	completion.Content = strings.ReplaceAll(completion.Content, secret, "[REDACTED]")
+	if usage, ok := redactCredentialValue(completion.Usage, secret).(map[string]any); ok {
+		completion.Usage = usage
+	}
+	return completion
+}
+
+func redactCredentialValue(value any, secret string) any {
+	switch typed := value.(type) {
+	case string:
+		return strings.ReplaceAll(typed, secret, "[REDACTED]")
+	case map[string]any:
+		redacted := make(map[string]any, len(typed))
+		for key, nested := range typed {
+			redacted[strings.ReplaceAll(key, secret, "[REDACTED]")] = redactCredentialValue(nested, secret)
+		}
+		return redacted
+	case []any:
+		redacted := make([]any, len(typed))
+		for index, nested := range typed {
+			redacted[index] = redactCredentialValue(nested, secret)
+		}
+		return redacted
+	default:
+		return value
+	}
+}
+
+func responseText(body map[string]any) string {
+	if text := stringValue(body["output_text"], ""); text != "" {
+		return text
+	}
+	var text strings.Builder
+	for _, output := range sliceValue(body["output"]) {
+		outputMap := mapValue(output)
+		for _, block := range sliceValue(outputMap["content"]) {
+			blockMap := mapValue(block)
+			if stringValue(blockMap["type"], "") == "output_text" || stringValue(blockMap["type"], "") == "text" {
+				text.WriteString(stringValue(blockMap["text"], ""))
+			}
+		}
+	}
+	return text.String()
 }
 
 // providerUsageWithOutcome keeps usage provider-native while attaching a

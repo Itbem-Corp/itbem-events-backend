@@ -6,24 +6,22 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"events-stocks/configuration"
+	"events-stocks/internal/agentprotocol"
 	"events-stocks/internal/agentwork"
 	"events-stocks/internal/authz"
 	"events-stocks/internal/automationagent"
-	"events-stocks/internal/deliveryledger"
-	"events-stocks/internal/environmentevidence"
-	"events-stocks/internal/projectvault"
-	"events-stocks/internal/qaevidence"
+	"events-stocks/internal/inferencecapability"
+	"events-stocks/internal/organizationscope"
 	"events-stocks/internal/releasegate"
-	"events-stocks/internal/releasegatecontrol"
-	"events-stocks/internal/securityevidence"
 	"events-stocks/models"
 	automationqueue "events-stocks/repositories/automationqueuerepository"
 	awsrepository "events-stocks/repositories/awsrepository"
 	"events-stocks/services/automationcost"
-	"events-stocks/services/deliveryworkflow"
+	"events-stocks/services/deliveryplansteps"
 	outboxService "events-stocks/services/outbox"
 	"events-stocks/utils"
 	"fmt"
@@ -52,7 +50,14 @@ var githubRepositoryPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]*/[a-z0-9]
 var githubOrganizationPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]*$`)
 var toolCallKeyPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{1,63}$`)
 var workerWorkspaceIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$`)
-var workspaceAttestationBranchPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$`)
+var agentProfileKeyPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{1,63}$`)
+var executionReportURLPattern = regexp.MustCompile(`(?i)\bhttps?://[^\s"'<>]+`)
+var executionReportProviderKeyPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b`),
+	regexp.MustCompile(`\bAIza[0-9A-Za-z_-]{35}\b`),
+	regexp.MustCompile(`\bya29\.[0-9A-Za-z_-]{20,}\b`),
+	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`),
+}
 
 const maxGitHubReviewWebhookBytes = 1 << 20
 
@@ -69,6 +74,7 @@ var allowedOperations = map[string]struct{}{
 	"document.analyze":          {},
 	"code.review":               {},
 	"product.ideate":            {},
+	"delivery.chat":             {},
 	"delivery.plan":             {},
 	"delivery.implementation":   {},
 	"delivery.assessment":       {},
@@ -77,6 +83,7 @@ var allowedOperations = map[string]struct{}{
 	"delivery.release_gate":     {},
 	"delivery.qa":               {},
 	"delivery.summary":          {},
+	"delivery.workflow":         {},
 }
 
 type githubPullRequestWebhook struct {
@@ -409,9 +416,12 @@ func validGitHubWebhookSignature(body []byte, value, secret string) bool {
 // Providers are an explicit allow-list because callback metadata is part of
 // the audit trail shown to a human reviewer. Do not accept a free-form name.
 var allowedProviders = map[string]struct{}{
-	"minimax":   {},
-	"openai":    {},
-	"anthropic": {},
+	"minimax":     {},
+	"openai":      {},
+	"deepseek":    {},
+	"openrouter":  {},
+	"anthropic":   {},
+	"opencode-go": {},
 }
 
 // genericTaskOperationAllowed keeps the quick, non-Delivery console useful
@@ -500,6 +510,7 @@ type outputDownloadResponse struct {
 type automationCostSummary struct {
 	Executions           int64 `json:"executions"`
 	Tasks                int64 `json:"tasks"`
+	UnpricedExecutions   int64 `json:"unpriced_executions"`
 	InputTokens          int64 `json:"input_tokens"`
 	OutputTokens         int64 `json:"output_tokens"`
 	CachedInputTokens    int64 `json:"cached_input_tokens"`
@@ -511,6 +522,31 @@ type automationCostSummary struct {
 	CachedCostMicros     int64 `json:"cached_cost_microusd"`
 	CacheWriteCostMicros int64 `json:"cache_write_cost_microusd"`
 	TotalCostMicros      int64 `json:"total_cost_microusd"`
+}
+
+const automationCostUnpricedPricingBases = "('', 'legacy', 'unpriced')"
+
+func automationCostPricingBasisCountsAsUnpriced(basis string) bool {
+	switch strings.ToLower(strings.TrimSpace(basis)) {
+	case "", "legacy", "unpriced":
+		return true
+	default:
+		return false
+	}
+}
+
+func automationCostUnpricedPricingBasisPredicate(column string) string {
+	return "LOWER(BTRIM(COALESCE(" + column + ", ''))) IN " + automationCostUnpricedPricingBases
+}
+
+func automationCostSummarySelect() string {
+	return "COUNT(*) AS executions, COUNT(DISTINCT execution.automation_task_id) AS tasks, COALESCE(SUM(execution.input_tokens), 0) AS input_tokens, COALESCE(SUM(execution.output_tokens), 0) AS output_tokens, COALESCE(SUM(execution.cached_input_tokens), 0) AS cached_input_tokens, COALESCE(SUM(execution.cache_write_tokens), 0) AS cache_write_tokens, COALESCE(SUM(execution.reasoning_tokens), 0) AS reasoning_tokens, COALESCE(SUM(execution.total_tokens), 0) AS total_tokens, COALESCE(SUM(execution.input_cost_micros), 0) AS input_cost_micros, COALESCE(SUM(execution.output_cost_micros), 0) AS output_cost_micros, COALESCE(SUM(execution.cached_cost_micros), 0) AS cached_cost_micros, COALESCE(SUM(execution.cache_write_cost_micros), 0) AS cache_write_cost_micros, COALESCE(SUM(execution.total_cost_micros), 0) AS total_cost_micros, COUNT(*) FILTER (WHERE " + automationCostUnpricedPricingBasisPredicate("execution.pricing_basis") + ") AS unpriced_executions"
+}
+
+func aggregateAutomationCostSummary(filteredQuery *gorm.DB) (automationCostSummary, error) {
+	var summary automationCostSummary
+	err := filteredQuery.Session(&gorm.Session{}).Select(automationCostSummarySelect()).Scan(&summary).Error
+	return summary, err
 }
 
 type automationCostBreakdown struct {
@@ -568,6 +604,23 @@ type automationCostModel struct {
 	TotalCostMicros      int64  `json:"total_cost_microusd"`
 }
 
+type automationCostAgent struct {
+	AgentKey        string `json:"agent_key"`
+	Executions      int64  `json:"executions"`
+	TotalTokens     int64  `json:"total_tokens"`
+	TotalCostMicros int64  `json:"total_cost_microusd"`
+}
+
+type automationCostWorkItem struct {
+	ProjectID       *uuid.UUID `json:"project_id,omitempty"`
+	ProjectName     string     `json:"project_name"`
+	WorkItemID      uuid.UUID  `json:"work_item_id"`
+	WorkItemTitle   string     `json:"work_item_title"`
+	Executions      int64      `json:"executions"`
+	TotalTokens     int64      `json:"total_tokens"`
+	TotalCostMicros int64      `json:"total_cost_microusd"`
+}
+
 // automationCostBudgetWatch gives platform operators a small, current-month
 // portfolio view of the hard project budgets. It intentionally contains no
 // prompts, task titles, repository references or execution payloads.
@@ -610,6 +663,11 @@ type automationCostExecution struct {
 	ID                   uuid.UUID  `json:"id"`
 	AutomationTaskID     uuid.UUID  `json:"automation_task_id"`
 	DeliveryWorkItemID   *uuid.UUID `json:"delivery_work_item_id,omitempty"`
+	ProjectID            *uuid.UUID `json:"project_id,omitempty"`
+	ProjectName          string     `json:"project_name,omitempty"`
+	WorkItemTitle        string     `json:"work_item_title,omitempty"`
+	AgentKey             string     `json:"agent_key,omitempty"`
+	AgentInstanceID      *uuid.UUID `json:"agent_instance_id,omitempty"`
 	Operation            string     `json:"operation"`
 	TaskStatus           string     `json:"task_status"`
 	ExecutionKind        string     `json:"execution_kind"`
@@ -690,22 +748,26 @@ func providerOutcomeFromUsage(usageJSON string) *automationProviderOutcome {
 // request/response references; the existing task-scoped inspector enforces
 // authorization before either object is read.
 type automationCostExecutionPage struct {
-	Page       int   `json:"page"`
-	PageSize   int   `json:"page_size"`
-	Total      int64 `json:"total"`
-	TotalPages int   `json:"total_pages"`
+	Page       int       `json:"page"`
+	PageSize   int       `json:"page_size"`
+	Total      int64     `json:"total"`
+	TotalPages int       `json:"total_pages"`
+	Mode       string    `json:"mode"`
+	SnapshotAt time.Time `json:"snapshot_at"`
+	HasMore    bool      `json:"has_more"`
+	NextCursor string    `json:"next_cursor,omitempty"`
 }
 
 // automationCostRecentExecutionSelect stays explicit rather than selecting a
 // model wholesale: the portfolio view needs every billable component, but must
 // never receive private object references or task payloads.
-const automationCostRecentExecutionSelect = "execution.id, execution.automation_task_id, execution.delivery_work_item_id, task.operation, task.status AS task_status, execution.execution_kind, execution.tool, execution.call_key, execution.call_status, execution.step_key, execution.provider, execution.model, execution.input_tokens, execution.output_tokens, execution.cached_input_tokens, execution.cache_write_tokens, execution.reasoning_tokens, execution.total_tokens, execution.input_cost_micros, execution.output_cost_micros, execution.cached_cost_micros, execution.cache_write_cost_micros, execution.total_cost_micros, execution.pricing_basis, execution.completed_at"
+const automationCostRecentExecutionSelect = "execution.id, execution.automation_task_id, execution.delivery_work_item_id, work_item.project_id, project.name AS project_name, work_item.title AS work_item_title, execution.agent_key AS agent_key, execution.agent_instance_id AS agent_instance_id, task.operation, task.status AS task_status, execution.execution_kind, execution.tool, execution.call_key, execution.call_status, execution.step_key, execution.provider, execution.model, execution.input_tokens, execution.output_tokens, execution.cached_input_tokens, execution.cache_write_tokens, execution.reasoning_tokens, execution.total_tokens, execution.input_cost_micros, execution.output_cost_micros, execution.cached_cost_micros, execution.cache_write_cost_micros, execution.total_cost_micros, execution.pricing_basis, execution.completed_at"
 
 // automationCostLedgerUnion gives the portfolio a single accounting view over
 // the primary agent call and independently billable runtime tools. Keep the
 // column list explicit: private request/result references never enter cost
 // aggregation, pagination or the dashboard response.
-const automationCostLedgerUnion = `SELECT id, automation_task_id, delivery_work_item_id, step_key, provider, model, input_tokens, output_tokens, cached_input_tokens, cache_write_tokens, reasoning_tokens, total_tokens, input_cost_micros, output_cost_micros, cached_cost_micros, cache_write_cost_micros, total_cost_micros, pricing_basis, completed_at, 'agent' AS execution_kind, '' AS tool, '' AS call_key, 'completed' AS call_status FROM automation_executions UNION ALL SELECT id, automation_task_id, delivery_work_item_id, step_key, provider, model, input_tokens, output_tokens, cached_input_tokens, cache_write_tokens, reasoning_tokens, total_tokens, input_cost_micros, output_cost_micros, cached_cost_micros, cache_write_cost_micros, total_cost_micros, pricing_basis, completed_at, 'tool' AS execution_kind, tool, call_key, call_status FROM automation_tool_executions`
+const automationCostLedgerUnion = `SELECT id, automation_task_id, delivery_work_item_id, step_key, agent_key, agent_instance_id, provider, model, input_tokens, output_tokens, cached_input_tokens, cache_write_tokens, reasoning_tokens, total_tokens, input_cost_micros, output_cost_micros, cached_cost_micros, cache_write_cost_micros, total_cost_micros, pricing_basis, completed_at, 'agent' AS execution_kind, '' AS tool, '' AS call_key, 'completed' AS call_status FROM automation_executions UNION ALL SELECT id, automation_task_id, delivery_work_item_id, step_key, agent_key, agent_instance_id, provider, model, input_tokens, output_tokens, cached_input_tokens, cache_write_tokens, reasoning_tokens, total_tokens, input_cost_micros, output_cost_micros, cached_cost_micros, cache_write_cost_micros, total_cost_micros, pricing_basis, completed_at, 'tool' AS execution_kind, tool, call_key, call_status FROM automation_tool_executions`
 
 const (
 	automationExecutionLedgerTable     = "automation_executions"
@@ -744,6 +806,8 @@ var automationCostLedgerFields = []automationCostLedgerField{
 	{Name: "automation_task_id", Required: true},
 	{Name: "delivery_work_item_id", Fallback: "NULL::uuid"},
 	{Name: "step_key", Fallback: "''::text"},
+	{Name: "agent_key", Fallback: "''::text"},
+	{Name: "agent_instance_id", Fallback: "NULL::uuid"},
 	{Name: "provider", Fallback: "''::text"},
 	{Name: "model", Fallback: "''::text"},
 	{Name: "input_tokens", Fallback: "0::bigint"},
@@ -759,6 +823,9 @@ var automationCostLedgerFields = []automationCostLedgerField{
 	{Name: "total_cost_micros", Required: true},
 	{Name: "pricing_basis", Fallback: "'legacy'::text"},
 	{Name: "completed_at", Required: true},
+	// Older ledgers may not have a separate creation timestamp. In that case
+	// completion time is the safest available immutable snapshot boundary.
+	{Name: "created_at", Fallback: "completed_at"},
 }
 
 func automationCostLedgerProjection(table string, columns map[string]struct{}, executionKind string) (string, []string, bool) {
@@ -865,8 +932,11 @@ type automationWorkerHealth struct {
 	Role                   string                      `json:"role,omitempty"`
 	Lane                   string                      `json:"lane,omitempty"`
 	Concurrency            int                         `json:"concurrency"`
-	Capabilities           []string                    `json:"capabilities,omitempty"`
-	Draining               bool                        `json:"draining,omitempty"`
+	Draining               bool                        `json:"draining"`
+	Capabilities           []string                    `json:"capabilities,omitempty" gorm:"-"`
+	CapabilitiesJSON       string                      `json:"-" gorm:"column:capabilities_json"`
+	Protocols              []string                    `json:"protocols,omitempty" gorm:"-"`
+	ProtocolsJSON          string                      `json:"-" gorm:"column:protocols_json"`
 	StartedAt              time.Time                   `json:"started_at"`
 	LastSeenAt             time.Time                   `json:"last_seen_at"`
 	WorkspaceReadiness     []automationWorkspaceHealth `gorm:"-" json:"workspace_readiness,omitempty"`
@@ -949,6 +1019,7 @@ type automationWorkspaceHealth struct {
 type automationHealth struct {
 	Queued              int64                                 `json:"queued"`
 	Running             int64                                 `json:"running"`
+	ActiveTasks         int64                                 `json:"active_tasks"`
 	FailedLastDay       int64                                 `json:"failed_last_day"`
 	ExpiredLeases       int64                                 `json:"expired_leases"`
 	SpendLastDay        int64                                 `json:"spend_last_day_microusd"`
@@ -973,6 +1044,23 @@ type automationHealth struct {
 	LastWorkerSeenAt              *time.Time                    `json:"last_worker_seen_at,omitempty"`
 	Workers                       []automationWorkerHealth      `json:"workers"`
 	ReviewIngress                 automationReviewIngressHealth `json:"review_ingress"`
+	Scaling                       automationScalingHealth       `json:"scaling"`
+	GlobalActiveLimit             int                           `json:"global_active_limit"`
+	ProjectActiveLimit            int                           `json:"project_active_limit"`
+	QueueDepthLimit               int                           `json:"queue_depth_limit"`
+	AdmissionSaturated            bool                          `json:"admission_saturated"`
+}
+
+type automationScalingHealth struct {
+	Mode                    string `json:"mode"`
+	Reason                  string `json:"reason,omitempty"`
+	QueueDepth              int64  `json:"queue_depth"`
+	ActiveWorkers           int64  `json:"active_workers"`
+	AvailableWorkers        int64  `json:"available_workers"`
+	DesiredWorkers          int64  `json:"desired_workers"`
+	TargetMessagesPerWorker int    `json:"target_messages_per_worker"`
+	MaxWorkers              int    `json:"max_workers"`
+	WorkerGap               int64  `json:"worker_gap"`
 }
 
 type automationOutboxStateCount struct {
@@ -996,11 +1084,16 @@ type automationReviewIngressHealth struct {
 
 type agentHeartbeatRequest struct {
 	WorkerID           string                      `json:"worker_id"`
+	AgentKey           string                      `json:"agent_key"`
+	MachineID          string                      `json:"machine_id"`
 	Provider           string                      `json:"provider"`
 	Model              string                      `json:"model"`
 	Role               string                      `json:"role"`
 	Lane               string                      `json:"lane"`
 	Concurrency        int                         `json:"concurrency"`
+	Draining           bool                        `json:"draining"`
+	Capabilities       []string                    `json:"capabilities"`
+	Protocols          []string                    `json:"protocols"`
 	StartedAt          string                      `json:"started_at"`
 	WorkspaceReadiness []automationWorkspaceHealth `json:"workspace_readiness"`
 }
@@ -1548,35 +1641,174 @@ func getExecutionDownload(c echo.Context, kind string) error {
 // browser cases and evidence metadata live together in this immutable report,
 // so there is no caller-supplied object key or second unrestricted endpoint.
 func GetToolExecutionReportContent(c echo.Context) error {
-	bucket, key, err := authorizedToolExecutionReport(c)
+	content, err := readAuthorizedToolExecutionReport(c)
 	if err != nil {
 		return err
-	}
-	body, err := awsrepository.GetS3Object(c.Request().Context(), key, bucket)
-	if err != nil {
-		return utils.Error(c, http.StatusServiceUnavailable, "Automation tool execution unavailable", "Could not read the private tool report")
-	}
-	defer body.Close()
-	content, err := io.ReadAll(io.LimitReader(body, 256*1024))
-	if err != nil || len(content) == 0 || !json.Valid(content) {
-		return utils.Error(c, http.StatusServiceUnavailable, "Automation tool execution unavailable", "Could not read the private tool report")
 	}
 	return utils.Success(c, http.StatusOK, "Automation tool execution report loaded", json.RawMessage(content))
 }
 
-// GetToolExecutionReportDownload provides the full report for an authorized
-// reviewer. It is deliberately separate from agent execution downloads: a
-// tool report contains an evidence-specific request/response contract.
+// GetToolExecutionReportDownload provides the sanitized report for an
+// authorized reviewer. It is deliberately separate from agent execution
+// downloads: a tool report contains an evidence-specific request/response
+// contract.
 func GetToolExecutionReportDownload(c echo.Context) error {
-	bucket, key, err := authorizedToolExecutionReport(c)
+	content, err := readAuthorizedToolExecutionReport(c)
 	if err != nil {
 		return err
 	}
-	url, err := awsrepository.GeneratePresignedURL(c.Request().Context(), key, bucket, 10)
+	c.Response().Header().Set(echo.HeaderContentDisposition, `attachment; filename="automation-tool-execution-report.json"`)
+	return c.Blob(http.StatusOK, echo.MIMEApplicationJSON, content)
+}
+
+func readAuthorizedToolExecutionReport(c echo.Context) ([]byte, error) {
+	bucket, key, err := authorizedToolExecutionReport(c)
 	if err != nil {
-		return utils.Error(c, http.StatusServiceUnavailable, "Automation tool execution unavailable", "Could not prepare the private tool report download")
+		return nil, err
 	}
-	return utils.Success(c, http.StatusOK, "Automation tool execution report download URL generated", outputDownloadResponse{DownloadURL: url, ExpiresIn: 600})
+	body, err := awsrepository.GetS3Object(c.Request().Context(), key, bucket)
+	if err != nil {
+		return nil, utils.Error(c, http.StatusServiceUnavailable, "Automation tool execution unavailable", "Could not read the private tool report")
+	}
+	defer body.Close()
+	content, err := io.ReadAll(io.LimitReader(body, 256*1024+1))
+	if err != nil || len(content) == 0 || len(content) > 256*1024 || !json.Valid(content) {
+		return nil, utils.Error(c, http.StatusServiceUnavailable, "Automation tool execution unavailable", "Could not read the private tool report")
+	}
+	sanitized, err := sanitizePrivateExecutionReport(content)
+	if err != nil {
+		return nil, utils.Error(c, http.StatusServiceUnavailable, "Automation tool execution unavailable", "Could not read the private tool report")
+	}
+	return sanitized, nil
+}
+
+// sanitizePrivateExecutionReport is a final server-side boundary for reports
+// whose object-store producer may be older or may include untrusted browser
+// output. It preserves operational data and summaries while removing secret-
+// bearing fields, provider keys in text, and private reasoning payloads.
+func sanitizePrivateExecutionReport(content []byte) ([]byte, error) {
+	var report any
+	if err := json.Unmarshal(content, &report); err != nil {
+		return nil, err
+	}
+	if _, ok := report.(map[string]any); !ok {
+		return nil, fmt.Errorf("tool report must be a JSON object")
+	}
+	sanitized := sanitizePrivateExecutionReportValue(report)
+	return json.Marshal(sanitized)
+}
+
+func sanitizePrivateExecutionReportValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		if executionReportPrivateReasoningNode(typed) {
+			return map[string]any{}
+		}
+		result := make(map[string]any, len(typed))
+		for key, entry := range typed {
+			if executionReportSensitiveKey(key) || executionReportPrivateReasoningKey(key) || executionReportPrivateReasoningNode(entry) {
+				continue
+			}
+			result[key] = sanitizePrivateExecutionReportValue(entry)
+		}
+		return result
+	case []any:
+		result := make([]any, 0, len(typed))
+		for _, entry := range typed {
+			if executionReportPrivateReasoningNode(entry) {
+				continue
+			}
+			result = append(result, sanitizePrivateExecutionReportValue(entry))
+		}
+		return result
+	case string:
+		return sanitizePrivateExecutionReportText(typed)
+	default:
+		return value
+	}
+}
+
+func executionReportPrivateReasoningNode(value any) bool {
+	object, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	for _, field := range []string{"type", "kind", "channel", "role"} {
+		candidate, ok := object[field].(string)
+		if ok && executionReportPrivateReasoningKey(candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func executionReportSensitiveKey(key string) bool {
+	normalized := strings.Map(func(character rune) rune {
+		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' {
+			return character
+		}
+		return -1
+	}, strings.ToLower(strings.TrimSpace(key)))
+	if executionReportOperationalTokenKey(normalized) {
+		return false
+	}
+	if normalized == "key" {
+		return true
+	}
+	for _, marker := range []string{"apikey", "accesskey", "clientsecret", "privatekey", "providerkey", "password", "passphrase", "secret", "token", "authorization", "credential", "cookie", "session"} {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	return normalized == "auth"
+}
+
+func executionReportPrivateReasoningKey(key string) bool {
+	normalized := strings.Map(func(character rune) rune {
+		if character >= 'a' && character <= 'z' && character != '_' && character != '-' || character >= '0' && character <= '9' {
+			return character
+		}
+		return -1
+	}, strings.ToLower(strings.TrimSpace(key)))
+	if executionReportOperationalTokenKey(normalized) {
+		return false
+	}
+	return strings.Contains(normalized, "reasoning") || strings.Contains(normalized, "chainofthought") ||
+		normalized == "analysis" || normalized == "analysiscontent" || normalized == "analysistext" ||
+		normalized == "thought" || normalized == "thoughts" || normalized == "cot" ||
+		strings.Contains(normalized, "privatecot") || strings.Contains(normalized, "privateanalysis") ||
+		strings.Contains(normalized, "hiddenanalysis") || strings.Contains(normalized, "privatethought") || strings.Contains(normalized, "hiddenthought")
+}
+
+func executionReportOperationalTokenKey(key string) bool {
+	switch key {
+	case "inputtokens", "outputtokens", "cachedinputtokens", "cachewritetokens", "reasoningtokens", "totaltokens",
+		"prompttokens", "completiontokens", "maxcompletiontokens", "maxoutputtokens", "tokencount", "totalinputtokens", "totaloutputtokens":
+		return true
+	default:
+		return false
+	}
+}
+
+func sanitizePrivateExecutionReportText(value string) string {
+	sanitized, _ := automationagent.RedactSourceExcerpt(value)
+	for _, pattern := range executionReportProviderKeyPatterns {
+		sanitized = pattern.ReplaceAllString(sanitized, "[REDACTED]")
+	}
+	return executionReportURLPattern.ReplaceAllStringFunc(sanitized, func(candidate string) string {
+		trimmed := strings.TrimRight(candidate, ".,;:!?)]}")
+		trailing := candidate[len(trimmed):]
+		parsed, err := url.Parse(trimmed)
+		if err != nil || parsed.Hostname() == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			return candidate
+		}
+		parsed.User = nil
+		parsed.RawQuery = ""
+		parsed.ForceQuery = false
+		parsed.Fragment = ""
+		parsed.RawFragment = ""
+		return parsed.String() + trailing
+	})
 }
 
 func authorizedToolExecutionReport(c echo.Context) (bucket, key string, err error) {
@@ -1597,10 +1829,13 @@ func authorizedToolExecutionReport(c echo.Context) (bucket, key string, err erro
 	}
 	var task models.AutomationTask
 	if err := configuration.DB.First(&task, execution.AutomationTaskID).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return "", "", utils.Error(c, http.StatusNotFound, "Automation tool execution not found", "")
+		}
 		return "", "", utils.Error(c, http.StatusInternalServerError, "Automation tool execution unavailable", "Could not resolve the parent task")
 	}
 	if !mayAccessTask(c, &task, requestedBy) {
-		return "", "", utils.Error(c, http.StatusForbidden, "Forbidden", "You cannot access this automation tool execution")
+		return "", "", utils.Error(c, http.StatusNotFound, "Automation tool execution not found", "")
 	}
 	cfg, _ := c.Get("config").(*models.Config)
 	if execution.Tool != "stagehand" || execution.RequestRef != execution.ResponseRef || !toolReportReferenceMatches(cfg, task.ID, execution.ResponseRef) {
@@ -1644,12 +1879,18 @@ func GetTrace(c echo.Context) error {
 	// while entries is the canonical, chronological cross-runtime ledger used by
 	// delivery UI and external integrations. It deliberately contains no object
 	// references: the scoped inspector endpoints authorize every private read.
+	safeExecutions := make([]automationCostExecution, 0, len(executions))
 	entries := make([]automationCostExecution, 0, len(executions)+len(toolExecutions))
 	for _, execution := range executions {
-		entries = append(entries, traceEntryFromAgentExecution(execution))
+		projected := traceEntryFromAgentExecution(execution)
+		safeExecutions = append(safeExecutions, projected)
+		entries = append(entries, projected)
 	}
+	safeToolExecutions := make([]automationCostExecution, 0, len(toolExecutions))
 	for _, execution := range toolExecutions {
-		entries = append(entries, traceEntryFromToolExecution(execution))
+		projected := traceEntryFromToolExecution(execution)
+		safeToolExecutions = append(safeToolExecutions, projected)
+		entries = append(entries, projected)
 	}
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].CompletedAt.Equal(entries[j].CompletedAt) {
@@ -1658,9 +1899,9 @@ func GetTrace(c echo.Context) error {
 		return entries[i].CompletedAt.Before(entries[j].CompletedAt)
 	})
 	return utils.Success(c, http.StatusOK, "Automation execution trace", map[string]any{
-		"task":            task,
-		"executions":      executions,
-		"tool_executions": toolExecutions,
+		"task":            automationTraceTaskFrom(task),
+		"executions":      safeExecutions,
+		"tool_executions": safeToolExecutions,
 		"entries":         entries,
 	})
 }
@@ -1668,7 +1909,8 @@ func GetTrace(c echo.Context) error {
 func traceEntryFromAgentExecution(execution models.AutomationExecution) automationCostExecution {
 	return automationCostExecution{
 		ID: execution.ID, AutomationTaskID: execution.AutomationTaskID, DeliveryWorkItemID: execution.DeliveryWorkItemID,
-		ExecutionKind: "agent", StepKey: execution.StepKey, Provider: execution.Provider, Model: execution.Model,
+		AgentInstanceID: execution.AgentInstanceID,
+		ExecutionKind:   "agent", StepKey: execution.StepKey, Provider: execution.Provider, Model: execution.Model,
 		InputTokens: execution.InputTokens, OutputTokens: execution.OutputTokens, CachedInputTokens: execution.CachedInputTokens,
 		CacheWriteTokens: execution.CacheWriteTokens, ReasoningTokens: execution.ReasoningTokens, TotalTokens: execution.TotalTokens,
 		InputCostMicros: execution.InputCostMicros, OutputCostMicros: execution.OutputCostMicros, CachedCostMicros: execution.CachedCostMicros,
@@ -1680,7 +1922,8 @@ func traceEntryFromAgentExecution(execution models.AutomationExecution) automati
 func traceEntryFromToolExecution(execution models.AutomationToolExecution) automationCostExecution {
 	return automationCostExecution{
 		ID: execution.ID, AutomationTaskID: execution.AutomationTaskID, DeliveryWorkItemID: execution.DeliveryWorkItemID,
-		ExecutionKind: "tool", Tool: execution.Tool, CallKey: execution.CallKey, CallStatus: execution.CallStatus, StepKey: execution.StepKey, Provider: execution.Provider, Model: execution.Model,
+		AgentInstanceID: execution.AgentInstanceID,
+		ExecutionKind:   "tool", Tool: execution.Tool, CallKey: execution.CallKey, CallStatus: execution.CallStatus, StepKey: execution.StepKey, Provider: execution.Provider, Model: execution.Model,
 		InputTokens: execution.InputTokens, OutputTokens: execution.OutputTokens, CachedInputTokens: execution.CachedInputTokens,
 		CacheWriteTokens: execution.CacheWriteTokens, ReasoningTokens: execution.ReasoningTokens, TotalTokens: execution.TotalTokens,
 		InputCostMicros: execution.InputCostMicros, OutputCostMicros: execution.OutputCostMicros, CachedCostMicros: execution.CachedCostMicros,
@@ -1689,9 +1932,32 @@ func traceEntryFromToolExecution(execution models.AutomationToolExecution) autom
 	}
 }
 
+func automationLedgerInstancePointer(instanceID uuid.UUID) *uuid.UUID {
+	if instanceID == uuid.Nil {
+		return nil
+	}
+	return &instanceID
+}
+
+func attributeAutomationCostRowsToCallbackIdentity(c echo.Context, execution *models.AutomationExecution, toolExecutions []models.AutomationToolExecution) bool {
+	identity, ok := currentAgentCallbackIdentity(c)
+	if !ok {
+		return false
+	}
+	instanceID := automationLedgerInstancePointer(identity.InstanceID)
+	if execution != nil {
+		execution.AgentInstanceID = instanceID
+	}
+	for index := range toolExecutions {
+		toolExecutions[index].AgentInstanceID = instanceID
+	}
+	return true
+}
+
 // CostOverview is intentionally aggregated server-side, so a dashboard never
 // has to download prompts, results, or all execution rows just to show spend.
 func CostOverview(c echo.Context) error {
+	setAutomationCostNoStoreHeaders(c)
 	if configuration.DB == nil {
 		return utils.Error(c, http.StatusServiceUnavailable, "Automation costs unavailable", "Database is unavailable")
 	}
@@ -1699,23 +1965,11 @@ func CostOverview(c echo.Context) error {
 	if strings.TrimSpace(requestedBy) == "" {
 		return utils.Error(c, http.StatusUnauthorized, "Unauthorized", "")
 	}
-	days := 30
-	if raw := strings.TrimSpace(c.QueryParam("days")); raw != "" {
-		if _, err := fmt.Sscan(raw, &days); err != nil || days < 1 || days > 365 {
-			return utils.Error(c, http.StatusBadRequest, "Invalid automation cost range", "days must be from 1 to 365")
-		}
+	costQuery, queryErr := parseAutomationCostQuery(c)
+	if queryErr != nil {
+		return utils.Error(c, http.StatusBadRequest, "Invalid automation cost query", queryErr.Error())
 	}
-	page, pageSize := 1, 40
-	if raw := strings.TrimSpace(c.QueryParam("page")); raw != "" {
-		if _, err := fmt.Sscan(raw, &page); err != nil || page < 1 {
-			return utils.Error(c, http.StatusBadRequest, "Invalid automation cost page", "page must be a positive integer")
-		}
-	}
-	if raw := strings.TrimSpace(c.QueryParam("page_size")); raw != "" {
-		if _, err := fmt.Sscan(raw, &pageSize); err != nil || pageSize < 1 || pageSize > 100 {
-			return utils.Error(c, http.StatusBadRequest, "Invalid automation cost page size", "page_size must be from 1 to 100")
-		}
-	}
+	days, page, pageSize := costQuery.Days, costQuery.Page, costQuery.PageSize
 	// Resolve the actor once. A cost overview is available to a task owner and
 	// to project members that can view the linked Delivery work item. A code or
 	// QA reviewer therefore sees the spend behind the gates they are asked to
@@ -1724,78 +1978,173 @@ func CostOverview(c echo.Context) error {
 	if err != nil {
 		return authz.Respond(c, err)
 	}
+	workspaceMode, _ := c.Get("workspace_mode").(string)
+	organizationID, hasOrganizationID := c.Get("organization_id").(uuid.UUID)
+	workspaceClientIDs, clientScopeErr := automationCostWorkspaceClientIDs(configuration.DB, workspaceMode, organizationID, hasOrganizationID)
+	if clientScopeErr != nil {
+		if errors.Is(clientScopeErr, organizationscope.ErrOrganizationNotFound) {
+			return utils.Error(c, http.StatusNotFound, "Automation cost workspace not found", "")
+		}
+		return utils.Error(c, http.StatusInternalServerError, "Automation costs unavailable", "Could not resolve automation cost workspace")
+	}
+	costQuery.WorkspaceClientIDs = workspaceClientIDs
+	snapshotAt := costQuery.SnapshotAt
+	if costQuery.Cursor != nil {
+		if !snapshotAt.IsZero() && !snapshotAt.Equal(costQuery.Cursor.SnapshotAt) {
+			return utils.Error(c, http.StatusBadRequest, "Invalid automation cost cursor", "Cursor snapshot does not match the requested snapshot")
+		}
+		snapshotAt = costQuery.Cursor.SnapshotAt
+	}
+	if costQuery.WorkItemCursor != nil {
+		if !snapshotAt.IsZero() && !snapshotAt.Equal(costQuery.WorkItemCursor.SnapshotAt) {
+			return utils.Error(c, http.StatusBadRequest, "Invalid work-item cost cursor", "Cursor snapshot does not match the requested snapshot")
+		}
+		snapshotAt = costQuery.WorkItemCursor.SnapshotAt
+	}
+	if snapshotAt.IsZero() {
+		snapshotAt = time.Now().UTC().Truncate(time.Microsecond)
+	}
+	costQuery.SnapshotAt = snapshotAt
+	cursorScope := automationCostCursorScope(costQuery, workspaceMode, organizationID, hasOrganizationID, user.CognitoSub)
+	if costQuery.Cursor != nil && costQuery.Cursor.ScopeHash != cursorScope {
+		return utils.Error(c, http.StatusBadRequest, "Invalid automation cost cursor", "Cursor does not match the selected filters or workspace")
+	}
+	workItemCursorScope := automationCostWorkItemCursorScope(costQuery, workspaceMode, organizationID, hasOrganizationID, user.CognitoSub)
+	if costQuery.WorkItemCursor != nil && costQuery.WorkItemCursor.ScopeHash != workItemCursorScope {
+		return utils.Error(c, http.StatusBadRequest, "Invalid work-item cost cursor", "Cursor does not match the selected filters or workspace")
+	}
 	ledgerSource, ledgerCoverage, ledgerErr := automationCostLedgerSource(configuration.DB)
 	if ledgerErr != nil {
 		return utils.ErrorWithData(c, http.StatusServiceUnavailable, "Automation costs unavailable", "Cost ledger is initializing", map[string]any{"ledger_coverage": ledgerCoverage})
 	}
-	baseQuery := configuration.DB.Table("("+ledgerSource+") AS execution").
+	baseQuery := configuration.DB.Table("(" + ledgerSource + ") AS execution").
 		Joins("JOIN automation_tasks AS task ON task.id = execution.automation_task_id").
 		Joins("LEFT JOIN delivery_work_items AS work_item ON work_item.id = execution.delivery_work_item_id").
 		Joins("LEFT JOIN delivery_projects AS project ON project.id = work_item.project_id").
-		Where("execution.completed_at >= ?", time.Now().UTC().AddDate(0, 0, -days))
+		Session(&gorm.Session{})
+	baseQuery = applyAutomationCostTimeWindow(baseQuery, snapshotAt, costQuery)
+	baseQuery, scopeErr := applyAutomationCostWorkspaceScope(baseQuery, workspaceMode, organizationID, hasOrganizationID, user.IsPlatformAdmin(), workspaceClientIDs)
+	if scopeErr != nil {
+		return utils.Error(c, http.StatusNotFound, "Automation cost workspace not found", "")
+	}
 	if !user.IsPlatformAdmin() {
 		projectIDs, membershipErr := deliveryReadableProjectIDs(user.CognitoSub)
 		if membershipErr != nil {
 			return utils.Error(c, http.StatusInternalServerError, "Automation costs unavailable", "Could not resolve delivery project access")
 		}
-		if len(projectIDs) > 0 {
-			baseQuery = baseQuery.Where("task.requested_by = ? OR work_item.project_id IN ?", requestedBy, projectIDs)
-		} else {
-			baseQuery = baseQuery.Where("task.requested_by = ?", requestedBy)
-		}
+		baseQuery = applyAutomationCostActorScope(baseQuery, requestedBy, projectIDs, false)
 	}
-	summary := automationCostSummary{}
+	filteredQuery := applyAutomationCostFilters(baseQuery.Session(&gorm.Session{}), costQuery)
 	// Keep the statements independent: the aggregate and the breakdown have
 	// different select/group shapes and must never leak state into one another.
-	if err := baseQuery.Session(&gorm.Session{}).Select("COUNT(*) AS executions, COUNT(DISTINCT execution.automation_task_id) AS tasks, COALESCE(SUM(execution.input_tokens), 0) AS input_tokens, COALESCE(SUM(execution.output_tokens), 0) AS output_tokens, COALESCE(SUM(execution.cached_input_tokens), 0) AS cached_input_tokens, COALESCE(SUM(execution.cache_write_tokens), 0) AS cache_write_tokens, COALESCE(SUM(execution.reasoning_tokens), 0) AS reasoning_tokens, COALESCE(SUM(execution.total_tokens), 0) AS total_tokens, COALESCE(SUM(execution.input_cost_micros), 0) AS input_cost_micros, COALESCE(SUM(execution.output_cost_micros), 0) AS output_cost_micros, COALESCE(SUM(execution.cached_cost_micros), 0) AS cached_cost_micros, COALESCE(SUM(execution.cache_write_cost_micros), 0) AS cache_write_cost_micros, COALESCE(SUM(execution.total_cost_micros), 0) AS total_cost_micros").Scan(&summary).Error; err != nil {
+	summary, err := aggregateAutomationCostSummary(filteredQuery)
+	if err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Automation costs unavailable", "")
 	}
 	var byOperation []automationCostBreakdown
-	if err := baseQuery.Session(&gorm.Session{}).Select("task.operation AS key, COUNT(*) AS executions, COALESCE(SUM(execution.input_tokens), 0) AS input_tokens, COALESCE(SUM(execution.output_tokens), 0) AS output_tokens, COALESCE(SUM(execution.cached_input_tokens), 0) AS cached_input_tokens, COALESCE(SUM(execution.cache_write_tokens), 0) AS cache_write_tokens, COALESCE(SUM(execution.reasoning_tokens), 0) AS reasoning_tokens, COALESCE(SUM(execution.total_tokens), 0) AS total_tokens, COALESCE(SUM(execution.input_cost_micros), 0) AS input_cost_micros, COALESCE(SUM(execution.output_cost_micros), 0) AS output_cost_micros, COALESCE(SUM(execution.cached_cost_micros), 0) AS cached_cost_micros, COALESCE(SUM(execution.cache_write_cost_micros), 0) AS cache_write_cost_micros, COALESCE(SUM(execution.total_cost_micros), 0) AS total_cost_micros").Group("task.operation").Order("SUM(execution.total_cost_micros) DESC").Scan(&byOperation).Error; err != nil {
+	if err := filteredQuery.Session(&gorm.Session{}).Select("task.operation AS key, COUNT(*) AS executions, COALESCE(SUM(execution.input_tokens), 0) AS input_tokens, COALESCE(SUM(execution.output_tokens), 0) AS output_tokens, COALESCE(SUM(execution.cached_input_tokens), 0) AS cached_input_tokens, COALESCE(SUM(execution.cache_write_tokens), 0) AS cache_write_tokens, COALESCE(SUM(execution.reasoning_tokens), 0) AS reasoning_tokens, COALESCE(SUM(execution.total_tokens), 0) AS total_tokens, COALESCE(SUM(execution.input_cost_micros), 0) AS input_cost_micros, COALESCE(SUM(execution.output_cost_micros), 0) AS output_cost_micros, COALESCE(SUM(execution.cached_cost_micros), 0) AS cached_cost_micros, COALESCE(SUM(execution.cache_write_cost_micros), 0) AS cache_write_cost_micros, COALESCE(SUM(execution.total_cost_micros), 0) AS total_cost_micros").Group("task.operation").Order("SUM(execution.total_cost_micros) DESC").Scan(&byOperation).Error; err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Automation costs unavailable", "")
 	}
 	// Operations describe the requested capability; step keys describe the
 	// delivery phase that actually spent the budget. Keep both dimensions so an
 	// operator can distinguish, for example, plan generation from browser QA.
 	var byStep []automationCostBreakdown
-	if err := baseQuery.Session(&gorm.Session{}).Select("COALESCE(NULLIF(execution.step_key, ''), 'execution') AS key, execution.execution_kind, execution.tool, COUNT(*) AS executions, COALESCE(SUM(execution.input_tokens), 0) AS input_tokens, COALESCE(SUM(execution.output_tokens), 0) AS output_tokens, COALESCE(SUM(execution.cached_input_tokens), 0) AS cached_input_tokens, COALESCE(SUM(execution.cache_write_tokens), 0) AS cache_write_tokens, COALESCE(SUM(execution.reasoning_tokens), 0) AS reasoning_tokens, COALESCE(SUM(execution.total_tokens), 0) AS total_tokens, COALESCE(SUM(execution.input_cost_micros), 0) AS input_cost_micros, COALESCE(SUM(execution.output_cost_micros), 0) AS output_cost_micros, COALESCE(SUM(execution.cached_cost_micros), 0) AS cached_cost_micros, COALESCE(SUM(execution.cache_write_cost_micros), 0) AS cache_write_cost_micros, COALESCE(SUM(execution.total_cost_micros), 0) AS total_cost_micros").Group("execution.step_key, execution.execution_kind, execution.tool").Order("SUM(execution.total_cost_micros) DESC").Scan(&byStep).Error; err != nil {
+	if err := filteredQuery.Session(&gorm.Session{}).Select("COALESCE(NULLIF(execution.step_key, ''), 'execution') AS key, execution.execution_kind, execution.tool, COUNT(*) AS executions, COALESCE(SUM(execution.input_tokens), 0) AS input_tokens, COALESCE(SUM(execution.output_tokens), 0) AS output_tokens, COALESCE(SUM(execution.cached_input_tokens), 0) AS cached_input_tokens, COALESCE(SUM(execution.cache_write_tokens), 0) AS cache_write_tokens, COALESCE(SUM(execution.reasoning_tokens), 0) AS reasoning_tokens, COALESCE(SUM(execution.total_tokens), 0) AS total_tokens, COALESCE(SUM(execution.input_cost_micros), 0) AS input_cost_micros, COALESCE(SUM(execution.output_cost_micros), 0) AS output_cost_micros, COALESCE(SUM(execution.cached_cost_micros), 0) AS cached_cost_micros, COALESCE(SUM(execution.cache_write_cost_micros), 0) AS cache_write_cost_micros, COALESCE(SUM(execution.total_cost_micros), 0) AS total_cost_micros").Group("execution.step_key, execution.execution_kind, execution.tool").Order("SUM(execution.total_cost_micros) DESC").Scan(&byStep).Error; err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Automation costs unavailable", "")
 	}
 	var byProject []automationCostProject
-	if err := baseQuery.Session(&gorm.Session{}).Select("project.id AS project_id, COALESCE(NULLIF(project.name, ''), 'Automatización general') AS project_name, COUNT(*) AS executions, COALESCE(SUM(execution.input_tokens), 0) AS input_tokens, COALESCE(SUM(execution.output_tokens), 0) AS output_tokens, COALESCE(SUM(execution.cached_input_tokens), 0) AS cached_input_tokens, COALESCE(SUM(execution.cache_write_tokens), 0) AS cache_write_tokens, COALESCE(SUM(execution.reasoning_tokens), 0) AS reasoning_tokens, COALESCE(SUM(execution.total_tokens), 0) AS total_tokens, COALESCE(SUM(execution.input_cost_micros), 0) AS input_cost_micros, COALESCE(SUM(execution.output_cost_micros), 0) AS output_cost_micros, COALESCE(SUM(execution.cached_cost_micros), 0) AS cached_cost_micros, COALESCE(SUM(execution.cache_write_cost_micros), 0) AS cache_write_cost_micros, COALESCE(SUM(execution.total_cost_micros), 0) AS total_cost_micros").Group("project.id, project.name").Order("SUM(execution.total_cost_micros) DESC").Scan(&byProject).Error; err != nil {
+	if err := filteredQuery.Session(&gorm.Session{}).Select("project.id AS project_id, COALESCE(NULLIF(project.name, ''), 'Automatización general') AS project_name, COUNT(*) AS executions, COALESCE(SUM(execution.input_tokens), 0) AS input_tokens, COALESCE(SUM(execution.output_tokens), 0) AS output_tokens, COALESCE(SUM(execution.cached_input_tokens), 0) AS cached_input_tokens, COALESCE(SUM(execution.cache_write_tokens), 0) AS cache_write_tokens, COALESCE(SUM(execution.reasoning_tokens), 0) AS reasoning_tokens, COALESCE(SUM(execution.total_tokens), 0) AS total_tokens, COALESCE(SUM(execution.input_cost_micros), 0) AS input_cost_micros, COALESCE(SUM(execution.output_cost_micros), 0) AS output_cost_micros, COALESCE(SUM(execution.cached_cost_micros), 0) AS cached_cost_micros, COALESCE(SUM(execution.cache_write_cost_micros), 0) AS cache_write_cost_micros, COALESCE(SUM(execution.total_cost_micros), 0) AS total_cost_micros").Group("project.id, project.name").Order("SUM(execution.total_cost_micros) DESC").Scan(&byProject).Error; err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Automation costs unavailable", "")
 	}
+	var byAgent []automationCostAgent
+	if err := filteredQuery.Session(&gorm.Session{}).
+		Select("execution.agent_key AS agent_key, COUNT(*) AS executions, COALESCE(SUM(execution.total_tokens), 0) AS total_tokens, COALESCE(SUM(execution.total_cost_micros), 0) AS total_cost_micros").
+		Where("execution.agent_key <> ''").Group("execution.agent_key").Order("SUM(execution.total_cost_micros) DESC").Scan(&byAgent).Error; err != nil {
+		return utils.Error(c, http.StatusInternalServerError, "Automation costs unavailable", "")
+	}
+	var byWorkItem []automationCostWorkItem
+	workItemQuery := filteredQuery.Session(&gorm.Session{}).
+		Select("project.id AS project_id, COALESCE(NULLIF(project.name, ''), 'Automatización general') AS project_name, work_item.id AS work_item_id, work_item.title AS work_item_title, COUNT(*) AS executions, COALESCE(SUM(execution.total_tokens), 0) AS total_tokens, COALESCE(SUM(execution.total_cost_micros), 0) AS total_cost_micros").
+		Where("work_item.id IS NOT NULL").Group("project.id, project.name, work_item.id, work_item.title")
+	if costQuery.WorkItemCursor != nil {
+		workItemQuery = applyAutomationCostWorkItemCursor(workItemQuery, costQuery.WorkItemCursor)
+	}
+	if err := workItemQuery.Order("SUM(execution.total_cost_micros) DESC, work_item.id ASC").Limit(costQuery.WorkItemLimit + 1).Scan(&byWorkItem).Error; err != nil {
+		return utils.Error(c, http.StatusInternalServerError, "Automation costs unavailable", "")
+	}
+	workItemNextCursor := ""
+	if len(byWorkItem) > costQuery.WorkItemLimit {
+		byWorkItem = byWorkItem[:costQuery.WorkItemLimit]
+		last := byWorkItem[len(byWorkItem)-1]
+		workItemNextCursor, err = encodeAutomationCostWorkItemCursor(automationCostWorkItemCursor{
+			SnapshotAt:      snapshotAt,
+			TotalCostMicros: last.TotalCostMicros,
+			WorkItemID:      last.WorkItemID,
+			ScopeHash:       workItemCursorScope,
+		})
+		if err != nil {
+			return utils.Error(c, http.StatusInternalServerError, "Automation costs unavailable", "Could not prepare the next work-item page")
+		}
+	}
 	var byModel []automationCostModel
-	if err := baseQuery.Session(&gorm.Session{}).Select("COALESCE(NULLIF(execution.provider, ''), 'sin proveedor') AS provider, COALESCE(NULLIF(execution.model, ''), 'sin modelo') AS model, COUNT(*) AS executions, COALESCE(SUM(execution.input_tokens), 0) AS input_tokens, COALESCE(SUM(execution.output_tokens), 0) AS output_tokens, COALESCE(SUM(execution.cached_input_tokens), 0) AS cached_input_tokens, COALESCE(SUM(execution.cache_write_tokens), 0) AS cache_write_tokens, COALESCE(SUM(execution.reasoning_tokens), 0) AS reasoning_tokens, COALESCE(SUM(execution.total_tokens), 0) AS total_tokens, COALESCE(SUM(execution.input_cost_micros), 0) AS input_cost_micros, COALESCE(SUM(execution.output_cost_micros), 0) AS output_cost_micros, COALESCE(SUM(execution.cached_cost_micros), 0) AS cached_cost_micros, COALESCE(SUM(execution.cache_write_cost_micros), 0) AS cache_write_cost_micros, COALESCE(SUM(execution.total_cost_micros), 0) AS total_cost_micros").Group("execution.provider, execution.model").Order("SUM(execution.total_cost_micros) DESC").Scan(&byModel).Error; err != nil {
+	if err := filteredQuery.Session(&gorm.Session{}).Select("COALESCE(NULLIF(execution.provider, ''), 'sin proveedor') AS provider, COALESCE(NULLIF(execution.model, ''), 'sin modelo') AS model, COUNT(*) AS executions, COALESCE(SUM(execution.input_tokens), 0) AS input_tokens, COALESCE(SUM(execution.output_tokens), 0) AS output_tokens, COALESCE(SUM(execution.cached_input_tokens), 0) AS cached_input_tokens, COALESCE(SUM(execution.cache_write_tokens), 0) AS cache_write_tokens, COALESCE(SUM(execution.reasoning_tokens), 0) AS reasoning_tokens, COALESCE(SUM(execution.total_tokens), 0) AS total_tokens, COALESCE(SUM(execution.input_cost_micros), 0) AS input_cost_micros, COALESCE(SUM(execution.output_cost_micros), 0) AS output_cost_micros, COALESCE(SUM(execution.cached_cost_micros), 0) AS cached_cost_micros, COALESCE(SUM(execution.cache_write_cost_micros), 0) AS cache_write_cost_micros, COALESCE(SUM(execution.total_cost_micros), 0) AS total_cost_micros").Group("execution.provider, execution.model").Order("SUM(execution.total_cost_micros) DESC").Scan(&byModel).Error; err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Automation costs unavailable", "")
 	}
 	var recentTotal int64
-	if err := baseQuery.Session(&gorm.Session{}).Count(&recentTotal).Error; err != nil {
+	if err := filteredQuery.Session(&gorm.Session{}).Count(&recentTotal).Error; err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Automation costs unavailable", "")
 	}
-	recentPage := automationCostExecutionPage{Page: page, PageSize: pageSize, Total: recentTotal}
+	mode := "offset"
+	if costQuery.Cursor != nil {
+		mode = "cursor"
+	}
+	recentPage := automationCostExecutionPage{Page: page, PageSize: pageSize, Total: recentTotal, Mode: mode, SnapshotAt: snapshotAt}
 	if recentTotal > 0 {
 		recentPage.TotalPages = int((recentTotal + int64(pageSize) - 1) / int64(pageSize))
 	}
-	var recentExecutions []automationCostExecution
-	if err := baseQuery.Session(&gorm.Session{}).
+	recentQuery := applyAutomationCostCursor(filteredQuery.Session(&gorm.Session{}), costQuery.Cursor).
 		Select(automationCostRecentExecutionSelect).
-		Order("execution.completed_at DESC, execution.id DESC").
-		Limit(pageSize).Offset((page - 1) * pageSize).Scan(&recentExecutions).Error; err != nil {
+		Order("execution.completed_at DESC, execution.id DESC")
+	var recentExecutions []automationCostExecution
+	if costQuery.Cursor != nil {
+		if err := recentQuery.Limit(pageSize + 1).Scan(&recentExecutions).Error; err != nil {
+			return utils.Error(c, http.StatusInternalServerError, "Automation costs unavailable", "")
+		}
+		if len(recentExecutions) > pageSize {
+			recentPage.HasMore = true
+			recentExecutions = recentExecutions[:pageSize]
+		}
+	} else if err := recentQuery.Limit(pageSize).Offset((page - 1) * pageSize).Scan(&recentExecutions).Error; err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Automation costs unavailable", "")
+	}
+	if costQuery.Cursor == nil {
+		recentPage.HasMore = int64(page*pageSize) < recentTotal
+	}
+	if recentPage.HasMore && len(recentExecutions) > 0 {
+		cursor, cursorErr := encodeAutomationCostCursor(recentExecutions[len(recentExecutions)-1], cursorScope, snapshotAt)
+		if cursorErr != nil {
+			return utils.Error(c, http.StatusInternalServerError, "Automation costs unavailable", "Could not prepare the next cost page")
+		}
+		recentPage.NextCursor = cursor
 	}
 	budgetWatch := make([]automationCostBudgetWatch, 0)
 	taskBudgetWatch := make([]automationCostTaskBudgetWatch, 0)
 	if user.IsPlatformAdmin() {
 		monthStart := time.Date(time.Now().UTC().Year(), time.Now().UTC().Month(), 1, 0, 0, 0, 0, time.UTC)
-		var currentMonthBudgets []automationCostBudgetWatch
-		if err := configuration.DB.Table("delivery_projects AS project").
+		budgetQuery := configuration.DB.Table("delivery_projects AS project").
 			Select("project.id AS project_id, project.name AS project_name, project.monthly_budget_micros, project.budget_alert_percent AS alert_percent, COALESCE(SUM(execution.total_cost_micros), 0) AS spent_micros").
 			Joins("LEFT JOIN delivery_work_items AS work_item ON work_item.project_id = project.id AND work_item.deleted_at IS NULL").
 			Joins("LEFT JOIN ("+ledgerSource+") AS execution ON execution.delivery_work_item_id = work_item.id AND execution.completed_at >= ?", monthStart).
 			Where("project.deleted_at IS NULL AND project.monthly_budget_micros > 0").
-			Group("project.id, project.name, project.monthly_budget_micros, project.budget_alert_percent").
-			Scan(&currentMonthBudgets).Error; err != nil {
+			Group("project.id, project.name, project.monthly_budget_micros, project.budget_alert_percent")
+		if strings.EqualFold(strings.TrimSpace(workspaceMode), "organization") {
+			budgetQuery = budgetQuery.Where("project.client_id IN ?", workspaceClientIDs)
+		}
+		if costQuery.ClientID != nil {
+			budgetQuery = budgetQuery.Where("project.client_id = ?", *costQuery.ClientID)
+		}
+		var currentMonthBudgets []automationCostBudgetWatch
+		if err := budgetQuery.Scan(&currentMonthBudgets).Error; err != nil {
 			return utils.Error(c, http.StatusInternalServerError, "Automation costs unavailable", "")
 		}
 		var reservations []struct {
@@ -1821,15 +2170,21 @@ func CostOverview(c echo.Context) error {
 		// A task budget is an all-time cap. Do not scope execution spend by the
 		// overview range or calendar month: doing so would advertise capacity the
 		// task is not actually allowed to spend.
-		var currentTaskBudgets []automationCostTaskBudgetWatch
-		if err := configuration.DB.Table("delivery_work_items AS work_item").
+		taskBudgetQuery := configuration.DB.Table("delivery_work_items AS work_item").
 			Select("project.id AS project_id, project.name AS project_name, work_item.id AS work_item_id, work_item.title AS work_item_title, work_item.budget_micros, work_item.budget_alert_percent AS alert_percent, COALESCE(SUM(execution.total_cost_micros), 0) AS spent_micros").
 			Joins("JOIN delivery_projects AS project ON project.id = work_item.project_id AND project.deleted_at IS NULL").
 			Joins("LEFT JOIN (" + ledgerSource + ") AS execution ON execution.delivery_work_item_id = work_item.id").
 			Where("work_item.deleted_at IS NULL AND work_item.budget_micros > 0").
 			Group("project.id, project.name, work_item.id, work_item.title, work_item.budget_micros, work_item.budget_alert_percent").
-			Order("work_item.updated_at DESC").
-			Scan(&currentTaskBudgets).Error; err != nil {
+			Order("work_item.updated_at DESC")
+		if strings.EqualFold(strings.TrimSpace(workspaceMode), "organization") {
+			taskBudgetQuery = taskBudgetQuery.Where("project.client_id IN ?", workspaceClientIDs)
+		}
+		if costQuery.ClientID != nil {
+			taskBudgetQuery = taskBudgetQuery.Where("project.client_id = ?", *costQuery.ClientID)
+		}
+		var currentTaskBudgets []automationCostTaskBudgetWatch
+		if err := taskBudgetQuery.Scan(&currentTaskBudgets).Error; err != nil {
 			return utils.Error(c, http.StatusInternalServerError, "Automation costs unavailable", "")
 		}
 		var taskReservations []struct {
@@ -1851,7 +2206,21 @@ func CostOverview(c echo.Context) error {
 			taskBudgetWatch = append(taskBudgetWatch, finalizeTaskBudgetWatch(workItem))
 		}
 	}
-	return utils.Success(c, http.StatusOK, "Automation cost overview", map[string]any{"range_days": days, "summary": summary, "by_operation": byOperation, "by_step": byStep, "by_project": byProject, "by_model": byModel, "budget_watch": budgetWatch, "task_budget_watch": taskBudgetWatch, "recent_execution_page": recentPage, "recent_executions": recentExecutions, "ledger_coverage": ledgerCoverage})
+	return utils.Success(c, http.StatusOK, "Automation cost overview", map[string]any{
+		"range_days": days, "snapshot_at": snapshotAt,
+		"applied_filters": map[string]any{
+			"client_id": costQuery.ClientID, "project_id": costQuery.ProjectID, "epic_id": costQuery.EpicID, "work_item_id": costQuery.WorkItemID,
+			"agent_instance_id": costQuery.AgentInstanceID,
+			"agent_key":         costQuery.AgentKey, "step_key": costQuery.StepKey, "provider": costQuery.Provider, "model": costQuery.Model,
+			"from_at": automationCostAppliedTimestamp(costQuery.FromAt), "to_at": automationCostAppliedTimestamp(costQuery.ToAt),
+		},
+		"summary": summary, "by_operation": byOperation, "by_step": byStep,
+		"by_project": byProject, "by_work_item": byWorkItem, "by_work_item_limit": costQuery.WorkItemLimit,
+		"by_work_item_cursor": costQuery.WorkItemCursorToken, "by_work_item_next_cursor": workItemNextCursor,
+		"by_agent": byAgent, "by_model": byModel,
+		"budget_watch": budgetWatch, "task_budget_watch": taskBudgetWatch,
+		"recent_execution_page": recentPage, "recent_executions": recentExecutions, "ledger_coverage": ledgerCoverage,
+	})
 }
 
 func finalizeBudgetWatch(watch automationCostBudgetWatch) automationCostBudgetWatch {
@@ -1920,28 +2289,53 @@ func Health(c echo.Context) error {
 	if err != nil {
 		return authz.Respond(c, err)
 	}
-	query := configuration.DB.Model(&models.AutomationTask{})
-	if !user.IsPlatformAdmin() {
-		query = query.Where("requested_by = ?", requestedBy)
+	workspace, workspaceErr := resolveAutomationHealthWorkspace(c, user)
+	if workspaceErr != nil {
+		if errors.Is(workspaceErr, errAutomationHealthWorkspaceUnavailable) || errors.Is(workspaceErr, organizationscope.ErrOrganizationNotFound) {
+			return utils.Error(c, http.StatusNotFound, "Automation health unavailable", "")
+		}
+		return utils.Error(c, http.StatusInternalServerError, "Automation health unavailable", "Could not resolve automation workspace")
+	}
+	query, scopeErr := applyAutomationHealthTaskWorkspaceScope(configuration.DB.Model(&models.AutomationTask{}), workspace)
+	if scopeErr != nil {
+		return utils.Error(c, http.StatusNotFound, "Automation health unavailable", "")
 	}
 	now := time.Now().UTC()
-	result := automationHealth{}
-	if err := query.Session(&gorm.Session{}).Where("status = ?", "queued").Count(&result.Queued).Error; err != nil {
+	result := automationHealth{
+		Workers: []automationWorkerHealth{},
+	}
+	if workspace.PlatformTelemetry {
+		result.Scaling = automationScalingHealth{Mode: "disabled", Reason: "scaling_policy_not_configured"}
+	} else {
+		result.Scaling = automationScalingHealth{Mode: "unavailable", Reason: "platform_workspace_required"}
+	}
+	cfg, _ := c.Get("config").(*models.Config)
+	if err := query.Session(&gorm.Session{}).Where("automation_tasks.status = ?", "queued").Count(&result.Queued).Error; err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Automation health unavailable", "")
 	}
-	if err := query.Session(&gorm.Session{}).Where("status = ?", "running").Count(&result.Running).Error; err != nil {
+	if err := query.Session(&gorm.Session{}).Where("automation_tasks.status = ?", "running").Count(&result.Running).Error; err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Automation health unavailable", "")
 	}
-	if err := query.Session(&gorm.Session{}).Where("status = ? AND completed_at >= ?", "failed", now.Add(-24*time.Hour)).Count(&result.FailedLastDay).Error; err != nil {
+	if err := query.Session(&gorm.Session{}).Where("automation_tasks.status IN ?", []string{"queued", "running", "cancel_requested"}).Count(&result.ActiveTasks).Error; err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Automation health unavailable", "")
 	}
-	if err := query.Session(&gorm.Session{}).Where("status = ? AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?", "running", now).Count(&result.ExpiredLeases).Error; err != nil {
+	if workspace.PlatformTelemetry && cfg != nil {
+		result.GlobalActiveLimit = cfg.AutomationGlobalActiveLimit
+		result.ProjectActiveLimit = cfg.AutomationProjectActiveLimit
+		result.QueueDepthLimit = cfg.AutomationQueueDepthLimit
+		result.AdmissionSaturated = (result.GlobalActiveLimit > 0 && result.ActiveTasks >= int64(result.GlobalActiveLimit)) ||
+			(result.QueueDepthLimit > 0 && result.ActiveTasks >= int64(result.QueueDepthLimit))
+	}
+	if err := query.Session(&gorm.Session{}).Where("automation_tasks.status = ? AND automation_tasks.completed_at >= ?", "failed", now.Add(-24*time.Hour)).Count(&result.FailedLastDay).Error; err != nil {
+		return utils.Error(c, http.StatusInternalServerError, "Automation health unavailable", "")
+	}
+	if err := query.Session(&gorm.Session{}).Where("automation_tasks.status = ? AND automation_tasks.lease_expires_at IS NOT NULL AND automation_tasks.lease_expires_at <= ?", "running", now).Count(&result.ExpiredLeases).Error; err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Automation health unavailable", "")
 	}
 	// Queue depth spans every tenant-scoped task on the shared local agent.
 	// It is operational telemetry for platform admins only; a regular
 	// requester must not infer another project's activity from it.
-	if user.IsPlatformAdmin() {
+	if workspace.PlatformTelemetry {
 		queueHealth := automationqueue.QueueHealth(c.Request().Context())
 		result.QueueTelemetry = queueHealth.Available
 		result.QueueLanes = queueHealth.Lanes
@@ -1957,19 +2351,24 @@ func Health(c echo.Context) error {
 	if ledgerErr != nil {
 		return utils.Error(c, http.StatusServiceUnavailable, "Automation health unavailable", "Cost ledger is initializing")
 	}
-	spendQuery := configuration.DB.Table("("+ledgerSource+") AS execution").Joins("JOIN automation_tasks AS task ON task.id = execution.automation_task_id").Where("execution.completed_at >= ?", now.Add(-24*time.Hour))
-	if !user.IsPlatformAdmin() {
-		spendQuery = spendQuery.Where("task.requested_by = ?", requestedBy)
+	spendQuery, scopeErr := applyAutomationHealthSpendWorkspaceScope(
+		configuration.DB.Table("("+ledgerSource+") AS execution").
+			Joins("JOIN automation_tasks AS task ON task.id = execution.automation_task_id").
+			Where("execution.completed_at >= ?", now.Add(-24*time.Hour)),
+		workspace,
+	)
+	if scopeErr != nil {
+		return utils.Error(c, http.StatusNotFound, "Automation health unavailable", "")
 	}
 	if err := spendQuery.Select("COALESCE(SUM(execution.total_cost_micros), 0) AS spend_last_day").Scan(&result.SpendLastDay).Error; err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Automation health unavailable", "")
 	}
-	if user.IsPlatformAdmin() {
+	if workspace.PlatformTelemetry {
 		result.OperationalTelemetryAvailable = true
 		workerQuery := configuration.DB.Model(&models.AutomationAgentHeartbeat{}).Where("last_seen_at >= ?", now.Add(-90*time.Second))
 		var heartbeatRows []automationWorkerHealth
 		if err := workerQuery.Session(&gorm.Session{}).
-			Select("provider, model, role, lane, concurrency, started_at, last_seen_at, workspace_readiness").
+			Select("provider, model, concurrency, draining, started_at, last_seen_at, capabilities_json, protocols_json, workspace_readiness").
 			Order("last_seen_at DESC").
 			Limit(maxAutomationHealthWorkerRows).
 			Find(&heartbeatRows).Error; err != nil {
@@ -1982,6 +2381,12 @@ func Health(c echo.Context) error {
 		}
 		result.LastWorkerSeenAt = newestAutomationWorkerLastSeen(result.Workers)
 		for index := range result.Workers {
+			if strings.TrimSpace(result.Workers[index].CapabilitiesJSON) != "" {
+				if err := json.Unmarshal([]byte(result.Workers[index].CapabilitiesJSON), &result.Workers[index].Capabilities); err != nil {
+					return utils.Error(c, http.StatusInternalServerError, "Automation health unavailable", "")
+				}
+			}
+			result.Workers[index].Protocols = safeWorkerProtocolsJSON(result.Workers[index].ProtocolsJSON)
 			// Legacy heartbeats predate workspace readiness. Keep them visible as
 			// live workers, but omit their preflight data instead of fabricating a
 			// ready state.
@@ -2179,13 +2584,48 @@ func validWorkerProvider(role, lane, provider, model string) bool {
 	return providerAllowed(provider) && model != "" && len(model) <= 128
 }
 
-// AgentHeartbeat gives the dashboard a real liveness signal from the isolated
-// worker. It is callback-secret authenticated and stores no host, queue or
-// credential information.
-func AgentHeartbeat(c echo.Context) error {
-	if !validWorkerCallbackCredential(c) {
-		return utils.Error(c, http.StatusUnauthorized, "Unauthorized", "")
+// normalizeWorkerProtocols validates the deliberately small protocol
+// allow-list and canonicalizes a heartbeat for stable persistence. Missing
+// protocol metadata is represented as an empty list for pre-protocol agents.
+func normalizeWorkerProtocols(protocols []string) ([]string, error) {
+	if len(protocols) > 1 {
+		return nil, fmt.Errorf("too many worker protocols")
 	}
+	seen := make(map[string]struct{}, len(protocols))
+	normalized := make([]string, 0, len(protocols))
+	for _, protocol := range protocols {
+		protocol = strings.TrimSpace(protocol)
+		if protocol != agentprotocol.ProtocolDeliveryPlanStepsV1 {
+			return nil, fmt.Errorf("worker protocol is not allowlisted")
+		}
+		if _, duplicate := seen[protocol]; duplicate {
+			return nil, fmt.Errorf("worker protocol is duplicated")
+		}
+		seen[protocol] = struct{}{}
+		normalized = append(normalized, protocol)
+	}
+	sort.Strings(normalized)
+	return normalized, nil
+}
+
+// safeWorkerProtocolsJSON prevents corrupted or pre-allow-list database values
+// from becoming arbitrary metadata in health responses.
+func safeWorkerProtocolsJSON(raw string) []string {
+	protocols := []string{}
+	if strings.TrimSpace(raw) == "" || json.Unmarshal([]byte(raw), &protocols) != nil {
+		return []string{}
+	}
+	normalized, err := normalizeWorkerProtocols(protocols)
+	if err != nil {
+		return []string{}
+	}
+	return normalized
+}
+
+// AgentHeartbeat gives the dashboard a real liveness signal from an enrolled
+// worker instance. Profile and machine identity are derived from the signed
+// callback rather than trusted from the request body.
+func AgentHeartbeat(c echo.Context) error {
 	if configuration.DB == nil {
 		return utils.Error(c, http.StatusServiceUnavailable, "Automation unavailable", "")
 	}
@@ -2193,11 +2633,27 @@ func AgentHeartbeat(c echo.Context) error {
 	if err := c.Bind(&request); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid agent heartbeat", "")
 	}
+	callbackIdentity, ok := bindCallbackProfileIdentity(c, &request.AgentKey, &request.MachineID)
+	if !ok {
+		return nil
+	}
 	workerID := strings.TrimSpace(request.WorkerID)
 	if _, err := uuid.FromString(workerID); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid agent heartbeat", "")
 	}
-	if request.Concurrency < 1 || request.Concurrency > 8 {
+	agentKey := strings.TrimSpace(request.AgentKey)
+	if agentKey == "" {
+		agentKey = "generalist"
+	}
+	machineID := strings.TrimSpace(request.MachineID)
+	if !agentProfileKeyPattern.MatchString(agentKey) || (machineID != "" && !isOpaqueMachineID(machineID)) {
+		return utils.Error(c, http.StatusBadRequest, "Invalid agent heartbeat", "")
+	}
+	profile, profileErr := findActiveAgentProfile(configuration.DB, agentKey)
+	if profileErr != nil || !profileSupportsCapabilities(profile, request.Capabilities) {
+		return utils.Error(c, http.StatusBadRequest, "Invalid agent heartbeat", "")
+	}
+	if !providerAllowed(request.Provider) || len(strings.TrimSpace(request.Model)) == 0 || len(strings.TrimSpace(request.Model)) > 128 || request.Concurrency < 1 || request.Concurrency > 8 {
 		return utils.Error(c, http.StatusBadRequest, "Invalid agent heartbeat", "")
 	}
 	role, lane, err := normalizeWorkerRoleLane(request.Role, request.Lane)
@@ -2212,6 +2668,10 @@ func AgentHeartbeat(c echo.Context) error {
 	if !validWorkerProvider(role, lane, request.Provider, request.Model) {
 		return utils.Error(c, http.StatusBadRequest, "Invalid agent heartbeat", "")
 	}
+	protocolList, err := normalizeWorkerProtocols(request.Protocols)
+	if err != nil {
+		return utils.Error(c, http.StatusBadRequest, "Invalid agent heartbeat", "")
+	}
 	startedAt, err := time.Parse(time.RFC3339, strings.TrimSpace(request.StartedAt))
 	if err != nil || startedAt.After(time.Now().UTC().Add(5*time.Minute)) {
 		return utils.Error(c, http.StatusBadRequest, "Invalid agent heartbeat", "")
@@ -2223,9 +2683,22 @@ func AgentHeartbeat(c echo.Context) error {
 	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid agent heartbeat", "")
 	}
+	capabilityList := request.Capabilities
+	if capabilityList == nil {
+		capabilityList = []string{}
+	}
+	capabilities, err := json.Marshal(capabilityList)
+	if err != nil {
+		return utils.Error(c, http.StatusBadRequest, "Invalid agent heartbeat", "")
+	}
+	protocols, err := json.Marshal(protocolList)
+	if err != nil {
+		return utils.Error(c, http.StatusBadRequest, "Invalid agent heartbeat", "")
+	}
 	now := time.Now().UTC()
-	heartbeat := models.AutomationAgentHeartbeat{WorkerID: workerID, Provider: strings.ToLower(strings.TrimSpace(request.Provider)), Model: strings.TrimSpace(request.Model), Role: role, Lane: lane, Concurrency: request.Concurrency, WorkspaceReadiness: string(workspaceReadiness), StartedAt: startedAt.UTC(), LastSeenAt: now}
-	if err := configuration.DB.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "worker_id"}}, DoUpdates: clause.Assignments(map[string]any{"provider": heartbeat.Provider, "model": heartbeat.Model, "role": heartbeat.Role, "lane": heartbeat.Lane, "concurrency": heartbeat.Concurrency, "workspace_readiness": heartbeat.WorkspaceReadiness, "started_at": heartbeat.StartedAt, "last_seen_at": heartbeat.LastSeenAt, "updated_at": now})}).Create(&heartbeat).Error; err != nil {
+	instanceID := callbackIdentity.InstanceID
+	heartbeat := models.AutomationAgentHeartbeat{WorkerID: workerID, AgentKey: agentKey, MachineID: machineID, AgentInstanceID: &instanceID, Provider: strings.ToLower(strings.TrimSpace(request.Provider)), Model: strings.TrimSpace(request.Model), Concurrency: request.Concurrency, Draining: request.Draining, CapabilitiesJSON: string(capabilities), ProtocolsJSON: string(protocols), WorkspaceReadiness: string(workspaceReadiness), StartedAt: startedAt.UTC(), LastSeenAt: now}
+	if err := configuration.DB.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "worker_id"}}, DoUpdates: clause.Assignments(map[string]any{"agent_key": heartbeat.AgentKey, "machine_id": heartbeat.MachineID, "agent_instance_id": heartbeat.AgentInstanceID, "provider": heartbeat.Provider, "model": heartbeat.Model, "concurrency": heartbeat.Concurrency, "draining": heartbeat.Draining, "capabilities_json": heartbeat.CapabilitiesJSON, "protocols_json": heartbeat.ProtocolsJSON, "workspace_readiness": heartbeat.WorkspaceReadiness, "started_at": heartbeat.StartedAt, "last_seen_at": heartbeat.LastSeenAt, "updated_at": now})}).Create(&heartbeat).Error; err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Automation heartbeat unavailable", "")
 	}
 	return utils.Success(c, http.StatusOK, "Automation agent heartbeat accepted", map[string]any{"accepted_at": now})
@@ -2382,20 +2855,28 @@ func GetArtifact(c echo.Context) error {
 }
 
 type callbackRequest struct {
-	Status             string                  `json:"status"`
-	RunID              string                  `json:"run_id"`
-	RecoveryRunID      string                  `json:"recovery_run_id"`
-	RequestRef         string                  `json:"request_ref"`
-	OutputRef          string                  `json:"output_ref"`
-	ErrorMessage       string                  `json:"error_message"`
-	Provider           string                  `json:"provider"`
-	Model              string                  `json:"model"`
-	ProviderResponseID string                  `json:"provider_response_id"`
-	Usage              json.RawMessage         `json:"usage"`
-	Artifacts          []callbackArtifact      `json:"artifacts"`
-	ToolExecutions     []callbackToolExecution `json:"tool_executions"`
-	Execution          json.RawMessage         `json:"execution"`
-	Deterministic      bool                    `json:"deterministic"`
+	ProgressStep       string                         `json:"progress_step"`
+	ProgressCall       int                            `json:"progress_call"`
+	Status             string                         `json:"status"`
+	RunID              string                         `json:"run_id"`
+	WorkerID           string                         `json:"worker_id"`
+	AgentKey           string                         `json:"agent_key"`
+	MachineID          string                         `json:"machine_id"`
+	ExecutionIdentity  *automationagent.AgentIdentity `json:"execution_identity"`
+	RecoveryRunID      string                         `json:"recovery_run_id"`
+	RequestRef         string                         `json:"request_ref"`
+	OutputRef          string                         `json:"output_ref"`
+	ErrorMessage       string                         `json:"error_message"`
+	Provider           string                         `json:"provider"`
+	Model              string                         `json:"model"`
+	CallID             string                         `json:"call_id"`
+	ReceiptID          string                         `json:"receipt_id"`
+	ProviderResponseID string                         `json:"provider_response_id"`
+	Usage              json.RawMessage                `json:"usage"`
+	Artifacts          []callbackArtifact             `json:"artifacts"`
+	ToolExecutions     []callbackToolExecution        `json:"tool_executions"`
+	Execution          json.RawMessage                `json:"execution"`
+	Deterministic      bool                           `json:"deterministic"`
 }
 
 // callbackToolExecution is an independently billable model call from a
@@ -2404,6 +2885,8 @@ type callbackRequest struct {
 type callbackToolExecution struct {
 	Tool        string          `json:"tool"`
 	CallKey     string          `json:"call_key"`
+	CallID      string          `json:"call_id"`
+	ReceiptID   string          `json:"receipt_id"`
 	CallStatus  string          `json:"call_status"`
 	StepKey     string          `json:"step_key"`
 	Provider    string          `json:"provider"`
@@ -2424,10 +2907,24 @@ type callbackArtifact struct {
 	SHA256      string `json:"sha256"`
 }
 
+type planIntegrationFanInProof struct {
+	SchemaVersion      int    `json:"schema_version"`
+	ParentTaskID       string `json:"parent_task_id"`
+	ExecutionID        string `json:"execution_id"`
+	PlanID             string `json:"plan_id"`
+	PlanVersion        int    `json:"plan_version"`
+	PlanHash           string `json:"plan_hash"`
+	IntegrationStepID  string `json:"integration_step_id"`
+	IntegrationStepKey string `json:"integration_step_key"`
+	IntegrationTaskID  string `json:"integration_task_id"`
+	RunID              string `json:"run_id"`
+	FencingToken       int64  `json:"fencing_token"`
+	WorkerID           string `json:"worker_id"`
+	AgentKey           string `json:"agent_key"`
+	MachineID          string `json:"machine_id"`
+}
+
 func Complete(c echo.Context) error {
-	if !validWorkerCallbackCredential(c) {
-		return utils.Error(c, http.StatusUnauthorized, "Unauthorized", "")
-	}
 	id, err := uuid.FromString(c.Param("id"))
 	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid task ID", "")
@@ -2438,6 +2935,11 @@ func Complete(c echo.Context) error {
 	}
 	if err := c.Bind(&request); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid automation result", err.Error())
+	}
+	request.OutputRef = strings.TrimSpace(request.OutputRef)
+	_, ok := bindCallbackProfileIdentity(c, &request.AgentKey, &request.MachineID)
+	if !ok {
+		return nil
 	}
 	request.Status = strings.ToLower(strings.TrimSpace(request.Status))
 	if request.Status != "running" && request.Status != "completed" && request.Status != "failed" {
@@ -2468,10 +2970,6 @@ func Complete(c echo.Context) error {
 		}
 		return claimAutomationTaskRun(c, id, request.RunID)
 	}
-	cancellationRequested := task.Status == "cancel_requested" && request.RunID != "" && task.RunID == request.RunID
-	if request.RunID == "" || (task.Status != "running" && !cancellationRequested) || task.RunID != request.RunID {
-		return utils.Error(c, http.StatusConflict, "Automation result ignored", "Task is not held by this worker run")
-	}
 	request.RequestRef = strings.TrimSpace(request.RequestRef)
 	ledgerRunID := request.RunID
 	if request.RecoveryRunID != "" {
@@ -2485,6 +2983,39 @@ func Complete(c echo.Context) error {
 			return utils.Error(c, http.StatusBadRequest, "Invalid automation result", "recovery evidence must match the original private run")
 		}
 		ledgerRunID = request.RecoveryRunID
+	}
+	ledgerIdentity, identityErr := ledgerAgentIdentity(&task, request)
+	if identityErr != nil {
+		return utils.Error(c, http.StatusBadRequest, "Invalid automation result", "worker identity is invalid for this run")
+	}
+	if request.Status == "completed" && task.Status == "completed" {
+		replayed, replayErr := verifiedPlanFanInCompletionReplay(configuration.DB, cfg, task, request, ledgerRunID, ledgerIdentity)
+		if replayErr == nil && replayed {
+			return c.NoContent(http.StatusNoContent)
+		}
+		return utils.Error(c, http.StatusConflict, "Automation result ignored", "completed task callback does not match a committed verified plan fan-in")
+	}
+	cancellationRequested := task.Status == "cancel_requested" && request.RunID != "" && task.RunID == request.RunID
+	if request.RunID == "" || (task.Status != "running" && !cancellationRequested) || task.RunID != request.RunID {
+		return utils.Error(c, http.StatusConflict, "Automation result ignored", "Task is not held by this worker run")
+	}
+	request.CallID = strings.TrimSpace(request.CallID)
+	request.ReceiptID = strings.TrimSpace(request.ReceiptID)
+	var primaryReceipt *models.AutomationInferenceReceipt
+	if request.ReceiptID != "" {
+		receipt, receiptErr := resolveAutomationInferenceReceipt(configuration.DB, request.ReceiptID, request.CallID, task.ID, ledgerRunID, ledgerIdentity)
+		if receiptErr != nil || !inferenceReceiptStatusAllowsCallback(receipt, request.Status) {
+			return utils.Error(c, http.StatusBadRequest, "Invalid inference receipt", "receipt must match this task, run, call and authenticated worker identity")
+		}
+		primaryReceipt = &receipt
+	} else if hasCallbackProviderAccounting(request.Provider, request.Model, request.Usage, request.ProviderResponseID) {
+		return utils.Error(c, http.StatusBadRequest, "Invalid inference receipt", "provider accounting requires a gateway receipt")
+	}
+	if request.Deterministic && primaryReceipt != nil {
+		return utils.Error(c, http.StatusBadRequest, "Invalid automation result", "deterministic tasks cannot report an inference receipt")
+	}
+	if request.Status == "completed" && !request.Deterministic && primaryReceipt == nil {
+		return utils.Error(c, http.StatusBadRequest, "Invalid inference receipt", "completed model tasks require an accepted gateway receipt")
 	}
 	// Admission reserves the maximum possible spend before the provider is
 	// called. A late callback must not convert an expired hold into ledger spend:
@@ -2519,9 +3050,18 @@ func Complete(c echo.Context) error {
 	if task.Operation == "code.review" && task.RequestedBy == "github-app-review" && request.Status == "completed" && len(request.Execution) == 0 {
 		return utils.Error(c, http.StatusBadRequest, "Invalid automation result", "remote code review completion requires exact GitHub publication evidence")
 	}
-	toolExecutionRows, toolExecutionErr := buildToolExecutionLedger(cfg, &task, ledgerRunID, request.Status, request.ToolExecutions, request.Artifacts, time.Now().UTC())
+	primaryReceiptID := uuid.Nil
+	if primaryReceipt != nil {
+		primaryReceiptID = primaryReceipt.ID
+	}
+	toolExecutionRows, toolExecutionErr := buildVerifiedToolExecutionLedger(configuration.DB, cfg, &task, ledgerRunID, request.Status, request.ToolExecutions, request.Artifacts, ledgerIdentity, primaryReceiptID, time.Now().UTC())
 	if toolExecutionErr != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid automation tool execution", toolExecutionErr.Error())
+	}
+	for index := range toolExecutionRows {
+		toolExecutionRows[index].WorkerID = ledgerIdentity.WorkerID
+		toolExecutionRows[index].AgentKey = ledgerIdentity.AgentKey
+		toolExecutionRows[index].MachineID = ledgerIdentity.MachineID
 	}
 	updates := map[string]interface{}{"status": request.Status}
 	expectedStatus := "running"
@@ -2551,7 +3091,7 @@ func Complete(c echo.Context) error {
 		// any other call; failures without usage remain transport/input failures.
 		// This prevents a storage outage after a provider response from erasing
 		// spend or causing the worker to repeat a billable call.
-		providerCallReported := len(request.Usage) > 0 || strings.TrimSpace(request.ProviderResponseID) != ""
+		providerCallReported := primaryReceipt != nil
 		if (request.Status == "completed" || (request.Status == "failed" && providerCallReported)) && !request.Deterministic {
 			// New workers store the canonical provider request before making a
 			// billable call. The empty fallback supports records produced before
@@ -2559,40 +3099,37 @@ func Complete(c echo.Context) error {
 			if request.RequestRef != "" && !executionRequestReferenceMatches(cfg, task.ID, ledgerRunID, request.RequestRef) {
 				return utils.Error(c, http.StatusBadRequest, "Invalid automation result", "request_ref must be this execution's private request object")
 			}
-			request.Provider = strings.ToLower(strings.TrimSpace(request.Provider))
-			if !providerAllowed(request.Provider) || strings.TrimSpace(request.Model) == "" || len(request.Usage) == 0 || !json.Valid(request.Usage) {
-				return utils.Error(c, http.StatusBadRequest, "Invalid automation result", "completed tasks require valid approved-provider execution metadata")
+			if primaryReceipt == nil {
+				return utils.Error(c, http.StatusBadRequest, "Invalid inference receipt", "billable provider outcomes require a gateway receipt")
 			}
-			var usage map[string]any
-			if err := json.Unmarshal(request.Usage, &usage); err != nil || usage == nil {
-				return utils.Error(c, http.StatusBadRequest, "Invalid automation result", "completed tasks require a usage object")
-			}
-			ledger, err := automationcost.Build(request.Provider, strings.TrimSpace(request.Model), usage, pricingCatalog(cfg))
-			if err != nil {
-				return utils.Error(c, http.StatusBadRequest, "Invalid automation result", "provider usage could not be costed: "+err.Error())
-			}
-			updates["provider"] = request.Provider
-			updates["model"] = strings.TrimSpace(request.Model)
-			updates["provider_response_id"] = strings.TrimSpace(request.ProviderResponseID)
-			updates["usage_json"] = string(request.Usage)
+			updates["provider"] = primaryReceipt.Provider
+			updates["model"] = primaryReceipt.Model
+			updates["provider_response_id"] = primaryReceipt.ProviderResponseID
+			updates["usage_json"] = primaryReceipt.UsageJSON
 			requestReference := task.InputRef
 			if request.RequestRef != "" {
 				requestReference = request.RequestRef
 			}
 			execution = &models.AutomationExecution{
 				AutomationTaskID: task.ID, DeliveryWorkItemID: task.DeliveryWorkItemID, RunID: ledgerRunID, StepKey: executionStepKey(task.Operation),
-				Provider: request.Provider, Model: strings.TrimSpace(request.Model), ProviderResponseID: strings.TrimSpace(request.ProviderResponseID),
-				InputTokens: ledger.InputTokens, OutputTokens: ledger.OutputTokens, CachedInputTokens: ledger.CachedInputTokens,
-				CacheWriteTokens: ledger.CacheWriteTokens, ReasoningTokens: ledger.ReasoningTokens, TotalTokens: ledger.TotalTokens,
-				InputCostMicros: ledger.InputCostMicros, OutputCostMicros: ledger.OutputCostMicros, CachedCostMicros: ledger.CachedCostMicros,
-				CacheWriteCostMicros: ledger.CacheWriteCostMicros, TotalCostMicros: ledger.TotalCostMicros, Currency: "USD",
-				PricingBasis: ledger.PricingBasis, PricingSnapshotJSON: ledger.PricingSnapshot, UsageJSON: string(request.Usage),
+				InferenceReceiptID: &primaryReceipt.ID,
+				WorkerID:           ledgerIdentity.WorkerID, AgentKey: ledgerIdentity.AgentKey, MachineID: ledgerIdentity.MachineID,
+				Provider: primaryReceipt.Provider, Model: primaryReceipt.Model, ProviderResponseID: primaryReceipt.ProviderResponseID,
+				InputTokens: primaryReceipt.InputTokens, OutputTokens: primaryReceipt.OutputTokens, CachedInputTokens: primaryReceipt.CachedInputTokens,
+				CacheWriteTokens: primaryReceipt.CacheWriteTokens, ReasoningTokens: primaryReceipt.ReasoningTokens, TotalTokens: primaryReceipt.TotalTokens,
+				InputCostMicros: primaryReceipt.InputCostMicros, OutputCostMicros: primaryReceipt.OutputCostMicros, CachedCostMicros: primaryReceipt.CachedCostMicros,
+				CacheWriteCostMicros: primaryReceipt.CacheWriteCostMicros, TotalCostMicros: primaryReceipt.TotalCostMicros, Currency: primaryReceipt.Currency,
+				PricingBasis: primaryReceipt.PricingBasis, PricingSnapshotJSON: primaryReceipt.PricingSnapshotJSON, UsageJSON: primaryReceipt.UsageJSON,
 				RequestRef: requestReference, ResponseRef: strings.TrimSpace(request.OutputRef), CompletedAt: completedAt,
 			}
 		}
 	}
+	if !attributeAutomationCostRowsToCallbackIdentity(c, execution, toolExecutionRows) {
+		return utils.Error(c, http.StatusUnauthorized, "Unauthorized", "")
+	}
 	rowsAffected := int64(0)
-	err = configuration.DB.Transaction(func(tx *gorm.DB) error {
+	callbackContext := configuration.WithConfig(c.Request().Context(), cfg)
+	err = configuration.DB.WithContext(callbackContext).Transaction(func(tx *gorm.DB) error {
 		result := tx.Model(&models.AutomationTask{}).Where(where, args...).Updates(updates)
 		if result.Error != nil {
 			return result.Error
@@ -2628,8 +3165,14 @@ func Complete(c echo.Context) error {
 				}
 			}
 			if task.Operation == "delivery.implementation" {
-				if err := persistImplementationChangeSet(tx, &task, request.Execution, completedAt); err != nil {
+				var assignedChildCount int64
+				if err := tx.Model(&models.DeliveryPlanStepAssignment{}).Where("child_automation_task_id = ?", task.ID).Count(&assignedChildCount).Error; err != nil {
 					return err
+				}
+				if assignedChildCount == 0 {
+					if err := persistImplementationChangeSet(tx, &task, request.Execution, completedAt); err != nil {
+						return err
+					}
 				}
 			}
 			if task.Operation == "delivery.publish" {
@@ -2653,431 +3196,950 @@ func Complete(c echo.Context) error {
 				return err
 			}
 		}
+		if task.Operation == "delivery.implementation" && task.DeliveryWorkItemID != nil {
+			if err := reconcilePlanStepChildTerminalInTransaction(tx, task, request, cancellationRequested, completedAt, ledgerRunID, ledgerIdentity, cfg); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	if err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Automation result failed", "")
 	}
 	if rowsAffected == 0 {
+		if request.Status == "completed" {
+			var currentTask models.AutomationTask
+			if reloadErr := configuration.DB.First(&currentTask, id).Error; reloadErr == nil && currentTask.Status == "completed" {
+				currentIdentity, identityErr := ledgerAgentIdentity(&currentTask, request)
+				if identityErr == nil {
+					replayed, replayErr := verifiedPlanFanInCompletionReplay(configuration.DB, cfg, currentTask, request, ledgerRunID, currentIdentity)
+					if replayErr == nil && replayed {
+						return c.NoContent(http.StatusNoContent)
+					}
+				}
+			}
+		}
 		return utils.Error(c, http.StatusConflict, "Automation result ignored", "Task is not awaiting a result")
 	}
 	return c.NoContent(http.StatusNoContent)
 }
 
-// advanceDelegatedDeliverySubmission advances only non-decision workflow
-// transitions after the authenticated worker has already persisted its strict
-// handoff in this transaction. It is intentionally not a model decision: a
-// frozen delegated policy merely allows the control plane to move completed
-// implementation and QA work into their independent review states. Human
-// mode, plan approval, code approval, QA approval, release approval, merge
-// and deployment all remain outside this helper.
-func advanceDelegatedDeliverySubmission(tx *gorm.DB, task *models.AutomationTask, completedAt time.Time) error {
-	if tx == nil || task == nil || task.ID == uuid.Nil || task.DeliveryWorkItemID == nil || completedAt.IsZero() {
+// verifiedPlanFanInCompletionReplay acknowledges a lost callback response only
+// when the previously committed parent result carries the exact integration
+// receipt and the child, assignment, step, execution, identities, and immutable
+// run references still agree. It is read-only and never creates another cost
+// row or advances a workflow gate.
+func verifiedPlanFanInCompletionReplay(
+	db *gorm.DB,
+	cfg *models.Config,
+	child models.AutomationTask,
+	request callbackRequest,
+	ledgerRunID string,
+	identity automationagent.AgentIdentity,
+) (bool, error) {
+	if db == nil || cfg == nil || child.Status != "completed" || child.Operation != "delivery.implementation" || child.DeliveryWorkItemID == nil ||
+		request.Status != "completed" || request.RunID == "" || child.RunID != request.RunID || request.OutputRef == "" || child.OutputRef != request.OutputRef ||
+		ledgerRunID == "" || !outputReferenceMatches(cfg, child.ID, request.OutputRef) ||
+		child.WorkerID != identity.WorkerID || child.AgentKey != identity.AgentKey || child.MachineID != identity.MachineID {
+		return false, nil
+	}
+	var handoff struct {
+		FanInReceipt *planIntegrationCallbackReceipt `json:"fan_in_receipt"`
+	}
+	if len(request.Execution) == 0 || len(request.Execution) > 32*1024 || json.Unmarshal(request.Execution, &handoff) != nil || handoff.FanInReceipt == nil {
+		return false, nil
+	}
+	var assignment models.DeliveryPlanStepAssignment
+	if err := db.Where("child_automation_task_id = ?", child.ID).Take(&assignment).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	if assignment.ChildAutomationTaskID != child.ID || assignment.Status != models.DeliveryPlanStepAssignmentCompleted {
+		return false, nil
+	}
+	var execution models.DeliveryPlanExecution
+	if err := db.Where("id = ?", assignment.ExecutionID).Take(&execution).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	if execution.Status != models.DeliveryPlanExecutionCompleted || execution.PlanID == uuid.Nil || execution.PlanVersion < 1 ||
+		!artifactDigestPattern.MatchString(execution.PlanHash) {
+		return false, nil
+	}
+	var parent models.AutomationTask
+	if err := db.Where("id = ?", execution.AutomationTaskID).Take(&parent).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	if parent.Status != "completed" || parent.Operation != "delivery.implementation" || parent.DeliveryWorkItemID == nil || *parent.DeliveryWorkItemID != *child.DeliveryWorkItemID ||
+		!executionResultReferenceMatches(cfg, parent.ID, ledgerRunID, parent.OutputRef) {
+		return false, nil
+	}
+	var step models.DeliveryPlanStep
+	if err := db.Where("id = ? AND plan_id = ?", assignment.DeliveryPlanStepID, execution.PlanID).Take(&step).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	if step.Role != models.DeliveryPlanStepRoleIntegration || step.AutomationTaskID == nil || *step.AutomationTaskID != child.ID || step.RunID != ledgerRunID || step.LeaseFence < 1 ||
+		step.WorkerID != identity.WorkerID || step.AgentKey != identity.AgentKey || step.MachineID != identity.MachineID {
+		return false, nil
+	}
+	receipt := handoff.FanInReceipt
+	if receipt.ParentTaskID != parent.ID.String() || receipt.PlanID != execution.PlanID.String() || receipt.PlanVersion != execution.PlanVersion || receipt.PlanHash != execution.PlanHash ||
+		receipt.StepID != step.ID.String() || receipt.ChildTaskID != child.ID.String() || receipt.RunID != ledgerRunID {
+		return false, nil
+	}
+	bucket, key, err := privateReference(parent.OutputRef)
+	if err != nil {
+		return false, nil
+	}
+	object, err := getPlanStepPatchObject(db.Statement.Context, key, bucket)
+	if err != nil {
+		return false, err
+	}
+	content, readErr := io.ReadAll(io.LimitReader(object, 1<<20+1))
+	closeErr := object.Close()
+	if readErr != nil || closeErr != nil || len(content) == 0 || len(content) > 1<<20 {
+		return false, fmt.Errorf("read committed plan fan-in replay proof")
+	}
+	var output struct {
+		TaskID             string                          `json:"task_id"`
+		IntegrationTaskID  string                          `json:"integration_task_id"`
+		RunID              string                          `json:"run_id"`
+		IntegrationReceipt *planIntegrationCallbackReceipt `json:"integration_receipt"`
+		Execution          struct {
+			FanInReceipt *planIntegrationCallbackReceipt `json:"fan_in_receipt"`
+		} `json:"execution"`
+		FanIn planIntegrationFanInProof `json:"fan_in"`
+	}
+	if json.Unmarshal(content, &output) != nil || output.TaskID != parent.ID.String() || output.IntegrationTaskID != child.ID.String() || output.RunID != ledgerRunID ||
+		output.IntegrationReceipt == nil || *output.IntegrationReceipt != *receipt || output.Execution.FanInReceipt == nil || *output.Execution.FanInReceipt != *receipt {
+		return false, nil
+	}
+	proof := output.FanIn
+	if proof.SchemaVersion != 1 || proof.ParentTaskID != parent.ID.String() || proof.ExecutionID != execution.ID.String() || proof.PlanID != execution.PlanID.String() ||
+		proof.PlanVersion != execution.PlanVersion || proof.PlanHash != execution.PlanHash || proof.IntegrationStepID != step.ID.String() || proof.IntegrationStepKey != step.StepKey ||
+		proof.IntegrationTaskID != child.ID.String() || proof.RunID != ledgerRunID || proof.FencingToken != step.LeaseFence ||
+		proof.WorkerID != identity.WorkerID || proof.AgentKey != identity.AgentKey || proof.MachineID != identity.MachineID {
+		return false, nil
+	}
+	return true, nil
+}
+
+// reconcilePlanStepChildTerminalInTransaction is the only fan-in point for
+// implementation child tasks. It may dispatch more independent roots, but it
+// never releases dependencies or promotes a parent result: child worktrees are
+// isolated and no verified merge artifact exists yet.
+func reconcilePlanStepChildTerminalInTransaction(tx *gorm.DB, child models.AutomationTask, request callbackRequest, cancelled bool, now time.Time, ledgerRunID string, identity automationagent.AgentIdentity, cfg *models.Config) error {
+	if tx == nil || child.ID == uuid.Nil || child.DeliveryWorkItemID == nil {
+		return fmt.Errorf("plan-step child callback is missing its task scope")
+	}
+	var assignmentIdentity models.DeliveryPlanStepAssignment
+	err := tx.Select("id", "execution_id").Where("child_automation_task_id = ?", child.ID).Take(&assignmentIdentity).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		// Legacy sequential implementation tasks have no execution assignment.
 		return nil
 	}
-	action, phase := delegatedSubmissionAction(task.Operation)
-	if action == "" {
-		return nil
+	if err != nil {
+		return err
+	}
+	var executionIdentity models.DeliveryPlanExecution
+	if err := tx.Select("id", "automation_task_id").First(&executionIdentity, "id = ?", assignmentIdentity.ExecutionID).Error; err != nil {
+		return err
+	}
+	// Keep the same parent -> execution -> assignment lock order as the
+	// reservation/scheduler service to avoid fan-in deadlocks under parallel
+	// child callbacks.
+	var parent models.AutomationTask
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&parent, "id = ?", executionIdentity.AutomationTaskID).Error; err != nil {
+		return err
+	}
+	var execution models.DeliveryPlanExecution
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&execution, "id = ?", executionIdentity.ID).Error; err != nil {
+		return err
+	}
+	var assignment models.DeliveryPlanStepAssignment
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND execution_id = ? AND child_automation_task_id = ?", assignmentIdentity.ID, execution.ID, child.ID).Take(&assignment).Error; err != nil {
+		return err
+	}
+	if parent.Operation != "delivery.implementation" || parent.DeliveryWorkItemID == nil || *parent.DeliveryWorkItemID != *child.DeliveryWorkItemID || parent.Status != "queued" {
+		return fmt.Errorf("plan-step execution parent no longer matches its queued implementation task")
 	}
 	var item models.DeliveryWorkItem
-	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&item, *task.DeliveryWorkItemID).Error; err != nil {
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&item, "id = ?", *parent.DeliveryWorkItemID).Error; err != nil {
 		return err
 	}
-	if !delegatedSubmissionStateMatches(item.State, action) {
-		// A human or an earlier idempotent callback already moved this item. The
-		// task result remains valid evidence, but it must not move a newer state.
-		return nil
+	if item.ProjectID == uuid.Nil {
+		return fmt.Errorf("plan-step execution work item has no project scope")
 	}
-	var event models.DeliveryEvent
-	err := tx.Where("work_item_id = ? AND event_type = ?", item.ID, deliveryledger.EventTypeAutonomySnapshot).Order("sequence ASC").First(&event).Error
-	if err == gorm.ErrRecordNotFound {
-		return nil
+
+	// A successful AutomationTask callback is not proof that its fenced plan
+	// step transition committed. Require that second durable signal; otherwise
+	// stop fan-out and audit the inconsistency as blocked aggregation.
+	if cancelled || request.Status == "failed" {
+		terminalAssignment := models.DeliveryPlanStepAssignmentFailed
+		if cancelled {
+			terminalAssignment = models.DeliveryPlanStepAssignmentCancelled
+		}
+		if assignment.Status != models.DeliveryPlanStepAssignmentCompleted && assignment.Status != models.DeliveryPlanStepAssignmentFailed && assignment.Status != models.DeliveryPlanStepAssignmentBlocked && assignment.Status != models.DeliveryPlanStepAssignmentCancelled {
+			if err := tx.Model(&models.DeliveryPlanStepAssignment{}).Where("id = ? AND status IN ?", assignment.ID, activePlanStepAssignmentStatuses()).Updates(map[string]any{
+				"status": terminalAssignment, "completed_at": now, "updated_at": now,
+			}).Error; err != nil {
+				return err
+			}
+			assignment.Status = terminalAssignment
+		}
+	} else if request.Status == "completed" && assignment.Status != models.DeliveryPlanStepAssignmentCompleted {
+		if assignment.Status == models.DeliveryPlanStepAssignmentPending || assignment.Status == models.DeliveryPlanStepAssignmentQueued || assignment.Status == models.DeliveryPlanStepAssignmentDispatched || assignment.Status == models.DeliveryPlanStepAssignmentRunning {
+			if err := tx.Model(&models.DeliveryPlanStepAssignment{}).Where("id = ? AND status IN ?", assignment.ID, activePlanStepAssignmentStatuses()).Updates(map[string]any{
+				"status": models.DeliveryPlanStepAssignmentBlocked, "completed_at": now, "updated_at": now,
+			}).Error; err != nil {
+				return err
+			}
+			assignment.Status = models.DeliveryPlanStepAssignmentBlocked
+		}
 	}
+
+	var plan models.DeliveryPlan
+	if err := tx.First(&plan, "id = ? AND work_item_id = ?", execution.PlanID, item.ID).Error; err != nil {
+		return err
+	}
+	var stepRows []models.DeliveryPlanStep
+	if err := tx.Where("plan_id = ?", plan.ID).Order("display_order ASC, id ASC").Find(&stepRows).Error; err != nil {
+		return err
+	}
+	if len(stepRows) == 0 {
+		return fmt.Errorf("frozen plan has no steps for fan-in")
+	}
+	stepIDs := make([]uuid.UUID, 0, len(stepRows))
+	for _, step := range stepRows {
+		stepIDs = append(stepIDs, step.ID)
+	}
+
+	var allAssignments []models.DeliveryPlanStepAssignment
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("execution_id = ?", execution.ID).Find(&allAssignments).Error; err != nil {
+		return err
+	}
+	assessmentAssignments, err := persistAndOverlayPlanChildTaskStates(tx, allAssignments, now)
 	if err != nil {
 		return err
 	}
-	snapshot, err := deliveryledger.ProjectAutonomySnapshot(event)
-	if err != nil || snapshot.ProjectID != item.ProjectID || !snapshot.Delegated {
-		// A malformed or manual-only snapshot never becomes a reason to advance
-		// a task. The callback is still durable; a malformed immutable event is
-		// surfaced as a retryable control-plane integrity fault.
+	beforeScheduling := deliveryplansteps.AssessFanIn(stepIDs, assessmentAssignments)
+	machineBlockReason := ""
+	if !beforeScheduling.HasChildFailure {
+		if _, err := enqueueReadyPlanStepsInTransaction(tx, execution.ID, now); err != nil {
+			if !errors.Is(err, deliveryplansteps.ErrNoEligibleAgentMachine) {
+				return fmt.Errorf("dispatch next ready plan steps: %w", err)
+			}
+			machineBlockReason = retryableMachineDispatchReason(err)
+			if err := tx.Model(&models.DeliveryWorkItem{}).Where("id = ?", item.ID).Updates(map[string]any{
+				"agent_progress": "blocked", "blocked_reason": machineBlockReason, "updated_at": now,
+			}).Error; err != nil {
+				return err
+			}
+		}
+	}
+	if err := tx.Where("execution_id = ?", execution.ID).Find(&allAssignments).Error; err != nil {
+		return err
+	}
+	assessmentAssignments, err = persistAndOverlayPlanChildTaskStates(tx, allAssignments, now)
+	if err != nil {
+		return err
+	}
+	decision := deliveryplansteps.AssessFanIn(stepIDs, assessmentAssignments)
+	if machineBlockReason != "" {
+		// Keep the parent task and approved work item retryable. A continuation
+		// polls for a new heartbeat and repeats the same server-side selection;
+		// no unassigned child is emitted into the queue.
+		if parent.ContinuationID != nil {
+			return tx.Model(&models.DeliveryContinuation{}).Where("id = ? AND status IN ?", *parent.ContinuationID, []string{"dispatched", "claimed"}).Updates(map[string]any{
+				"status": "dispatched", "available_at": now.Add(time.Minute), "updated_at": now,
+			}).Error
+		}
+		return nil
+	}
+	if decision.WaitingForChildren {
+		// Preserve the parent reservation while any targeted child can still
+		// consume the aggregate budget. Continuation polling stays observational.
+		if parent.ContinuationID != nil {
+			return tx.Model(&models.DeliveryContinuation{}).Where("id = ? AND status IN ?", *parent.ContinuationID, []string{"dispatched", "claimed"}).Updates(map[string]any{
+				"status": "dispatched", "available_at": now.Add(time.Minute), "updated_at": now,
+			}).Error
+		}
+		return nil
+	}
+	if !decision.AggregationPending {
+		return fmt.Errorf("fan-in returned an unsupported non-terminal decision")
+	}
+	if !decision.HasChildFailure && request.Status == "completed" {
+		completed, reason, err := completeVerifiedPlanFanInInTransaction(
+			tx, parent, child, item, execution, plan, stepRows, allAssignments,
+			request, ledgerRunID, identity, cfg, now,
+		)
 		if err != nil {
-			return fmt.Errorf("delegated delivery authority is invalid: %w", err)
-		}
-		return nil
-	}
-	if err := recordDelegatedSubmissionEvidence(tx, *task, item.ID, phase, completedAt); err != nil {
-		return err
-	}
-	if err := deliveryworkflow.Advance(&item, action, nil, completedAt); err != nil {
-		return err
-	}
-	return tx.Save(&item).Error
-}
-
-// delegatedSubmissionAction maps an eligible delegated operation to its
-// transition and its immutable delivery phase label. An empty result means the
-// operation is not allowed to advance a delivery work item.
-func delegatedSubmissionAction(operation string) (deliveryworkflow.Action, string) {
-	switch strings.TrimSpace(operation) {
-	case "delivery.implementation":
-		return deliveryworkflow.ActionSubmitCodeReview, "implementation"
-	case "delivery.assessment":
-		return deliveryworkflow.ActionSubmitAssessment, "assessment"
-	case "delivery.qa":
-		return deliveryworkflow.ActionSubmitQA, "qa"
-	default:
-		return "", ""
-	}
-}
-
-func delegatedSubmissionStateMatches(state string, action deliveryworkflow.Action) bool {
-	switch action {
-	case deliveryworkflow.ActionSubmitCodeReview:
-		return strings.TrimSpace(state) == deliveryworkflow.StateImplementation
-	case deliveryworkflow.ActionSubmitAssessment:
-		return strings.TrimSpace(state) == deliveryworkflow.StateImplementation
-	case deliveryworkflow.ActionSubmitQA:
-		return strings.TrimSpace(state) == deliveryworkflow.StateQARunning
-	default:
-		return false
-	}
-}
-
-// recordDelegatedSubmissionEvidence is the same bounded report provenance the
-// manual submission route records. It deliberately stores a reference only:
-// private output is never copied into the ledger or exposed to the dashboard.
-func recordDelegatedSubmissionEvidence(tx *gorm.DB, task models.AutomationTask, workItemID uuid.UUID, phase string, completedAt time.Time) error {
-	if strings.TrimSpace(task.OutputRef) == "" {
-		return fmt.Errorf("delegated %s submission has no private result reference", phase)
-	}
-	var existing models.DeliveryEvidence
-	err := tx.Where("work_item_id = ? AND reference = ?", workItemID, task.OutputRef).First(&existing).Error
-	if err == nil {
-		return nil
-	}
-	if err != gorm.ErrRecordNotFound {
-		return err
-	}
-	evidence := models.DeliveryEvidence{
-		WorkItemID: workItemID, Kind: "report", Phase: phase,
-		Title: "Resultado del agente: " + phase, Reference: task.OutputRef,
-		MetadataJSON: fmt.Sprintf(`{"automation_task_id":%q,"operation":%q,"provider":%q,"model":%q,"submission_authority":"delegated"}`, task.ID.String(), task.Operation, task.Provider, task.Model),
-		CapturedBy:   "itbem-control-plane", CapturedAt: &completedAt,
-	}
-	return tx.Create(&evidence).Error
-}
-
-func persistCodeReviewPublication(tx *gorm.DB, task *models.AutomationTask, raw json.RawMessage, completedAt time.Time) error {
-	publication, err := codeReviewPublicationForTask(task, raw)
-	if err != nil {
-		return err
-	}
-	publication.AutomationTaskID, publication.PublishedAt = task.ID, publication.PublishedAt.UTC()
-	if publication.PublishedAt.After(completedAt.Add(time.Minute)) {
-		return fmt.Errorf("code review publication time is invalid")
-	}
-	return tx.Create(&publication).Error
-}
-
-func codeReviewPublicationForTask(task *models.AutomationTask, raw json.RawMessage) (models.AutomationCodeReviewPublication, error) {
-	if task == nil || task.ID == uuid.Nil || task.Operation != "code.review" || task.RequestedBy != "github-app-review" || !artifactDigestPattern.MatchString(strings.ToLower(strings.TrimSpace(task.EvidenceSubjectDigest))) {
-		return models.AutomationCodeReviewPublication{}, fmt.Errorf("only an exact webhook review task may publish GitHub review evidence")
-	}
-	var execution automationagent.GitHubCodeReviewPublication
-	decoder := json.NewDecoder(strings.NewReader(string(raw)))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&execution); err != nil {
-		return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review publication evidence is invalid")
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review publication evidence is invalid")
-	}
-	repository := strings.ToLower(strings.TrimSpace(execution.Repository))
-	verdict := strings.ToLower(strings.TrimSpace(execution.Verdict))
-	event := strings.ToUpper(strings.TrimSpace(execution.Event))
-	actor := strings.ToLower(strings.TrimSpace(execution.ReviewerActor))
-	author := strings.ToLower(strings.TrimSpace(execution.AuthorActor))
-	checkName := strings.TrimSpace(execution.CheckName)
-	checkConclusion := strings.ToLower(strings.TrimSpace(execution.CheckConclusion))
-	if execution.SchemaVersion != 2 || !githubRepositoryPattern.MatchString(repository) || execution.PullRequest < 1 || !gitCommitSHA.MatchString(strings.ToLower(strings.TrimSpace(execution.HeadSHA))) || !artifactDigestPattern.MatchString(strings.ToLower(strings.TrimSpace(execution.PatchSHA256))) || !artifactDigestPattern.MatchString(strings.ToLower(strings.TrimSpace(execution.SubjectSHA256))) || !artifactDigestPattern.MatchString(strings.ToLower(strings.TrimSpace(execution.PayloadSHA256))) || !strings.EqualFold(execution.SubjectSHA256, task.EvidenceSubjectDigest) || execution.ReviewID < 1 || actor == "" || execution.CheckRunID < 1 || checkName != "Bema Review / exact-sha" || (checkConclusion != "success" && checkConclusion != "failure") || execution.PublishedAt.IsZero() {
-		return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review publication evidence is invalid")
-	}
-	expectedCorrelationID, correlationErr := githubReviewCorrelationID(repository, execution.PullRequest, execution.HeadSHA)
-	if correlationErr != nil || task.CorrelationID != expectedCorrelationID || !validGitHubReviewURL(execution.ReviewURL, repository, execution.PullRequest, execution.ReviewID) || !validGitHubCheckRunURL(execution.CheckRunURL) {
-		return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review publication does not match its queued pull request")
-	}
-	switch event {
-	case "APPROVE":
-		if verdict != "approve" || !execution.ReviewGatePassed || author == "" || strings.EqualFold(actor, author) || checkConclusion != "success" {
-			return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review approval is not independent")
-		}
-	case "REQUEST_CHANGES":
-		if verdict != "request_changes" || execution.ReviewGatePassed || checkConclusion != "failure" {
-			return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review event contradicts its verdict")
-		}
-	case "COMMENT":
-		// A Reviewer COMMENT normally blocks because it means the exact review
-		// cannot approve the head. The narrowly classified exception is a
-		// worker-calculated, independent low-maintainability observation with no
-		// evidence gap. Its GitHub check is the authoritative proof that the
-		// Reviewer App applied that exception; controller persistence never turns
-		// an arbitrary successful COMMENT into a release signal.
-		nonBlockingComment := verdict == "comment" && execution.ReviewGatePassed && author != "" && !strings.EqualFold(actor, author) && checkConclusion == "success"
-		blockingComment := (verdict == "comment" || verdict == "blocked" || (verdict == "approve" && author != "" && strings.EqualFold(actor, author))) && !execution.ReviewGatePassed && checkConclusion == "failure"
-		if !nonBlockingComment && !blockingComment {
-			return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review comment contradicts its verdict")
-		}
-	default:
-		return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review event is invalid")
-	}
-	checkRunID, checkRunURL := execution.CheckRunID, strings.TrimSpace(execution.CheckRunURL)
-	return models.AutomationCodeReviewPublication{
-		Repository: repository, PullRequest: execution.PullRequest, HeadSHA: strings.ToLower(execution.HeadSHA), PatchSHA256: strings.ToLower(execution.PatchSHA256),
-		SubjectSHA256: strings.ToLower(execution.SubjectSHA256), PayloadSHA256: strings.ToLower(execution.PayloadSHA256), Verdict: verdict, Event: event, ReviewGatePassed: execution.ReviewGatePassed,
-		ReviewID: execution.ReviewID, ReviewURL: strings.TrimSpace(execution.ReviewURL), ReviewerActor: actor, AuthorActor: author, PublishedAt: execution.PublishedAt,
-		CheckRunID: &checkRunID, CheckRunURL: &checkRunURL, CheckName: &checkName, CheckConclusion: &checkConclusion,
-	}, nil
-}
-
-func validGitHubCheckRunURL(value string) bool {
-	parsed, err := url.Parse(strings.TrimSpace(value))
-	return err == nil && parsed.Scheme == "https" && strings.EqualFold(parsed.Hostname(), "github.com") && parsed.User == nil && parsed.RawQuery == "" && strings.Trim(parsed.Path, "/") != ""
-}
-
-func validGitHubReviewURL(value, repository string, pullRequest int, reviewID int64) bool {
-	parsed, err := url.Parse(strings.TrimSpace(value))
-	if err != nil || parsed.Scheme != "https" || !strings.EqualFold(parsed.Hostname(), "github.com") || parsed.User != nil || parsed.RawQuery != "" || pullRequest < 1 || reviewID < 1 {
-		return false
-	}
-	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
-	if len(parts) != 4 || !strings.EqualFold(parts[0]+"/"+parts[1], repository) || parts[2] != "pull" || parts[3] != strconv.Itoa(pullRequest) {
-		return false
-	}
-	return parsed.Fragment == "pullrequestreview-"+strconv.FormatInt(reviewID, 10)
-}
-
-func persistOnboardingCapabilityProbes(tx *gorm.DB, task *models.AutomationTask, raw json.RawMessage, completedAt time.Time) error {
-	if tx == nil || completedAt.IsZero() {
-		return fmt.Errorf("only a bounded onboarding task may append capability probes")
-	}
-	execution, queuedSubject, err := onboardingCapabilityProbeForTask(task, raw)
-	if err != nil {
-		return err
-	}
-	var onboarding models.DeliveryRepositoryOnboarding
-	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", *task.DeliveryOnboardingID).First(&onboarding).Error; err != nil {
-		return err
-	}
-	if onboarding.Status != "proposed" || !strings.EqualFold(onboarding.ProposalSHA256, queuedSubject) || onboarding.RepositoryReference != execution.RepositoryReference || onboarding.DefaultBranch != execution.DefaultBranch || !strings.EqualFold(onboarding.Revision, execution.Revision) {
-		return fmt.Errorf("onboarding capability probe subject is stale or mismatched")
-	}
-	proposal, err := projectvault.ValidateStoredProposal(
-		onboarding.ProposalJSON, onboarding.RepositoryReference, onboarding.DefaultBranch,
-		onboarding.Revision, onboarding.Readiness, onboarding.ProposalSHA256, onboarding.VaultSHA256,
-	)
-	if err != nil {
-		return err
-	}
-	updated, err := projectvault.ApplyCapabilityProbes(proposal, execution.Probes)
-	if err != nil {
-		return err
-	}
-	encoded, err := json.Marshal(updated)
-	if err != nil {
-		return err
-	}
-	proposalDigest, err := projectvault.ProposalSHA256(updated)
-	if err != nil {
-		return err
-	}
-	for _, probe := range execution.Probes {
-		row := models.DeliveryRepositoryCapabilityProbe{
-			ProjectID: onboarding.ProjectID, OnboardingID: onboarding.ID, AutomationTaskID: task.ID,
-			RepositoryReference: execution.RepositoryReference, Revision: execution.Revision,
-			Capability: probe.Name, State: probe.State, ExecutorRole: execution.ExecutorRole,
-			EvidenceSHA256: strings.ToLower(probe.EvidenceSHA256), SubjectSHA256: strings.ToLower(probe.SubjectSHA256),
-			Reason: probe.Reason, ObservedAt: completedAt.UTC(),
-		}
-		if err := tx.Create(&row).Error; err != nil {
 			return err
 		}
+		if completed {
+			return nil
+		}
+		if reason != "" {
+			return persistPlanAggregationPendingInTransaction(tx, parent, item, execution, reason, now)
+		}
 	}
-	result := tx.Model(&models.DeliveryRepositoryOnboarding{}).
-		Where("id = ? AND status = ? AND proposal_sha256 = ?", onboarding.ID, "proposed", onboarding.ProposalSHA256).
-		Updates(map[string]any{"proposal_json": string(encoded), "proposal_sha256": proposalDigest, "readiness": updated.Readiness})
-	if result.Error != nil {
-		return result.Error
+	return persistPlanAggregationPendingInTransaction(tx, parent, item, execution, decision.Reason, now)
+}
+
+type planIntegrationCallbackReceipt struct {
+	ParentTaskID string `json:"parent_task_id"`
+	PlanID       string `json:"plan_id"`
+	PlanVersion  int    `json:"plan_version"`
+	PlanHash     string `json:"plan_hash"`
+	StepID       string `json:"step_id"`
+	ChildTaskID  string `json:"child_task_id"`
+	RunID        string `json:"run_id"`
+}
+
+type planIntegrationOutputEvidence struct {
+	PlanID             string                       `json:"plan_id"`
+	PlanVersion        int                          `json:"plan_version"`
+	StepID             string                       `json:"step_id"`
+	StepKey            string                       `json:"step_key"`
+	AcceptanceCriteria []string                     `json:"acceptance_criteria"`
+	Checks             []planIntegrationOutputCheck `json:"checks"`
+	VerifiedAt         time.Time                    `json:"verified_at"`
+}
+
+type planIntegrationOutputCheck struct {
+	Criterion string `json:"criterion"`
+	Passed    bool   `json:"passed"`
+}
+
+// completeVerifiedPlanFanInInTransaction is the only successful aggregate
+// transition. It verifies the frozen integration child, its exact lease-run
+// evidence and every repository artifact before promoting the parent.
+func completeVerifiedPlanFanInInTransaction(
+	tx *gorm.DB,
+	parent, child models.AutomationTask,
+	item models.DeliveryWorkItem,
+	execution models.DeliveryPlanExecution,
+	plan models.DeliveryPlan,
+	steps []models.DeliveryPlanStep,
+	assignments []models.DeliveryPlanStepAssignment,
+	request callbackRequest,
+	ledgerRunID string,
+	identity automationagent.AgentIdentity,
+	cfg *models.Config,
+	now time.Time,
+) (bool, string, error) {
+	if tx == nil || child.DeliveryWorkItemID == nil || *child.DeliveryWorkItemID != item.ID || len(steps) == 0 {
+		return false, deliveryplansteps.AggregationPendingReason + ": frozen plan scope is missing", nil
 	}
-	if result.RowsAffected != 1 {
-		return fmt.Errorf("onboarding capability probe lost its proposal checkpoint")
+	var integration *models.DeliveryPlanStep
+	for index := range steps {
+		if steps[index].Role != models.DeliveryPlanStepRoleIntegration {
+			continue
+		}
+		if integration != nil {
+			return false, deliveryplansteps.AggregationPendingReason + ": frozen plan has multiple integration nodes", nil
+		}
+		integration = &steps[index]
+	}
+	if integration == nil || integration.AutomationTaskID == nil || *integration.AutomationTaskID != child.ID {
+		return false, "", nil
+	}
+	if request.Status != "completed" || strings.TrimSpace(ledgerRunID) == "" || cfg == nil || strings.TrimSpace(cfg.AutomationOutputBucket) == "" {
+		return false, deliveryplansteps.AggregationPendingReason + ": integration callback scope is incomplete", nil
+	}
+	if integration.Status != models.DeliveryPlanStepCompleted || integration.RunID != ledgerRunID || integration.LeaseFence < 1 || integration.WorkerID != identity.WorkerID || integration.AgentKey != identity.AgentKey || integration.MachineID != identity.MachineID {
+		return false, deliveryplansteps.AggregationPendingReason + ": integration step completion does not match its callback fence", nil
+	}
+	var integrationAssignment *models.DeliveryPlanStepAssignment
+	for index := range assignments {
+		if assignments[index].DeliveryPlanStepID == integration.ID {
+			if integrationAssignment != nil {
+				return false, deliveryplansteps.AggregationPendingReason + ": integration step has duplicate assignments", nil
+			}
+			integrationAssignment = &assignments[index]
+		}
+	}
+	if integrationAssignment == nil || integrationAssignment.ChildAutomationTaskID != child.ID || integrationAssignment.Status != models.DeliveryPlanStepAssignmentCompleted {
+		return false, deliveryplansteps.AggregationPendingReason + ": integration assignment is not terminal", nil
+	}
+
+	var dependencies []models.DeliveryPlanStepDependency
+	if err := tx.Where("plan_id = ?", plan.ID).Order("step_id ASC, depends_on_step_id ASC").Find(&dependencies).Error; err != nil {
+		return false, "", err
+	}
+	planHash, err := deliveryplansteps.ApprovedPlanContentHash(plan, steps, dependencies)
+	if err != nil || planHash != execution.PlanHash || execution.PlanID != plan.ID || execution.PlanVersion != plan.Version || execution.AutomationTaskID != parent.ID {
+		return false, deliveryplansteps.AggregationPendingReason + ": frozen plan hash no longer matches its execution", nil
+	}
+	var handoff struct {
+		FanInReceipt *planIntegrationCallbackReceipt `json:"fan_in_receipt"`
+	}
+	if len(request.Execution) == 0 || len(request.Execution) > 32*1024 || json.Unmarshal(request.Execution, &handoff) != nil || handoff.FanInReceipt == nil {
+		return false, deliveryplansteps.AggregationPendingReason + ": integration callback omitted its frozen-plan receipt", nil
+	}
+	receipt := handoff.FanInReceipt
+	if receipt.ParentTaskID != parent.ID.String() || receipt.PlanID != plan.ID.String() || receipt.PlanVersion != plan.Version || receipt.PlanHash != execution.PlanHash || receipt.StepID != integration.ID.String() || receipt.ChildTaskID != child.ID.String() || receipt.RunID != ledgerRunID {
+		return false, deliveryplansteps.AggregationPendingReason + ": integration receipt does not match the current parent, plan, child, and run", nil
+	}
+
+	var gatePlan struct {
+		RepositoryImpact []struct {
+			Reference string `json:"reference"`
+			Impact    string `json:"impact"`
+		} `json:"repository_impact"`
+	}
+	if json.Unmarshal([]byte(plan.StructuredJSON), &gatePlan) != nil {
+		return false, deliveryplansteps.AggregationPendingReason + ": approved repository impact is invalid", nil
+	}
+	expectedRepositories := make(map[string]struct{})
+	for _, repository := range gatePlan.RepositoryImpact {
+		if !strings.EqualFold(strings.TrimSpace(repository.Impact), "changes") {
+			continue
+		}
+		reference := strings.TrimSpace(repository.Reference)
+		if !strings.HasPrefix(reference, "workspace://") {
+			return false, deliveryplansteps.AggregationPendingReason + ": approved changed repository reference is invalid", nil
+		}
+		if _, duplicate := expectedRepositories[reference]; duplicate {
+			return false, deliveryplansteps.AggregationPendingReason + ": approved repository impact contains duplicates", nil
+		}
+		expectedRepositories[reference] = struct{}{}
+	}
+	if len(expectedRepositories) == 0 || len(expectedRepositories) > models.MaxDeliveryPlanStepPatchArtifacts {
+		return false, deliveryplansteps.AggregationPendingReason + ": approved plan has no bounded changed-repository set", nil
+	}
+
+	var events []models.DeliveryPlanStepActivityEvent
+	if err := tx.Where(`step_id = ? AND plan_id = ? AND automation_task_id = ? AND run_id = ? AND worker_id = ?
+		AND agent_key = ? AND machine_id = ? AND fencing_token = ? AND action = ? AND phase = ?`,
+		integration.ID, plan.ID, child.ID, ledgerRunID, identity.WorkerID, identity.AgentKey, identity.MachineID, integration.LeaseFence,
+		models.DeliveryPlanStepActivityEvidence, models.DeliveryPlanStepActivityCompleted).Order("sequence DESC").Limit(1).Find(&events).Error; err != nil {
+		return false, "", err
+	}
+	if len(events) != 1 || events[0].AgentInstanceID == nil || *events[0].AgentInstanceID == uuid.Nil {
+		return false, deliveryplansteps.AggregationPendingReason + ": integration acceptance event is missing", nil
+	}
+	if err := requirePlanStepAcceptanceEvidence(tx, *integration, child.ID, ledgerRunID, identity, integration.LeaseFence, *events[0].AgentInstanceID); err != nil {
+		return false, deliveryplansteps.AggregationPendingReason + ": integration acceptance or dependency-merge evidence is incomplete", nil
+	}
+	if err := validatePlanStepActivityAcceptanceCriteria(integration.AcceptanceCriteriaJSON, events[0]); err != nil {
+		return false, deliveryplansteps.AggregationPendingReason + ": integration acceptance criteria do not match the frozen step", nil
+	}
+	var details models.DeliveryPlanStepActivityDetails
+	if json.Unmarshal([]byte(events[0].DetailsJSON), &details) != nil || len(details.PatchArtifacts) != len(expectedRepositories) {
+		return false, deliveryplansteps.AggregationPendingReason + ": integration artifact manifest is incomplete", nil
+	}
+	var artifactRows []models.DeliveryPlanStepPatchArtifact
+	if err := tx.Where("plan_id = ? AND automation_task_id = ? AND run_id = ? AND step_id = ?", plan.ID, child.ID, ledgerRunID, integration.ID).Order("repository_ref ASC").Find(&artifactRows).Error; err != nil {
+		return false, "", err
+	}
+	if len(artifactRows) != len(expectedRepositories) || len(artifactRows) != len(details.PatchArtifacts) {
+		return false, deliveryplansteps.AggregationPendingReason + ": final artifact rows do not cover every changed repository", nil
+	}
+	refsByRepository := make(map[string]models.DeliveryPlanStepPatchArtifactReference, len(details.PatchArtifacts))
+	for _, reference := range details.PatchArtifacts {
+		if _, expected := expectedRepositories[reference.RepositoryRef]; !expected {
+			return false, deliveryplansteps.AggregationPendingReason + ": artifact manifest contains an unapproved repository", nil
+		}
+		if _, duplicate := refsByRepository[reference.RepositoryRef]; duplicate || reference.SizeBytes < 1 || reference.SizeBytes > models.MaxDeliveryPlanStepPatchArtifactBytes || !artifactDigestPattern.MatchString(reference.SHA256) || !gitCommitSHA.MatchString(reference.BaseSHA) {
+			return false, deliveryplansteps.AggregationPendingReason + ": artifact manifest is malformed", nil
+		}
+		refsByRepository[reference.RepositoryRef] = reference
+	}
+	for _, artifact := range artifactRows {
+		reference, found := refsByRepository[artifact.RepositoryRef]
+		if !found || artifact.PlanID != plan.ID || artifact.AutomationTaskID != child.ID || artifact.RunID != ledgerRunID || artifact.StepID != integration.ID ||
+			artifact.WorkerID != identity.WorkerID || artifact.AgentKey != identity.AgentKey || artifact.MachineID != identity.MachineID ||
+			artifact.AgentInstanceID == nil || *artifact.AgentInstanceID != *events[0].AgentInstanceID || artifact.FencingToken != integration.LeaseFence ||
+			artifact.Bucket != cfg.AutomationOutputBucket || artifact.ObjectKey != planStepPatchObjectKey(child.ID, ledgerRunID, integration.ID, artifact.SHA256) ||
+			artifact.BaseSHA != reference.BaseSHA || artifact.SHA256 != reference.SHA256 || artifact.SizeBytes != reference.SizeBytes {
+			return false, deliveryplansteps.AggregationPendingReason + ": final repository artifact does not match its authenticated evidence", nil
+		}
+		object, err := getPlanStepPatchObject(tx.Statement.Context, artifact.ObjectKey, artifact.Bucket)
+		if err != nil {
+			return false, "", fmt.Errorf("read final integration patch artifact: %w", err)
+		}
+		patch, readErr := io.ReadAll(io.LimitReader(object, int64(models.MaxDeliveryPlanStepPatchArtifactBytes)+1))
+		closeErr := object.Close()
+		if readErr != nil || closeErr != nil {
+			for index := range patch {
+				patch[index] = 0
+			}
+			return false, "", fmt.Errorf("read final integration patch artifact")
+		}
+		digest := sha256.Sum256(patch)
+		validBytes := int64(len(patch)) == artifact.SizeBytes && hex.EncodeToString(digest[:]) == artifact.SHA256 && validateUnifiedGitPatch(patch) == nil && !containsHighConfidencePatchSecret(patch)
+		for index := range patch {
+			patch[index] = 0
+		}
+		if !validBytes {
+			return false, deliveryplansteps.AggregationPendingReason + ": final integration patch bytes no longer match their immutable reference", nil
+		}
+	}
+	if manifestSHA256, manifestErr := models.DeliveryPlanStepPatchArtifactManifestSHA256(details.PatchArtifacts); manifestErr != nil || details.ReviewDiffSHA256 != manifestSHA256 {
+		return false, deliveryplansteps.AggregationPendingReason + ": integration artifact manifest digest is inconsistent", nil
+	}
+
+	if !executionResultReferenceMatches(cfg, child.ID, ledgerRunID, request.OutputRef) {
+		return false, deliveryplansteps.AggregationPendingReason + ": integration result reference is not bound to its child run", nil
+	}
+	bucket, key, err := privateReference(request.OutputRef)
+	if err != nil {
+		return false, deliveryplansteps.AggregationPendingReason + ": integration result reference is invalid", nil
+	}
+	body, err := awsrepository.GetS3Object(tx.Statement.Context, key, bucket)
+	if err != nil {
+		return false, "", fmt.Errorf("read integration result for fan-in: %w", err)
+	}
+	defer body.Close()
+	content, err := io.ReadAll(io.LimitReader(body, 1<<20+1))
+	if err != nil {
+		return false, "", fmt.Errorf("read integration result for fan-in: %w", err)
+	}
+	if len(content) == 0 || len(content) > 1<<20 {
+		return false, deliveryplansteps.AggregationPendingReason + ": integration result is empty or oversized", nil
+	}
+	var output struct {
+		TaskID             string                          `json:"task_id"`
+		RunID              string                          `json:"run_id"`
+		PlanID             string                          `json:"plan_id"`
+		TargetPlanStepID   string                          `json:"target_plan_step_id"`
+		CompletedPlanSteps []string                        `json:"completed_plan_steps"`
+		PlanStepEvidence   []planIntegrationOutputEvidence `json:"plan_step_evidence"`
+		IntegrationReceipt *planIntegrationCallbackReceipt `json:"integration_receipt"`
+		Execution          struct {
+			FanInReceipt *planIntegrationCallbackReceipt `json:"fan_in_receipt"`
+		} `json:"execution"`
+	}
+	if json.Unmarshal(content, &output) != nil || output.TaskID != child.ID.String() || output.RunID != ledgerRunID || output.PlanID != plan.ID.String() || output.TargetPlanStepID != integration.ID.String() || !containsAutomationString(output.CompletedPlanSteps, integration.StepKey) || output.IntegrationReceipt == nil || *output.IntegrationReceipt != *receipt || output.Execution.FanInReceipt == nil || *output.Execution.FanInReceipt != *receipt {
+		return false, deliveryplansteps.AggregationPendingReason + ": integration result does not match its receipt", nil
+	}
+	criteria := []string{}
+	if json.Unmarshal([]byte(integration.AcceptanceCriteriaJSON), &criteria) != nil || len(criteria) == 0 || len(output.PlanStepEvidence) != 1 {
+		return false, deliveryplansteps.AggregationPendingReason + ": integration output omitted final acceptance evidence", nil
+	}
+	outputEvidence := output.PlanStepEvidence[0]
+	if outputEvidence.PlanID != plan.ID.String() || outputEvidence.PlanVersion != plan.Version || outputEvidence.StepID != integration.ID.String() || outputEvidence.StepKey != integration.StepKey || !sameAutomationStrings(outputEvidence.AcceptanceCriteria, criteria) || outputEvidence.VerifiedAt.IsZero() || !validPlanIntegrationOutputChecks(criteria, outputEvidence.Checks) {
+		return false, deliveryplansteps.AggregationPendingReason + ": integration output acceptance evidence is not exact", nil
+	}
+
+	parentResult := map[string]json.RawMessage{}
+	if json.Unmarshal(content, &parentResult) != nil {
+		return false, deliveryplansteps.AggregationPendingReason + ": integration result JSON is invalid", nil
+	}
+	parentResult["task_id"], _ = json.Marshal(parent.ID.String())
+	parentResult["integration_task_id"], _ = json.Marshal(child.ID.String())
+	parentResult["plan_hash"], _ = json.Marshal(execution.PlanHash)
+	parentResult["plan_execution_id"], _ = json.Marshal(execution.ID.String())
+	proof := map[string]any{
+		"schema_version": 1, "parent_task_id": parent.ID.String(), "execution_id": execution.ID.String(),
+		"plan_id": plan.ID.String(), "plan_version": plan.Version, "plan_hash": execution.PlanHash,
+		"integration_step_id": integration.ID.String(), "integration_step_key": integration.StepKey,
+		"integration_task_id": child.ID.String(), "run_id": integration.RunID, "fencing_token": integration.LeaseFence,
+		"worker_id": identity.WorkerID, "agent_key": identity.AgentKey, "machine_id": identity.MachineID,
+		"evidence_event_id": events[0].ID.String(), "evidence_sequence": events[0].Sequence,
+		"evidence_verified_at": outputEvidence.VerifiedAt.UTC(), "acceptance_checks": details.AcceptanceChecks,
+		"applied_dependency_manifest_sha256": details.AppliedDependencyManifestSHA256,
+		"applied_dependency_patch_count":     details.AppliedDependencyPatchCount,
+		"final_artifacts":                    details.PatchArtifacts,
+	}
+	parentResult["fan_in"], _ = json.Marshal(proof)
+	parentOutput, err := json.Marshal(parentResult)
+	if err != nil {
+		return false, "", err
+	}
+	parentKey := "automation/" + parent.ID.String() + "/runs/" + ledgerRunID + "/result.json"
+	if err := awsrepository.UploadEncryptedJSON(tx.Statement.Context, parentOutput, parentKey, cfg.AutomationOutputBucket); err != nil {
+		return false, "", fmt.Errorf("store verified parent fan-in result: %w", err)
+	}
+	parent.OutputRef = "s3://" + cfg.AutomationOutputBucket + "/" + parentKey
+	changes, err := implementationChangeSetsForHandoff(&parent, request.Execution, now)
+	if err != nil || len(changes) != len(expectedRepositories) {
+		return false, deliveryplansteps.AggregationPendingReason + ": final review handoff does not cover every repository", nil
+	}
+	changesByRepository := make(map[string]models.DeliveryChangeSet, len(changes))
+	for _, change := range changes {
+		if _, duplicate := changesByRepository[change.RepositoryRef]; duplicate || change.CIStatus != "passed" {
+			return false, deliveryplansteps.AggregationPendingReason + ": final repository review handoff is duplicated or unverified", nil
+		}
+		changesByRepository[change.RepositoryRef] = change
+	}
+	for _, artifact := range artifactRows {
+		change, found := changesByRepository[artifact.RepositoryRef]
+		var metadata struct {
+			ReviewDiffSHA256 string `json:"review_diff_sha256"`
+		}
+		if !found || json.Unmarshal([]byte(change.MetadataJSON), &metadata) != nil || metadata.ReviewDiffSHA256 != artifact.SHA256 {
+			return false, deliveryplansteps.AggregationPendingReason + ": final review handoff does not match its repository artifact", nil
+		}
+	}
+	if err := persistVerifiedPlanFanInChangeSets(tx, changes, now); err != nil {
+		return false, "", err
+	}
+	parentResultUpdate := tx.Model(&models.AutomationTask{}).Where("id = ? AND status = ?", parent.ID, "queued").Updates(map[string]any{
+		"status": "completed", "output_ref": parent.OutputRef, "error_message": "", "progress_step": "completed",
+		"completed_at": now, "budget_reservation_micros": 0, "budget_reservation_expires_at": nil, "updated_at": now,
+	})
+	if parentResultUpdate.Error != nil {
+		return false, "", parentResultUpdate.Error
+	}
+	if parentResultUpdate.RowsAffected != 1 {
+		return false, "", fmt.Errorf("parent task changed during locked verified fan-in")
+	}
+	executionUpdate := tx.Model(&models.DeliveryPlanExecution{}).
+		Where("id = ? AND automation_task_id = ? AND plan_hash = ? AND status IN ?", execution.ID, parent.ID, execution.PlanHash, []string{models.DeliveryPlanExecutionDispatching, models.DeliveryPlanExecutionRunning}).
+		Updates(map[string]any{"status": models.DeliveryPlanExecutionCompleted, "completed_at": now, "updated_at": now})
+	if executionUpdate.Error != nil {
+		return false, "", executionUpdate.Error
+	}
+	if executionUpdate.RowsAffected != 1 {
+		return false, "", fmt.Errorf("plan execution changed during locked verified fan-in")
+	}
+	return true, "", nil
+}
+
+func sameAutomationStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func containsAutomationString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func validPlanIntegrationOutputChecks(criteria []string, checks []planIntegrationOutputCheck) bool {
+	if len(criteria) == 0 || len(checks) != len(criteria) {
+		return false
+	}
+	expected := make(map[string]struct{}, len(criteria))
+	for _, criterion := range criteria {
+		expected[criterion] = struct{}{}
+	}
+	for _, check := range checks {
+		if !check.Passed {
+			return false
+		}
+		if _, found := expected[check.Criterion]; !found {
+			return false
+		}
+		delete(expected, check.Criterion)
+	}
+	return len(expected) == 0
+}
+
+func persistVerifiedPlanFanInChangeSets(tx *gorm.DB, changes []models.DeliveryChangeSet, now time.Time) error {
+	for _, change := range changes {
+		var existing models.DeliveryChangeSet
+		err := tx.Where("work_item_id = ? AND repository_ref = ? AND branch = ?", change.WorkItemID, change.RepositoryRef, change.Branch).First(&existing).Error
+		if err == nil {
+			if existing.ReviewType != change.ReviewType || existing.CIStatus != change.CIStatus || existing.Environment != change.Environment || existing.MetadataJSON != change.MetadataJSON || existing.CreatedBy != change.CreatedBy {
+				return fmt.Errorf("fan-in review record conflicts with existing repository evidence")
+			}
+			continue
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		change.CreatedAt = now
+		change.UpdatedAt = now
+		if err := tx.Create(&change).Error; err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func onboardingCapabilityProbeForTask(task *models.AutomationTask, raw json.RawMessage) (automationagent.OnboardingProbeExecution, string, error) {
-	if task == nil || task.ID == uuid.Nil || task.Operation != "delivery.onboarding_probe" || task.DeliveryOnboardingID == nil || *task.DeliveryOnboardingID == uuid.Nil {
-		return automationagent.OnboardingProbeExecution{}, "", fmt.Errorf("only a bounded onboarding task may append capability probes")
+// Assignment completion is recorded by the fenced plan-step callback before
+// the child stores its final output and submits its AutomationTask callback.
+// Treat a still-active child row as active even if its step is already marked
+// completed, so fan-in cannot release the parent budget or block continuation
+// while a sibling still has a terminal callback in flight.
+func persistAndOverlayPlanChildTaskStates(tx *gorm.DB, assignments []models.DeliveryPlanStepAssignment, now time.Time) ([]models.DeliveryPlanStepAssignment, error) {
+	if len(assignments) == 0 {
+		return []models.DeliveryPlanStepAssignment{}, nil
 	}
-	execution, err := automationagent.DecodeOnboardingProbeExecution(raw)
-	if err != nil || execution.TaskID != task.ID.String() {
-		return automationagent.OnboardingProbeExecution{}, "", fmt.Errorf("onboarding capability probes do not match their automation task")
+	childIDs := make([]uuid.UUID, 0, len(assignments))
+	indexByTaskID := make(map[uuid.UUID]int, len(assignments))
+	for index, assignment := range assignments {
+		childIDs = append(childIDs, assignment.ChildAutomationTaskID)
+		indexByTaskID[assignment.ChildAutomationTaskID] = index
 	}
-	queuedSubject := strings.ToLower(strings.TrimSpace(task.EvidenceSubjectDigest))
-	if !artifactDigestPattern.MatchString(queuedSubject) {
-		return automationagent.OnboardingProbeExecution{}, "", fmt.Errorf("onboarding capability probe task has no exact proposal subject")
+	var tasks []models.AutomationTask
+	if err := tx.Select("id", "status").Where("id IN ?", childIDs).Find(&tasks).Error; err != nil {
+		return nil, err
 	}
-	return execution, queuedSubject, nil
+	if len(tasks) != len(assignments) {
+		return nil, fmt.Errorf("one or more plan-step child tasks are missing during fan-in")
+	}
+	result := append([]models.DeliveryPlanStepAssignment(nil), assignments...)
+	for _, task := range tasks {
+		index, exists := indexByTaskID[task.ID]
+		if !exists {
+			return nil, fmt.Errorf("fan-in returned a task outside the assignment set")
+		}
+		status, err := effectivePlanStepAssignmentStatus(result[index].Status, task.Status)
+		if err != nil {
+			return nil, err
+		}
+		if status != result[index].Status && (task.Status == "failed" || task.Status == "cancelled" || (task.Status == "completed" && status == models.DeliveryPlanStepAssignmentBlocked)) {
+			update := tx.Model(&models.DeliveryPlanStepAssignment{}).Where("id = ?", result[index].ID).Updates(map[string]any{
+				"status": status, "completed_at": now, "updated_at": now,
+			})
+			if update.Error != nil {
+				return nil, update.Error
+			}
+			if update.RowsAffected != 1 {
+				return nil, fmt.Errorf("child task terminal state could not be synchronized to its assignment")
+			}
+		}
+		result[index].Status = status
+	}
+	return result, nil
 }
 
-func persistReleaseGateEvaluation(tx *gorm.DB, task *models.AutomationTask, raw json.RawMessage, completedAt time.Time) error {
-	if tx == nil || completedAt.IsZero() {
-		return fmt.Errorf("only a bounded release Gatekeeper task may append an evaluation")
-	}
-	workItemID, actor, input, environment, err := releaseGateCandidateForTask(task, raw)
-	if err != nil {
-		return err
-	}
-	if environment != nil {
-		if _, _, err := deliveryledger.RecordEnvironmentObservation(tx, workItemID, *environment, completedAt.UTC()); err != nil {
-			return err
+func effectivePlanStepAssignmentStatus(assignmentStatus, childTaskStatus string) (string, error) {
+	switch childTaskStatus {
+	case "queued", "running", "cancel_requested":
+		return models.DeliveryPlanStepAssignmentRunning, nil
+	case "failed":
+		return models.DeliveryPlanStepAssignmentFailed, nil
+	case "cancelled":
+		return models.DeliveryPlanStepAssignmentCancelled, nil
+	case "completed":
+		if assignmentStatus == models.DeliveryPlanStepAssignmentPending || assignmentStatus == models.DeliveryPlanStepAssignmentQueued || assignmentStatus == models.DeliveryPlanStepAssignmentDispatched || assignmentStatus == models.DeliveryPlanStepAssignmentRunning {
+			return models.DeliveryPlanStepAssignmentBlocked, nil
 		}
+		return assignmentStatus, nil
+	default:
+		return "", fmt.Errorf("plan-step child task has an unsupported terminal state")
 	}
-	input, err = releasegatecontrol.Resolve(tx, workItemID, input, completedAt.UTC())
-	if err != nil {
-		return err
-	}
-	preApproval := releasegate.Evaluate(input)
-	if preApproval.SubjectDigest == "" {
-		return fmt.Errorf("release Gatekeeper execution has no exact subject")
-	}
-	input.HumanApproval = &releasegate.HumanApproval{Actor: actor, ActorType: "human", SubjectDigest: preApproval.SubjectDigest, Approved: true}
-	if _, _, err := deliveryledger.RecordGateEvaluation(tx, workItemID, input, completedAt.UTC()); err != nil {
-		return err
-	}
-	return nil
 }
 
-func persistQAObservation(tx *gorm.DB, task *models.AutomationTask, raw json.RawMessage, completedAt time.Time) error {
-	if tx == nil || completedAt.IsZero() {
-		return fmt.Errorf("only a bounded QA task may append an observation")
-	}
-	workItemID, observation, err := qaObservationForTask(task, raw)
+func enqueueReadyPlanStepsInTransaction(tx *gorm.DB, executionID uuid.UUID, now time.Time) (int, error) {
+	execution, readySteps, err := deliveryplansteps.ReadyPlanStepsInTransaction(tx, executionID, now)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	if _, _, err := deliveryledger.RecordQAObservation(tx, workItemID, observation, completedAt.UTC()); err != nil {
-		return err
+	if len(readySteps) == 0 {
+		return 0, nil
 	}
-	security, complete, err := securityObservationFromQA(observation)
+	var parent models.AutomationTask
+	if err := tx.First(&parent, "id = ?", execution.AutomationTaskID).Error; err != nil {
+		return 0, err
+	}
+	if parent.DeliveryWorkItemID == nil || parent.Operation != "delivery.implementation" || parent.Status != "queued" {
+		return 0, fmt.Errorf("approved-plan parent is not eligible for child dispatch")
+	}
+	var item models.DeliveryWorkItem
+	if err := tx.First(&item, "id = ?", *parent.DeliveryWorkItemID).Error; err != nil {
+		return 0, err
+	}
+	var plan models.DeliveryPlan
+	if err := tx.First(&plan, "id = ?", execution.PlanID).Error; err != nil {
+		return 0, err
+	}
+	var steps []models.DeliveryPlanStep
+	if err := tx.Where("plan_id = ?", plan.ID).Order("display_order ASC, id ASC").Find(&steps).Error; err != nil {
+		return 0, err
+	}
+	var dependencies []models.DeliveryPlanStepDependency
+	if err := tx.Where("plan_id = ?", plan.ID).Order("step_id ASC, depends_on_step_id ASC").Find(&dependencies).Error; err != nil {
+		return 0, err
+	}
+	dtos, err := deliveryplansteps.DTOs(steps, dependencies, plan.Version)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	if complete {
-		if _, _, err := deliveryledger.RecordSecurityObservation(tx, workItemID, security, completedAt.UTC()); err != nil {
-			return err
+	stepDTOs := make(map[uuid.UUID]deliveryplansteps.StepDTO, len(dtos))
+	for _, step := range dtos {
+		stepID, parseErr := uuid.FromString(step.ID)
+		if parseErr != nil || stepID == uuid.Nil || step.PlanID != plan.ID.String() || step.PlanVersion != execution.PlanVersion {
+			return 0, fmt.Errorf("current plan DTO does not match the frozen execution")
 		}
+		stepDTOs[stepID] = step
 	}
-	return nil
-}
-
-const (
-	securitySecretsTestKind      = "security:secrets"
-	securityHighCriticalTestKind = "security:high-critical"
-)
-
-// securityObservationFromQA promotes only operator-owned reserved command
-// identities. Missing scanners do not become an event, so the release gate
-// remains explicitly missing instead of treating an unavailable tool as pass.
-func securityObservationFromQA(observation qaevidence.Observation) (securityevidence.Observation, bool, error) {
-	if err := qaevidence.Validate(observation); err != nil {
-		return securityevidence.Observation{}, false, err
+	childTaskIDs := make(map[uuid.UUID]uuid.UUID, len(readySteps))
+	for _, step := range readySteps {
+		if _, found := stepDTOs[step.ID]; !found {
+			return 0, fmt.Errorf("ready step is not present in the frozen plan snapshot")
+		}
+		childID := deliveryplansteps.ChildAutomationTaskID(execution.ID, step.ID)
+		var child models.AutomationTask
+		if err := tx.First(&child, "id = ?", childID).Error; err != nil {
+			return 0, fmt.Errorf("precreated child task is missing: %w", err)
+		}
+		if child.JobID != deliveryplansteps.ChildAutomationJobID(execution.ID, step.ID) || child.DeliveryWorkItemID == nil || *child.DeliveryWorkItemID != item.ID || child.Operation != parent.Operation || child.InputRef != parent.InputRef {
+			return 0, fmt.Errorf("precreated child task does not match its execution parent")
+		}
+		childTaskIDs[step.ID] = childID
 	}
-	repositories := make([]securityevidence.Repository, 0, len(observation.Repositories))
-	for _, repository := range observation.Repositories {
-		commands := make(map[string]qaevidence.Command, len(repository.Commands))
-		for _, command := range repository.Commands {
-			commands[strings.ToLower(command.Kind)] = command
+	assignments, err := deliveryplansteps.ReserveReadyAssignmentsInTransaction(tx, execution.ID, execution.MaxConcurrency, childTaskIDs, now)
+	if err != nil {
+		return 0, err
+	}
+	if len(assignments) != len(childTaskIDs) {
+		return 0, fmt.Errorf("reserved assignments differ from ready plan steps")
+	}
+	for _, assignment := range assignments {
+		step, found := stepDTOs[assignment.DeliveryPlanStepID]
+		childID, mapped := childTaskIDs[assignment.DeliveryPlanStepID]
+		if !found || !mapped || childID != assignment.ChildAutomationTaskID {
+			return 0, fmt.Errorf("reserved assignment does not match its targeted child")
 		}
-		secretScan, hasSecretScan := commands[securitySecretsTestKind]
-		highCritical, hasHighCritical := commands[securityHighCriticalTestKind]
-		if !hasSecretScan || !hasHighCritical {
-			return securityevidence.Observation{}, false, nil
-		}
-		highFindings := 0
-		if !highCritical.Passed {
-			// The bounded command contract exposes pass/fail, not scanner details.
-			// One means at least one high-or-critical finding was observed.
-			highFindings = 1
-		}
-		repositories = append(repositories, securityevidence.Repository{
-			Reference: repository.Reference, Branch: repository.Branch, SecretScanPassed: secretScan.Passed,
-			HighFindings: highFindings, CriticalFindings: 0,
+		result := tx.Model(&models.DeliveryPlanStepAssignment{}).Where("id = ? AND status IN ?", assignment.ID, []string{models.DeliveryPlanStepAssignmentPending, models.DeliveryPlanStepAssignmentQueued}).Updates(map[string]any{
+			"status": models.DeliveryPlanStepAssignmentQueued, "queued_at": now, "updated_at": now,
 		})
+		if result.Error != nil {
+			return 0, result.Error
+		}
+		if result.RowsAffected != 1 {
+			return 0, fmt.Errorf("new plan-step assignment could not be queued")
+		}
+		var child models.AutomationTask
+		if err := tx.First(&child, "id = ?", childID).Error; err != nil {
+			return 0, err
+		}
+		queuedChild := tx.Model(&models.AutomationTask{}).Where("id = ? AND status IN ?", child.ID, []string{"pending", "queued"}).Updates(map[string]any{"status": "queued", "updated_at": now})
+		if queuedChild.Error != nil {
+			return 0, queuedChild.Error
+		}
+		if queuedChild.RowsAffected != 1 {
+			return 0, fmt.Errorf("precreated child task is not eligible for first dispatch")
+		}
+		message := planStepChildQueueMessage(item, child, step)
+		message.Payload.AgentKey = assignment.TargetAgentKey
+		message.Payload.TargetMachineID = assignment.TargetMachineID
+		if _, err := outboxService.EnqueueAutomationProcess(tx.Statement.Context, tx, message); err != nil {
+			return 0, err
+		}
 	}
-	security := securityevidence.Observation{
-		SchemaVersion: securityevidence.SchemaVersion, TaskID: observation.TaskID, MatrixDigest: observation.MatrixDigest, Repositories: repositories,
+	result := tx.Model(&models.DeliveryPlanExecution{}).Where("id = ? AND status IN ?", execution.ID, []string{models.DeliveryPlanExecutionPending, models.DeliveryPlanExecutionDispatching}).Updates(map[string]any{
+		"status": models.DeliveryPlanExecutionDispatching, "dispatched_at": now, "updated_at": now,
+	})
+	if result.Error != nil {
+		return 0, result.Error
 	}
-	if err := securityevidence.Validate(security); err != nil {
-		return securityevidence.Observation{}, false, err
+	if err := tx.Model(&models.DeliveryWorkItem{}).Where("id = ?", item.ID).Updates(map[string]any{
+		"agent_progress": "queued", "blocked_reason": "", "updated_at": now,
+	}).Error; err != nil {
+		return 0, err
 	}
-	return security, true, nil
+	return len(assignments), nil
 }
 
-func qaObservationForTask(task *models.AutomationTask, raw json.RawMessage) (uuid.UUID, qaevidence.Observation, error) {
-	if task == nil || task.ID == uuid.Nil || task.Operation != "delivery.qa" || task.DeliveryWorkItemID == nil || *task.DeliveryWorkItemID == uuid.Nil {
-		return uuid.Nil, qaevidence.Observation{}, fmt.Errorf("only a bounded QA task may append an observation")
-	}
-	observation, err := qaevidence.Decode(raw)
-	if err != nil {
-		return uuid.Nil, qaevidence.Observation{}, err
-	}
-	subject := strings.ToLower(strings.TrimSpace(task.EvidenceSubjectDigest))
-	if observation.TaskID != task.ID.String() || !strings.EqualFold(observation.MatrixDigest, subject) || !artifactDigestPattern.MatchString(subject) {
-		return uuid.Nil, qaevidence.Observation{}, fmt.Errorf("QA observation does not match its exact queued subject")
-	}
-	return *task.DeliveryWorkItemID, observation, nil
+func planStepChildQueueMessage(item models.DeliveryWorkItem, child models.AutomationTask, step deliveryplansteps.StepDTO) automationqueue.Message {
+	message := automationqueue.Message{SchemaVersion: 1, JobID: child.JobID.String(), TenantCode: "itbem", CorrelationID: child.CorrelationID, Type: "ai.local.process"}
+	message.Payload.TaskID = child.ID.String()
+	message.Payload.ProjectID = item.ProjectID.String()
+	message.Payload.AgentKey = strings.TrimSpace(step.AgentKey)
+	message.Payload.PlanStepID = strings.TrimSpace(step.ID)
+	message.Payload.Operation = child.Operation
+	message.Payload.MaxCompletionTokens = child.MaxCompletionTokens
+	message.Payload.InputRef = child.InputRef
+	message.Payload.Attempt = 1
+	return message
 }
 
-func releaseGateCandidateForTask(task *models.AutomationTask, raw json.RawMessage) (uuid.UUID, string, releasegate.Input, *environmentevidence.Observation, error) {
-	if task == nil || task.Operation != "delivery.release_gate" || task.DeliveryWorkItemID == nil || *task.DeliveryWorkItemID == uuid.Nil {
-		return uuid.Nil, "", releasegate.Input{}, nil, fmt.Errorf("only a bounded release Gatekeeper task may append an evaluation")
+func activePlanStepAssignmentStatuses() []string {
+	return []string{models.DeliveryPlanStepAssignmentPending, models.DeliveryPlanStepAssignmentQueued, models.DeliveryPlanStepAssignmentDispatched, models.DeliveryPlanStepAssignmentRunning}
+}
+
+func retryableMachineDispatchReason(err error) string {
+	reason := strings.TrimSpace(err.Error())
+	if reason == "" {
+		reason = "No hay un agente local reciente con el perfil y todos los workspaces congelados listos en Docker. Se reintentará cuando llegue un heartbeat compatible."
 	}
-	actor := strings.TrimSpace(task.RequestedBy)
-	if actor == "" || actor == "github-app-review" || actor == "itbem-local-agent" || actor == "itbem-github-app" {
-		return uuid.Nil, "", releasegate.Input{}, nil, fmt.Errorf("release Gatekeeper task does not have an authenticated human requester")
+	if len(reason) > 512 {
+		reason = reason[:512]
 	}
-	var handoff map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &handoff); err != nil || (len(handoff) != 2 && len(handoff) != 3) {
-		return uuid.Nil, "", releasegate.Input{}, nil, fmt.Errorf("release Gatekeeper execution metadata is invalid")
+	return reason
+}
+
+func persistPlanAggregationPendingInTransaction(tx *gorm.DB, parent models.AutomationTask, item models.DeliveryWorkItem, execution models.DeliveryPlanExecution, reason string, now time.Time) error {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = deliveryplansteps.AggregationPendingReason
 	}
-	var schemaVersion int
-	if err := json.Unmarshal(handoff["schema_version"], &schemaVersion); err != nil || (schemaVersion != 1 && schemaVersion != 2) || (schemaVersion == 1 && len(handoff) != 2) || (schemaVersion == 2 && len(handoff) != 3) {
-		return uuid.Nil, "", releasegate.Input{}, nil, fmt.Errorf("release Gatekeeper execution schema is invalid")
+	updates := map[string]any{"agent_progress": "blocked", "blocked_reason": reason, "updated_at": now}
+	if err := tx.Model(&models.DeliveryWorkItem{}).Where("id = ?", item.ID).Updates(updates).Error; err != nil {
+		return err
 	}
-	input, err := releasegate.DecodeInput(handoff["gatekeeper_input"])
-	if err != nil || input.SchemaVersion != releasegate.SchemaVersion || input.Action != releasegate.ActionRelease || input.ChangeSetID != task.DeliveryWorkItemID.String() || input.HumanApproval != nil {
-		return uuid.Nil, "", releasegate.Input{}, nil, fmt.Errorf("release Gatekeeper execution candidate is invalid")
+	// Keep the parent queued and the execution running: neither a failed nor a
+	// completed aggregate exists. Stop its continuation from interpreting the
+	// parent's intentionally empty result as a normal implementation result.
+	if err := tx.Model(&models.AutomationTask{}).Where("id = ? AND status = ?", parent.ID, "queued").Updates(map[string]any{
+		"progress_step":             "aggregation_pending",
+		"budget_reservation_micros": 0, "budget_reservation_expires_at": nil, "updated_at": now,
+	}).Error; err != nil {
+		return err
 	}
-	if schemaVersion == 1 {
-		// Rolling upgrades may finish a task on an old release worker. Accept its
-		// exact GitHub PR/check candidate but attach no environment event, so the
-		// deterministic Gatekeeper remains blocked until a schema-v2 rerun.
-		return *task.DeliveryWorkItemID, actor, input, nil, nil
+	if err := tx.Model(&models.DeliveryPlanExecution{}).Where("id = ? AND status IN ?", execution.ID, []string{models.DeliveryPlanExecutionPending, models.DeliveryPlanExecutionDispatching, models.DeliveryPlanExecutionRunning}).Updates(map[string]any{
+		"status": models.DeliveryPlanExecutionRunning, "updated_at": now,
+	}).Error; err != nil {
+		return err
 	}
-	environment, err := environmentevidence.Decode(handoff["environment_observation"])
-	subject := strings.ToLower(strings.TrimSpace(task.EvidenceSubjectDigest))
-	if err != nil || environment.TaskID != task.ID.String() || !strings.EqualFold(environment.MatrixDigest, subject) || !artifactDigestPattern.MatchString(subject) {
-		return uuid.Nil, "", releasegate.Input{}, nil, fmt.Errorf("release environment observation does not match its exact queued subject")
+	if parent.ContinuationID != nil {
+		if err := tx.Model(&models.DeliveryContinuation{}).Where("id = ? AND status NOT IN ?", *parent.ContinuationID, []string{"done", "superseded"}).Updates(map[string]any{
+			"status": "blocked", "available_at": now, "updated_at": now,
+		}).Error; err != nil {
+			return err
+		}
+	} else {
+		if err := tx.Model(&models.DeliveryContinuation{}).Where("work_item_id = ? AND epoch = ? AND phase = ? AND status IN ?", item.ID, item.AutomationEpoch, "implementation", []string{"pending", "claimed", "dispatched"}).Updates(map[string]any{
+			"status": "blocked", "available_at": now, "updated_at": now,
+		}).Error; err != nil {
+			return err
+		}
 	}
-	return *task.DeliveryWorkItemID, actor, input, &environment, nil
+	message := planAggregationPendingMessage(item, execution, reason, now)
+	return tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&message).Error
+}
+
+func planAggregationPendingMessage(item models.DeliveryWorkItem, execution models.DeliveryPlanExecution, reason string, now time.Time) models.DeliveryMessage {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = deliveryplansteps.AggregationPendingReason
+	}
+	receipt, _ := json.Marshal(map[string]any{
+		"version": 1, "status": "aggregation_pending", "reason": reason,
+		"required_artifact": "verified_parent_workspace_merge_and_full_plan_acceptance_receipt",
+	})
+	return models.DeliveryMessage{
+		ID:         uuid.NewV5(uuid.NamespaceURL, "delivery-plan-aggregation-pending/"+execution.ID.String()),
+		WorkItemID: item.ID, Phase: "implementation", AuthorType: "agent", AuthorID: "itbem-runtime",
+		Body: reason, Intent: "agent_update", Effect: "workflow_observation", ReceiptJSON: string(receipt), CreatedAt: now,
+	}
 }
 
 func buildToolExecutionLedger(cfg *models.Config, task *models.AutomationTask, runID, status string, reported []callbackToolExecution, artifacts []callbackArtifact, completedAt time.Time) ([]models.AutomationToolExecution, error) {
 	if len(reported) == 0 {
 		return nil, nil
 	}
-	if task == nil || strings.TrimSpace(status) != "completed" || task.Operation != "delivery.qa" || task.DeliveryWorkItemID == nil || len(reported) > 6 {
+	agentLoop := task != nil && task.Operation == "delivery.implementation" && (status == "completed" || status == "failed")
+	if task == nil || (!agentLoop && ((strings.TrimSpace(status) != "completed" && strings.TrimSpace(status) != "failed") || task.Operation != "delivery.qa")) || task.DeliveryWorkItemID == nil || len(reported) > 6 {
 		return nil, fmt.Errorf("only bounded completed delivery QA tool calls are allowed")
 	}
 	artifactReferences := make(map[string]callbackArtifact, len(artifacts))
@@ -3130,6 +4192,7 @@ func buildToolExecutionLedger(cfg *models.Config, task *models.AutomationTask, r
 		}
 		rows = append(rows, models.AutomationToolExecution{
 			AutomationTaskID: task.ID, DeliveryWorkItemID: task.DeliveryWorkItemID, RunID: runID, Tool: tool, CallKey: callKey, CallStatus: callStatus, StepKey: stepKey,
+			WorkerID: task.WorkerID, AgentKey: task.AgentKey, MachineID: task.MachineID,
 			Provider: provider, Model: model, InputTokens: ledger.InputTokens, OutputTokens: ledger.OutputTokens, CachedInputTokens: ledger.CachedInputTokens,
 			CacheWriteTokens: ledger.CacheWriteTokens, ReasoningTokens: ledger.ReasoningTokens, TotalTokens: ledger.TotalTokens,
 			InputCostMicros: ledger.InputCostMicros, OutputCostMicros: ledger.OutputCostMicros, CachedCostMicros: ledger.CachedCostMicros,
@@ -3143,23 +4206,103 @@ func buildToolExecutionLedger(cfg *models.Config, task *models.AutomationTask, r
 // claimAutomationTaskRun gives at most one worker a renewable, opaque lease.
 // A redelivered SQS message is therefore harmless while the original worker is
 // active; a genuinely abandoned run becomes recoverable after the lease.
-func claimAutomationTaskRun(c echo.Context, id uuid.UUID, runID string) error {
-	now := time.Now().UTC()
-	expiresAt := now.Add(automationRunLeaseDuration)
-	reservationExpiresAt := now.Add(2 * automationRunLeaseDuration)
+func claimAutomationTaskRun(c echo.Context, id uuid.UUID, runID string, progress ...callbackRequest) error {
+	var now, expiresAt, reservationExpiresAt time.Time
+	claimIdentity := automationagent.AgentIdentity{}
+	if len(progress) == 0 {
+		return utils.Error(c, http.StatusBadRequest, "Invalid automation claim", "a worker identity is required")
+	}
+	var identityErr error
+	claimIdentity, identityErr = validateAgentClaimIdentity(configuration.DB, id, progress[0])
+	if identityErr != nil || claimIdentity.WorkerID == "" || claimIdentity.AgentKey == "" || claimIdentity.MachineID == "" {
+		return utils.Error(c, http.StatusBadRequest, "Invalid automation claim", "worker identity or profile is invalid")
+	}
+	callbackIdentity, callbackAuthenticated := currentAgentCallbackIdentity(c)
+	if !callbackAuthenticated || callbackIdentity.AgentKey != claimIdentity.AgentKey || callbackIdentity.MachineID != claimIdentity.MachineID {
+		return utils.Error(c, http.StatusUnauthorized, "Unauthorized", "")
+	}
+	if !validAgentProgress(progress[0].ProgressStep, progress[0].ProgressCall) {
+		return utils.Error(c, http.StatusBadRequest, "Invalid automation claim", "progress label is invalid")
+	}
 	claimed := false
-	retryAfterSeconds := int64(0)
+	busy := false
+	var retryAfterSeconds int64
+	inferenceToken := ""
 	if err := configuration.DB.Transaction(func(tx *gorm.DB) error {
+		var assignment models.DeliveryPlanStepAssignment
+		assignmentErr := tx.Where("child_automation_task_id = ?", id).Take(&assignment).Error
+		if assignmentErr == nil {
+			var child models.AutomationTask
+			if err := tx.Select("id", "delivery_work_item_id", "status").First(&child, "id = ?", id).Error; err != nil {
+				return err
+			}
+			// A terminal child may still have its immutable assignment row. Do
+			// not classify its redelivery as busy merely because the assignment is
+			// now terminal; the queue can safely acknowledge it.
+			switch child.Status {
+			case "completed", "failed", "cancelled", "cancel_requested":
+				return nil
+			}
+			if !planStepAssignmentTargetProfileMatches(assignment, claimIdentity) {
+				busy = true
+				return nil
+			}
+			if child.DeliveryWorkItemID == nil {
+				busy = true
+				return nil
+			}
+			var validationErr error
+			now, validationErr = deliveryplansteps.ValidateAssignmentWorker(tx, &assignment, *child.DeliveryWorkItemID,
+				claimIdentity.WorkerID, claimIdentity.AgentKey, claimIdentity.MachineID, time.Time{})
+			if validationErr != nil {
+				if errors.Is(validationErr, deliveryplansteps.ErrNoEligibleAgentMachine) {
+					busy = true
+					return nil
+				}
+				return validationErr
+			}
+		} else if !errors.Is(assignmentErr, gorm.ErrRecordNotFound) {
+			return assignmentErr
+		}
+		if now.IsZero() {
+			now = time.Now().UTC()
+		}
+		expiresAt = now.Add(automationRunLeaseDuration)
+		reservationExpiresAt = now.Add(2 * automationRunLeaseDuration)
 		// The budget hold intentionally outlives the execution lease. A worker
 		// may finish uploading a private result shortly after its 20-minute
 		// lease, while the queue needs time to redeliver a genuinely abandoned
 		// run. Keeping the admission hold for 40 minutes prevents that narrow
 		// recovery window from becoming unreserved spend.
 		updates := map[string]any{"status": "running", "run_id": runID, "lease_expires_at": expiresAt, "budget_reservation_expires_at": reservationExpiresAt, "attempt_count": gorm.Expr("attempt_count + ?", 1)}
+		renewal := map[string]any{"lease_expires_at": expiresAt, "budget_reservation_expires_at": reservationExpiresAt}
+		if claimIdentity.WorkerID != "" {
+			updates["worker_id"], updates["agent_key"], updates["machine_id"], updates["agent_instance_id"] = claimIdentity.WorkerID, claimIdentity.AgentKey, claimIdentity.MachineID, callbackIdentity.InstanceID
+			renewal["worker_id"], renewal["agent_key"], renewal["machine_id"], renewal["agent_instance_id"] = claimIdentity.WorkerID, claimIdentity.AgentKey, claimIdentity.MachineID, callbackIdentity.InstanceID
+		}
+		if len(progress) > 0 && progress[0].ProgressStep != "" {
+			updates["progress_step"], updates["progress_call"] = progress[0].ProgressStep, progress[0].ProgressCall
+			renewal["progress_step"], renewal["progress_call"] = progress[0].ProgressStep, progress[0].ProgressCall
+		}
 		result := tx.Model(&models.AutomationTask{}).Where("id = ? AND status = ?", id, "queued").Updates(updates)
 		if result.Error != nil || result.RowsAffected > 0 {
 			claimed = result.RowsAffected > 0
-			return result.Error
+			if result.Error != nil || !claimed {
+				return result.Error
+			}
+			var claimedTask models.AutomationTask
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&claimedTask, "id = ?", id).Error; err != nil {
+				return err
+			}
+			if _, err := freezeAutomationInferenceAttemptPolicy(tx, claimedTask, runID, now); err != nil {
+				return err
+			}
+			token, mintErr := mintAutomationInferenceCapability(claimedTask, now)
+			if mintErr != nil {
+				return mintErr
+			}
+			inferenceToken = token
+			return renewPlanExecutionParentReservationInTransaction(tx, id, reservationExpiresAt, now)
 		}
 		var current models.AutomationTask
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&current, id).Error; err != nil {
@@ -3169,9 +4312,51 @@ func claimAutomationTaskRun(c echo.Context, id uuid.UUID, runID string) error {
 			return nil
 		}
 		if current.RunID == runID {
-			result := tx.Model(&models.AutomationTask{}).Where("id = ? AND status = ? AND run_id = ?", id, "running", runID).Updates(map[string]any{"lease_expires_at": expiresAt, "budget_reservation_expires_at": reservationExpiresAt})
+			if claimIdentity.WorkerID != "" && current.WorkerID != "" && (current.WorkerID != claimIdentity.WorkerID || current.AgentKey != claimIdentity.AgentKey || current.MachineID != claimIdentity.MachineID) {
+				busy = true
+				return nil
+			}
+			snapshot, err := readAutomationInferenceAttemptPolicy(tx, current.ID, runID)
+			if err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					// Do not extend a pre-migration run's lease without an immutable
+					// inference policy snapshot for that exact attempt. Retain the
+					// queue delivery so it can be retried with a fresh RunID after
+					// the legacy lease expires.
+					busy = true
+					return nil
+				}
+				return err
+			}
+			if _, _, valid := validateAutomationInferenceAttemptPolicy(snapshot); !valid {
+				return errors.New("automation inference attempt policy snapshot is invalid")
+			}
+			var projectID *uuid.UUID
+			if current.DeliveryWorkItemID != nil {
+				var item models.DeliveryWorkItem
+				if err := tx.Select("project_id").First(&item, *current.DeliveryWorkItemID).Error; err != nil || item.ProjectID == uuid.Nil {
+					return errors.New("automation inference attempt project scope is invalid")
+				}
+				projectID = &item.ProjectID
+			}
+			if snapshot.AutomationTaskID != current.ID || snapshot.RunID != current.RunID ||
+				snapshot.Operation != current.Operation || snapshot.MaxCompletionTokens != current.MaxCompletionTokens ||
+				!sameInferenceProject(snapshot.ProjectID, projectID) {
+				return errors.New("automation inference attempt policy scope is invalid")
+			}
+			result := tx.Model(&models.AutomationTask{}).Where("id = ? AND status = ? AND run_id = ?", id, "running", runID).Updates(renewal)
 			claimed = result.RowsAffected > 0
-			return result.Error
+			if result.Error != nil || !claimed {
+				return result.Error
+			}
+			current.LeaseExpiresAt = &expiresAt
+			current.WorkerID, current.AgentKey, current.MachineID = claimIdentity.WorkerID, claimIdentity.AgentKey, claimIdentity.MachineID
+			token, mintErr := mintAutomationInferenceCapability(current, now)
+			if mintErr != nil {
+				return mintErr
+			}
+			inferenceToken = token
+			return renewPlanExecutionParentReservationInTransaction(tx, id, reservationExpiresAt, now)
 		}
 		if current.LeaseExpiresAt != nil && current.LeaseExpiresAt.After(now) {
 			retryAfterSeconds = automationLeaseRetryAfterSeconds(*current.LeaseExpiresAt, now)
@@ -3181,7 +4366,22 @@ func claimAutomationTaskRun(c echo.Context, id uuid.UUID, runID string) error {
 			Where("id = ? AND status = ? AND (lease_expires_at IS NULL OR lease_expires_at <= ?)", id, "running", now).
 			Updates(updates)
 		claimed = result.RowsAffected > 0
-		return result.Error
+		if result.Error != nil || !claimed {
+			return result.Error
+		}
+		var claimedTask models.AutomationTask
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&claimedTask, "id = ?", id).Error; err != nil {
+			return err
+		}
+		if _, err := freezeAutomationInferenceAttemptPolicy(tx, claimedTask, runID, now); err != nil {
+			return err
+		}
+		token, mintErr := mintAutomationInferenceCapability(claimedTask, now)
+		if mintErr != nil {
+			return mintErr
+		}
+		inferenceToken = token
+		return renewPlanExecutionParentReservationInTransaction(tx, id, reservationExpiresAt, now)
 	}); err != nil {
 		if err == gorm.ErrRecordNotFound {
 			return utils.Error(c, http.StatusNotFound, "Automation task not found", "")
@@ -3191,19 +4391,82 @@ func claimAutomationTaskRun(c echo.Context, id uuid.UUID, runID string) error {
 	if !claimed {
 		if retryAfterSeconds > 0 {
 			c.Response().Header().Set(retryLeaseHeader, strconv.FormatInt(retryAfterSeconds, 10))
+		}
+		if busy || retryAfterSeconds > 0 {
 			c.Response().Header().Set("X-ITBEM-Automation-Run-Busy", "1")
+		}
+		if busy {
+			return utils.Error(c, http.StatusConflict, "Automation run is not eligible for this worker", "The assigned worker identity or plan-step eligibility does not match")
 		}
 		return utils.Error(c, http.StatusConflict, "Automation run is already leased", "Another active worker owns this execution; no provider call will be duplicated")
 	}
+	c.Response().Header().Set(inferencecapability.HeaderName, inferenceToken)
+	c.Response().Header().Set(echo.HeaderCacheControl, "no-store")
 	return c.NoContent(http.StatusNoContent)
 }
 
-func automationLeaseRetryAfterSeconds(expiresAt, now time.Time) int64 {
-	remaining := expiresAt.Sub(now)
-	if remaining <= 0 {
-		return 0
+func mintAutomationInferenceCapability(task models.AutomationTask, now time.Time) (string, error) {
+	key, _, ok := activeAttemptPolicySigningKey()
+	if !ok || task.ID == uuid.Nil || task.LeaseExpiresAt == nil || !task.LeaseExpiresAt.After(now) {
+		return "", errors.New("automation inference capability signing or lease is unavailable")
 	}
-	return int64((remaining + time.Second - 1) / time.Second)
+	return inferencecapability.Mint(string(key), inferencecapability.Scope{
+		TaskID: task.ID.String(), RunID: task.RunID, Operation: task.Operation,
+		WorkerID: task.WorkerID, AgentKey: task.AgentKey, MachineID: task.MachineID,
+	}, inferencecapability.MaxTTL)
+}
+
+func planStepAssignmentTargetIdentityMatches(assignment models.DeliveryPlanStepAssignment, identity automationagent.AgentIdentity) bool {
+	if assignment.ID == uuid.Nil || identity.WorkerID == "" || identity.AgentKey == "" || identity.MachineID == "" ||
+		assignment.TargetMachineID == "" || assignment.TargetAgentKey == "" ||
+		identity.MachineID != assignment.TargetMachineID || identity.AgentKey != assignment.TargetAgentKey {
+		return false
+	}
+	for _, status := range activePlanStepAssignmentStatuses() {
+		if assignment.Status == status {
+			return true
+		}
+	}
+	return false
+}
+
+// planStepAssignmentTargetProfileMatches leaves machine eligibility to the
+// transactional delivery-plan validator. A redelivered queue message may be
+// claimed by another machine only after that validator proves the existing
+// task and step leases plus the old target heartbeat have expired.
+func planStepAssignmentTargetProfileMatches(assignment models.DeliveryPlanStepAssignment, identity automationagent.AgentIdentity) bool {
+	if assignment.ID == uuid.Nil || identity.WorkerID == "" || identity.AgentKey == "" || identity.MachineID == "" ||
+		assignment.TargetAgentKey == "" || identity.AgentKey != assignment.TargetAgentKey {
+		return false
+	}
+	for _, status := range activePlanStepAssignmentStatuses() {
+		if assignment.Status == status {
+			return true
+		}
+	}
+	return false
+}
+
+func renewPlanExecutionParentReservationInTransaction(tx *gorm.DB, childTaskID uuid.UUID, expiresAt, now time.Time) error {
+	if tx == nil || childTaskID == uuid.Nil {
+		return fmt.Errorf("plan-step reservation renewal is missing its transaction or child task")
+	}
+	var scope struct {
+		ParentTaskID uuid.UUID `gorm:"column:parent_task_id"`
+	}
+	err := tx.Table("delivery_plan_step_assignments AS assignment").
+		Select("execution.automation_task_id AS parent_task_id").
+		Joins("JOIN delivery_plan_executions AS execution ON execution.id = assignment.execution_id").
+		Where("assignment.child_automation_task_id = ?", childTaskID).Take(&scope).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil // legacy, non-fan-out implementation task
+	}
+	if err != nil {
+		return err
+	}
+	return tx.Model(&models.AutomationTask{}).
+		Where("id = ? AND status = ? AND budget_reservation_micros > 0", scope.ParentTaskID, "queued").
+		Updates(map[string]any{"budget_reservation_expires_at": expiresAt, "updated_at": now}).Error
 }
 
 type implementationExecutionHandoff struct {
@@ -3633,7 +4896,16 @@ func providerAllowed(provider string) bool {
 }
 
 func mayAccessTask(c echo.Context, task *models.AutomationTask, requestedBy string) bool {
-	if task != nil && strings.TrimSpace(requestedBy) != "" && task.RequestedBy == requestedBy {
+	if task == nil {
+		return false
+	}
+	// A delivery requester is not a permanent grant. Every read of its private
+	// execution evidence must still be authorized by current project membership
+	// (or platform-admin authority) so removing a member revokes access.
+	if task.DeliveryWorkItemID != nil {
+		return mayAccessDeliveryTask(c, task)
+	}
+	if strings.TrimSpace(requestedBy) != "" && task.RequestedBy == requestedBy {
 		return true
 	}
 	if mayAccessDeliveryTask(c, task) {

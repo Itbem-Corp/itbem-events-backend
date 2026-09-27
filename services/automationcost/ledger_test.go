@@ -13,7 +13,7 @@ func TestBuildNormalizesCacheAndUsesM3Pricing(t *testing.T) {
 	if ledger.CachedInputTokens != 500_000 || ledger.InputCostMicros != 300_000 || ledger.OutputCostMicros != 2_400_000 || ledger.CachedCostMicros != 60_000 || ledger.TotalCostMicros != 2_760_000 {
 		t.Fatalf("unexpected ledger: %#v", ledger)
 	}
-	if ledger.PricingBasis != "estimated_api_equivalent" {
+	if ledger.PricingBasis != "official_api_price" {
 		t.Fatalf("unexpected pricing basis: %s", ledger.PricingBasis)
 	}
 }
@@ -74,6 +74,25 @@ func TestBuildNormalizesMiniMaxM3ProviderUsageShape(t *testing.T) {
 	// micro-USD accounting rounds each independently and stays reproducible.
 	if ledger.InputCostMicros != 38 || ledger.CachedCostMicros != 15 || ledger.OutputCostMicros != 101 || ledger.TotalCostMicros != 154 {
 		t.Fatalf("unexpected MiniMax M3 ledger cost: %#v", ledger)
+	}
+}
+
+func TestBuildReadsCacheWriteFromNestedUsageDetails(t *testing.T) {
+	ledger, err := Build("openai", "gpt-6-sol", map[string]any{
+		"input_tokens":  1_000_000.0,
+		"output_tokens": 1_000_000.0,
+		"input_tokens_details": map[string]any{
+			"cached_tokens":         200_000.0,
+			"cache_creation_tokens": 100_000.0,
+		},
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 700K ordinary input at $1/M, 200K cache reads at $0.10/M,
+	// 100K cache writes at $1.25/M and 1M output at $5/M.
+	if ledger.InputCostMicros != 700000 || ledger.CachedCostMicros != 20000 || ledger.CacheWriteCostMicros != 125000 || ledger.OutputCostMicros != 5000000 || ledger.TotalCostMicros != 5845000 {
+		t.Fatalf("unexpected cache-aware ledger: %#v", ledger)
 	}
 }
 

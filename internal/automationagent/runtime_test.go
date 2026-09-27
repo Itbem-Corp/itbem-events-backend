@@ -2,14 +2,16 @@ package automationagent
 
 import "testing"
 
-func runtimeTestEnvironment(overrides map[string]string) func(string) string {
+func runtimeTestEnvironment(t *testing.T, overrides map[string]string) func(string) string {
+	t.Helper()
 	values := map[string]string{
-		"ITBEM_AI_QUEUE_URL":         "https://sqs.example/queue",
-		"AWS_REGION":                 "us-east-2",
-		"ITBEM_API_BASE_URL":         "https://api.example.com",
-		"AUTOMATION_CALLBACK_SECRET": "callback-secret",
-		"ITBEM_AI_INPUT_BUCKET":      "itbem-ai-inputs-test",
-		"ITBEM_AI_OUTPUT_BUCKET":     "itbem-ai-outputs-test",
+		"ITBEM_AI_QUEUE_URL":      "https://sqs.example/queue",
+		"AWS_REGION":              "us-east-2",
+		"ITBEM_API_BASE_URL":      "https://api.example.com",
+		"ITBEM_AGENT_INSTANCE_ID": "11111111-1111-4111-8111-111111111111",
+		"ITBEM_AI_STATE_DIR":      t.TempDir(),
+		"ITBEM_AI_INPUT_BUCKET":   "itbem-ai-inputs-test",
+		"ITBEM_AI_OUTPUT_BUCKET":  "itbem-ai-outputs-test",
 	}
 	for key, value := range overrides {
 		values[key] = value
@@ -18,11 +20,11 @@ func runtimeTestEnvironment(overrides map[string]string) func(string) string {
 }
 
 func TestLoadRuntimeConfigAcceptsLegacyOrExactRoleIdentity(t *testing.T) {
-	legacy, err := LoadRuntimeConfig(runtimeTestEnvironment(nil))
+	legacy, err := LoadRuntimeConfig(runtimeTestEnvironment(t, nil))
 	if err != nil || legacy.Role != "" || legacy.Lane != "" {
 		t.Fatalf("legacy runtime = %#v, %v", legacy, err)
 	}
-	reviewer, err := LoadRuntimeConfig(runtimeTestEnvironment(map[string]string{"ITBEM_AI_ROLE": "reviewer", "ITBEM_AI_QUEUE_LANE": "review"}))
+	reviewer, err := LoadRuntimeConfig(runtimeTestEnvironment(t, map[string]string{"ITBEM_AI_ROLE": "reviewer", "ITBEM_AI_QUEUE_LANE": "review"}))
 	if err != nil || reviewer.Role != "reviewer" || reviewer.Lane != "review" {
 		t.Fatalf("review runtime = %#v, %v", reviewer, err)
 	}
@@ -36,7 +38,7 @@ func TestLoadRuntimeConfigRejectsPartialOrCrossRoleIdentity(t *testing.T) {
 		"invented":   {"ITBEM_AI_ROLE": "admin", "ITBEM_AI_QUEUE_LANE": "production"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if config, err := LoadRuntimeConfig(runtimeTestEnvironment(overrides)); err == nil {
+			if config, err := LoadRuntimeConfig(runtimeTestEnvironment(t, overrides)); err == nil {
 				t.Fatalf("invalid runtime identity accepted: %#v", config)
 			}
 		})
@@ -52,18 +54,18 @@ func TestLoadRuntimeConfigValidatesQueueTransport(t *testing.T) {
 		"query mutation":     "https://sqs.example/queue?override=true",
 	} {
 		t.Run(name, func(t *testing.T) {
-			if config, err := LoadRuntimeConfig(runtimeTestEnvironment(map[string]string{"ITBEM_AI_QUEUE_URL": queueURL})); err == nil {
+			if config, err := LoadRuntimeConfig(runtimeTestEnvironment(t, map[string]string{"ITBEM_AI_QUEUE_URL": queueURL})); err == nil {
 				t.Fatalf("unsafe queue transport accepted: %#v", config)
 			}
 		})
 	}
-	if _, err := LoadRuntimeConfig(runtimeTestEnvironment(map[string]string{"ITBEM_AI_QUEUE_URL": "http://127.0.0.1:4566/000000000000/local-queue"})); err != nil {
+	if _, err := LoadRuntimeConfig(runtimeTestEnvironment(t, map[string]string{"ITBEM_AI_QUEUE_URL": "http://127.0.0.1:4566/000000000000/local-queue"})); err != nil {
 		t.Fatalf("loopback development queue rejected: %v", err)
 	}
 }
 
 func TestLoadRuntimeConfigAcceptsProductAgnosticBuckets(t *testing.T) {
-	config, err := LoadRuntimeConfig(runtimeTestEnvironment(map[string]string{
+	config, err := LoadRuntimeConfig(runtimeTestEnvironment(t, map[string]string{
 		"ITBEM_AI_INPUT_BUCKET":  "acme-control-inputs-prod",
 		"ITBEM_AI_OUTPUT_BUCKET": "acme-control-evidence-prod",
 	}))
@@ -73,19 +75,19 @@ func TestLoadRuntimeConfigAcceptsProductAgnosticBuckets(t *testing.T) {
 }
 
 func TestLoadRuntimeConfigSelectsHTTPSGatewayWithoutAWSIdentity(t *testing.T) {
-	config, err := LoadRuntimeConfig(runtimeTestEnvironment(map[string]string{
-		"ITBEM_AI_TRANSPORT":         "gateway",
-		"ITBEM_AI_GATEWAY_TOKEN":     "lane-bound-token",
-		"ITBEM_AI_QUEUE_URL":         "",
-		"AWS_REGION":                 "",
-		"AUTOMATION_CALLBACK_SECRET": "",
-		"ITBEM_AI_ROLE":              "reviewer",
-		"ITBEM_AI_QUEUE_LANE":        "review",
+	config, err := LoadRuntimeConfig(runtimeTestEnvironment(t, map[string]string{
+		"ITBEM_AI_TRANSPORT":      "gateway",
+		"ITBEM_AI_GATEWAY_TOKEN":  "lane-bound-token",
+		"ITBEM_AI_QUEUE_URL":      "",
+		"AWS_REGION":              "",
+		"ITBEM_AGENT_INSTANCE_ID": "22222222-2222-4222-8222-222222222222",
+		"ITBEM_AI_ROLE":           "reviewer",
+		"ITBEM_AI_QUEUE_LANE":     "review",
 	}))
 	if err != nil {
 		t.Fatalf("gateway runtime rejected: %v", err)
 	}
-	if config.Transport != "gateway" || config.CallbackSecret != "lane-bound-token" || config.QueueURL != "" || config.AWSRegion != "" {
+	if config.Transport != "gateway" || config.GatewayToken != "lane-bound-token" || config.QueueURL != "" || config.AWSRegion != "" {
 		t.Fatalf("unexpected gateway runtime: %#v", config)
 	}
 }

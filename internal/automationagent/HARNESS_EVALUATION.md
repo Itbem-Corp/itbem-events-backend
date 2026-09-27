@@ -1,10 +1,18 @@
 # Evaluación del harness — 2026-09-20
 
+> **Registro histórico.** Las rondas live y sus comandos fueron realizados con
+> el harness anterior, que usaba un adaptador directo de proveedor. Ese modo se
+> retiró porque eludía el gateway central; no debe repetirse. El runner vigente
+> sólo ejecuta pruebas offline con dobles o reproduce un informe guardado.
+
 ## Dictamen
 
 **No certificado todavía para autonomía profesional sin supervisión.** Hay controles verificables de permisos, recuperación, costes y evidencia, pero las evaluaciones reales encontraron limitaciones de implementación y razonamiento. Un conjunto pequeño de casos sintéticos no demuestra superioridad frente al mercado ni fiabilidad en producción.
 
-Se usó MiniMax-M3 mediante el proveedor ya implementado y la credencial local, sin imprimirla. No se ejecutaron tareas de clientes, colas de producción, publicaciones, despliegues ni migraciones.
+La evaluación histórica usó MiniMax-M3 mediante el proveedor directo del harness
+anterior. No se ejecutaron tareas de clientes, colas de producción,
+publicaciones, despliegues ni migraciones. Sus cifras describen únicamente esa
+ejecución pasada y no son una ruta soportada para repetir inferencias.
 
 ## Evaluación real
 
@@ -45,7 +53,7 @@ Omisiones explícitas en la suite local:
 
 - Integración LocalStack/S3/SQS: desactivada para no intervenir en colas existentes.
 - Creación de symlink: omitida por el entorno Windows; no equivale a validar esa protección en este host.
-- Evaluación pagada: omitida en la ejecución offline, realizada separadamente como se describe arriba.
+- La evaluación pagada documentada arriba es histórica; el harness vigente no ofrece modo de inferencia live.
 
 ## Reproducción
 
@@ -55,14 +63,22 @@ Desde el backend, con el toolchain Go local disponible:
 # Local, sin inferencias pagadas; repite seis paquetes tres veces.
 ./scripts/Test-AgentHarness.ps1
 
-# SOLO con autorización de una nueva ronda pagada.
-./scripts/Test-AgentHarness.ps1 -LiveMiniMax
+# Comprueba aislamiento de entorno usando un Go falso y valores sintéticos.
+./scripts/Test-AgentHarnessIsolation.ps1
 
-# Para continuar una ronda, conserva sus reservas y llamadas acumuladas.
-./scripts/Test-AgentHarness.ps1 -LiveMiniMax -PriorReport '<informe-anterior.json>'
+# Reproduce un informe existente; no hace inferencias.
+./scripts/Test-AgentHarness.ps1 -ScoreReportPath '<informe-anterior.json>'
 ```
 
-El modo real está desactivado en CI por defecto. Usa el endpoint canónico de MiniMax, deshabilita redirects, limita llamadas y reserva cada intento antes de enviarlo. Usa repositorios temporales sin remotos y verificaciones Go reales; el agente no tiene autorización para editar los tests de aceptación. El checkout base debe permanecer intacto y una finalización recuperada no debe causar otra inferencia.
+Los antiguos selectores `-LiveMiniMax` y `-LiveProvider` ahora fallan cerrados
+antes de iniciar Go. El runner vigente conserva la suite offline con proveedores
+falsos, además de las pruebas del cliente central contra servidores HTTP falsos;
+no lee archivos de credenciales ni envía inferencias. Para evaluar un modelo
+real se debe ejecutar una tarea sintética autorizada a través del producto, con
+el worker y el gateway centrales, de modo que se apliquen la lease, la ruta por
+acción, el registro de uso y la redacción normales. La reproducción del scorer
+puede leer reportes existentes; deben tratarse como sensibles si contienen
+prompts o respuestas.
 
 ## Trabajo necesario antes de aumentar autonomía
 
@@ -231,12 +247,12 @@ de falsos éxitos, pero sigue siendo un smoke determinista pequeño y no una
 evaluación experta, de mercado o multi-proveedor.
 ## Integración del scorer semántico en el runner — 2026-09-21 16:55
 
-`scripts/Test-AgentHarness.ps1` ahora puede ejecutar el scorer semántico como
-parte de una ronda live con `-ScoreSemantics`. El resultado se guarda junto al
-`live.json` en `semantic-score.json`; un resultado semántico incompleto o
-fallido conserva un código distinto de cero por defecto y no se puede convertir
-en éxito accidentalmente. `-AllowSemanticFailures` existe sólo para recopilar
-diagnóstico y mantiene `passed=false` en el artefacto.
+El runner histórico podía ejecutar el scorer semántico como parte de una ronda
+live con `-ScoreSemantics`. Esa combinación quedó retirada junto con el bypass
+de proveedor. El scorer vigente sólo procesa reportes ya guardados mediante
+`-ScoreReportPath`; un resultado semántico incompleto o fallido conserva un
+código distinto de cero por defecto. `-AllowSemanticFailures` existe sólo para
+recopilar diagnóstico y mantiene `passed=false` en el artefacto.
 
 También se añadió `-ScoreReportPath` para repetir la evaluación de un reporte
 sintético ya existente sin enviar nuevas llamadas al proveedor. La repetición

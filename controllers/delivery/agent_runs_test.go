@@ -2,17 +2,58 @@ package delivery
 
 import (
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"events-stocks/internal/deliveryledger"
-	"events-stocks/internal/projectvault"
 	"events-stocks/internal/releasegate"
 	"events-stocks/models"
+	"events-stocks/services/deliveryplansteps"
 	"events-stocks/services/deliveryworkflow"
 	"github.com/gofrs/uuid"
+	"github.com/labstack/echo/v4"
 )
+
+func TestPlanExecutionConflictMapsToStableHTTP409(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	ctx := echo.New().NewContext(httptest.NewRequest(http.MethodPost, "/api/automation/work-items/id/agent-runs", nil), recorder)
+
+	handled, err := handlePlanExecutionConflict(ctx, fmt.Errorf("create plan execution: %w", deliveryplansteps.ErrPlanExecutionConflict))
+	if err != nil || !handled {
+		t.Fatalf("handlePlanExecutionConflict() = handled %v, err %v", handled, err)
+	}
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusConflict)
+	}
+	var response struct {
+		Status  int    `json:"status"`
+		Message string `json:"message"`
+		Error   string `json:"error"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Status != http.StatusConflict || response.Message != "Conflicto en la ejecución del plan" || response.Error != planExecutionConflictCode {
+		t.Fatalf("response = %#v, want stable plan execution conflict response", response)
+	}
+}
+
+func TestPlanExecutionConflictMapperDoesNotHandleOtherErrors(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	ctx := echo.New().NewContext(httptest.NewRequest(http.MethodPost, "/api/automation/work-items/id/agent-runs", nil), recorder)
+
+	handled, err := handlePlanExecutionConflict(ctx, fmt.Errorf("database unavailable"))
+	if handled || err != nil {
+		t.Fatalf("handlePlanExecutionConflict(other error) = handled %v, err %v; want false, nil", handled, err)
+	}
+	if recorder.Body.Len() != 0 {
+		t.Fatalf("non-conflict error wrote a response body: %s", recorder.Body.String())
+	}
+}
 
 func TestAgentRunSpecsAreBoundToDeliveryStates(t *testing.T) {
 	checks := []struct {
@@ -45,12 +86,62 @@ func TestAgentRunSpecsAreBoundToDeliveryStates(t *testing.T) {
 	}
 }
 
-func TestStoredReleaseGateCandidateUsesEveryExactPublishedRepositoryHead(t *testing.T) {
-	workItemID := uuid.Must(uuid.NewV4())
-	item := models.DeliveryWorkItem{
-		ID:       workItemID,
-		PlanJSON: `{"repository_impact":[{"reference":"workspace://api","impact":"changes"},{"reference":"workspace://web","impact":"changes"}]}`,
+func TestEnvironmentContextKeepsWorkflowWithoutLeakingExtraMetadata(t *testing.T) {
+	raw := map[string]any{
+		"branch": "staging", "deployment": "manual", "url": "https://staging.example.test",
+		"promotion": "After QA, open a PR to main", "excerpt": "QA verifies the preview",
+		"api_key": "must-stay-private", "github_code_context": "not-an-environment-field",
 	}
+	got := sanitizedDeliveryContextMetadata("environment", raw)
+	for _, key := range []string{"branch", "deployment", "url", "promotion", "excerpt"} {
+		if got[key] != raw[key] {
+			t.Fatalf("environment field %s was not preserved: %#v", key, got)
+		}
+	}
+	if _, found := got["api_key"]; found {
+		t.Fatal("credentials must not leave with environment context")
+	}
+	if _, found := got["github_code_context"]; found {
+		t.Fatal("repository metadata must not be accepted on an environment source")
+	}
+}
+
+func TestRunbookContextKeepsProjectWorkflowWithoutLeakingSecrets(t *testing.T) {
+	raw := map[string]any{
+		"technologies": "Go and Next.js", "issue_workflow": "Plan in GitHub Issues",
+		"branch_workflow": "Feature branches start from dev", "pull_request_workflow": "Review before merge",
+		"release_workflow": "Promote through staging", "excerpt": "Project-specific workflow",
+		"api_key": "must-stay-private", "github_code_context": "not-a-runbook-field",
+	}
+	got := sanitizedDeliveryContextMetadata("runbook", raw)
+	for _, key := range []string{"technologies", "issue_workflow", "branch_workflow", "pull_request_workflow", "release_workflow", "excerpt"} {
+		if got[key] != raw[key] {
+			t.Fatalf("runbook field %s was not preserved: %#v", key, got)
+		}
+	}
+	if _, found := got["api_key"]; found {
+		t.Fatal("credentials must not leave with runbook context")
+	}
+	if _, found := got["github_code_context"]; found {
+		t.Fatal("repository metadata must not be accepted on a runbook source")
+	}
+}
+
+func TestChatAdmissionDoesNotRepresentInformationalWorkAsDeliveryProgress(t *testing.T) {
+	// The persistence branch in StartAgentRun is intentionally phase-scoped:
+	// delivery.chat may allocate a task and write a durable answer, but it must
+	// leave the current delivery phase and recovery projection untouched.
+	if agentRunUpdatesWorkflowProgress("chat") {
+		t.Fatal("delivery.chat must not update workflow progress")
+	}
+	if !agentRunUpdatesWorkflowProgress("assessment") {
+		t.Fatal("a read-only assessment is a terminal workflow result, not informational chat")
+	}
+}
+
+func TestStoredReleaseGateCandidateUsesOnlyThePublishedExactRepositoryMatrix(t *testing.T) {
+	workItemID := uuid.Must(uuid.NewV4())
+	item := models.DeliveryWorkItem{ID: workItemID, PlanJSON: `{"repository_impact":[{"reference":"workspace://web","impact":"changes"},{"reference":"workspace://api","impact":"changes"}]}`}
 	change := func(reference, repository, branch, sha, pr string) models.DeliveryChangeSet {
 		return models.DeliveryChangeSet{
 			RepositoryRef: reference, Branch: branch, CommitSHA: sha, ReviewType: "pull_request", PullRequestURL: pr,
@@ -89,6 +180,58 @@ func TestStoredReleaseGateCandidateFailsClosedForMissingOrUntrustedPublishedHead
 	} {
 		if _, err := storedReleaseGateCandidate(item, changes); err == nil {
 			t.Fatal("missing or untrusted exact PR head must fail closed")
+		}
+	}
+}
+
+func TestApprovedPlanStepQueueMessageTargetsOneStepAndKeepsParentInputReference(t *testing.T) {
+	workItemID, projectID, taskID, jobID, stepID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
+	inputRef := "s3://private-inputs/automation/inputs/shared-plan/input.json"
+	item := models.DeliveryWorkItem{ID: workItemID, ProjectID: projectID}
+	child := models.AutomationTask{ID: taskID, JobID: jobID, CorrelationID: "correlation-123", Operation: "delivery.implementation", InputRef: inputRef, MaxCompletionTokens: 512}
+	step := deliveryplansteps.StepDTO{ID: stepID.String(), AgentKey: "backend_engineer"}
+	message := approvedPlanStepQueueMessage(item, child, step)
+	if message.JobID != jobID.String() || message.Payload.TaskID != taskID.String() || message.Payload.ProjectID != projectID.String() {
+		t.Fatalf("plan-step queue message lost task scope: %#v", message)
+	}
+	if message.Payload.PlanStepID != stepID.String() || message.Payload.AgentKey != "backend_engineer" {
+		t.Fatalf("plan-step message must target the authenticated worker profile and exactly one step: %#v", message.Payload)
+	}
+	if message.Payload.InputRef != inputRef || message.Payload.Operation != child.Operation || message.Payload.Attempt != 1 {
+		t.Fatalf("child message must reuse the encrypted immutable parent input and operation: %#v", message.Payload)
+	}
+}
+
+func TestImplementationFanoutRejectsStepDefinitionsThatDifferFromFrozenApproval(t *testing.T) {
+	stepID, planID := uuid.Must(uuid.NewV4()).String(), uuid.Must(uuid.NewV4()).String()
+	expected := []deliveryplansteps.StepDTO{{
+		ID: stepID, PlanID: planID, PlanVersion: 3, StepKey: "add-handler", Order: 1,
+		Title: "Add handler", Objective: "Implement the endpoint", AcceptanceCriteria: []string{"Tests pass"}, AgentKey: "backend_engineer",
+	}}
+	frozen := append([]deliveryplansteps.StepDTO(nil), expected...)
+	if !sameApprovedPlanStepDefinitions(expected, frozen) {
+		t.Fatal("the exact approved plan definition should match")
+	}
+	frozen[0].AgentKey = "frontend_engineer"
+	if sameApprovedPlanStepDefinitions(expected, frozen) {
+		t.Fatal("fan-out must not route a stale input to a changed frozen step profile")
+	}
+}
+
+func TestAggregatePlanStepBudgetReservationIsConservativeAndBounded(t *testing.T) {
+	got, err := aggregatePlanStepBudgetReservation(125, 4)
+	if err != nil || got != 500 {
+		t.Fatalf("aggregate reservation = %d, err=%v; want 500", got, err)
+	}
+	if got, err := aggregatePlanStepBudgetReservation(0, 3); err != nil || got != 0 {
+		t.Fatalf("unbounded parent budget must not invent a hold, got=%d err=%v", got, err)
+	}
+	for _, input := range []struct {
+		perChild int64
+		count    int
+	}{{1, 0}, {-1, 1}, {1, models.DeliveryPlanExecutionMaxConcurrency + 1}, {int64(^uint64(0) >> 1), 2}} {
+		if _, err := aggregatePlanStepBudgetReservation(input.perChild, input.count); err == nil {
+			t.Fatalf("invalid or overflowing aggregate reservation was accepted: %#v", input)
 		}
 	}
 }
@@ -155,6 +298,55 @@ func TestBuildDeliveryAgentInputUsesFrozenContextAndBoundedScope(t *testing.T) {
 	if strings.Contains(string(encoded), "must not leak") || strings.Contains(string(encoded), "s3://private") {
 		t.Fatal("contacts, author IDs and private evidence locations must never be included in agent input")
 	}
+	if input.Delivery.Mandate.Version != deliveryMandateVersion || input.Delivery.Mandate.MaxConcurrency != models.DefaultDeliveryMandateMaxConcurrency || input.Delivery.Mandate.Objective != "Approved plan" {
+		t.Fatalf("agent input must include the durable bounded mandate: %#v", input.Delivery.Mandate)
+	}
+	if len(input.Delivery.Mandate.EffectiveAllowedTools) == 0 || !containsDeliveryString(input.Delivery.Mandate.EffectiveAllowedTools, "patch.apply") {
+		t.Fatalf("implementation capabilities must be explicitly bounded: %#v", input.Delivery.Mandate.EffectiveAllowedTools)
+	}
+}
+
+func TestDeliveryMandateDefaultsAreConservativeAndPhaseScoped(t *testing.T) {
+	item := models.DeliveryWorkItem{Title: "Ship contract", ExpectedOutcome: "A reviewed contract", IncludedScopeJSON: `["packages/contracts"]`, ExcludedScopeJSON: `["production"]`, BudgetMicros: 120000}
+	mandate := defaultDeliveryMandate(item, []string{"workspace://api", "workspace://api"})
+	if mandate.Version != deliveryMandateVersion || mandate.MaxConcurrency != models.DefaultDeliveryMandateMaxConcurrency || mandate.BudgetMicros != 120000 || len(mandate.RepositoryRefs) != 1 {
+		t.Fatalf("unexpected default mandate: %#v", mandate)
+	}
+	if _, err := validateDeliveryMandate(mandate); err != nil {
+		t.Fatal(err)
+	}
+	chat := effectiveDeliveryMandate(mandate, "chat")
+	if containsDeliveryString(chat.EffectiveAllowedTools, "patch.apply") || !containsDeliveryString(chat.EffectiveAllowedTools, "conversation.respond") {
+		t.Fatalf("chat must remain informational and read-only: %#v", chat.EffectiveAllowedTools)
+	}
+	item.MandateJSON = "{}"
+	resolved, err := resolveDeliveryMandate(item, []models.DeliveryContextSnapshot{
+		{Kind: "repository", Reference: "workspace://api"},
+		{Kind: "document", Reference: "https://docs.example.test/brief"},
+	})
+	if err != nil || len(resolved.RepositoryRefs) != 1 || resolved.RepositoryRefs[0] != "workspace://api" {
+		t.Fatalf("only repository snapshots may enter repository_refs: %#v / %v", resolved.RepositoryRefs, err)
+	}
+}
+
+func TestStoredDeliveryMandateFailsClosedOnUnknownCapabilityOrVersion(t *testing.T) {
+	item := models.DeliveryWorkItem{Title: "Bounded task", ExpectedOutcome: "Evidence", MandateJSON: `{"version":1,"objective":"Evidence","included_scope":[],"excluded_scope":[],"repository_refs":[],"allowed_tools":["shell.exec"],"max_concurrency":1,"budget_microusd":0,"autonomy_policy":"bounded_autonomy","stop_conditions":["scope_exceeded"],"human_actions":["approve_plan"]}`}
+	if _, err := resolveDeliveryMandate(item, nil); err == nil || !strings.Contains(err.Error(), "unallowlisted") {
+		t.Fatalf("unknown capabilities must fail closed, got %v", err)
+	}
+	item.MandateJSON = `{"version":2,"objective":"Evidence","included_scope":[],"excluded_scope":[],"repository_refs":[],"allowed_tools":["context.read"],"max_concurrency":1,"budget_microusd":0,"autonomy_policy":"bounded_autonomy","stop_conditions":["scope_exceeded"],"human_actions":["approve_plan"]}`
+	if _, err := resolveDeliveryMandate(item, nil); err == nil || !strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("unknown mandate versions must fail closed, got %v", err)
+	}
+}
+
+func containsDeliveryString(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 func TestBuildDeliveryAgentInputSanitizesContextMetadataBeforeInference(t *testing.T) {
@@ -215,46 +407,83 @@ func TestBuildDeliveryAgentInputSanitizesContextMetadataBeforeInference(t *testi
 	}
 }
 
-func TestAttachExactProjectVaultsBindsWorkspaceToApprovedGitHubCheckpoint(t *testing.T) {
-	projectID, workItemID, sourceID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
-	revision := strings.Repeat("a", 40)
+func TestBuildDeliveryAgentInputProjectsFrozenEpicContextAllowlist(t *testing.T) {
+	projectID, workItemID, epicID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
+	item := models.DeliveryWorkItem{
+		ID: workItemID, ProjectID: projectID, State: deliveryworkflow.StatePlanning,
+		IncludedScopeJSON: `[]`, ExcludedScopeJSON: `[]`, AcceptanceJSON: `[]`,
+	}
+	rawMetadata := `{"epic_id":"` + epicID.String() + `","status":"active","summary":"Ship the audit-ready delivery workflow.","api_key":"must-not-reach-inference","created_by":"private-user","unreviewed_notes":"must-not-reach-inference"}`
 	snapshots := []models.DeliveryContextSnapshot{{
-		WorkItemID: workItemID, SourceID: sourceID, Kind: "repository", Name: "Backend",
-		Reference: "workspace://backend", Revision: revision, MetadataJSON: `{"github_repository":"Acme/Backend"}`,
+		ID: uuid.Must(uuid.NewV4()), WorkItemID: workItemID, SourceID: epicID, Kind: "epic", Name: "  Delivery platform  ",
+		Reference: "  epic://" + epicID.String() + "  ", Revision: "epic-v3", MetadataJSON: rawMetadata,
+		CapturedAt: time.Date(2026, 8, 9, 0, 30, 0, 0, time.UTC),
 	}}
-	item := models.DeliveryWorkItem{ID: workItemID, ProjectID: projectID, State: deliveryworkflow.StatePlanning, IncludedScopeJSON: `[]`, ExcludedScopeJSON: `[]`, AcceptanceJSON: `[]`}
+	original := snapshots[0]
 	input, err := buildDeliveryAgentInput(item, models.DeliveryProject{ID: projectID}, snapshots, nil, nil, nil, nil, "", "plan")
 	if err != nil {
 		t.Fatal(err)
 	}
-	manifest := projectvault.Manifest{
-		SchemaVersion: projectvault.SchemaVersion, Scope: "repository",
-		Repository: projectvault.Repository{Reference: "github://Acme/Backend", DefaultBranch: "main", Revision: revision},
-		Entries:    []projectvault.VaultEntry{{Key: "stack/runtime", Kind: "stack", Lifecycle: "active", Value: map[string]any{"runtime": "go", "api_key": "must-not-leak"}}},
+	if len(input.Delivery.ContextSources) != 1 {
+		t.Fatalf("expected one frozen epic context source, got %#v", input.Delivery.ContextSources)
 	}
-	digest, err := projectvault.ManifestSHA256(manifest)
+	projected := input.Delivery.ContextSources[0]
+	if projected.Kind != "epic" || projected.Name != "Delivery platform" || projected.Reference != "epic://"+epicID.String() || projected.Revision != "epic-v3" {
+		t.Fatalf("epic identity must be projected from the frozen snapshot: %#v", projected)
+	}
+	if len(projected.Metadata) != 3 || projected.Metadata["epic_id"] != epicID.String() || projected.Metadata["status"] != "active" || projected.Metadata["summary"] != "Ship the audit-ready delivery workflow." {
+		t.Fatalf("epic metadata must contain only the shared safe projection: %#v", projected.Metadata)
+	}
+	encoded, err := json.Marshal(projected)
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, _ := json.Marshal(manifest)
-	vaults := []models.DeliveryProjectVaultRevision{{
-		ProjectID: projectID, RepositoryReference: "github://Acme/Backend", Revision: revision,
-		SchemaVersion: projectvault.SchemaVersion, ManifestJSON: string(raw), ContentSHA256: digest, Version: 1,
-	}}
-	if err := attachExactProjectVaults(&input, snapshots, vaults); err != nil {
-		t.Fatalf("exact approved Vault rejected: %v", err)
+	if strings.Contains(string(encoded), "must-not-reach-inference") || strings.Contains(string(encoded), "created_by") {
+		t.Fatalf("unallowlisted epic metadata reached inference: %s", encoded)
 	}
-	vault := input.Delivery.ContextSources[0].Vault
-	if vault == nil || vault.Revision != revision || vault.ContentSHA256 != digest || len(vault.Entries) != 1 || vault.Entries[0].Value["runtime"] != "go" || vault.Entries[0].Value["api_key"] != nil {
-		t.Fatalf("Vault-first projection is invalid or unsafe: %#v", vault)
+	if snapshots[0] != original {
+		t.Fatal("building inference input must not mutate the immutable epic snapshot")
 	}
-	encoded, _ := json.Marshal(input)
-	if strings.Contains(string(encoded), "must-not-leak") {
-		t.Fatal("credential-like Vault values reached model input")
+}
+
+func TestBuildDeliveryAgentInputRejectsCredentialShapedLegacyEpicSnapshotsWithoutEcho(t *testing.T) {
+	projectID, workItemID, epicID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
+	item := models.DeliveryWorkItem{
+		ID: workItemID, ProjectID: projectID, State: deliveryworkflow.StatePlanning,
+		IncludedScopeJSON: `[]`, ExcludedScopeJSON: `[]`, AcceptanceJSON: `[]`,
 	}
-	vaults[0].ContentSHA256 = strings.Repeat("b", 64)
-	if err := attachExactProjectVaults(&input, snapshots, vaults); err == nil {
-		t.Fatal("digest-invalid Vault must fail closed")
+	const fixedError = "frozen epic context snapshot is invalid"
+	cases := []struct {
+		name      string
+		title     string
+		reference string
+		revision  string
+		summary   string
+	}{
+		{name: "title", title: "Delivery api_key=legacy-secret", reference: "epic://" + epicID.String(), summary: "Safe summary"},
+		{name: "reference", title: "Delivery", reference: "epic://" + epicID.String() + "?token=legacy-secret", summary: "Safe summary"},
+		{name: "revision", title: "Delivery", reference: "epic://" + epicID.String(), revision: "api_key=legacy-secret", summary: "Safe summary"},
+		{name: "oversized revision", title: "Delivery", reference: "epic://" + epicID.String(), revision: strings.Repeat("r", 81), summary: "Safe summary"},
+		{name: "summary", title: "Delivery", reference: "epic://" + epicID.String(), summary: "Legacy password=legacy-secret"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			metadata, err := json.Marshal(map[string]string{"epic_id": epicID.String(), "status": "active", "summary": test.summary})
+			if err != nil {
+				t.Fatal(err)
+			}
+			snapshots := []models.DeliveryContextSnapshot{{
+				WorkItemID: workItemID, SourceID: epicID, Kind: "epic", Name: test.title,
+				Reference: test.reference, Revision: test.revision, MetadataJSON: string(metadata),
+			}}
+			_, buildErr := buildDeliveryAgentInput(item, models.DeliveryProject{ID: projectID}, snapshots, nil, nil, nil, nil, "", "plan")
+			if buildErr == nil || buildErr.Error() != fixedError {
+				t.Fatalf("credential-shaped legacy epic data must fail with one generic error, got %v", buildErr)
+			}
+			if strings.Contains(buildErr.Error(), "legacy-secret") || strings.Contains(buildErr.Error(), "api_key") || strings.Contains(buildErr.Error(), "password") {
+				t.Fatalf("rejection error leaked legacy data: %v", buildErr)
+			}
+		})
 	}
 }
 

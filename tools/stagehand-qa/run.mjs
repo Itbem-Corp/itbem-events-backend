@@ -1,5 +1,5 @@
 import fs from "node:fs/promises";
-import { createHash } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -8,7 +8,7 @@ import { z } from "zod";
 
 const maxURLLength = 2048;
 const maxSummaryLength = 1200;
-const minMeaningfulScreenshotBytes = 4096;
+const maxGatewayPayloadBytes = 8_192;
 const maxBrowserQACases = 3;
 const desktopViewport = Object.freeze({ name: "desktop", width: 1440, height: 1200 });
 const mobileViewport = Object.freeze({ name: "mobile", width: 412, height: 915 });
@@ -16,7 +16,7 @@ const mobileViewport = Object.freeze({ name: "mobile", width: 412, height: 915 }
 // an underlying transport becomes unhealthy. These are deliberately local
 // runner limits: the worker still owns the broader task lease and retry policy.
 const stagehandInitializationTimeoutMs = 35_000;
-const miniMaxRequestTimeoutMs = 30_000;
+const gatewayRequestTimeoutMs = 30_000;
 const stagehandCloseTimeoutMs = 10_000;
 
 export async function withTimeout(operation, timeoutMs, label) {
@@ -49,23 +49,100 @@ function fail(message) {
   process.exitCode = 2;
 }
 
-function parseArguments(argv) {
-  const values = new Map();
-  for (let index = 0; index < argv.length; index += 2) {
-    const key = argv[index];
-    const value = argv[index + 1];
-    if ((key !== "--url" && key !== "--output" && key !== "--plan") || !value || values.has(key)) {
-      throw new Error("usage: node run.mjs --url <http(s) preview> --output <report.json> [--plan <browser-plan.json>]");
-    }
-    values.set(key, value);
-  }
-  if (!values.has("--url") || !values.has("--output")) {
-    throw new Error("usage: node run.mjs --url <http(s) preview> --output <report.json> [--plan <browser-plan.json>]");
-  }
-  const previewURL = new URL(values.get("--url"));
-  if (!/^https?:$/.test(previewURL.protocol) || previewURL.username || previewURL.password || previewURL.href.length > maxURLLength) {
+export function createPreviewURLContext(rawURL) {
+  let navigation;
+  try {
+    navigation = new URL(String(rawURL ?? "").trim());
+  } catch {
     throw new Error("preview URL must be a bounded HTTP(S) URL without credentials");
   }
+  if (!/^https?:$/.test(navigation.protocol) || navigation.username || navigation.password || navigation.href.length > maxURLLength) {
+    throw new Error("preview URL must be a bounded HTTP(S) URL without credentials");
+  }
+  const report = new URL(navigation.href);
+  report.search = "";
+  report.hash = "";
+  const sensitiveValues = new Set();
+  const addSensitiveValue = (value) => {
+    const normalized = String(value ?? "");
+    if (normalized.length >= 1) {
+      sensitiveValues.add(normalized);
+      try { sensitiveValues.add(decodeURIComponent(normalized)); } catch {}
+      try { sensitiveValues.add(encodeURIComponent(normalized)); } catch {}
+    }
+  };
+  for (const [, value] of navigation.searchParams) addSensitiveValue(value);
+  if (navigation.hash) addSensitiveValue(navigation.hash.slice(1));
+  const sortedSensitiveValues = [...sensitiveValues].filter(Boolean).sort((left, right) => right.length - left.length);
+  const sanitizeURL = (value) => {
+    try {
+      const parsed = new URL(String(value ?? ""));
+      parsed.username = "";
+      parsed.password = "";
+      parsed.search = "";
+      parsed.hash = "";
+      return parsed.href;
+    } catch {
+      return "";
+    }
+  };
+  const sanitizeText = (value, limit = maxSummaryLength) => {
+    let text = String(value ?? "").replace(/\u0000/g, "").slice(0, Math.max(limit * 4, maxURLLength * 2));
+    text = text.replace(/https?:\/\/[^\s"'<>]+/gi, (candidate) => {
+      const trailing = candidate.match(/[),.;!?]+$/)?.[0] ?? "";
+      const url = trailing ? candidate.slice(0, -trailing.length) : candidate;
+      return `${sanitizeURL(url) || "[REDACTED_URL]"}${trailing}`;
+    });
+    for (const secret of sortedSensitiveValues) {
+      const escaped = secret.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      text = text.replace(new RegExp(escaped, "gi"), "[REDACTED_URL_VALUE]");
+    }
+    for (const testValue of approvedTestValues()) text = text.split(testValue).join("[REDACTED_TEST_VALUE]");
+    return safeText(text, limit);
+  };
+  return {
+    navigationURL: navigation.href,
+    reportURL: report.href,
+    sanitizeURL,
+    sanitizeText,
+  };
+}
+
+export async function parseArguments(argv) {
+  const values = new Map();
+  for (let index = 0; index < argv.length;) {
+    const key = argv[index];
+    const value = argv[index + 1];
+    if ((key !== "--url" && key !== "--url-file" && key !== "--output" && key !== "--plan") || !value || values.has(key)) {
+      throw new Error("usage: node run.mjs (--url <http(s) preview> | --url-file <private URL file>) --output <report.json> [--plan <browser-plan.json>]");
+    }
+    values.set(key, value);
+    index += 2;
+  }
+  const hasLiteralURL = values.has("--url");
+  const hasURLFile = values.has("--url-file");
+  if (hasLiteralURL === hasURLFile || !values.has("--output")) {
+    throw new Error("usage: node run.mjs (--url <http(s) preview> | --url-file <private URL file>) --output <report.json> [--plan <browser-plan.json>]");
+  }
+  let rawURL;
+  if (hasURLFile) {
+    try {
+      const stat = await fs.stat(path.resolve(values.get("--url-file")));
+      if (!stat.isFile() || stat.size > maxURLLength + 1) throw new Error("invalid");
+      rawURL = await fs.readFile(path.resolve(values.get("--url-file")), "utf8");
+    } catch {
+      throw new Error("private preview URL file could not be read");
+    }
+  } else {
+    rawURL = values.get("--url");
+    // Literal command-line arguments are observable in process listings and
+    // crash diagnostics. Signed query strings and fragments must arrive only
+    // through the wrapper-created private file instead.
+    if (rawURL.includes("?") || rawURL.includes("#")) {
+      throw new Error("signed preview URLs must be supplied with --url-file");
+    }
+  }
+  const urlContext = createPreviewURLContext(rawURL);
   const output = path.resolve(values.get("--output"));
   if (path.extname(output).toLowerCase() !== ".json") {
     throw new Error("semantic QA output must be a .json artifact");
@@ -74,7 +151,14 @@ function parseArguments(argv) {
   if (plan && path.extname(plan).toLowerCase() !== ".json") {
     throw new Error("browser QA plan must be a .json file");
   }
-  return { previewURL: previewURL.href, output, plan };
+  return { previewURL: urlContext.navigationURL, reportURL: urlContext.reportURL, urlContext, output, plan };
+}
+
+// Kept as a tiny injection seam so tests can assert the exact URL handed to
+// the browser without starting Chromium or Stagehand.
+export async function navigatePreview(page, previewURL) {
+  if (!page || typeof page.goto !== "function") throw new Error("Stagehand browser page is unavailable");
+  await page.goto(previewURL, { waitUntil: "domcontentloaded", timeoutMs: 45_000 });
 }
 
 function environment() {
@@ -86,36 +170,75 @@ function environment() {
 }
 
 export function modelConfiguration(env) {
-  const ledgerModel = (process.env.STAGEHAND_QA_MODEL ?? process.env.MINIMAX_MODEL ?? "").trim();
-  const apiKey = (process.env.STAGEHAND_QA_API_KEY ?? process.env.MINIMAX_API_KEY ?? "").trim();
-  const baseURL = (process.env.STAGEHAND_QA_BASE_URL ?? "https://api.minimax.io/v1").trim();
-  if (!ledgerModel || !apiKey) {
-    throw new Error("Stagehand requires STAGEHAND_QA_MODEL and STAGEHAND_QA_API_KEY (or the already configured MINIMAX_API_KEY)");
+  const inferenceURL = (process.env.STAGEHAND_QA_INFERENCE_URL ?? "").trim();
+  const inferenceCapability = (process.env.STAGEHAND_QA_INFERENCE_CAPABILITY ?? "").trim();
+  const taskID = (process.env.STAGEHAND_QA_TASK_ID ?? "").trim();
+  const runID = (process.env.STAGEHAND_QA_RUN_ID ?? "").trim();
+  const operation = (process.env.STAGEHAND_QA_OPERATION ?? "").trim();
+  if (!inferenceURL || !inferenceCapability || !taskID || !runID || operation !== "delivery.qa") {
+    throw new Error("Stagehand requires a bound delivery.qa inference gateway lease");
   }
   if (env === "BROWSERBASE" && !(process.env.BROWSERBASE_API_KEY ?? "").trim()) {
     throw new Error("BROWSERBASE_API_KEY is required when STAGEHAND_QA_ENV=BROWSERBASE");
   }
-  // Keep the original MiniMax model identity separately for ITBEM's cost
-  // ledger while Stagehand uses the OpenAI-compatible model convention.
-  const modelName = ledgerModel.includes("/") ? ledgerModel : `openai/${ledgerModel}`;
   let endpoint;
   try {
-    endpoint = new URL(baseURL);
+    endpoint = new URL(inferenceURL);
   } catch {
-    throw new Error("Stagehand QA base URL must be a valid HTTPS MiniMax endpoint");
+    throw new Error("Stagehand QA inference gateway URL is invalid");
   }
-  // The Delivery worker supplies MINIMAX_API_KEY only to this pinned runner.
-  // Treat the endpoint as a credential boundary, not as a convenient model
-  // setting: an accidental proxy, HTTP URL or look-alike host must never
-  // receive that credential. Supporting a different provider later requires
-  // its own explicit credential source and reviewed runner contract.
-  if (endpoint.protocol !== "https:" || endpoint.hostname.toLowerCase() !== "api.minimax.io" || endpoint.port || endpoint.username || endpoint.password || endpoint.search || endpoint.hash || !/^\/v1\/?$/.test(endpoint.pathname)) {
-    throw new Error("Stagehand QA requires the canonical HTTPS MiniMax v1 endpoint");
+  const loopback = endpoint.hostname === "localhost" || endpoint.hostname === "127.0.0.1" || endpoint.hostname === "::1";
+  if ((endpoint.protocol !== "https:" && !(endpoint.protocol === "http:" && loopback)) || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) {
+    throw new Error("Stagehand QA inference gateway must use HTTPS or loopback HTTP");
   }
-  const provider = "minimax";
-  // MiniMax exposes the OpenAI-compatible Chat Completions shape; selecting
-  // it explicitly avoids Stagehand's Responses-API default.
-  return { modelName, ledgerModel, apiKey, baseURL: endpoint.href.replace(/\/$/, ""), provider, isMiniMax: true, openaiEndpointFormat: "chat" };
+  // The runner uses only deterministic browser APIs. Its semantic call below
+  // goes to ITBEM's gateway; this model-shaped value deliberately cannot grant
+  // a provider credential to Stagehand or a customer repository.
+  return {
+    modelName: "openai/itbem-gateway",
+    // Stagehand requires an API-key-shaped config value, but the semantic
+    // path below uses only this run-scoped, inference-only capability.
+    apiKey: "itbem-gateway-local-only",
+    baseURL: endpoint.href.replace(/\/$/, ""),
+    inferenceURL: endpoint.href,
+    inferenceCapability,
+    taskID,
+    runID,
+    operation,
+    provider: "gateway",
+    ledgerModel: "gateway-managed",
+    isGateway: true,
+    openaiEndpointFormat: "chat",
+  };
+}
+
+export function sendGatewayInference(model, payload, signal, fetchImpl = fetch) {
+  if (!isUUID(payload?.call_id)) throw new Error("Stagehand gateway call_id must be a UUID");
+  let encodedPayload;
+  try {
+    encodedPayload = JSON.stringify(payload);
+  } catch {
+    throw new Error("Stagehand gateway payload could not be encoded");
+  }
+  if (Buffer.byteLength(encodedPayload, "utf8") > maxGatewayPayloadBytes) {
+    throw new Error("Stagehand gateway payload exceeds the privacy size limit");
+  }
+  return fetchImpl(model.inferenceURL, {
+    method: "POST",
+    headers: {
+      ["X-ITBEM-Inference-Capability"]: model.inferenceCapability,
+      "Content-Type": "application/json",
+    },
+    body: encodedPayload,
+    signal,
+    // A bearer capability is scoped to this gateway request. Do not let a
+    // redirect carry it to another origin (or any redirect target).
+    redirect: "error",
+  });
+}
+
+function isUUID(value) {
+  return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
 
 function safeText(value, limit = maxSummaryLength) {
@@ -151,22 +274,6 @@ async function setVerifiedViewport(page, requested) {
   return actual;
 }
 
-// The manifest travels inside the immutable JSON report while the PNG files
-// travel as separate artifacts. SHA-256 lets the dashboard/S3 viewer prove
-// that the displayed visual evidence is the exact file Stagehand captured.
-async function screenshotEvidence(directory, name, metadata) {
-  const body = await fs.readFile(path.join(directory, name));
-  return {
-    name,
-    content_type: "image/png",
-    bytes: body.byteLength,
-    sha256: createHash("sha256").update(body).digest("hex"),
-    captured_at: metadata.capturedAt,
-    url: safeText(metadata.url, maxURLLength),
-    viewport: metadata.viewport,
-  };
-}
-
 export function safeMetrics(metrics) {
   const source = metrics && typeof metrics === "object" ? metrics : {};
   const numeric = (name) => Number.isFinite(source[name]) ? Math.max(0, Math.trunc(source[name])) : 0;
@@ -188,12 +295,35 @@ export function safeMetrics(metrics) {
 
 export function safeProviderUsage(usage) {
   const source = usage && typeof usage === "object" ? usage : {};
-  const numeric = (name) => Number.isFinite(source[name]) ? Math.max(0, Math.trunc(source[name])) : 0;
-  const input = numeric("inputTokens");
-  const output = numeric("outputTokens");
-  const reasoning = numeric("reasoningTokens");
-  const cached = numeric("cachedInputTokens");
-  const cacheWrite = numeric("cacheCreationInputTokens") || numeric("cacheWriteInputTokens");
+  const numeric = (...values) => {
+    const value = values.find(Number.isFinite);
+    return value === undefined ? 0 : Math.max(0, Math.trunc(value));
+  };
+  // The gateway returns provider-native usage keys (snake_case), while the
+  // Stagehand SDK's own metrics use camelCase. Accept both forms here so a
+  // valid receipt does not become a zero-token local report. The nested
+  // details below are provider-native MiniMax/OpenAI/Anthropic usage fields.
+  const input = numeric(source.inputTokens, source.input_tokens, source.prompt_tokens);
+  const output = numeric(source.outputTokens, source.output_tokens, source.completion_tokens);
+  const reasoning = numeric(
+    source.reasoningTokens,
+    source.reasoning_tokens,
+    source.output_tokens_details?.reasoning_tokens,
+    source.completion_tokens_details?.reasoning_tokens,
+  );
+  const cached = numeric(
+    source.cachedInputTokens,
+    source.cached_input_tokens,
+    source.input_tokens_details?.cached_tokens,
+    source.prompt_tokens_details?.cached_tokens,
+    source.cache_read_input_tokens,
+  );
+  const cacheWrite = numeric(
+    source.cacheCreationInputTokens,
+    source.cacheWriteInputTokens,
+    source.cache_creation_input_tokens,
+    source.cache_write_tokens,
+  );
   return {
     input_tokens: input,
     output_tokens: output,
@@ -203,7 +333,7 @@ export function safeProviderUsage(usage) {
     // Provider total_tokens normally already includes reasoning within output.
     // Fall back to the two billable aggregate dimensions, never their sum
     // plus reasoning, so cost and displayed total remain consistent.
-    total_tokens: Math.max(numeric("totalTokens"), input + output),
+    total_tokens: Math.max(numeric(source.totalTokens, source.total_tokens), input + output),
     inference_ms: 0,
   };
 }
@@ -243,19 +373,23 @@ export function combinedUsage(...usages) {
 }
 
 const PageAssessment = z.object({
-  title: z.string().max(280).optional(),
-  primary_heading: z.string().max(280).optional(),
-  primary_action: z.string().max(280).optional(),
-  blocking_issue: z.string().max(600).optional(),
-});
+  // Page-derived text is intentionally not part of the gateway contract.
+  // These empty strings preserve the current report shape without allowing
+  // the model to echo or invent user-visible content.
+  title: z.string().max(0),
+  primary_heading: z.string().max(0),
+  primary_action: z.string().max(0),
+  blocking_issue: z.enum(["", "browser_e2e_failed", "responsive_overflow", "browser_runtime_errors", "network_observation_missing"]),
+}).strict();
 
-const minMaxSemanticSystemPrompt = [
+const semanticSystemPrompt = [
   "You are a careful read-only web QA reviewer.",
-  "Use only the supplied browser-derived evidence.",
+  "Use only the supplied categorical browser signals. They contain no page text by design.",
   "Return one JSON object and nothing else.",
   "It must have exactly these string keys: title, primary_heading, primary_action, blocking_issue.",
-  "Use an empty string when a value is not evidenced or no clearly blocking issue is visible.",
-  "Never infer credentials, private data, hidden state, or interactions that were not supplied.",
+  "title, primary_heading, and primary_action must always be empty strings.",
+  "blocking_issue must be one of: empty string, browser_e2e_failed, responsive_overflow, browser_runtime_errors, network_observation_missing.",
+  "Never return, infer, or request visible page text, credentials, private data, or hidden state.",
 ].join(" ");
 
 function approvedTestValues() {
@@ -265,31 +399,42 @@ function approvedTestValues() {
     .sort((left, right) => right.length - left.length);
 }
 
-export function redactedInferenceText(value, limit = 6000) {
-  let redacted = boundedPrivateText(value, limit)
+export function redactedInferenceText(value, limit = 6000, previewURLContext = null) {
+  let redacted = previewURLContext
+    ? previewURLContext.sanitizeText(value, Math.max(limit * 4, maxURLLength * 2))
+    : boundedPrivateText(value, Math.max(limit * 4, maxURLLength * 2));
+  redacted = redacted
     .replace(/\b(?:sk|pk|rk|AKIA)[-_a-zA-Z0-9]{16,}\b/g, "[REDACTED_SECRET]")
-    .replace(/\b(?:bearer|token|api[_ -]?key|password|secret)\s*[:=]\s*\S+/gi, "$1=[REDACTED]")
+    .replace(/\b(bearer|token|api[_ -]?key|password|secret)\s*[:=]\s*\S+/gi, "$1=[REDACTED]")
     .replace(/data:[^\s]{1,4096}/gi, "[REDACTED_DATA_URL]");
   for (const testValue of approvedTestValues()) redacted = redacted.split(testValue).join("[REDACTED_TEST_VALUE]");
-  return redacted;
+  return safeText(redacted, limit);
 }
 
-// Browser evidence is structured and bounded before it reaches MiniMax. Test
-// values must be available to Stagehand for a human-approved E2E flow, but a
-// page is allowed to reflect them; never let that reflection cross the model
-// boundary. The private local report remains the audited record of the run.
-export function redactedInferenceEvidence(value, depth = 0) {
-  if (depth > 8) return "[TRUNCATED_EVIDENCE]";
-  if (typeof value === "string") return redactedInferenceText(value, 6000);
-  if (typeof value === "number" || typeof value === "boolean" || value === null) return value;
-  if (Array.isArray(value)) return value.slice(0, 48).map((entry) => redactedInferenceEvidence(entry, depth + 1));
+// Known-secret patterns are a secondary defense only; they cannot classify
+// arbitrary user-visible content. Gateway evidence is built from an explicit
+// categorical allowlist below, never from these generic string helpers.
+export function redactedInferenceEvidence(value, depth = 0, previewURLContext = null) {
+  // Generic recursive redaction cannot establish that arbitrary strings are
+  // non-sensitive. Callers must use the explicit categorical projection in
+  // browserSemanticEvidence instead.
+  void value;
+  void depth;
+  void previewURLContext;
+  return "[OMITTED_UNTRUSTED_EVIDENCE]";
+}
+
+export function sanitizeReportValue(value, previewURLContext, depth = 0) {
+  if (depth > 12) return "[TRUNCATED_REPORT]";
+  if (typeof value === "string") return redactedInferenceText(value, 16_000, previewURLContext);
+  if (Array.isArray(value)) return value.map((entry) => sanitizeReportValue(entry, previewURLContext, depth + 1));
   if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).slice(0, 80).map(([key, entry]) => [key, redactedInferenceEvidence(entry, depth + 1)]));
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, sanitizeReportValue(entry, previewURLContext, depth + 1)]));
   }
-  return "";
+  return value;
 }
 
-function parseMiniMaxAssessment(content) {
+function parseGatewayAssessment(content) {
   const text = boundedPrivateText(content, 10_000)
     .replace(/<think>[\s\S]*?<\/think>/gi, "")
     .replace(/^\s*```(?:json)?\s*/i, "")
@@ -297,10 +442,10 @@ function parseMiniMaxAssessment(content) {
     .trim();
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
-  if (start < 0 || end <= start) throw new Error("MiniMax did not return a JSON object");
+  if (start < 0 || end <= start) throw new Error("Gateway did not return a JSON object");
   const parsed = JSON.parse(text.slice(start, end + 1));
   const validated = PageAssessment.safeParse(parsed);
-  if (!validated.success) throw new Error("MiniMax JSON did not match the QA assessment contract");
+  if (!validated.success) throw new Error("Gateway JSON did not match the categorical QA assessment contract");
   return validated.data;
 }
 
@@ -326,121 +471,163 @@ export function miniMaxUsage(response, statusCode = 0) {
   return Object.keys(providerOutcome).length > 0 ? { ...normalized, _itbem_provider: providerOutcome } : normalized;
 }
 
-// The private report preserves exactly what ITBEM sent and the provider's
-// answer that is useful for review. It intentionally excludes reasoning
-// traces: they are neither required to reproduce the request nor appropriate
-// evidence for a human delivery gate.
-function miniMaxResponseAudit(payload) {
-  const choices = Array.isArray(payload?.choices) ? payload.choices.map((choice, index) => ({
-    index: Number.isInteger(choice?.index) ? choice.index : index,
-    finish_reason: safeText(choice?.finish_reason, 80),
-    message: {
-      role: safeText(choice?.message?.role, 40),
-      content: boundedPrivateText(choice?.message?.content, 16_000),
-    },
-  })) : [];
+function boundedSignalCount(value) {
+  return Number.isFinite(value) ? Math.min(10_000, Math.max(0, Math.trunc(value))) : 0;
+}
+
+function summarizeBrowserE2E(value) {
+  const source = value && typeof value === "object" ? value : {};
+  const cases = Array.isArray(source.cases) ? source.cases.slice(0, maxBrowserQACases) : [];
+  const steps = cases.flatMap((testCase) => Array.isArray(testCase?.steps) ? testCase.steps.slice(0, 8) : []);
+  const modes = new Set(["read_only", "approved_navigation", "approved_test_flow"]);
   return {
-    id: safeText(payload?.id, 180),
-    object: safeText(payload?.object, 80),
-    created: Number.isFinite(payload?.created) ? Math.trunc(payload.created) : undefined,
-    model: safeText(payload?.model, 180),
-    choices,
-    usage: payload?.usage && typeof payload.usage === "object" ? payload.usage : {},
+    mode: modes.has(source.mode) ? source.mode : "read_only",
+    passed: source.passed === true,
+    case_count: cases.length,
+    step_count: steps.length,
+    passed_step_count: steps.filter((step) => step?.passed === true).length,
+    failed_step_count: steps.filter((step) => step?.passed === false).length,
   };
 }
 
-async function browserSemanticEvidence(page, executionEvidence = {}) {
-  const fallback = await fallbackAssessment(page);
+function summarizeResponsive(value) {
+  const source = value && typeof value === "object" ? value : {};
+  const overflow = source.overflow && typeof source.overflow === "object" ? source.overflow : null;
+  const hasOverflowMeasurement = Number.isFinite(overflow?.document_width) && Number.isFinite(overflow?.viewport_width);
+  return {
+    passed: source.passed === true,
+    viewport: "mobile",
+    overflow_measured: hasOverflowMeasurement,
+    horizontal_overflow: hasOverflowMeasurement && overflow.document_width > overflow.viewport_width + 2,
+    screenshot_omitted: true,
+  };
+}
+
+function summarizeBrowserRuntime(value) {
+  const source = value && typeof value === "object" ? value : {};
+  const consoleErrorCount = Array.isArray(source.console_errors) ? source.console_errors.length : 0;
+  const failedRequestCount = Array.isArray(source.failed_requests) ? source.failed_requests.length : 0;
+  const runtimeSignals = {
+    console_errors: Array.from({ length: boundedSignalCount(consoleErrorCount) }, () => "console_error"),
+    failed_requests: Array.from({ length: boundedSignalCount(failedRequestCount) }, () => "failed_request"),
+    observed_network_sources: Array.isArray(source.observed_network_sources) ? source.observed_network_sources : [],
+  };
+  return {
+    passed: browserRuntimePassed(runtimeSignals),
+    console_error_count: boundedSignalCount(consoleErrorCount),
+    failed_request_count: boundedSignalCount(failedRequestCount),
+    has_network_observation: browserRuntimeHasNetworkObservation(runtimeSignals),
+    network_sources: runtimeSignals.observed_network_sources.filter((entry) => entry === "response_event" || entry === "performance_timing"),
+  };
+}
+
+export async function browserSemanticEvidence(page, executionEvidence = {}) {
+  let observed = {};
   try {
-    const bodyText = await page.locator("body").innerText();
-    return {
-      ...fallback,
-      visible_text: redactedInferenceText(bodyText, 6000),
-      // MiniMax is not being asked to guess whether a UI works from a page
-      // snapshot alone. Give it the actual, already-completed browser
-      // contract and runtime signals so its review is grounded in what
-      // Stagehand just exercised.
-      approved_browser_e2e: redactedInferenceEvidence(executionEvidence.browser_e2e ?? {}),
-      responsive: redactedInferenceEvidence(executionEvidence.responsive ?? {}),
-      browser_runtime: redactedInferenceEvidence(executionEvidence.browser_runtime ?? {}),
-    };
+    observed = await page.evaluate(() => {
+      const visible = (element) => {
+        if (!element) return false;
+        const style = getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity || 1) > 0 && rect.width > 0 && rect.height > 0;
+      };
+      const headings = document.querySelectorAll("h1, [role='heading'][aria-level='1']");
+      const actions = document.querySelectorAll("button, [role='button'], a[href]");
+      return {
+        document_ready: document.readyState === "interactive" || document.readyState === "complete",
+        title_present: Boolean(document.title),
+        body_has_elements: Boolean(document.body?.childElementCount),
+        primary_heading_count: headings.length,
+        visible_primary_heading_count: Array.from(headings).filter(visible).length,
+        primary_action_count: actions.length,
+        visible_primary_action_count: Array.from(actions).filter(visible).length,
+        form_count: document.forms.length,
+        input_count: document.querySelectorAll("input, textarea, select").length,
+      };
+    });
   } catch {
-    return {
-      ...fallback,
-      visible_text: "",
-      approved_browser_e2e: redactedInferenceEvidence(executionEvidence.browser_e2e ?? {}),
-      responsive: redactedInferenceEvidence(executionEvidence.responsive ?? {}),
-      browser_runtime: redactedInferenceEvidence(executionEvidence.browser_runtime ?? {}),
-    };
+    observed = {};
   }
+  // Explicit projection is the boundary: do not recursively sanitize or pass
+  // through any browser-, plan-, or provider-originated strings.
+  return {
+    page: {
+      inspection_available: Object.keys(observed).length > 0,
+      document_ready: observed.document_ready === true,
+      title_present: observed.title_present === true,
+      body_has_elements: observed.body_has_elements === true,
+      primary_heading_count: boundedSignalCount(observed.primary_heading_count),
+      visible_primary_heading_count: boundedSignalCount(observed.visible_primary_heading_count),
+      primary_action_count: boundedSignalCount(observed.primary_action_count),
+      visible_primary_action_count: boundedSignalCount(observed.visible_primary_action_count),
+      form_count: boundedSignalCount(observed.form_count),
+      input_count: boundedSignalCount(observed.input_count),
+    },
+    approved_browser_e2e: summarizeBrowserE2E(executionEvidence.browser_e2e),
+    responsive: summarizeResponsive(executionEvidence.responsive),
+    browser_runtime: summarizeBrowserRuntime(executionEvidence.browser_runtime),
+  };
 }
 
-async function assessWithMiniMax(page, model, executionEvidence) {
+export async function assessWithGateway(page, model, executionEvidence, fetchImpl = fetch) {
   const evidence = await browserSemanticEvidence(page, executionEvidence);
-  const endpoint = `${model.baseURL.replace(/\/+$/, "")}/chat/completions`;
+  const callID = randomUUID();
   const requestPayload = {
-    model: model.ledgerModel,
+    // These are transport placeholders only. Infer ignores them and resolves
+    // the effective provider/model from the persisted delivery.qa route.
+    provider: "minimax",
+    model: "gateway-managed",
     messages: [
-      { role: "system", content: minMaxSemanticSystemPrompt },
-      { role: "user", content: `Browser QA evidence (read-only):\n${JSON.stringify(evidence)}` },
+      { role: "system", content: semanticSystemPrompt },
+      { role: "user", content: `Categorical browser QA signals (read-only):\n${JSON.stringify(evidence)}` },
     ],
-    // MiniMax documents 1.0 as the supported/recommended temperature for
-    // its OpenAI-compatible M-series API.
-    temperature: 1,
-    reasoning_split: true,
+    max_completion_tokens: 1024,
+    call_id: callID,
+    task_id: model.taskID,
+    run_id: model.runID,
+    operation: model.operation,
   };
-  const requestAudit = { endpoint, body: requestPayload };
+  const requestAudit = { endpoint: model.inferenceURL, call_id: callID, body: requestPayload };
   let response;
   const controller = new AbortController();
-  const requestTimeout = setTimeout(() => controller.abort(new Error(`MiniMax request timed out after ${miniMaxRequestTimeoutMs}ms`)), miniMaxRequestTimeoutMs);
+  const requestTimeout = setTimeout(() => controller.abort(new Error(`Gateway request timed out after ${gatewayRequestTimeoutMs}ms`)), gatewayRequestTimeoutMs);
   try {
-    response = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${model.apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(requestPayload),
-      signal: controller.signal,
-    });
-  } catch (error) {
-    throw Object.assign(error, {
+    response = await sendGatewayInference(model, requestPayload, controller.signal, fetchImpl);
+  } catch {
+    throw Object.assign(new Error("Gateway inference transport failed"), {
       usage: safeProviderUsage({}),
-      call: { call_key: "semantic-assessment", call_status: "failed", provider: model.provider, model: model.ledgerModel, usage: safeProviderUsage({}), request: requestAudit, response: { transport_error: safeText(error?.message, 600) } },
+      call: { call_key: "semantic-assessment", call_id: callID, call_status: "failed", provider: "gateway", model: "gateway-managed", usage: safeProviderUsage({}), request: requestAudit, response: { transport_error: "gateway_transport_error" } },
     });
   } finally {
     clearTimeout(requestTimeout);
   }
   const payload = await response.json().catch(() => ({}));
-  const usage = miniMaxUsage(payload, response.status);
-  const call = { call_key: "semantic-assessment", call_status: "completed", provider: model.provider, model: model.ledgerModel, usage, request: requestAudit, response: miniMaxResponseAudit(payload) };
+  const usage = safeProviderUsage(payload?.usage ?? {});
+  const provider = safeText(payload?.provider, 48);
+  const providerModel = safeText(payload?.model, 200);
+  const call = { call_key: "semantic-assessment", call_id: callID, receipt_id: "", call_status: "completed", provider, model: providerModel, usage, request: requestAudit, response: { status_code: response.status } };
+  const receiptCorrelated = payload?.call_id === callID && isUUID(payload?.receipt_id);
+  if (receiptCorrelated) call.receipt_id = payload.receipt_id;
   if (!response.ok) {
     call.call_status = "failed";
-    throw Object.assign(new Error(safeText(payload?.error?.message || payload?.base_resp?.status_msg || `MiniMax request failed (${response.status})`, 600)), { usage, call });
+    throw Object.assign(new Error("Gateway inference rejected the request"), { usage, call });
   }
-  const content = payload?.choices?.[0]?.message?.content;
-  try {
-    return { assessment: parseMiniMaxAssessment(content), usage, responseExcerpt: "", call };
-  } catch (error) {
+  if (!receiptCorrelated) {
     call.call_status = "failed";
-    throw Object.assign(error, { usage, call, responseExcerpt: boundedPrivateText(content, 16_000) });
+    throw Object.assign(new Error("Gateway inference receipt correlation failed"), { usage, call });
+  }
+  const content = payload?.content;
+  try {
+    return { assessment: parseGatewayAssessment(content), usage, responseExcerpt: "", call };
+  } catch {
+    call.call_status = "failed";
+    throw Object.assign(new Error("Gateway assessment did not match the categorical QA contract"), { usage, call, responseExcerpt: "" });
   }
 }
 
 async function fallbackAssessment(page) {
-  const title = safeText(await page.title(), 280);
-  try {
-    const visible = await page.evaluate(() => {
-      const text = (element) => (element?.textContent || "").replace(/\s+/g, " ").trim();
-      return {
-        primary_heading: text(document.querySelector("h1, [role='heading'][aria-level='1']")),
-        primary_action: text(document.querySelector("button, [role='button'], a[href]")),
-      };
-    });
-    return { title, primary_heading: safeText(visible?.primary_heading, 280), primary_action: safeText(visible?.primary_action, 280) };
-  } catch {
-    return { title, primary_heading: "", primary_action: "" };
-  }
+  void page;
+  return { title: "", primary_heading: "", primary_action: "", blocking_issue: "" };
 }
 
 function safeIdentifier(value, label) {
@@ -508,9 +695,18 @@ export async function loadBrowserPlan(planPath) {
   if (!parsed || typeof parsed !== "object" || parsed.schema_version !== 1 || !["read_only", "approved_navigation", "approved_test_flow"].includes(parsed.mode) || !Array.isArray(parsed.cases) || parsed.cases.length > maxBrowserQACases) {
     throw new Error("browser QA plan has an unsupported shape");
   }
+  // If a browser is already authenticated, visual evidence can expose account
+  // data even before a test-flow fill. Plans can declare that state explicitly;
+  // approved_test_flow is treated as potentially authenticated regardless.
+  if (parsed.uses_authenticated_session !== undefined && typeof parsed.uses_authenticated_session !== "boolean") {
+    throw new Error("browser QA authenticated-session flag is invalid");
+  }
   const caseIDs = new Set();
   const cases = parsed.cases.map((testCase) => {
     if (!testCase || typeof testCase !== "object") throw new Error("browser QA case is invalid");
+    if (testCase.uses_authenticated_session !== undefined && typeof testCase.uses_authenticated_session !== "boolean") {
+      throw new Error("browser QA authenticated-session flag is invalid");
+    }
     const id = safeIdentifier(testCase.id, "browser QA case id");
     if (caseIDs.has(id)) throw new Error("browser QA case IDs must be unique");
     caseIDs.add(id);
@@ -524,9 +720,9 @@ export async function loadBrowserPlan(planPath) {
         throw new Error("approved test-flow clicks require an immediate post-action assertion");
       }
     }
-    return { id, title, steps };
+    return { id, title, steps, uses_authenticated_session: testCase.uses_authenticated_session === true };
   });
-  return { schema_version: 1, mode: parsed.mode, cases };
+  return { schema_version: 1, mode: parsed.mode, uses_authenticated_session: parsed.uses_authenticated_session === true, cases };
 }
 
 function normalizeBrowserStep(step, mode, index) {
@@ -558,15 +754,17 @@ function sameOriginURL(pathname, previewURL) {
   return target.href;
 }
 
-async function runBrowserCases(page, previewURL, plan, directory, browserRuntime) {
+export async function runBrowserCases(page, previewURL, plan, directory, browserRuntime, previewURLContext = null) {
+  void directory;
   const cases = [];
   let passed = true;
   for (let caseIndex = 0; caseIndex < plan.cases.length; caseIndex += 1) {
     const testCase = plan.cases[caseIndex];
     const steps = [];
-    const beforeScreenshot = await captureCaseScreenshot(page, directory, `semantic-qa-case-${String(caseIndex + 1).padStart(2, "0")}-before.png`);
-    if (!beforeScreenshot.name) passed = false;
-    for (const step of testCase.steps) {
+    // Arbitrary page/session content cannot be classified as public, so visual
+    // artifacts are denied for all plans, not just declared authenticated flows.
+    for (let stepIndex = 0; stepIndex < testCase.steps.length; stepIndex += 1) {
+      const step = testCase.steps[stepIndex];
       let stepPassed = true;
       let detail = "";
       try {
@@ -609,34 +807,32 @@ async function runBrowserCases(page, previewURL, plan, directory, browserRuntime
             }
           }
         }
-      } catch (error) {
+      } catch {
         stepPassed = false;
-        detail = safeText(error?.message || "Browser QA step failed", 400);
+        detail = "Browser QA step failed";
       }
       await browserRuntime?.capturePerformance(page);
       if (!stepPassed) passed = false;
-      steps.push({ id: step.id, kind: step.kind, passed: stepPassed, detail, url: safeText(page.url(), 1024), usage: { input_tokens: 0, output_tokens: 0, cached_input_tokens: 0, reasoning_tokens: 0, total_tokens: 0 } });
+      steps.push({ id: `step-${stepIndex + 1}`, kind: step.kind, passed: stepPassed, detail, url: previewURLContext?.sanitizeURL(page.url()) || safeText(page.url(), 1024), usage: { input_tokens: 0, output_tokens: 0, cached_input_tokens: 0, reasoning_tokens: 0, total_tokens: 0 } });
       if (!stepPassed) break;
     }
-    const afterScreenshot = await captureCaseScreenshot(page, directory, `semantic-qa-case-${String(caseIndex + 1).padStart(2, "0")}-after.png`);
-    if (!afterScreenshot.name) passed = false;
-    const casePassed = steps.length === testCase.steps.length && steps.every((step) => step.passed) && Boolean(beforeScreenshot.name) && Boolean(afterScreenshot.name);
+    const casePassed = steps.length === testCase.steps.length && steps.every((step) => step.passed);
     cases.push({
-      id: testCase.id,
-      title: testCase.title,
+      id: `case-${caseIndex + 1}`,
+      title: `Approved browser case ${caseIndex + 1}`,
       passed: casePassed,
       steps,
-      // Keep `screenshot` as the after state for older dashboard versions,
-      // while the named pair gives the QA gate true before/after evidence.
-      screenshot: afterScreenshot.name,
-      screenshot_captured_at: afterScreenshot.captured_at,
-      screenshot_url: afterScreenshot.url,
-      screenshot_viewport: afterScreenshot.viewport,
-      before_screenshot: beforeScreenshot.name,
-      before_screenshot_captured_at: beforeScreenshot.captured_at,
-      before_screenshot_url: beforeScreenshot.url,
-      before_screenshot_viewport: beforeScreenshot.viewport,
-      evidence_error: beforeScreenshot.error || afterScreenshot.error,
+      screenshot_status: "omitted_untrusted_page_content",
+      screenshot_reason: "omitted_untrusted_page_content",
+      screenshot: "",
+      screenshot_captured_at: "",
+      screenshot_url: "",
+      screenshot_viewport: null,
+      before_screenshot: "",
+      before_screenshot_captured_at: "",
+      before_screenshot_url: "",
+      before_screenshot_viewport: null,
+      evidence_error: "",
     });
     // Stop after a failed case. Continuing into later navigation or approved
     // clicks from an unknown browser state would make the evidence ambiguous.
@@ -645,18 +841,11 @@ async function runBrowserCases(page, previewURL, plan, directory, browserRuntime
   return { mode: plan.mode, passed, cases };
 }
 
-async function captureCaseScreenshot(page, directory, name) {
-  const capturedAt = new Date().toISOString();
-  const url = safeText(page.url(), maxURLLength);
-  const viewport = await browserViewport(page);
-  try {
-    await waitForRenderedDocument(page);
-    await waitForVisualStability(page);
-    await fs.writeFile(path.join(directory, name), await page.screenshot({ fullPage: true }), { mode: 0o600 });
-    return { name, captured_at: capturedAt, url, viewport, error: "" };
-  } catch (error) {
-    return { name: "", captured_at: capturedAt, url, viewport, error: safeText(error?.message || "Case screenshot could not be captured", 400) };
-  }
+export function requiresSensitiveScreenshotOmission(plan) {
+  // Arbitrary content cannot be proven non-sensitive from a browser plan.
+  // Keep screenshots off for every run, not only plans that declare auth.
+  void plan;
+  return true;
 }
 
 async function waitForRenderedDocument(page) {
@@ -667,7 +856,7 @@ async function waitForRenderedDocument(page) {
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     const body = document.body;
     const style = body ? getComputedStyle(body) : null;
-    return Boolean(body && style && style.visibility !== "hidden" && style.display !== "none" && (body.innerText || body.querySelector("img, svg, canvas, [role], input, button")));
+    return Boolean(body && style && style.visibility !== "hidden" && style.display !== "none" && (body.childElementCount > 0 || body.querySelector("img, svg, canvas, [role], input, button")));
   });
   if (!rendered) throw new Error("Mobile document did not render visible page content");
 }
@@ -722,19 +911,22 @@ async function waitForVisualStability(page) {
 // browser cases: it never clicks or mutates state. The separate mobile image
 // and overflow measurement give the human QA gate useful evidence even when
 // a plan's feature-specific assertions only apply to the desktop layout.
-async function runMobileResponsiveSmoke(page, previewURL, directory, browserRuntime) {
+export async function runMobileResponsiveSmoke(page, previewURL, directory, browserRuntime, previewURLContext = null, options = {}) {
+  // The browser plan cannot prove that arbitrary rendered content is safe.
+  // Therefore screenshots stay disabled for every run.
+  void directory;
+  void options;
   const viewport = responsiveViewport("mobile");
-  const screenshotName = "semantic-qa-preview-mobile.png";
   const startedAt = new Date().toISOString();
   let passed = true;
   let detail = "";
-  let url = previewURL;
+  let url = previewURLContext?.sanitizeURL(previewURL) || safeText(previewURL, maxURLLength);
   let overflow = null;
   try {
     await setVerifiedViewport(page, viewport);
-    await page.goto(previewURL, { waitUntil: "domcontentloaded", timeoutMs: 45_000 });
+    await navigatePreview(page, previewURL);
     await waitForRenderedDocument(page);
-    url = safeText(page.url(), maxURLLength);
+    url = previewURLContext?.sanitizeURL(page.url()) || safeText(page.url(), maxURLLength);
     overflow = await page.evaluate(() => ({
       document_width: Math.max(0, Math.trunc(document.documentElement.scrollWidth || 0)),
       viewport_width: Math.max(0, Math.trunc(window.innerWidth || 0)),
@@ -746,29 +938,7 @@ async function runMobileResponsiveSmoke(page, previewURL, directory, browserRunt
     await browserRuntime?.capturePerformance(page);
   } catch (error) {
     passed = false;
-    detail = safeText(error?.message || "Mobile responsive smoke failed", 400);
-  }
-  let screenshot = "";
-  try {
-    // A viewport image is deliberate here. Some Chromium/CDP combinations can
-    // produce an empty full-page bitmap immediately after a viewport emulation
-    // change even though the DOM is available. The QA gate needs the rendered
-    // mobile interface above the fold, not a misleading white artifact.
-    let image = null;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      await waitForRenderedDocument(page);
-      const candidate = await page.screenshot({ fullPage: false, animations: "disabled", scale: "css" });
-      if (candidate.byteLength >= minMeaningfulScreenshotBytes) {
-        image = candidate;
-        break;
-      }
-    }
-    if (!image) throw new Error("Mobile screenshot did not contain enough rendered visual evidence");
-    await fs.writeFile(path.join(directory, screenshotName), image, { mode: 0o600 });
-    screenshot = screenshotName;
-  } catch (error) {
-    passed = false;
-    if (!detail) detail = safeText(error?.message || "Mobile screenshot could not be captured", 400);
+    detail = "Mobile responsive smoke failed";
   }
   return {
     viewport,
@@ -776,37 +946,39 @@ async function runMobileResponsiveSmoke(page, previewURL, directory, browserRunt
     detail,
     url,
     overflow,
-    screenshot,
+    screenshot: "",
+    screenshot_status: "omitted_untrusted_page_content",
+    screenshot_reason: "omitted_untrusted_page_content",
     captured_at: new Date().toISOString(),
     started_at: startedAt,
   };
 }
 
-export function boundedBrowserRuntime() {
+export function boundedBrowserRuntime(previewURLContext = null) {
   const consoleErrors = [];
   const failedRequests = [];
   const unavailableObservers = [];
   const networkSources = [];
-  const record = (entries, value, limit = 320) => {
-    const normalized = redactedInferenceText(value, limit);
-    if (normalized && entries.length < 12) entries.push(normalized);
+  const record = (entries, value) => {
+    // Browser-originated messages and URLs can contain arbitrary account or
+    // page data. Keep only a fixed event code and never persist the message.
+    if (value && entries.length < 12) entries.push(entries === consoleErrors ? "console_error" : "failed_request");
   };
   return {
     recordConsole(message) {
-      if (message?.type?.() === "error") record(consoleErrors, message.text?.());
+      if (message?.type?.() === "error") record(consoleErrors, true);
     },
     recordPageError(error) {
-      record(consoleErrors, error?.message || error);
+      record(consoleErrors, Boolean(error));
     },
     recordRequestFailure(request) {
       const failure = request?.failure?.();
-      if (failure?.errorText) record(failedRequests, `${request.method?.() || "REQUEST"} ${request.url?.() || ""}: ${failure.errorText}`);
+      if (failure?.errorText) record(failedRequests, true);
     },
     recordFailedResponse(response) {
       const status = Number(response?.status?.());
       if (!Number.isFinite(status) || status < 400) return;
-      const request = response?.request?.();
-      record(failedRequests, `${request?.method?.() || "REQUEST"} ${request?.url?.() || response?.url?.() || ""}: HTTP ${Math.trunc(status)}`);
+      record(failedRequests, true);
     },
     async capturePerformance(page) {
       try {
@@ -816,16 +988,14 @@ export function boundedBrowserRuntime() {
             ...performance.getEntriesByType("resource"),
           ];
           return performanceEntries.slice(-200).map((entry) => ({
-            name: String(entry.name || ""),
-            initiator_type: String(entry.initiatorType || ""),
             response_status: Number(entry.responseStatus || 0),
           }));
         });
         if (!networkSources.includes("performance_timing")) networkSources.push("performance_timing");
-        for (const entry of Array.isArray(entries) ? entries : []) {
+          for (const entry of Array.isArray(entries) ? entries : []) {
           const status = Number(entry?.response_status);
           if (Number.isFinite(status) && status >= 400) {
-            record(failedRequests, `${safeText(entry?.initiator_type || "REQUEST", 40).toUpperCase()} ${safeText(entry?.name, 1024)}: HTTP ${Math.trunc(status)}`);
+            record(failedRequests, true);
           }
         }
       } catch {
@@ -856,12 +1026,12 @@ async function main() {
   if (!supportedNodeRuntime()) {
     throw new Error("Stagehand requires Node ^20.19.0 or >=22.12.0");
   }
-  const { previewURL, output, plan: planPath } = parseArguments(process.argv.slice(2));
+  const { previewURL, reportURL, urlContext, output, plan: planPath } = await parseArguments(process.argv.slice(2));
   const env = environment();
   const model = modelConfiguration(env);
   const browserPlan = await loadBrowserPlan(planPath);
+  const omitVisualScreenshots = requiresSensitiveScreenshotOmission(browserPlan);
   await fs.mkdir(path.dirname(output), { recursive: true, mode: 0o700 });
-  const screenshot = path.join(path.dirname(output), `${path.basename(output, ".json")}.png`);
   let stagehand;
   const startedAt = new Date().toISOString();
   try {
@@ -876,22 +1046,18 @@ async function main() {
     await withTimeout(() => stagehand.init(), stagehandInitializationTimeoutMs, "Stagehand initialization");
     const page = stagehand.context.pages()[0];
     if (!page) throw new Error("Stagehand did not provide a browser page");
-    const browserRuntime = boundedBrowserRuntime();
-    // Runtime errors are evidence, not a model-created diagnosis. Preserve a
-    // small redacted record for MiniMax and the human QA gate.
+    const browserRuntime = boundedBrowserRuntime(urlContext);
+    // Runtime evidence stores only fixed error codes and allowlisted signals;
+    // raw browser messages and URLs can contain arbitrary page/account data.
     browserRuntime.attach(page);
     const desktop = responsiveViewport("desktop");
     await setVerifiedViewport(page, desktop);
-    await page.goto(previewURL, { waitUntil: "domcontentloaded", timeoutMs: 45_000 });
+    await navigatePreview(page, previewURL);
     await browserRuntime.capturePerformance(page);
     await waitForRenderedDocument(page);
     await waitForVisualStability(page);
-    await fs.writeFile(screenshot, await page.screenshot({ fullPage: true }), { mode: 0o600 });
-    const landingScreenshotCapturedAt = new Date().toISOString();
-    const landingScreenshotURL = safeText(page.url(), maxURLLength);
-    const landingViewport = await browserViewport(page);
-    const browserE2E = await runBrowserCases(page, previewURL, browserPlan, path.dirname(output), browserRuntime);
-    const responsive = await runMobileResponsiveSmoke(page, previewURL, path.dirname(output), browserRuntime);
+    const browserE2E = await runBrowserCases(page, reportURL, browserPlan, path.dirname(output), browserRuntime, urlContext);
+    const responsive = await runMobileResponsiveSmoke(page, previewURL, path.dirname(output), browserRuntime, urlContext, { suppressScreenshot: omitVisualScreenshots });
     const browserRuntimeEvidence = browserRuntime.evidence();
     let assessment;
     let extractionError = "";
@@ -899,33 +1065,28 @@ async function main() {
     let providerUsage = null;
     let semanticCall = null;
     try {
-      if (model.isMiniMax) {
-        const semantic = await assessWithMiniMax(page, model, {
-          browser_e2e: browserE2E,
-          responsive,
-          browser_runtime: browserRuntimeEvidence,
-        });
-        assessment = semantic.assessment;
-        providerUsage = semantic.usage;
-        semanticCall = semantic.call;
-      } else {
-        assessment = await stagehand.extract(
-          "Return only the requested structured fields. Inspect this preview read-only. Identify its visible page title, primary heading, primary action and one clearly blocking usability issue if present. Do not click, submit, authenticate, mutate data or navigate away.",
-          PageAssessment,
-        );
-      }
+      if (!model.isGateway) throw new Error("Stagehand requires the central inference gateway");
+      const semantic = await assessWithGateway(page, model, {
+        browser_e2e: browserE2E,
+        responsive,
+        browser_runtime: browserRuntimeEvidence,
+      });
+      assessment = semantic.assessment;
+      providerUsage = semantic.usage;
+      semanticCall = semantic.call;
     } catch (error) {
-      extractionError = safeText(error?.message || "Stagehand did not produce a structured assessment", 600);
-      providerResponseExcerpt = boundedPrivateText(error?.responseExcerpt || error?.text || error?.cause?.text || "");
+      // Keep diagnostics categorical; errors from browser/model libraries may
+      // include snippets of user content and are not sent to the report.
+      extractionError = "categorical_gateway_assessment_failed";
       providerUsage = error?.usage || error?.cause?.usage || null;
       semanticCall = error?.call || null;
       assessment = await fallbackAssessment(page);
     }
     const normalized = {
-      title: safeText(assessment?.title, 280),
-      primary_heading: safeText(assessment?.primary_heading, 280),
-      primary_action: safeText(assessment?.primary_action, 280),
-      blocking_issue: safeText(assessment?.blocking_issue, 600),
+      title: "",
+      primary_heading: "",
+      primary_action: "",
+      blocking_issue: PageAssessment.shape.blocking_issue.safeParse(assessment?.blocking_issue).success ? assessment.blocking_issue : "",
     };
     const hasApprovedBrowserCases = browserPlan.cases.length > 0;
     const semanticStatus = extractionError ? "degraded" : "structured";
@@ -942,7 +1103,7 @@ async function main() {
           ? "blocked"
           : "passed";
     const stagehandUsage = safeMetrics(await stagehand.metrics);
-    const usage = model.isMiniMax
+    const usage = model.isGateway
       ? combinedUsage(stagehandUsage, providerUsage)
       : resolvedUsage(stagehandUsage, providerUsage);
     // This array is the immutable per-inference contract consumed by the
@@ -951,84 +1112,67 @@ async function main() {
     const calls = semanticCall ? [semanticCall] : extractionError ? [] : [{
       call_key: "semantic-assessment",
       call_status: "completed",
-      provider: model.provider,
-      model: model.ledgerModel,
-      usage: model.isMiniMax ? providerUsage : usage,
-      request: { instruction: "Stagehand schema extraction" },
+      provider: "gateway",
+      model: "gateway-managed",
+      usage: providerUsage,
+      request: { instruction: "Categorical browser-signal assessment" },
       response: { status: "structured" },
     }];
-    const caseScreenshots = browserE2E.cases.flatMap((testCase) => [testCase.before_screenshot, testCase.screenshot]).filter(Boolean);
-    const evidenceArtifacts = await Promise.all([
-      screenshotEvidence(path.dirname(output), path.basename(screenshot), {
-        capturedAt: landingScreenshotCapturedAt,
-        url: landingScreenshotURL,
-        viewport: landingViewport,
-      }),
-      ...browserE2E.cases.flatMap((testCase) => [
-        ...(testCase.before_screenshot ? [screenshotEvidence(path.dirname(output), testCase.before_screenshot, {
-          capturedAt: testCase.before_screenshot_captured_at,
-          url: testCase.before_screenshot_url,
-          viewport: testCase.before_screenshot_viewport,
-        })] : []),
-        ...(testCase.screenshot ? [screenshotEvidence(path.dirname(output), testCase.screenshot, {
-          capturedAt: testCase.screenshot_captured_at,
-          url: testCase.screenshot_url,
-          viewport: testCase.screenshot_viewport,
-        })] : []),
-      ]),
-      ...(responsive.screenshot ? [screenshotEvidence(path.dirname(output), responsive.screenshot, {
-        capturedAt: responsive.captured_at,
-        url: responsive.url,
-        viewport: responsive.viewport,
-      })] : []),
-    ]);
+    const effectiveProvider = semanticCall?.provider || model.provider;
+    const effectiveModel = semanticCall?.model || model.ledgerModel;
+    const caseScreenshots = [];
+    const evidenceArtifacts = [];
     const report = {
       schema_version: 1,
       tool: "stagehand",
       mode: env.toLowerCase(),
-      provider: model.provider,
-      model: model.ledgerModel,
-      preview_url: previewURL,
+      provider: effectiveProvider,
+      model: effectiveModel,
+      preview_url: reportURL,
       started_at: startedAt,
       completed_at: new Date().toISOString(),
       request: {
-		instruction: "Run only the approved browser QA cases, then inspect the resulting preview. Remain read-only unless the reviewed plan explicitly uses approved_test_flow; then use only its ITBEM_QA_* test values, approved same-origin actions and immediate assertions. Never navigate outside the preview origin or expand the plan.",
-		url: previewURL,
+        instruction: "Run only the approved browser QA cases. AI receives categorical layout/runtime signals only; rendered text and screenshots are never sent. Remain read-only unless the reviewed plan explicitly uses approved_test_flow; then use only its ITBEM_QA_* test values, approved same-origin actions and immediate assertions. Never navigate outside the preview origin or expand the plan.",
+		url: reportURL,
 		mode: browserPlan.mode,
-		browser_cases: browserPlan.cases,
+		browser_cases: browserPlan.cases.map((testCase, caseIndex) => ({
+          id: `case-${caseIndex + 1}`,
+          steps: testCase.steps.map((step, stepIndex) => ({ id: `step-${stepIndex + 1}`, kind: step.kind })),
+        })),
 	  },
       verdict,
-      summary: !browserE2E.passed || !responsive.passed ? "An approved browser step or the mobile responsive smoke failed; human review is required." : !browserRuntimeObserved ? "The browser did not expose a trustworthy network-observation path; human review is required." : !browserRuntimePassedQA ? "The browser reported console errors or failed requests; human review is required." : normalized.blocking_issue ? `Potential blocking issue: ${normalized.blocking_issue}` : extractionError ? "Approved deterministic browser QA and mobile responsive smoke passed; the semantic model response was retained as degraded private evidence for the mandatory human QA review." : "Approved browser QA, mobile responsive smoke and semantic visual review completed without a reported blocking issue.",
+      summary: !browserE2E.passed || !responsive.passed ? "An approved browser step or the mobile responsive smoke failed; human review is required." : !browserRuntimeObserved ? "The browser did not expose a trustworthy network-observation path; human review is required." : !browserRuntimePassedQA ? "The browser reported console errors or failed requests; human review is required." : normalized.blocking_issue ? `Potential blocking issue: ${normalized.blocking_issue}` : extractionError ? "Deterministic browser checks passed; categorical gateway assessment was unavailable and human review is required." : "Categorical browser-signal assessment completed without a reported blocking issue; human review remains mandatory.",
       assessment: normalized,
-	  extraction: { status: extractionError ? "schema_rejected" : "structured", semantic_status: semanticStatus, strategy: model.isMiniMax ? "minimax_chat_json" : "stagehand_schema", error: extractionError, provider_response_excerpt: providerResponseExcerpt },
+	  extraction: { status: extractionError ? "schema_rejected" : "structured", semantic_status: semanticStatus, strategy: model.isGateway ? "gateway_chat_json" : "stagehand_schema", error: extractionError, provider_response_excerpt: providerResponseExcerpt },
 	  calls,
       browser_e2e: browserE2E,
       responsive,
       browser_runtime: browserRuntimeEvidence,
       evidence: {
-        screenshot: path.basename(screenshot),
+        screenshot: "",
         case_screenshots: caseScreenshots,
         responsive_screenshot: responsive.screenshot,
         artifacts: evidenceArtifacts,
       },
       usage,
     };
-    await fs.writeFile(output, `${JSON.stringify(report, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-    if (report.verdict !== "passed") process.exitCode = 1;
+    const sanitizedReport = sanitizeReportValue(report, urlContext);
+    await fs.writeFile(output, `${JSON.stringify(sanitizedReport, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    if (sanitizedReport.verdict !== "passed") process.exitCode = 1;
   } finally {
     if (stagehand) {
       try {
         await withTimeout(() => stagehand.close(), stagehandCloseTimeoutMs, "Stagehand shutdown");
-      } catch (error) {
+      } catch {
         // Closing must never turn a completed report into a false pass. The
-        // process will still exit with this error after the report is written.
+        // process still exits with this generic diagnostic after the report.
         if (!process.exitCode) process.exitCode = 2;
-        process.stderr.write(`${safeText(error?.message || "Stagehand shutdown failed", 600)}\n`);
+        process.stderr.write("Stagehand shutdown failed\n");
       }
     }
   }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main().catch((error) => fail(safeText(error?.message || "Stagehand semantic QA failed", 600)));
+  main().catch(() => fail("Stagehand semantic QA failed; details withheld to protect page content."));
 }

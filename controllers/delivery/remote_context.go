@@ -20,6 +20,35 @@ import (
 
 const remoteWorkspaceAttestationTTL = 2 * time.Minute
 
+// bindRemoteAgentWorkspace resolves a remote worker workspace only through a
+// ready, same-project GitHub checkpoint. The submitted revision is never
+// trusted as a free-form label; it must match that immutable checkpoint.
+func bindRemoteAgentWorkspace(projectID uuid.UUID, metadata map[string]any, requestedRevision string) (string, error) {
+	if projectID == uuid.Nil || metadata == nil {
+		return "", fmt.Errorf("a project and linked GitHub repository are required")
+	}
+	repository, ok := metadata["github_repository"].(string)
+	repository = strings.ToLower(strings.TrimSpace(repository))
+	if !ok || !isDeliveryRepositoryReference("github://"+repository) {
+		return "", fmt.Errorf("the remote workspace must identify its linked GitHub repository")
+	}
+	var checkpoint models.DeliveryContextSource
+	if err := configuration.DB.Where("project_id = ? AND kind = ? AND reference = ? AND status = ?", projectID, "repository", "github://"+repository, "ready").First(&checkpoint).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return "", fmt.Errorf("a ready GitHub checkpoint for the linked repository is required")
+		}
+		return "", fmt.Errorf("could not verify the linked GitHub checkpoint")
+	}
+	if !projectvault.ValidRevision(checkpoint.Revision) {
+		return "", fmt.Errorf("the linked GitHub checkpoint has no immutable revision")
+	}
+	requestedRevision = strings.TrimSpace(requestedRevision)
+	if requestedRevision != "" && !strings.EqualFold(requestedRevision, checkpoint.Revision) {
+		return "", fmt.Errorf("the remote workspace revision must match its linked GitHub checkpoint")
+	}
+	return strings.ToLower(strings.TrimSpace(checkpoint.Revision)), nil
+}
+
 // applyWorkspaceDeliveryMetadata projects only the safe, inventory-derived
 // workspace signals that help a human classify a repository in the project
 // map. It never reads secrets, parses manifests for dependencies, or changes
