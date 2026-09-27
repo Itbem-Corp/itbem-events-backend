@@ -9,8 +9,13 @@ import (
 )
 
 const (
-	codeReviewSegmentMaxPatchBytes = 40 << 10
-	codeReviewSegmentMaxFiles      = 4
+	// A segment is the only patch sent to the provider. Its file and byte caps
+	// keep prompt size bounded, while sixteen segments cover the full 3 MiB
+	// ingress boundary without silently dropping file diffs. The per-segment
+	// ceiling preserves the former whole-review safety limit, so a large single
+	// file can be reviewed without cutting a hunk.
+	codeReviewSegmentMaxPatchBytes = 512 << 10
+	codeReviewSegmentMaxFiles      = 32
 	codeReviewSegmentMaxContext    = 32 << 10
 	codeReviewSegmentMaxExcerpts   = 12
 	maxCodeReviewSegments          = 16

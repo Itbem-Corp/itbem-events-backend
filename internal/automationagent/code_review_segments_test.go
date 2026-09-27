@@ -44,11 +44,30 @@ func TestSegmentCodeReviewInputPreservesEveryFrozenFileRangeAndContext(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(segments) != 2 || segments[0].Remote != nil || len(segments[0].ChangedFiles) != codeReviewSegmentMaxFiles || len(segments[1].ChangedFiles) != 1 || len(segments[0].Context) != codeReviewSegmentMaxFiles || len(segments[1].Context) != 1 {
+	if len(segments) != 2 || segments[0].Remote != nil || len(segments[0].ChangedFiles) != codeReviewSegmentMaxFiles || len(segments[1].ChangedFiles) != 1 || len(segments[0].Context) != min(codeReviewSegmentMaxFiles, codeReviewSegmentMaxExcerpts) || len(segments[1].Context) != 1 {
 		t.Fatalf("unexpected exact-SHA segments: %#v", segments)
 	}
 	if segments[0].Patch+segments[1].Patch != input.Patch {
 		t.Fatal("segmentation changed the frozen patch")
+	}
+}
+
+func TestSegmentCodeReviewInputCoversARepositorySizedFileSet(t *testing.T) {
+	patch := ""
+	for index := 0; index < 206; index++ {
+		file := fmt.Sprintf("src/file_%03d.go", index)
+		patch += fmt.Sprintf("diff --git a/%s b/%s\n--- a/%s\n+++ b/%s\n@@ -1 +1 @@\n-old%d\n+new%d\n", file, file, file, file, index, index)
+	}
+	input, err := NewCodeReviewInput("github://acme/service", strings.Repeat("a", 40), strings.Repeat("b", 40), patch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	segments, err := SegmentCodeReviewInput(input)
+	if err != nil || len(segments) < 2 || len(segments) > maxCodeReviewSegments {
+		t.Fatalf("repository-sized patch must remain fully segmentable: segments=%d / %v", len(segments), err)
+	}
+	if err := validateCodeReviewSegmentCoverage(input, segments); err != nil {
+		t.Fatalf("large segmented review lost immutable coverage: %v", err)
 	}
 }
 

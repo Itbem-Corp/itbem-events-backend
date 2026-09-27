@@ -13,7 +13,11 @@ import (
 
 const (
 	maxCodeReviewChangedFiles = 300
-	maxCodeReviewPatchBytes   = 512 << 10
+	// The worker never sends this complete boundary to the provider. It first
+	// partitions it into independently validated file-diff segments. Keep the
+	// ingress cap below the private 10 MiB transport limit while allowing a
+	// large, but still bounded, PR to reach that segmented path.
+	maxCodeReviewPatchBytes   = 3 << 20
 	maxCodeReviewContextBytes = 192 << 10
 	maxCodeReviewExcerpts     = 64
 )
