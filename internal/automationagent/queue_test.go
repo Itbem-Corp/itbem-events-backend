@@ -59,6 +59,9 @@ func TestCompletionTokensForOperationKeepsPlansBoundedAndExpandsImplementation(t
 	if got := CompletionTokensForOperation("product.ideate"); got != miniMaxM3CompletionLimit {
 		t.Fatalf("product ideation budget = %d, want %d", got, miniMaxM3CompletionLimit)
 	}
+	if got := CompletionTokensForOperation("code.review"); got != miniMaxM3CompletionLimit {
+		t.Fatalf("segmented code review budget = %d, want %d", got, miniMaxM3CompletionLimit)
+	}
 	if got := CompletionTokensForOperation("delivery.qa"); got != DefaultCompletionTokens {
 		t.Fatalf("QA operation budget = %d, want %d", got, DefaultCompletionTokens)
 	}

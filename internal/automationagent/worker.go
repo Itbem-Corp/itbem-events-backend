@@ -1123,7 +1123,7 @@ func CompletionTokensForOperation(operation string) int {
 	switch strings.TrimSpace(operation) {
 	case "delivery.chat", "delivery.plan", "delivery.qa", "delivery.summary":
 		return DefaultCompletionTokens
-	case "product.ideate", "delivery.implementation":
+	case "code.review", "product.ideate", "delivery.implementation":
 		return miniMaxM3CompletionLimit
 	case "delivery.publish":
 		return 0

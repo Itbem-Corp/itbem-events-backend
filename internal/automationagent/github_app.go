@@ -82,7 +82,6 @@ const (
 	// otherwise ordinary PRs before the head SHA is decoded; retain a bounded
 	// response while allowing the documented PR body size plus metadata.
 	maxGitHubPullRequestStateBytes = 1 << 20
-	maxGitHubPullRequestPatchBytes = 512 << 10
 )
 const maxGitHubInstallationIDs = 16
 
@@ -163,8 +162,8 @@ func ReadGitHubPullRequestPatch(ctx context.Context, config GitHubAppConfig, tok
 	if response.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("GitHub pull request comparison was rejected (%d)", response.StatusCode)
 	}
-	patch, err := io.ReadAll(io.LimitReader(response.Body, maxGitHubPullRequestPatchBytes+1))
-	if err != nil || len(patch) == 0 || len(patch) > maxGitHubPullRequestPatchBytes {
+	patch, err := io.ReadAll(io.LimitReader(response.Body, maxCodeReviewPatchBytes+1))
+	if err != nil || len(patch) == 0 || len(patch) > maxCodeReviewPatchBytes {
 		return "", fmt.Errorf("GitHub pull request comparison is invalid or exceeds the review limit")
 	}
 	return string(patch), nil

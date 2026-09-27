@@ -183,6 +183,26 @@ func TestReadGitHubPullRequestPatchPinsWebhookCommitComparison(t *testing.T) {
 	}
 }
 
+func TestReadGitHubPullRequestPatchAcceptsOnlyTheBoundedSegmentedReviewEnvelope(t *testing.T) {
+	base := strings.Repeat("a", 40)
+	head := strings.Repeat("b", 40)
+	withinLimit := "diff --git a/a.go b/a.go\n" + strings.Repeat("+x\n", (512<<10)/3+1)
+	if len(withinLimit) <= 512<<10 || len(withinLimit) > maxCodeReviewPatchBytes {
+		t.Fatalf("fixture must exercise the expanded bounded envelope: %d", len(withinLimit))
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/repos/itbem/backend/compare/"+base+"..."+head {
+			t.Fatalf("unexpected comparison request: %s", request.URL.Path)
+		}
+		_, _ = response.Write([]byte(withinLimit))
+	}))
+	defer server.Close()
+	patch, err := ReadGitHubPullRequestPatch(context.Background(), GitHubAppConfig{APIBaseURL: server.URL}, "ephemeral", "itbem/backend", base, head)
+	if err != nil || len(patch) != len(withinLimit) {
+		t.Fatalf("bounded large patch should be frozen for segmentation: bytes=%d / %v", len(patch), err)
+	}
+}
+
 func TestReadGitHubPullRequestStateReturnsOnlyAValidOpenCurrentPR(t *testing.T) {
 	head := strings.Repeat("b", 40)
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
