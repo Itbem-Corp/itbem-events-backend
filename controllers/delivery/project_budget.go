@@ -171,6 +171,32 @@ func projectBudgetReservation(cfg *models.Config, inputBytes, maxCompletionToken
 	return automationcost.EstimateUpperBound(provider, model, inputBytes, maxCompletionTokens, configured)
 }
 
+// policyRouteBudgetReservation holds capacity for every candidate that could
+// be reached during one call. A failed primary may still have consumed tokens,
+// so reserving only the primary would understate the maximum spend of a
+// fallback chain. Operators must supply a concrete price entry for each route.
+func policyRouteBudgetReservation(cfg *models.Config, routes []models.AutomationAIActionRoute, inputBytes, maxCompletionTokens int) (int64, error) {
+	if len(routes) == 0 {
+		return projectBudgetReservation(cfg, inputBytes, maxCompletionTokens)
+	}
+	configured := ""
+	if cfg != nil {
+		configured = cfg.AutomationPricingJSON
+	}
+	var total int64
+	for _, route := range routes {
+		reservation, err := automationcost.EstimateUpperBound(route.Provider, route.Model, inputBytes, maxCompletionTokens, configured)
+		if err != nil || reservation < 0 || total > math.MaxInt64-reservation {
+			if err != nil {
+				return 0, err
+			}
+			return 0, fmt.Errorf("fallback route budget exceeds supported range")
+		}
+		total += reservation
+	}
+	return total, nil
+}
+
 const (
 	defaultQASemanticInputTokenReserve  = 24_000
 	defaultQASemanticOutputTokenReserve = 4_096
@@ -181,8 +207,12 @@ const (
 // Stagehand call in addition to the delivery agent summary; reserving it here
 // prevents concurrent QA tasks from silently exceeding a project cap.
 func deliveryRunBudgetReservation(cfg *models.Config, operation string, inputBytes, maxCompletionTokens int) (int64, error) {
+	return deliveryRunBudgetReservationForRoutes(cfg, nil, operation, inputBytes, maxCompletionTokens)
+}
+
+func deliveryRunBudgetReservationForRoutes(cfg *models.Config, routes []models.AutomationAIActionRoute, operation string, inputBytes, maxCompletionTokens int) (int64, error) {
 	if operation == "delivery.implementation" {
-		perCall, err := projectBudgetReservation(cfg, automationagent.AgentMaxRequestBytes, maxCompletionTokens)
+		perCall, err := policyRouteBudgetReservation(cfg, routes, automationagent.AgentMaxRequestBytes, maxCompletionTokens)
 		if err != nil {
 			return 0, err
 		}
@@ -191,7 +221,7 @@ func deliveryRunBudgetReservation(cfg *models.Config, operation string, inputByt
 		}
 		return perCall * automationagent.AgentMaxCalls, nil
 	}
-	primary, err := projectBudgetReservation(cfg, inputBytes, maxCompletionTokens)
+	primary, err := policyRouteBudgetReservation(cfg, routes, inputBytes, maxCompletionTokens)
 	if err != nil || operation != "delivery.qa" {
 		return primary, err
 	}

@@ -1,10 +1,18 @@
 package automationqueuerepository
 
 import (
-	"events-stocks/internal/agentwork"
+	"encoding/json"
 	"testing"
 
+	"events-stocks/configuration"
+	"events-stocks/internal/agentwork"
+
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
+	"github.com/gofrs/uuid"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 const completeLaneQueues = `{
@@ -95,6 +103,126 @@ func TestQueueAttributeCountFailsClosedForMissingMalformedOrNegativeValues(t *te
 			t.Fatalf("queue count %q = %d, %v", sample.value, count, ok)
 		}
 	}
+}
+
+func TestValidateSupportsOptionalStepScopedRoutingAndPreservesJSONFields(t *testing.T) {
+	message := Message{SchemaVersion: 1, JobID: "job", TenantCode: "itbem", Type: "ai.local.process"}
+	message.Payload.TaskID, message.Payload.Attempt, message.Payload.Operation = "task", 1, "delivery.implementation"
+	message.Payload.InputRef = "s3://itbem-ai-inputs-local/automation/inputs/task/input.json"
+	if err := Validate(message); err != nil {
+		t.Fatalf("legacy message without child-routing fields must remain valid: %v", err)
+	}
+
+	message.Payload.PlanStepID = uuid.Must(uuid.NewV4()).String()
+	message.Payload.AgentKey = "backend-engineer"
+	message.Payload.TargetMachineID = uuid.Must(uuid.NewV4()).String()
+	if err := Validate(message); err != nil {
+		t.Fatalf("valid targeted specialist message rejected: %v", err)
+	}
+	encoded, err := json.Marshal(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatal(err)
+	}
+	data := payload["payload"].(map[string]any)
+	if data["plan_step_id"] != message.Payload.PlanStepID || data["agent_key"] != message.Payload.AgentKey || data["target_machine_id"] != message.Payload.TargetMachineID {
+		t.Fatalf("outbox message JSON omitted targeted routing fields: %#v", data)
+	}
+
+	invalid := message
+	invalid.Payload.PlanStepID = "00000000-0000-0000-0000-000000000000"
+	if err := Validate(invalid); err == nil {
+		t.Fatal("zero UUID plan-step target must be rejected")
+	}
+	invalid = message
+	invalid.Payload.AgentKey = "Backend Engineer"
+	if err := Validate(invalid); err == nil {
+		t.Fatal("malformed agent key must be rejected")
+	}
+	invalid = message
+	invalid.Payload.AgentKey = " frontend-engineer"
+	if err := Validate(invalid); err == nil {
+		t.Fatal("agent key with surrounding whitespace must be rejected")
+	}
+	invalid = message
+	invalid.Payload.Operation = "delivery.plan"
+	if err := Validate(invalid); err == nil {
+		t.Fatal("a step-scoped target on a non-implementation message must be rejected")
+	}
+	invalid = message
+	invalid.Payload.AgentKey = ""
+	if err := Validate(invalid); err == nil {
+		t.Fatal("step-scoped messages must carry the server-hydrated profile target")
+	}
+}
+
+func TestPublishTargetHydrationUsesPersistedAssignmentNotOutboxValues(t *testing.T) {
+	db, mock := newQueueTargetTestDB(t)
+	taskID, stepID, machineID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
+	message := Message{SchemaVersion: 1, JobID: "job", TenantCode: "itbem", Type: "ai.local.process"}
+	message.Payload.TaskID, message.Payload.Attempt, message.Payload.Operation = taskID.String(), 1, "delivery.implementation"
+	message.Payload.PlanStepID, message.Payload.AgentKey = stepID.String(), "attacker-profile"
+	message.Payload.TargetMachineID = uuid.Must(uuid.NewV4()).String()
+	message.Payload.InputRef = "s3://itbem-ai-inputs-local/automation/inputs/task/input.json"
+	mock.ExpectQuery(`SELECT target_machine_id, target_agent_key FROM "delivery_plan_step_assignments" WHERE child_automation_task_id = \$1 AND delivery_plan_step_id = \$2 AND status IN \(\$3,\$4,\$5,\$6\) LIMIT \$7`).
+		WithArgs(taskID, stepID, "pending", "queued", "dispatched", "running", 1).
+		WillReturnRows(sqlmock.NewRows([]string{"target_machine_id", "target_agent_key"}).AddRow(machineID, "backend-engineer"))
+
+	hydrated, err := hydratePersistedPlanStepTarget(db, message)
+	if err != nil {
+		t.Fatalf("hydrate persisted plan-step target: %v", err)
+	}
+	if hydrated.Payload.TargetMachineID != machineID.String() || hydrated.Payload.AgentKey != "backend-engineer" {
+		t.Fatalf("hydrated target = (%q, %q), want persisted machine/profile", hydrated.Payload.TargetMachineID, hydrated.Payload.AgentKey)
+	}
+	if err := Validate(hydrated); err != nil {
+		t.Fatalf("hydrated message should pass queue validation: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPublishTargetHydrationBlocksUnassignedPlanStep(t *testing.T) {
+	db, mock := newQueueTargetTestDB(t)
+	taskID, stepID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
+	message := Message{SchemaVersion: 1, JobID: "job", TenantCode: "itbem", Type: "ai.local.process"}
+	message.Payload.TaskID, message.Payload.Attempt, message.Payload.Operation = taskID.String(), 1, "delivery.implementation"
+	message.Payload.PlanStepID = stepID.String()
+	message.Payload.InputRef = "s3://itbem-ai-inputs-local/automation/inputs/task/input.json"
+	mock.ExpectQuery(`SELECT target_machine_id, target_agent_key FROM "delivery_plan_step_assignments" WHERE child_automation_task_id = \$1 AND delivery_plan_step_id = \$2 AND status IN \(\$3,\$4,\$5,\$6\) LIMIT \$7`).
+		WithArgs(taskID, stepID, "pending", "queued", "dispatched", "running", 1).
+		WillReturnRows(sqlmock.NewRows([]string{"target_machine_id", "target_agent_key"}))
+	if _, err := hydratePersistedPlanStepTarget(db, message); err == nil {
+		t.Fatal("plan step without a persisted assignment target must not dispatch")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func newQueueTargetTestDB(t *testing.T) (*gorm.DB, sqlmock.Sqlmock) {
+	t.Helper()
+	connection, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := gorm.Open(postgres.New(postgres.Config{Conn: connection}), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	if err != nil {
+		_ = connection.Close()
+		t.Fatal(err)
+	}
+	original := configuration.DB
+	configuration.DB = db
+	cleanup := func() {
+		configuration.DB = original
+		_ = connection.Close()
+	}
+	t.Cleanup(cleanup)
+	return db, mock
 }
 
 func TestQueueCountsRequireEveryApproximateCounter(t *testing.T) {

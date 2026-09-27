@@ -132,6 +132,17 @@ class RenderDockerEnvTests(unittest.TestCase):
                 f"{runtime_name}: ${{{{ secrets.{secret_name} }}}}", workflow
             )
 
+    def test_ai_provider_bundle_identifier_is_optional_and_not_a_key(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn(
+            "AI_PROVIDER_CREDENTIALS_SECRET_ID: ${{ vars.AI_PROVIDER_CREDENTIALS_SECRET_ID }}",
+            workflow,
+        )
+        self.assertIn("--optional AI_PROVIDER_CREDENTIALS_SECRET_ID", workflow)
+        self.assertNotIn(
+            "AI_PROVIDER_CREDENTIALS_SECRET_ID: ${{ secrets.", workflow
+        )
+
     def test_automatic_promotion_keeps_rollback_snapshots_bounded(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("github.event_name == 'push'", workflow)

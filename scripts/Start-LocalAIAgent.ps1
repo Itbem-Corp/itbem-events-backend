@@ -1,17 +1,17 @@
 [CmdletBinding()]
 param(
-	[Alias('LocalStackEndpoint')]
-	[string]$AwsEmulatorEndpoint = 'http://localhost:4566',
-    [string]$ApiBaseURL = 'http://localhost:8081',
-    # Empty preserves the migration-compatible combined queue. Supplying an
-    # identity requires the exact role/lane pair and selects only that lane's
-    # queue; one process can never consume work belonging to another role.
-    [string]$Role = '',
-    [string]$Lane = '',
+    [Alias('LocalStackEndpoint')]
+    [string]$AwsEmulatorEndpoint = 'http://localhost:4566',
+    [string]$ApiBaseURL = 'http://127.0.0.1:18080',
+    # The local API is the same cloud-gateway boundary used in deployed
+    # environments. Provider credentials must never be used by this launcher.
+    [string]$InferenceGatewayURL = 'http://127.0.0.1:18080/api/internal/automation/inference',
     # Empty means: derive the region from the local queue URL. This keeps the
     # isolated worker aligned with the control plane even when Cognito/local
     # infrastructure was bootstrapped in a region other than us-east-1.
     [string]$AWSRegion = '',
+    [string]$Role = '',
+    [string]$Lane = '',
     # This script is for local development, where .env.ai.local is the
     # deliberate source of truth. Opt in only when an explicit caller needs
     # process environment variables to take precedence.
@@ -19,6 +19,7 @@ param(
     [switch]$ProviderSmoke,
     [switch]$Doctor,
     [switch]$SyncWorkspaces,
+    [switch]$ShowMachineIdentity,
     # Service mode is intentionally opt-in: it keeps the local worker online
     # after an unexpected process failure, while normal development runs still
     # return their exit code directly to the terminal.
@@ -28,12 +29,48 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$roleLaneMap = @{
+    orchestrator = 'orchestration'
+    principal_engineer = 'engineering'
+    reviewer = 'review'
+    qa = 'qa'
+    release_manager = 'release'
+}
+if ([string]::IsNullOrWhiteSpace($Role) -ne [string]::IsNullOrWhiteSpace($Lane)) {
+    throw 'Role and Lane must form one exact supported worker assignment.'
+}
+if (-not [string]::IsNullOrWhiteSpace($Role)) {
+    if (-not $roleLaneMap.ContainsKey($Role) -or $roleLaneMap[$Role] -ne $Lane) {
+        throw 'Role and Lane must form one exact supported worker assignment.'
+    }
+    $env:ITBEM_AI_ROLE = $Role
+    $env:ITBEM_AI_QUEUE_LANE = $Lane
+} else {
+    Remove-Item -Path 'Env:ITBEM_AI_ROLE' -ErrorAction SilentlyContinue
+    Remove-Item -Path 'Env:ITBEM_AI_QUEUE_LANE' -ErrorAction SilentlyContinue
+}
+$providerRequired = -not ($Role -eq 'release_manager' -and $Lane -eq 'release')
 $endpoint = [Uri]$AwsEmulatorEndpoint
 if ($endpoint.Scheme -ne 'http' -or $endpoint.Host -notin @('localhost', '127.0.0.1', '::1')) {
     throw 'AwsEmulatorEndpoint must be an HTTP loopback endpoint.'
 }
 
 $backendRoot = Split-Path -Parent $PSScriptRoot
+$providerCredentialVariables = @(
+    'MINIMAX_API_KEY', 'OPENAI_API_KEY', 'DEEPSEEK_API_KEY',
+    'OPENROUTER_API_KEY', 'ANTHROPIC_API_KEY', 'OPENCODE_GO_API_KEY'
+)
+$controlPlaneOnlySecretVariables = @(
+    'AUTOMATION_ATTEMPT_POLICY_SIGNING_KEY',
+    'AUTOMATION_ATTEMPT_POLICY_SIGNING_KEY_PREVIOUS'
+)
+$disabledLegacyCredentialVariables = @('AUTOMATION_CALLBACK_SECRET')
+
+function Remove-ProviderCredentialEnvironment {
+    foreach ($name in $providerCredentialVariables) {
+        Remove-Item -Path "Env:$name" -ErrorAction SilentlyContinue
+    }
+}
 
 function Resolve-LocalAWSRegion([string]$RequestedRegion, [string]$BackendRoot) {
     if (-not [string]::IsNullOrWhiteSpace($RequestedRegion)) {
@@ -55,11 +92,31 @@ function Import-LocalAgentEnvironment([string]$Path, [bool]$PreferProcessEnviron
     Get-Content -LiteralPath $Path | ForEach-Object {
         $line = $_.Trim()
         if (-not $line -or $line.StartsWith('#')) { return }
-        if ($line -notmatch '^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$') {
+        # Identify the variable name before parsing any value so provider
+        # credential lines are discarded without being captured.
+        if ($line -notmatch '^([A-Za-z_][A-Za-z0-9_]*)\s*=') {
             throw "Invalid local agent environment entry in $Path"
         }
         $name = $matches[1]
-        $value = $matches[2].Trim()
+        if ($name -in $providerCredentialVariables) {
+            # Gateway-only inference: do not import provider keys from the
+            # local file or from inherited shell state into the worker.
+            return
+        }
+        if ($name -in $controlPlaneOnlySecretVariables) {
+            # The signing key stays in the API process; workers must not be
+            # able to forge immutable provider/model route snapshots.
+            return
+        }
+        if ($name -in $disabledLegacyCredentialVariables) {
+            # Callback authentication uses a registered machine signing key;
+            # the legacy shared secret must never enter the local worker.
+            return
+        }
+        if ($line -notmatch '^[A-Za-z_][A-Za-z0-9_]*\s*=\s*(.*)$') {
+            throw "Invalid local agent environment entry in $Path"
+        }
+        $value = $matches[1].Trim()
         if ($value.Length -ge 2 -and (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'")))) {
             $value = $value.Substring(1, $value.Length - 2)
         }
@@ -149,32 +206,22 @@ function Enter-LocalAgentWorkerLock([string]$Lane) {
     return $mutex
 }
 
+Remove-ProviderCredentialEnvironment
+foreach ($name in $controlPlaneOnlySecretVariables) { Remove-Item -Path "Env:$name" -ErrorAction SilentlyContinue }
+foreach ($name in $disabledLegacyCredentialVariables) { Remove-Item -Path "Env:$name" -ErrorAction SilentlyContinue }
 Import-LocalAgentEnvironment (Join-Path $backendRoot '.env.ai.local') $PreferProcessEnvironment
-$roleAssignments = @{
-    orchestrator = 'orchestration'
-    principal_engineer = 'engineering'
-    reviewer = 'review'
-    qa = 'qa'
-    release_manager = 'release'
-}
-$Role = $Role.Trim().ToLowerInvariant()
-$Lane = $Lane.Trim().ToLowerInvariant()
-if ([string]::IsNullOrWhiteSpace($Role) -ne [string]::IsNullOrWhiteSpace($Lane)) {
-    throw 'Role and Lane must be configured together.'
-}
-if (-not [string]::IsNullOrWhiteSpace($Role)) {
-    if (-not $roleAssignments.ContainsKey($Role) -or $roleAssignments[$Role] -ne $Lane) {
-        throw 'Role and Lane must form one exact supported worker assignment.'
-    }
-    $env:ITBEM_AI_ROLE = $Role
-    $env:ITBEM_AI_QUEUE_LANE = $Lane
-} else {
-    Remove-Item -Path Env:ITBEM_AI_ROLE -ErrorAction SilentlyContinue
-    Remove-Item -Path Env:ITBEM_AI_QUEUE_LANE -ErrorAction SilentlyContinue
-}
-if ($Doctor) {
+# Keep later launcher changes from accidentally widening the worker's
+# environment after the gateway-only configuration has been loaded.
+Remove-ProviderCredentialEnvironment
+foreach ($name in $controlPlaneOnlySecretVariables) { Remove-Item -Path "Env:$name" -ErrorAction SilentlyContinue }
+foreach ($name in $disabledLegacyCredentialVariables) { Remove-Item -Path "Env:$name" -ErrorAction SilentlyContinue }
+# The worker receives only the gateway address and callback identity. The
+# local test-bundle path belongs to the local API process, never the worker.
+Remove-Item -Path 'Env:AI_PROVIDER_CREDENTIALS_LOCAL_FILE' -ErrorAction SilentlyContinue
+Remove-Item -Path 'Env:AI_PROVIDER_CREDENTIALS_SECRET_ID' -ErrorAction SilentlyContinue
+if ($ShowMachineIdentity) {
     Set-Location $backendRoot
-    go run ./cmd/itbem-ai-agent --doctor
+    go run ./cmd/itbem-ai-agent --show-machine-identity
     exit $LASTEXITCODE
 }
 if ($SyncWorkspaces) {
@@ -182,42 +229,41 @@ if ($SyncWorkspaces) {
     go run ./cmd/itbem-ai-agent --sync-workspaces
     exit $LASTEXITCODE
 }
+$gatewayURL = ''
+# The local Compose gateway is the canonical target. Do not let a shell that
+# previously ran the legacy :8081 setup silently route a fresh worker to an
+# older control plane. A process-level endpoint is an explicit opt-in only.
+if ($PreferProcessEnvironment) {
+    $gatewayURL = [Environment]::GetEnvironmentVariable('ITBEM_AI_GATEWAY_URL', 'Process')
+}
+if ([string]::IsNullOrWhiteSpace($gatewayURL)) {
+    $gatewayURL = $InferenceGatewayURL.Trim()
+}
+[Environment]::SetEnvironmentVariable('ITBEM_AI_GATEWAY_URL', $gatewayURL, 'Process')
+try {
+    $gateway = [Uri]$gatewayURL
+    if (($gateway.Scheme -ne 'https' -and -not ($gateway.Scheme -eq 'http' -and $gateway.Host -in @('localhost', '127.0.0.1', '::1'))) -or [string]::IsNullOrWhiteSpace($gateway.Host)) {
+        throw 'invalid'
+    }
+}
+catch {
+    throw 'ITBEM_AI_GATEWAY_URL must use HTTPS or loopback HTTP.'
+}
 $provider = [Environment]::GetEnvironmentVariable('ITBEM_AI_PROVIDER', 'Process')
 if ([string]::IsNullOrWhiteSpace($provider)) { $provider = 'minimax' }
 $provider = $provider.Trim().ToLowerInvariant()
-$providerRequired = -not ($Role -eq 'release_manager' -and $Lane -eq 'release')
-$secretName = @{ minimax = 'MINIMAX_API_KEY'; openai = 'OPENAI_API_KEY'; anthropic = 'ANTHROPIC_API_KEY' }[$provider]
-if ($providerRequired -and -not $secretName) { throw 'ITBEM_AI_PROVIDER must be minimax, openai, or anthropic.' }
-if (-not $providerRequired) {
-    # The deterministic release lane has no reason to hold model credentials.
-    # The local file is shared across lanes, so explicitly erase every
-    # supported provider key after import and do not reload one from the User
-    # environment below.
-    foreach ($modelSecret in @('MINIMAX_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY')) {
-        [Environment]::SetEnvironmentVariable($modelSecret, $null, 'Process')
-    }
-    $secretName = $null
+if (-not $Doctor -and [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('ITBEM_AGENT_INSTANCE_ID', 'Process'))) {
+    throw 'ITBEM_AGENT_INSTANCE_ID is required after an administrator registers this machine public key. Run this launcher with -ShowMachineIdentity, register its machine_id/public_key, then set ITBEM_AGENT_INSTANCE_ID.'
 }
 
-foreach ($name in @($secretName, 'ITBEM_AI_WORKSPACES_JSON', 'ITBEM_AI_CONCURRENCY') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) {
+foreach ($name in @('ITBEM_AI_WORKSPACES_JSON', 'ITBEM_AI_CONCURRENCY')) {
     if (-not [Environment]::GetEnvironmentVariable($name, 'Process')) {
         $userValue = [Environment]::GetEnvironmentVariable($name, 'User')
         if ($userValue) { [Environment]::SetEnvironmentVariable($name, $userValue, 'Process') }
     }
 }
-if ($providerRequired -and -not [Environment]::GetEnvironmentVariable($secretName, 'Process')) {
-    throw "$secretName must be set in .env.ai.local, the current process, or Windows User environment. Never commit local secrets."
-}
-
-if ($ProviderSmoke -and -not $providerRequired) {
-    throw 'The deterministic release worker has no model provider to smoke-test.'
-}
 if ($ProviderSmoke) {
-    Write-Host "Running one explicit provider smoke check with '$provider'."
-    $env:ITBEM_AI_ALLOW_PROVIDER_SMOKE = '1'
-    Set-Location $backendRoot
-    go run ./cmd/itbem-ai-agent --provider-smoke
-    exit $LASTEXITCODE
+    throw 'Provider smoke is disabled through the mandatory gateway because it has no task lease. Run an explicit integration test instead.'
 }
 
 if ([string]::IsNullOrWhiteSpace($Role) -or $Role -eq 'qa') {
@@ -258,14 +304,11 @@ $env:ITBEM_AI_S3_ENDPOINT = $AwsEmulatorEndpoint
 $env:ITBEM_AI_INPUT_BUCKET = 'itbem-ai-inputs-local'
 $env:ITBEM_AI_OUTPUT_BUCKET = 'itbem-ai-outputs-local'
 $env:ITBEM_API_BASE_URL = $ApiBaseURL.TrimEnd('/')
-# Keep the callback credential aligned with the local control plane. The
-# process/.env.ai.local value is intentionally authoritative; the fallback is
-# only for the disposable all-local launcher and is never sent to production.
-$callbackSecret = [Environment]::GetEnvironmentVariable('AUTOMATION_CALLBACK_SECRET', 'Process')
-if ([string]::IsNullOrWhiteSpace($callbackSecret)) {
-    $callbackSecret = 'local-automation-callback-secret'
+if ($Doctor) {
+    Set-Location $backendRoot
+    go run ./cmd/itbem-ai-agent --doctor
+    exit $LASTEXITCODE
 }
-$env:AUTOMATION_CALLBACK_SECRET = $callbackSecret
 
 $workerLock = Enter-LocalAgentWorkerLock $Lane
 $exitCode = 0

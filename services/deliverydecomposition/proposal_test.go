@@ -22,3 +22,19 @@ func TestParseRejectsCyclesAndUnpinnedContext(t *testing.T) {
 		t.Fatal("expected context reference rejection")
 	}
 }
+
+func TestParseValidatesTaskSpecificPrimaryRepository(t *testing.T) {
+	valid := `{"summary":"Build both surfaces","tasks":[{"key":"web","title":"Build web","expected_outcome":"Web ready","included_scope":["UI"],"acceptance_criteria":["Rendered"],"context_references":["workspace://backend","workspace://frontend"],"primary_repository_ref":"workspace://frontend"}]}`
+	proposal, err := Parse([]byte(valid))
+	if err != nil || proposal.Tasks[0].PrimaryRepositoryRef != "workspace://frontend" {
+		t.Fatalf("valid per-task primary rejected: %v", err)
+	}
+	for _, invalid := range []string{
+		`{"summary":"Build web","tasks":[{"key":"web","title":"Build web","expected_outcome":"Web ready","included_scope":["UI"],"acceptance_criteria":["Rendered"],"context_references":["workspace://backend"],"primary_repository_ref":"workspace://frontend"}]}`,
+		`{"summary":"Build web","tasks":[{"key":"web","title":"Build web","expected_outcome":"Web ready","included_scope":["UI"],"acceptance_criteria":["Rendered"],"context_references":["github://org/frontend"],"primary_repository_ref":"github://org/frontend"}]}`,
+	} {
+		if _, err := Parse([]byte(invalid)); err == nil {
+			t.Fatal("invalid per-task primary accepted")
+		}
+	}
+}

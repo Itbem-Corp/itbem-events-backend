@@ -80,10 +80,14 @@ func TestValidatePlanStructureRequiresReviewableFields(t *testing.T) {
 		"assumptions":          []any{},
 		"human_decisions":      []any{},
 		"implementation_steps": []any{"Edit the bounded controller"},
-		"risks":                []any{},
-		"qa_plan":              []any{"Run delivery tests"},
-		"evidence_plan":        []any{"QA report"},
-		"acceptance_criteria":  []any{"Human gate remains mandatory"},
+		"execution_steps": []any{
+			map[string]any{"step_key": "implement", "role": "implementation", "order": 0, "title": "Implement", "objective": "Edit the bounded controller", "acceptance_criteria": []any{"Human gate remains mandatory"}},
+			map[string]any{"step_key": "integrate", "role": "integration", "order": 1, "title": "Integrate", "objective": "Merge branches and verify the final result", "acceptance_criteria": []any{"Human gate remains mandatory"}, "depends_on": []any{"implement"}},
+		},
+		"risks":               []any{},
+		"qa_plan":             []any{"Run delivery tests"},
+		"evidence_plan":       []any{"QA report"},
+		"acceptance_criteria": []any{"Human gate remains mandatory"},
 		"repository_impact": []any{map[string]any{
 			"name": "Backend", "reference": "workspace://backend", "revision": "0123456789abcdef0123456789abcdef01234567", "role": "primary", "impact": "consulted", "notes": "Planning only",
 		}},

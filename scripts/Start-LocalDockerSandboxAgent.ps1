@@ -11,6 +11,13 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$providerCredentialVariables = @(
+    'MINIMAX_API_KEY', 'OPENAI_API_KEY', 'DEEPSEEK_API_KEY',
+    'OPENROUTER_API_KEY', 'ANTHROPIC_API_KEY', 'OPENCODE_GO_API_KEY'
+)
+foreach ($name in $providerCredentialVariables) {
+    Remove-Item -Path "Env:$name" -ErrorAction SilentlyContinue
+}
 $backendRoot = Split-Path -Parent $PSScriptRoot
 $environmentPath = Join-Path $backendRoot '.env.ai.local'
 if (-not (Test-Path -LiteralPath $environmentPath -PathType Leaf)) {
@@ -26,12 +33,12 @@ if ([string]::IsNullOrWhiteSpace($workspaceLine)) {
 $workspaceJSON = ($workspaceLine -replace '^\s*ITBEM_AI_WORKSPACES_JSON\s*=\s*', '').Trim().Trim('"').Trim("'")
 $workspaces = $workspaceJSON | ConvertFrom-Json -ErrorAction Stop
 
-# Keep the worker's derived sandbox registry authoritative while still
-# preventing stale User/Process provider credentials from winning over the
-# local file. Only the provider settings are copied; secrets never get logged.
+# Keep the worker's derived sandbox registry authoritative. Provider keys are
+# neither imported nor forwarded: every inference uses the authenticated
+# cloud gateway.
 $localAgentValues = @{}
 Get-Content -LiteralPath $environmentPath | ForEach-Object {
-    if ($_ -match '^\s*(ITBEM_AI_PROVIDER|MINIMAX_MODEL|MINIMAX_API_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY)\s*=\s*(.*)$') {
+    if ($_ -match '^\s*(ITBEM_AI_PROVIDER|MINIMAX_MODEL|OPENAI_MODEL|DEEPSEEK_MODEL|OPENROUTER_MODEL|ANTHROPIC_MODEL|OPENCODE_GO_MODEL)\s*=\s*(.*)$') {
         $value = $matches[2].Trim().Trim('"').Trim("'")
         $localAgentValues[$matches[1]] = $value
     }
@@ -80,20 +87,11 @@ foreach ($property in $workspaces.PSObject.Properties) {
 }
 $env:ITBEM_AI_WORKSPACES_JSON = $workspaces | ConvertTo-Json -Depth 20 -Compress
 
-# The running local backend owns the callback secret. Resolve it in-process on
-# every launch so a stale inherited value can never silently authenticate the
-# wrong local backend. It never appears in a command line, log or generated
-# configuration file.
-$secret = (& docker exec $BackendContainerName sh -lc 'printf %s "$AUTOMATION_CALLBACK_SECRET"').Trim()
-if (-not [string]::IsNullOrWhiteSpace($secret)) {
-    $env:AUTOMATION_CALLBACK_SECRET = $secret
-} elseif ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('AUTOMATION_CALLBACK_SECRET', 'Process'))) {
-    throw "Could not resolve the callback secret from local container '$BackendContainerName'."
-}
+# Callback authentication uses the enrolled machine's protected Ed25519 key.
+# This launcher must never extract a shared callback secret from the API
+# container or pass it to the local worker process.
 $launcher = Join-Path $PSScriptRoot 'Start-LocalAIAgent.ps1'
-# The local .env.ai.local file is the source of truth for provider credentials.
-# Do not inherit a stale User/Process MINIMAX_API_KEY into the worker; the
-# callback secret is resolved explicitly above from the running backend.
+# Provider credentials and control-plane signing secrets are never forwarded.
 $arguments = @('-NoProfile', '-File', $launcher, '-LocalStackEndpoint', $LocalStackEndpoint, '-ApiBaseURL', $ApiBaseURL, '-PreferProcessEnvironment', '-RestartDelaySeconds', "$RestartDelaySeconds")
 if ($Doctor) { $arguments += '-Doctor' }
 if ($KeepAlive) { $arguments += '-KeepAlive' }

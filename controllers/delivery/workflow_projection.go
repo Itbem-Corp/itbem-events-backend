@@ -215,7 +215,7 @@ func deliveryProjectionRecovery(item models.DeliveryWorkItem, state string, late
 	case strings.Contains(lower, "validation"), strings.Contains(lower, "test"), strings.Contains(lower, "check"):
 		return &deliveryWorkflowProjectionRecovery{Mode: "repair", Title: "Revisa el fallo y repara dentro del alcance", Detail: "El último intento dejó una validación fallida. Revisa el resultado antes de reintentar para no repetir el mismo error.", ActionID: "open_activity", RequiresHumanReview: true}
 	default:
-		phase := map[string]string{"delivery.plan": "plan", "delivery.implementation": "implementation", "delivery.qa": "qa", "delivery.summary": "summary"}[latest.Operation]
+		phase := map[string]string{"delivery.plan": "plan", "delivery.implementation": "implementation", "delivery.assessment": "assessment", "delivery.qa": "qa", "delivery.summary": "summary"}[latest.Operation]
 		if phase == "" {
 			return nil
 		}
@@ -371,7 +371,7 @@ func deliveryProjectionCopy(state, progress, blockedReason string) (string, stri
 func deliveryProjectionStateActions(state string, latest *models.AutomationTask) []deliveryWorkflowProjectionAction {
 	actions := []deliveryWorkflowProjectionAction{}
 	if latest != nil && (latest.Status == "failed" || latest.Status == "dispatch_failed") && !ambiguousAgentOutcome(latest.ErrorMessage) {
-		phase := map[string]string{"delivery.plan": "plan", "delivery.implementation": "implementation", "delivery.qa": "qa", "delivery.summary": "summary"}[latest.Operation]
+		phase := map[string]string{"delivery.plan": "plan", "delivery.implementation": "implementation", "delivery.assessment": "assessment", "delivery.qa": "qa", "delivery.summary": "summary"}[latest.Operation]
 		if phase != "" {
 			actions = append(actions, deliveryWorkflowProjectionAction{ID: "retry_" + phase, Kind: "agent_run", Label: "Reintentar " + phase, Permission: string(deliveryManage), Phase: phase, RequiresConfirmation: false})
 		}

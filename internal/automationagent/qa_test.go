@@ -4,13 +4,19 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"events-stocks/internal/inferencecapability"
+	"github.com/gofrs/uuid"
 )
 
 type artifactFakeStore struct {
@@ -28,16 +34,6 @@ func (s *artifactFakeStore) PutEncryptedObject(_ context.Context, bucket, key st
 
 func TestRunQACapturesBoundedRegisteredWorkspaceEvidence(t *testing.T) {
 	root := t.TempDir()
-	remote := filepath.ToSlash(filepath.Join(t.TempDir(), "origin.git"))
-	if initialized, err := runLocal(context.Background(), filepath.Dir(remote), commandTimeout, "", "git", "init", "--bare", remote); err != nil || initialized.ExitCode != 0 {
-		t.Fatalf("remote setup failed: %#v / %v", initialized, err)
-	}
-	for _, command := range [][]string{{"git", "init", "-b", "main"}, {"git", "config", "user.email", "test@example.invalid"}, {"git", "config", "user.name", "ITBEM Test"}} {
-		result, err := runLocal(context.Background(), root, commandTimeout, "", command[0], command[1:]...)
-		if err != nil || result.ExitCode != 0 {
-			t.Fatalf("workspace git setup failed: %#v / %v", result, err)
-		}
-	}
 	if err := os.WriteFile(filepath.Join(root, "result.txt"), []byte("evidence"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -59,24 +55,17 @@ func main() {
 	if err := os.WriteFile(filepath.Join(root, "capture.go"), []byte(captureProgram), 0600); err != nil {
 		t.Fatal(err)
 	}
-	for _, command := range [][]string{{"git", "add", "result.txt", "capture.go"}, {"git", "commit", "-m", "qa harness"}, {"git", "remote", "add", "origin", remote}, {"git", "push", "-u", "origin", "main"}} {
-		result, err := runLocal(context.Background(), root, commandTimeout, "", command[0], command[1:]...)
-		if err != nil || result.ExitCode != 0 {
-			t.Fatalf("managed workspace seed failed: %#v / %v", result, err)
-		}
-	}
-	frozen := workspaceGitState(root).HeadSHA
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusOK) }))
 	defer server.Close()
-	registry := `{"repo":{"path":"` + filepath.ToSlash(root) + `","repository_url":"` + remote + `","base_branch":"main","capabilities":["repository:read","repository:fetch"],"qa_artifact_patterns":["result.txt"],"qa_screenshot_command":["go","run","capture.go","{preview_url}","{artifact_path}"]}}`
+	registry := `{"repo":{"path":"` + filepath.ToSlash(root) + `","qa_artifact_patterns":["result.txt"],"qa_screenshot_command":["go","run","capture.go","{preview_url}","{artifact_path}"]}}`
 	lookup := func(name string) string {
 		if name == "ITBEM_AI_WORKSPACES_JSON" {
 			return registry
 		}
 		return ""
 	}
-	delivery := []byte(`{"work_item":{"preview_url":"` + server.URL + `"},"context_sources":[{"kind":"repository","reference":"workspace://repo","revision":"` + frozen + `"}]}`)
-	result, artifacts, err := RunQA(context.Background(), "task", delivery, lookup)
+	delivery := []byte(`{"work_item":{"preview_url":"` + server.URL + `"},"context_sources":[{"kind":"repository","reference":"workspace://repo"}]}`)
+	result, artifacts, err := RunQA(context.Background(), "task", "run", delivery, lookup)
 	if err != nil || result["preview"].(map[string]any)["passed"] != true || len(artifacts) != 2 {
 		t.Fatalf("unexpected QA result: %#v / %#v / %v", result, artifacts, err)
 	}
@@ -196,7 +185,7 @@ func main() {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, artifacts, err := RunQA(context.Background(), "d7d7d837-2e18-43af-9f58-6d59629db2dd", deliveryBytes, lookup)
+	result, artifacts, err := RunQA(context.Background(), "d7d7d837-2e18-43af-9f58-6d59629db2dd", "run", deliveryBytes, lookup)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,6 +211,277 @@ func TestQAScreenshotArtifactSlotsReserveVisualEvidence(t *testing.T) {
 	}
 	if got := qaSemanticArtifactSlots([]string{"node", "stagehand.mjs", "--url", "{preview_url}", "--output", "{artifact_path}"}); got != 9 {
 		t.Fatalf("semantic QA must reserve report and bounded browser evidence slots, got %d", got)
+	}
+}
+
+func TestCheckPreviewNavigatesWithSignedURLButReturnsOnlySanitizedURL(t *testing.T) {
+	const queryCanary = "qa-preview-query-canary-92b"
+	const fragmentCanary = "qa-preview-fragment-canary-71c"
+	var observedQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		observedQuery = request.URL.RawQuery
+		response.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	previewURL := server.URL + "/preview?token=" + queryCanary + "#" + fragmentCanary
+
+	result := checkPreview(context.Background(), previewURL)
+	if observedQuery != "token="+queryCanary {
+		t.Fatalf("preview probe must navigate with the complete query credential, got %q", observedQuery)
+	}
+	if got := result["url"]; got != server.URL+"/preview" {
+		t.Fatalf("preview result must contain only the safe URL, got %#v", got)
+	}
+	if strings.Contains(fmt.Sprint(result), queryCanary) || strings.Contains(fmt.Sprint(result), fragmentCanary) {
+		t.Fatalf("preview result leaked a signed URL component: %#v", result)
+	}
+}
+
+func TestSanitizePreviewReportRedactsCredentialsAndDropsPrivateReasoning(t *testing.T) {
+	const (
+		urlQueryCanary      = "REPORT_URL_QUERY_CANARY"
+		apiKeyCanary        = "REPORT_API_KEY_CANARY"
+		cookieCanary        = "REPORT_COOKIE_CANARY"
+		refreshTokenCanary  = "REPORT_REFRESH_TOKEN_CANARY"
+		authorizationCanary = "REPORT_AUTHORIZATION_CANARY"
+		providerTokenCanary = "sk-or-v1-REPORT_PROVIDER_TOKEN_CANARY_1234567890"
+		jwtCanary           = "eyJREPORTHEADER123456.eyJREPORTPAYLOAD123456.REPORTSIGNATURE123456" // gitleaks:allow synthetic test-only security canary; never used for provider access
+		analysisCanary      = "PRIVATE_ANALYSIS_CANARY"
+		reasoningCanary     = "PRIVATE_REASONING_CANARY"
+		chainCanary         = "PRIVATE_CHAIN_OF_THOUGHT_CANARY"
+	)
+	body := []byte(`{"tool":"probe","summary":"SAFE_SUMMARY_CANARY","status":"passed","preview_url":"https://preview.example.test/login?token=` + urlQueryCanary + `","credentials":{"provider_api_key":"` + apiKeyCanary + `","cookie":"` + cookieCanary + `","refresh_token":"` + refreshTokenCanary + `"},"nested":{"Authorization":"Bearer ` + authorizationCanary + `","request":"Authorization: Bearer TEXT_BEARER_CANARY ` + providerTokenCanary + ` ` + jwtCanary + `","analysis":"` + analysisCanary + `","reasoning_content":"` + reasoningCanary + `","chain-of-thought":"` + chainCanary + `","reasoning_summary":"SAFE_REASONING_SUMMARY_CANARY","evidence":{"status":"captured","summary":"SAFE_EVIDENCE_SUMMARY_CANARY"}}}`)
+	sanitized, report := sanitizePreviewReport(body, "https://preview.example.test/login")
+	if report == nil {
+		t.Fatal("expected a structured sanitized report")
+	}
+	for _, forbidden := range []string{urlQueryCanary, apiKeyCanary, cookieCanary, refreshTokenCanary, authorizationCanary, "TEXT_BEARER_CANARY", providerTokenCanary, jwtCanary, analysisCanary, reasoningCanary, chainCanary} {
+		if strings.Contains(string(sanitized), forbidden) || strings.Contains(fmt.Sprint(report), forbidden) {
+			t.Fatalf("sanitized QA report leaked canary %q: bytes=%s report=%#v", forbidden, sanitized, report)
+		}
+	}
+	if !strings.Contains(string(sanitized), "SAFE_SUMMARY_CANARY") || !strings.Contains(string(sanitized), "SAFE_REASONING_SUMMARY_CANARY") || !strings.Contains(string(sanitized), "SAFE_EVIDENCE_SUMMARY_CANARY") || !strings.Contains(string(sanitized), `"status":"passed"`) || !strings.Contains(string(sanitized), `"status":"captured"`) {
+		t.Fatalf("sanitization must preserve summaries, statuses and evidence: %s", sanitized)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(sanitized, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	nested := decoded["nested"].(map[string]any)
+	for _, privateField := range []string{"analysis", "reasoning_content", "chain-of-thought"} {
+		if _, exists := nested[privateField]; exists {
+			t.Fatalf("private reasoning field %q must be removed, got %#v", privateField, nested)
+		}
+	}
+	if nested["reasoning_summary"] != "SAFE_REASONING_SUMMARY_CANARY" {
+		t.Fatalf("a safe reasoning summary must remain available: %#v", nested)
+	}
+	command := sanitizePreviewCommand([]string{"qa", "--api-key", "CLI_API_KEY_CANARY", "--password=CLI_INLINE_PASSWORD_CANARY", "sk-proj-CLI_PROVIDER_TOKEN_CANARY_1234567890"}, "")
+	if strings.Contains(fmt.Sprint(command), "CLI_API_KEY_CANARY") || strings.Contains(fmt.Sprint(command), "CLI_INLINE_PASSWORD_CANARY") || strings.Contains(fmt.Sprint(command), "CLI_PROVIDER_TOKEN_CANARY") || command[2] != "[REDACTED]" {
+		t.Fatalf("command sanitizer leaked a flag value or credential-shaped token: %#v", command)
+	}
+	freeText := sanitizePreviewText("reasoning: PRIVATE_TEXT_REASONING_CANARY\nsummary: SAFE_TEXT_SUMMARY_CANARY", "")
+	if strings.Contains(freeText, "PRIVATE_TEXT_REASONING_CANARY") || !strings.Contains(freeText, "SAFE_TEXT_SUMMARY_CANARY") {
+		t.Fatalf("free-form output must remove private reasoning and keep safe summaries: %q", freeText)
+	}
+}
+
+func TestQASanitizerFixtureProcess(t *testing.T) {
+	for index, argument := range os.Args {
+		if argument != "--qa-report-path" {
+			continue
+		}
+		if index+1 >= len(os.Args) {
+			t.Fatal("missing fixture report path")
+		}
+		fixture := `{"tool":"probe","summary":"CAPTURE_SAFE_SUMMARY_CANARY","status":"passed","credentials":{"api_key":"CAPTURE_REPORT_API_KEY_CANARY","session":"CAPTURE_SESSION_CANARY"},"details":{"chain_of_thought":"CAPTURE_PRIVATE_COT_CANARY","thinking":"CAPTURE_PRIVATE_THINKING_CANARY","reasoning_summary":"CAPTURE_SAFE_REASONING_SUMMARY_CANARY","evidence":{"status":"captured","note":"Authorization: Bearer CAPTURE_TEXT_BEARER_CANARY sk-or-v1-CAPTURE_PROVIDER_TOKEN_CANARY_1234567890 eyJCAPTUREHEADER123456.eyJCAPTUREPAYLOAD123456.CAPTURESIGNATURE123456"}},"preview_url":"https://preview.example.test/home?token=CAPTURE_URL_QUERY_CANARY"}` // gitleaks:allow synthetic test-only security canary; never used for provider access
+		if err := os.WriteFile(os.Args[index+1], []byte(fixture), 0600); err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintln(os.Stdout, "access_token=CAPTURE_OUTPUT_TOKEN_CANARY Authorization: Bearer CAPTURE_OUTPUT_BEARER_CANARY sk-proj-CAPTURE_OUTPUT_PROVIDER_TOKEN_CANARY_1234567890 reasoning: CAPTURE_OUTPUT_PRIVATE_REASONING_CANARY")
+		return
+	}
+}
+
+func TestCaptureSemanticQAStoresOnlySanitizedReportAndSummary(t *testing.T) {
+	root := t.TempDir()
+	workspace := Workspace{ID: "repo", Root: root, Config: WorkspaceConfig{SandboxRuntime: WorkspaceSandboxProcess}}
+	command := []string{
+		os.Args[0], "-test.v", "-test.run=^TestQASanitizerFixtureProcess$", "--",
+		"--api-key", "CAPTURE_COMMAND_FLAG_CANARY", "--password=CAPTURE_COMMAND_INLINE_CANARY",
+		"--qa-report-path", "{artifact_path}", "--preview-url", "{preview_url}",
+	}
+	result, artifacts, err := captureSemanticQA(context.Background(), "sanitize-task", "sanitize-run", "https://preview.example.test/home", json.RawMessage(`{"approved_plan":{}}`), workspace, root, command, func(string) string { return "" })
+	if err != nil {
+		t.Fatalf("synthetic semantic QA fixture failed: %v", err)
+	}
+	if len(artifacts) != 1 || artifacts[0].ContentType != "application/json" {
+		t.Fatalf("expected one sanitized JSON report artifact, got %#v", artifacts)
+	}
+	resultBytes, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reportPath := filepath.Join(root, ".itbem-agent-evidence", "sanitize-task", "semantic-qa.json")
+	persistedBytes, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, payload := range []string{string(artifacts[0].Body), string(persistedBytes), string(resultBytes)} {
+		for _, forbidden := range []string{
+			"CAPTURE_REPORT_API_KEY_CANARY", "CAPTURE_SESSION_CANARY", "CAPTURE_PRIVATE_COT_CANARY", "CAPTURE_PRIVATE_THINKING_CANARY",
+			"CAPTURE_TEXT_BEARER_CANARY", "CAPTURE_PROVIDER_TOKEN_CANARY", "CAPTUREHEADER123456", "CAPTUREPAYLOAD123456", "CAPTURESIGNATURE123456",
+			"CAPTURE_URL_QUERY_CANARY", "CAPTURE_OUTPUT_TOKEN_CANARY", "CAPTURE_OUTPUT_BEARER_CANARY", "CAPTURE_OUTPUT_PROVIDER_TOKEN_CANARY",
+			"CAPTURE_OUTPUT_PRIVATE_REASONING_CANARY", "CAPTURE_COMMAND_FLAG_CANARY", "CAPTURE_COMMAND_INLINE_CANARY",
+		} {
+			if strings.Contains(payload, forbidden) {
+				t.Fatalf("semantic QA persisted or returned forbidden canary %q: %s", forbidden, payload)
+			}
+		}
+	}
+	if string(artifacts[0].Body) != string(persistedBytes) {
+		t.Fatalf("on-disk synthetic report must match the sanitized artifact bytes: disk=%s artifact=%s", persistedBytes, artifacts[0].Body)
+	}
+	if !strings.Contains(string(persistedBytes), "CAPTURE_SAFE_SUMMARY_CANARY") || !strings.Contains(string(persistedBytes), "CAPTURE_SAFE_REASONING_SUMMARY_CANARY") || !strings.Contains(string(persistedBytes), `"status":"passed"`) || !strings.Contains(string(persistedBytes), `"status":"captured"`) {
+		t.Fatalf("sanitizer must preserve permitted summary/status/evidence: %s", persistedBytes)
+	}
+	if !strings.Contains(string(resultBytes), "CAPTURE_SAFE_SUMMARY_CANARY") || !strings.Contains(string(resultBytes), "CAPTURE_SAFE_REASONING_SUMMARY_CANARY") {
+		t.Fatalf("returned result must retain safe summaries: %s", resultBytes)
+	}
+	if commandResult, ok := result["command"].([]string); !ok || commandResult[5] != "[REDACTED]" || strings.Contains(strings.Join(commandResult, " "), "CAPTURE_COMMAND_INLINE_CANARY") {
+		t.Fatalf("returned command must redact separated and inline credentials: %#v", result["command"])
+	}
+}
+
+func TestStagehandSignedPreviewUsesPrivateURLFileAndSanitizesReturnedEvidence(t *testing.T) {
+	installGatewayTestCapability(t, "task", "run", inferencecapability.OperationDeliveryQA)
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("Node.js is unavailable")
+	}
+	node := "node"
+	const queryCanary = "qa-preview-query-canary-31d"
+	const fragmentCanary = "qa-preview-fragment-canary-84f"
+	previewURL := "https://preview.example.test/review?token=" + queryCanary + "#" + fragmentCanary
+	root := t.TempDir()
+	runner := filepath.Join(root, "itbem-events-backend", "tools", "stagehand-qa", "run.mjs")
+	if err := os.MkdirAll(filepath.Dir(runner), 0700); err != nil {
+		t.Fatal(err)
+	}
+	program := `import fs from "node:fs";
+import path from "node:path";
+const args = process.argv.slice(2);
+const urlFile = args[args.indexOf("--url-file") + 1];
+const output = args[args.indexOf("--output") + 1];
+if (!urlFile || !output) process.exit(2);
+const navigatedURL = fs.readFileSync(urlFile, "utf8");
+fs.writeFileSync(path.join(process.cwd(), "observed-navigation-url.txt"), navigatedURL);
+fs.writeFileSync(path.join(process.cwd(), "observed-argv.json"), JSON.stringify(args));
+fs.writeFileSync(output, JSON.stringify({ tool: "probe", preview_url: navigatedURL, request: { url: navigatedURL }, argv: args }));
+process.stdout.write(navigatedURL);
+`
+	if err := os.WriteFile(runner, []byte(program), 0600); err != nil {
+		t.Fatal(err)
+	}
+	delivery := json.RawMessage(`{"approved_plan":{}}`)
+	lookup := func(name string) string {
+		switch name {
+		case "ITBEM_AI_GATEWAY_URL":
+			return "https://gateway.example.test/api/internal/automation/inference"
+		case "AUTOMATION_CALLBACK_SECRET":
+			return "test-callback-secret"
+		default:
+			return ""
+		}
+	}
+	workspace := Workspace{ID: "repo", Root: root, Config: WorkspaceConfig{SandboxRuntime: WorkspaceSandboxProcess}}
+	result, artifacts, err := captureSemanticQA(context.Background(), "task", "run", previewURL, delivery, workspace, root,
+		[]string{node, runner, "--url", "{preview_url}", "--output", "{artifact_path}"}, lookup)
+	if err != nil {
+		t.Fatalf("pinned Stagehand should execute with a private URL file: %v", err)
+	}
+	if got, readErr := os.ReadFile(filepath.Join(root, "observed-navigation-url.txt")); readErr != nil || string(got) != previewURL {
+		t.Fatalf("Stagehand navigation must receive the complete URL, got %q / %v", got, readErr)
+	}
+	argv, err := os.ReadFile(filepath.Join(root, "observed-argv.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	semanticJSON, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sensitive := range []string{queryCanary, fragmentCanary} {
+		if strings.Contains(string(argv), sensitive) || strings.Contains(string(semanticJSON), sensitive) {
+			t.Fatalf("signed URL canary leaked into Stagehand argv/result: argv=%s result=%s", argv, semanticJSON)
+		}
+	}
+	command, ok := result["command"].([]string)
+	if !ok || len(command) == 0 || !containsString(command, "--url-file") {
+		t.Fatalf("reported Stagehand command must use --url-file: %#v", result["command"])
+	}
+	for _, artifact := range artifacts {
+		if strings.Contains(string(artifact.Body), queryCanary) || strings.Contains(string(artifact.Body), fragmentCanary) {
+			t.Fatalf("signed URL canary leaked into a persisted QA artifact %s: %s", artifact.Name, artifact.Body)
+		}
+	}
+	if len(artifacts) != 1 || artifacts[0].ContentType != "application/json" {
+		t.Fatalf("test runner should produce one JSON artifact: %#v", artifacts)
+	}
+	var persisted map[string]any
+	if err := json.Unmarshal(artifacts[0].Body, &persisted); err != nil {
+		t.Fatalf("sanitized report is not valid JSON: %v", err)
+	}
+	if persisted["preview_url"] != "https://preview.example.test/review" {
+		t.Fatalf("persisted report must retain only the safe navigation URL: %#v", persisted)
+	}
+	urlFileIndex := -1
+	for index, argument := range command {
+		if argument == "--url-file" {
+			urlFileIndex = index
+			break
+		}
+	}
+	if urlFileIndex < 0 || urlFileIndex+1 >= len(command) {
+		t.Fatalf("Stagehand command is missing the private URL-file argument: %#v", command)
+	}
+	fileArgument := command[urlFileIndex+1]
+	if _, err := os.Stat(fileArgument); !os.IsNotExist(err) {
+		t.Fatalf("private URL file must be removed after Stagehand exits; stat err=%v", err)
+	}
+}
+
+func TestGenericSemanticAndScreenshotRunnersFailClosedForSignedURL(t *testing.T) {
+	const queryCanary = "qa-preview-query-canary-55a"
+	const fragmentCanary = "qa-preview-fragment-canary-16e"
+	previewURL := "https://preview.example.test/review?token=" + queryCanary + "#" + fragmentCanary
+	root := t.TempDir()
+	marker := filepath.Join(root, "runner-executed")
+	program := `package main
+import "os"
+func main() { _ = os.WriteFile("runner-executed", []byte("yes"), 0600) }
+`
+	if err := os.WriteFile(filepath.Join(root, "runner.go"), []byte(program), 0600); err != nil {
+		t.Fatal(err)
+	}
+	workspace := Workspace{ID: "repo", Root: root, Config: WorkspaceConfig{SandboxRuntime: WorkspaceSandboxProcess}}
+	semantic, _, semanticErr := captureSemanticQA(context.Background(), "task", "run", previewURL, json.RawMessage(`{"approved_plan":{}}`), workspace, root,
+		[]string{"go", "run", "runner.go", "{preview_url}"}, func(string) string { return "" })
+	if semanticErr == nil || strings.Contains(fmt.Sprint(semantic), queryCanary) || strings.Contains(semanticErr.Error(), queryCanary) || strings.Contains(semanticErr.Error(), fragmentCanary) {
+		t.Fatalf("generic semantic QA must fail closed without exposing the signed URL: %#v / %v", semantic, semanticErr)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("generic semantic runner executed before rejecting a signed URL, stat err=%v", err)
+	}
+	screenshot, _, screenshotErr := captureScreenshotAt(context.Background(), "task", previewURL, workspace, root,
+		[]string{"go", "run", "runner.go", "{preview_url}"}, qaScreenshotViewports[0])
+	if screenshotErr == nil || strings.Contains(fmt.Sprint(screenshot), queryCanary) || strings.Contains(screenshotErr.Error(), queryCanary) || strings.Contains(screenshotErr.Error(), fragmentCanary) {
+		t.Fatalf("custom screenshot runner must fail closed without exposing the signed URL: %#v / %v", screenshot, screenshotErr)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("screenshot runner executed before rejecting a signed URL, stat err=%v", err)
+	}
+	if _, err := defaultScreenshotCommandAt(previewURL, filepath.Join(root, "screenshot.png"), qaScreenshotViewports[0]); err == nil || strings.Contains(err.Error(), queryCanary) || strings.Contains(err.Error(), fragmentCanary) {
+		t.Fatalf("default screenshot command must reject signed URLs with a safe error, got %v", err)
 	}
 }
 
@@ -301,7 +561,7 @@ func TestBrowserQATestEnvironmentExposesOnlyApprovedReferences(t *testing.T) {
 func TestApprovedTestFlowCannotPassValuesToAnUnpinnedQACommand(t *testing.T) {
 	delivery := []byte(`{"approved_plan":{"browser_qa_mode":"approved_test_flow","browser_qa_cases":[{"id":"login","title":"Login","steps":[{"kind":"fill","selector":"input[type=email]","value_env":"ITBEM_QA_LOGIN_EMAIL"}]}]}}`)
 	_, _, err := captureSemanticQA(
-		context.Background(), "task", "http://127.0.0.1:3000/login", delivery, t.TempDir(),
+		context.Background(), "task", "run", "http://127.0.0.1:3000/login", delivery, Workspace{ID: "test", Root: t.TempDir(), Config: WorkspaceConfig{SandboxRuntime: WorkspaceSandboxProcess}}, t.TempDir(),
 		[]string{"go", "run", "not-stagehand.go", "{preview_url}", "{artifact_path}"},
 		func(name string) string {
 			if name == "ITBEM_QA_LOGIN_EMAIL" {
@@ -355,16 +615,6 @@ func TestValidateApprovedBrowserQAPlanRejectsUnsafeOrUnapprovedSteps(t *testing.
 
 func TestRunQAAttachesConfiguredSemanticReportAndScreenshot(t *testing.T) {
 	root := t.TempDir()
-	captureProgram := `package main
-import (
-  "encoding/base64"
-  "os"
-)
-func main() {
-  if len(os.Args) != 3 { os.Exit(2) }
-  body, _ := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL92gAAAABJRU5ErkJggg==")
-  if err := os.WriteFile(os.Args[2], body, 0600); err != nil { panic(err) }
-}`
 	semanticProgram := `package main
 import (
   "encoding/base64"
@@ -377,15 +627,12 @@ func main() {
   body, _ := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL92gAAAABJRU5ErkJggg==")
   if err := os.WriteFile(filepath.Join(filepath.Dir(os.Args[2]), "semantic-qa.png"), body, 0600); err != nil { panic(err) }
 }`
-	if err := os.WriteFile(filepath.Join(root, "capture.go"), []byte(captureProgram), 0600); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.WriteFile(filepath.Join(root, "semantic.go"), []byte(semanticProgram), 0600); err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusOK) }))
 	defer server.Close()
-	registry := `{"repo":{"path":"` + filepath.ToSlash(root) + `","qa_screenshot_command":["go","run","capture.go","{preview_url}","{artifact_path}"],"qa_semantic_command":["go","run","semantic.go","{preview_url}","{artifact_path}"]}}`
+	registry := `{"repo":{"path":"` + filepath.ToSlash(root) + `","qa_semantic_command":["go","run","semantic.go","{preview_url}","{artifact_path}"]}}`
 	lookup := func(name string) string {
 		if name == "ITBEM_AI_WORKSPACES_JSON" {
 			return registry
@@ -393,7 +640,7 @@ func main() {
 		return ""
 	}
 	delivery := []byte(`{"work_item":{"preview_url":"` + server.URL + `"},"context_sources":[{"kind":"repository","reference":"workspace://repo"}]}`)
-	result, artifacts, err := RunQA(context.Background(), "task", delivery, lookup)
+	result, artifacts, err := RunQA(context.Background(), "task", "run", delivery, lookup)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -404,6 +651,167 @@ func main() {
 	if artifacts[0].Name != "repo-semantic-qa.json" || artifacts[1].Name != "repo-semantic-qa.png" {
 		t.Fatalf("semantic evidence must be a report followed by its screenshot: %#v", artifacts)
 	}
+}
+
+func TestRunQARefreshesCapabilityAfterRepositoryCommandsBeforeStagehand(t *testing.T) {
+	fixture := newStagehandCapabilityRefreshFixture(t)
+	initialCapability := installGatewayTestCapability(t, fixture.taskID, fixture.runID, inferencecapability.OperationDeliveryQA)
+	var refreshedCapability string
+	_, _, err := runQAWithCapabilityRefresh(context.Background(), fixture.taskID, fixture.runID, fixture.delivery, fixture.lookup, func(context.Context) (bool, error) {
+		refreshedCapability = installGatewayTestCapability(t, fixture.taskID, fixture.runID, inferencecapability.OperationDeliveryQA)
+		if refreshedCapability == initialCapability {
+			t.Fatal("refresh must issue a new run capability")
+		}
+		return true, appendRefreshOrder(fixture.orderPath)
+	})
+	if err != nil {
+		t.Fatalf("QA with a refreshed Stagehand capability failed: %v", err)
+	}
+	order, err := os.ReadFile(fixture.orderPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(order), "qa-command\nrefresh\nstagehand\n"; got != want {
+		t.Fatalf("capability must refresh after repository QA and immediately before Stagehand; got %q, want %q", got, want)
+	}
+	observedCapability, err := os.ReadFile(fixture.capabilityPath)
+	if err != nil || string(observedCapability) != refreshedCapability {
+		t.Fatalf("Stagehand did not receive the freshly issued capability: got %q, want %q, err=%v", observedCapability, refreshedCapability, err)
+	}
+}
+
+func TestRunQADoesNotStartStagehandWhenCapabilityRefreshFailsOrIsRejected(t *testing.T) {
+	tests := []struct {
+		name     string
+		accepted bool
+		cause    error
+	}{
+		{name: "claim rejected"},
+		{name: "refresh request failed", accepted: true, cause: errors.New("callback unavailable")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newStagehandCapabilityRefreshFixture(t)
+			installGatewayTestCapability(t, fixture.taskID, fixture.runID, inferencecapability.OperationDeliveryQA)
+			_, _, err := runQAWithCapabilityRefresh(context.Background(), fixture.taskID, fixture.runID, fixture.delivery, fixture.lookup, func(context.Context) (bool, error) {
+				if err := appendRefreshOrder(fixture.orderPath); err != nil {
+					return false, err
+				}
+				return test.accepted, test.cause
+			})
+			var refreshErr *qaCapabilityRefreshError
+			if !errors.As(err, &refreshErr) {
+				t.Fatalf("refresh failure must be distinguished from a QA failure, got %v", err)
+			}
+			if test.cause == nil {
+				if !errors.Is(err, errQACapabilityNotAccepted) {
+					t.Fatalf("a rejected claim must fail closed, got %v", err)
+				}
+			} else if !errors.Is(err, test.cause) {
+				t.Fatalf("refresh error must be preserved for retry, got %v", err)
+			}
+			order, readErr := os.ReadFile(fixture.orderPath)
+			if readErr != nil || string(order) != "qa-command\nrefresh\n" {
+				t.Fatalf("Stagehand must not start after a failed/rejected refresh: order=%q err=%v", order, readErr)
+			}
+			if _, statErr := os.Stat(fixture.capabilityPath); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("Stagehand must not write output after refresh failure: stat err=%v", statErr)
+			}
+		})
+	}
+}
+
+type stagehandCapabilityRefreshFixture struct {
+	taskID         string
+	runID          string
+	delivery       json.RawMessage
+	lookup         func(string) string
+	orderPath      string
+	capabilityPath string
+}
+
+func newStagehandCapabilityRefreshFixture(t *testing.T) stagehandCapabilityRefreshFixture {
+	t.Helper()
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("Node.js is unavailable")
+	}
+	root := t.TempDir()
+	runner := filepath.Join(root, "itbem-events-backend", "tools", "stagehand-qa", "run.mjs")
+	if err := os.MkdirAll(filepath.Dir(runner), 0700); err != nil {
+		t.Fatal(err)
+	}
+	const stagehandProgram = `import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../");
+const args = process.argv.slice(2);
+const output = args[args.indexOf("--output") + 1];
+const capability = process.env.STAGEHAND_QA_INFERENCE_CAPABILITY || "";
+if (!output || !capability) process.exit(2);
+fs.appendFileSync(path.join(root, "order.txt"), "stagehand\n");
+fs.writeFileSync(path.join(root, "capability.txt"), capability);
+fs.writeFileSync(output, JSON.stringify({ tool: "refresh-test", verdict: "passed" }));
+fs.writeFileSync(output.replace(/\.json$/, ".png"), Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL92gAAAABJRU5ErkJggg==", "base64"));
+`
+	if err := os.WriteFile(runner, []byte(stagehandProgram), 0600); err != nil {
+		t.Fatal(err)
+	}
+	qaCommand := filepath.Join(root, "qa-before.go")
+	const qaProgram = `package main
+import (
+  "os"
+)
+func main() {
+  file, err := os.OpenFile("order.txt", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+  if err != nil { panic(err) }
+  if _, err := file.WriteString("qa-command\n"); err != nil { panic(err) }
+  if err := file.Close(); err != nil { panic(err) }
+}`
+	if err := os.WriteFile(qaCommand, []byte(qaProgram), 0600); err != nil {
+		t.Fatal(err)
+	}
+	registryBytes, err := json.Marshal(map[string]any{
+		"repo": map[string]any{
+			"path":                root,
+			"qa_commands":         [][]string{{"go", "run", qaCommand}},
+			"qa_semantic_command": []string{node, runner, "--url", "{preview_url}", "--output", "{artifact_path}"},
+			"sandbox_runtime":     WorkspaceSandboxProcess,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusOK) }))
+	t.Cleanup(server.Close)
+	lookup := func(name string) string {
+		switch name {
+		case "ITBEM_AI_WORKSPACES_JSON":
+			return string(registryBytes)
+		case "ITBEM_AI_GATEWAY_URL":
+			return "https://gateway.example.test/api/internal/automation/inference"
+		default:
+			return ""
+		}
+	}
+	taskID, runID := "qa-capability-refresh-task", "qa-capability-refresh-run"
+	delivery := json.RawMessage(`{"work_item":{"preview_url":"` + server.URL + `"},"context_sources":[{"kind":"repository","reference":"workspace://repo"}]}`)
+	return stagehandCapabilityRefreshFixture{
+		taskID: taskID, runID: runID, delivery: delivery, lookup: lookup,
+		orderPath: filepath.Join(root, "order.txt"), capabilityPath: filepath.Join(root, "capability.txt"),
+	}
+}
+
+func appendRefreshOrder(path string) error {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		return err
+	}
+	if _, err := file.WriteString("refresh\n"); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
 }
 
 func TestStagehandEvidenceManifestBindsEveryUploadedPNG(t *testing.T) {
@@ -451,8 +859,11 @@ func TestStagehandEvidenceManifestRejectsMissingOrUnsafeArtifacts(t *testing.T) 
 
 func TestStagehandToolExecutionUsesOnlyUploadedSemanticReport(t *testing.T) {
 	result := map[string]any{"semantic": map[string]any{"report": map[string]any{
-		"tool": "stagehand", "provider": "minimax", "model": "MiniMax-M3",
-		"usage": map[string]any{"input_tokens": float64(120), "output_tokens": float64(40), "total_tokens": float64(160)},
+		"tool": "stagehand", "calls": []any{map[string]any{
+			"call_key": "semantic-assessment", "call_id": uuid.Must(uuid.NewV4()).String(), "receipt_id": uuid.Must(uuid.NewV4()).String(),
+			"provider": "minimax", "model": "MiniMax-M3", "call_status": "completed",
+			"usage": map[string]any{"input_tokens": float64(120), "output_tokens": float64(40), "total_tokens": float64(160)},
+		}},
 	}}}
 	references := []ArtifactReference{{Name: "dashboard-semantic-qa.json", Reference: "s3://private/automation/task/artifacts/01-dashboard-semantic-qa.json", ContentType: "application/json"}}
 	executions := stagehandToolExecutions(result, references)
@@ -464,77 +875,69 @@ func TestStagehandToolExecutionUsesOnlyUploadedSemanticReport(t *testing.T) {
 	}
 }
 
-func TestSemanticQAEnvironmentOnlyExposesProviderCredentialToPinnedStagehand(t *testing.T) {
-	workspace := t.TempDir()
-	runnerDirectory := t.TempDir()
-	runner := filepath.Join(runnerDirectory, "run.mjs")
-	runnerBody := []byte("export {}\n")
-	if err := os.WriteFile(runner, runnerBody, 0600); err != nil {
-		t.Fatal(err)
-	}
-	digest := sha256.Sum256(runnerBody)
+func TestSemanticQAEnvironmentOnlyExposesScopedCapabilityToPinnedStagehand(t *testing.T) {
+	capability := installGatewayTestCapability(t, "task-1", "run-1", inferencecapability.OperationDeliveryQA)
 	lookup := func(name string) string {
 		switch name {
+		case "ITBEM_AI_GATEWAY_URL":
+			return "https://gateway.example.test/api/internal/automation/inference"
+		case "AUTOMATION_CALLBACK_SECRET":
+			return "test-callback-secret"
 		case "MINIMAX_API_KEY":
-			return "test-minimax-key"
-		case "ITBEM_STAGEHAND_RUNNER_PATH":
-			return runner
-		case "ITBEM_STAGEHAND_RUNNER_SHA256":
-			return fmt.Sprintf("%x", digest)
-		default:
-			return ""
-		}
-	}
-	ordinary, ordinaryTrusted, err := semanticQAEnvironment([]string{"go", "run", "semantic.go", "{preview_url}", "{artifact_path}"}, workspace, lookup)
-	if err != nil || ordinaryTrusted || len(ordinary) != 0 {
-		t.Fatalf("ordinary repository QA must not receive provider credentials: %#v / trusted=%t / %v", ordinary, ordinaryTrusted, err)
-	}
-	pinned := []string{"node", runner, "--url", "{preview_url}", "--output", "{artifact_path}"}
-	environment, trusted, err := semanticQAEnvironment(pinned, workspace, lookup)
-	if err != nil || !trusted || environment["MINIMAX_API_KEY"] != "test-minimax-key" || len(environment) != 1 {
-		t.Fatalf("verified operator Stagehand runner must receive only its provider credential: %#v / trusted=%t / %v", environment, trusted, err)
-	}
-	if _, _, err := semanticQAEnvironment(pinned, workspace, func(name string) string {
-		if name == "ITBEM_STAGEHAND_RUNNER_PATH" {
-			return runner
-		}
-		if name == "ITBEM_STAGEHAND_RUNNER_SHA256" {
-			return fmt.Sprintf("%x", digest)
+			return "unused-provider-key"
 		}
 		return ""
-	}); err == nil {
-		t.Fatal("verified Stagehand runner must fail closed without its configured provider credential")
 	}
-	if err := os.WriteFile(runner, []byte("changed\n"), 0600); err != nil {
-		t.Fatal(err)
+	ordinary, err := semanticQAEnvironment([]string{"go", "run", "semantic.go", "{preview_url}", "{artifact_path}"}, "task", "run", lookup)
+	if err != nil || len(ordinary) != 0 {
+		t.Fatalf("ordinary repository QA must not receive provider credentials: %#v / %v", ordinary, err)
 	}
-	if _, _, err := semanticQAEnvironment(pinned, workspace, lookup); err == nil {
-		t.Fatal("a changed Stagehand runner must not receive provider credentials")
+	pinned := []string{"node", "C:/agent/itbem-events-backend/tools/stagehand-qa/run.mjs", "--url", "{preview_url}", "--output", "{artifact_path}"}
+	environment, err := semanticQAEnvironment(pinned, "task-1", "run-1", lookup)
+	if err != nil || environment["STAGEHAND_QA_INFERENCE_URL"] == "" || environment["STAGEHAND_QA_INFERENCE_CAPABILITY"] == "" || strings.Contains(environment["STAGEHAND_QA_INFERENCE_CAPABILITY"], "test-callback-secret") || environment["STAGEHAND_QA_TASK_ID"] != "task-1" || environment["STAGEHAND_QA_RUN_ID"] != "run-1" || environment["STAGEHAND_QA_OPERATION"] != "delivery.qa" || environment["AUTOMATION_CALLBACK_SECRET"] != "" || environment["MINIMAX_API_KEY"] != "" || len(environment) != 5 {
+		t.Fatalf("pinned Stagehand runner must receive only its scoped inference capability: %#v / %v", environment, err)
 	}
-	insideWorkspace := filepath.Join(workspace, "run.mjs")
-	if err := os.WriteFile(insideWorkspace, runnerBody, 0600); err != nil {
-		t.Fatal(err)
+	if environment["STAGEHAND_QA_INFERENCE_CAPABILITY"] != capability {
+		t.Fatal("Stagehand must receive the capability issued to this exact worker run")
 	}
-	insideDigest := sha256.Sum256(runnerBody)
-	insideLookup := func(name string) string {
-		switch name {
-		case "MINIMAX_API_KEY":
-			return "test-minimax-key"
-		case "ITBEM_STAGEHAND_RUNNER_PATH":
-			return insideWorkspace
-		case "ITBEM_STAGEHAND_RUNNER_SHA256":
-			return fmt.Sprintf("%x", insideDigest)
-		default:
-			return ""
+	for _, runtime := range []string{"/usr/bin/node", "C:/managed/node.exe", `C:\managed\node.exe`} {
+		command := []string{runtime, "C:/agent/itbem-events-backend/tools/stagehand-qa/run.mjs"}
+		got, err := semanticQAEnvironment(command, "task-1", "run-1", lookup)
+		if err != nil || got["STAGEHAND_QA_INFERENCE_CAPABILITY"] != capability {
+			t.Errorf("absolute managed Node runtime %q must receive its bound Stagehand capability: %#v / %v", runtime, got, err)
 		}
 	}
-	if _, _, err := semanticQAEnvironment([]string{"node", insideWorkspace, "--url", "{preview_url}", "--output", "{artifact_path}"}, workspace, insideLookup); err == nil {
-		t.Fatal("a Stagehand runner inside the reviewed workspace must not receive provider credentials")
+	for _, runtime := range []string{"/usr/bin/pwsh", "./node", "node.exe"} {
+		command := []string{runtime, "tools/stagehand-qa/run.mjs"}
+		got, err := semanticQAEnvironment(command, "task-1", "run-1", lookup)
+		if err != nil || len(got) != 0 {
+			t.Errorf("unapproved runtime %q must not receive Stagehand capability: %#v / %v", runtime, got, err)
+		}
+	}
+	verified, err := inferencecapability.Verify(testGatewayCapabilitySigningKey, environment["STAGEHAND_QA_INFERENCE_CAPABILITY"], "task-1", "run-1", "delivery.qa", time.Now().UTC())
+	if err != nil || verified.TaskID != "task-1" || verified.RunID != "run-1" || verified.Operation != inferencecapability.OperationDeliveryQA || verified.WorkerID == "" || verified.MachineID == "" {
+		t.Fatalf("Stagehand capability was not signed for its exact run: %v", err)
+	}
+	// Check the effective subprocess environment after the same transform
+	// used by runLocalWithEnv, not only the explicit Stagehand overrides.
+	effective := repositoryCommandEnvironment([]string{
+		"AUTOMATION_CALLBACK_SECRET=test-callback-secret",
+		"ITBEM_AGENT_PRIVATE_KEY=private-key-must-not-reach-stagehand",
+		"MINIMAX_API_KEY=provider-key-must-not-reach-stagehand",
+	}, environment)
+	for _, entry := range effective {
+		name, _, _ := strings.Cut(entry, "=")
+		if strings.EqualFold(name, "AUTOMATION_CALLBACK_SECRET") || strings.EqualFold(name, "MINIMAX_API_KEY") || strings.EqualFold(name, "ITBEM_AGENT_PRIVATE_KEY") {
+			t.Fatalf("Stagehand subprocess inherited forbidden credential environment variable %s", name)
+		}
+	}
+	if _, err := semanticQAEnvironment(pinned, "task", "run", func(string) string { return "" }); err == nil {
+		t.Fatal("pinned Stagehand runner must fail closed without its bound gateway identity")
 	}
 }
 
 func TestResolveSemanticQACommandUsesOnlyConfiguredManagedNodeRuntime(t *testing.T) {
-	command := []string{"node", "C:/operator/stagehand/run.mjs", "--url", "{preview_url}", "--output", "{artifact_path}"}
+	command := []string{"node", "C:/agent/itbem-events-backend/tools/stagehand-qa/run.mjs", "--url", "{preview_url}", "--output", "{artifact_path}"}
 	resolved, err := resolveSemanticQACommand(command, func(name string) string {
 		if name == "ITBEM_STAGEHAND_NODE_EXECUTABLE" {
 			return "C:/managed/node.exe"
@@ -553,8 +956,8 @@ func TestStagehandToolExecutionKeepsEachReportedCallSeparate(t *testing.T) {
 	result := map[string]any{"semantic": map[string]any{"report": map[string]any{
 		"tool": "stagehand",
 		"calls": []any{
-			map[string]any{"call_key": "semantic-assessment", "provider": "minimax", "model": "MiniMax-M3", "usage": map[string]any{"input_tokens": float64(120), "output_tokens": float64(40), "total_tokens": float64(160)}},
-			map[string]any{"call_key": "semantic-retry", "call_status": "failed", "provider": "minimax", "model": "MiniMax-M3", "usage": map[string]any{"input_tokens": float64(60), "output_tokens": float64(20), "total_tokens": float64(80)}},
+			map[string]any{"call_key": "semantic-assessment", "call_id": uuid.Must(uuid.NewV4()).String(), "receipt_id": uuid.Must(uuid.NewV4()).String(), "provider": "minimax", "model": "MiniMax-M3", "usage": map[string]any{"input_tokens": float64(120), "output_tokens": float64(40), "total_tokens": float64(160)}},
+			map[string]any{"call_key": "semantic-retry", "call_id": uuid.Must(uuid.NewV4()).String(), "receipt_id": uuid.Must(uuid.NewV4()).String(), "call_status": "failed", "provider": "minimax", "model": "MiniMax-M3", "usage": map[string]any{"input_tokens": float64(60), "output_tokens": float64(20), "total_tokens": float64(80)}},
 		},
 	}}}
 	references := []ArtifactReference{{Name: "dashboard-semantic-qa.json", Reference: "s3://private/automation/task/artifacts/01-dashboard-semantic-qa.json", ContentType: "application/json"}}

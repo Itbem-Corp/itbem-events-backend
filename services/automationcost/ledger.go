@@ -66,6 +66,15 @@ func Build(provider, model string, usage map[string]any, configured string) (Led
 	if nested := mapValue(usage["prompt_tokens_details"]); ledger.CachedInputTokens == 0 {
 		ledger.CachedInputTokens = usageNumber(nested, "cached_tokens", "cache_read_input_tokens")
 	}
+	if nested := mapValue(usage["input_tokens_details"]); ledger.CachedInputTokens == 0 {
+		ledger.CachedInputTokens = usageNumber(nested, "cached_tokens", "cache_read_input_tokens")
+	}
+	if nested := mapValue(usage["prompt_tokens_details"]); ledger.CacheWriteTokens == 0 {
+		ledger.CacheWriteTokens = usageNumber(nested, "cache_write_tokens", "cache_creation_input_tokens", "cache_creation_tokens")
+	}
+	if nested := mapValue(usage["input_tokens_details"]); ledger.CacheWriteTokens == 0 {
+		ledger.CacheWriteTokens = usageNumber(nested, "cache_write_tokens", "cache_creation_input_tokens", "cache_creation_tokens")
+	}
 	// MiniMax M3 reports reasoning usage inside completion_tokens_details. Keep
 	// it visible in the immutable ledger even when the provider bills it as part
 	// of completion tokens, so operators can distinguish answer size from model
@@ -170,10 +179,30 @@ func EstimateUpperBound(provider, model string, inputBytes, maxCompletionTokens 
 
 func catalogFor(configured string) (Catalog, error) {
 	if strings.TrimSpace(configured) == "" {
-		return Catalog{Version: "minimax-paygo-2026-08", Basis: "estimated_api_equivalent", Models: map[string]Rates{
-			// Source: MiniMax public pay-as-you-go page (checked 2026-08-08).
-			"minimax:minimax-m3":   {InputMicrosPerMillion: 600000, OutputMicrosPerMillion: 2400000, CachedMicrosPerMillion: 120000},
-			"minimax:minimax-m2.7": {InputMicrosPerMillion: 300000, OutputMicrosPerMillion: 1200000, CachedMicrosPerMillion: 60000, CacheWriteMicrosPerMillion: 375000},
+		return Catalog{Version: "official-text-prices-2026-09-23", Basis: "official_api_price", Models: map[string]Rates{
+			// Sources checked 2026-09-23: MiniMax Token Plan, DeepSeek Models &
+			// Pricing, and OpenAI API Pricing. All amounts are micro-USD / 1M.
+			"minimax:minimax-m3":             {InputMicrosPerMillion: 600000, OutputMicrosPerMillion: 2400000, CachedMicrosPerMillion: 120000},
+			"minimax:minimax-m2.7":           {InputMicrosPerMillion: 300000, OutputMicrosPerMillion: 1200000, CachedMicrosPerMillion: 60000, CacheWriteMicrosPerMillion: 375000},
+			"minimax:minimax-m2.7-highspeed": {InputMicrosPerMillion: 600000, OutputMicrosPerMillion: 2400000, CachedMicrosPerMillion: 60000, CacheWriteMicrosPerMillion: 375000},
+			// DeepSeek switches between peak and off-peak pricing. The built-in
+			// catalogue intentionally uses its published peak rate so a hard budget
+			// admission never under-reserves. Deployments that need invoice-exact
+			// off-peak accounting can provide a time-aware external price catalog.
+			"deepseek:deepseek-flash":  {InputMicrosPerMillion: 300000, OutputMicrosPerMillion: 1200000, CachedMicrosPerMillion: 6000},
+			"deepseek:deepseek-v4-pro": {InputMicrosPerMillion: 1320000, OutputMicrosPerMillion: 3960000, CachedMicrosPerMillion: 44000},
+			"openai:gpt-6-astra":       {InputMicrosPerMillion: 5000000, OutputMicrosPerMillion: 25000000, CachedMicrosPerMillion: 500000, CacheWriteMicrosPerMillion: 6250000},
+			"openai:gpt-6-sol":         {InputMicrosPerMillion: 1000000, OutputMicrosPerMillion: 5000000, CachedMicrosPerMillion: 100000, CacheWriteMicrosPerMillion: 1250000},
+			"openai:gpt-6-luna":        {InputMicrosPerMillion: 50000, OutputMicrosPerMillion: 250000, CachedMicrosPerMillion: 5000, CacheWriteMicrosPerMillion: 62500},
+			"openai:gpt-5.3-codex":     {InputMicrosPerMillion: 1750000, OutputMicrosPerMillion: 14000000, CachedMicrosPerMillion: 175000},
+			// Anthropic publishes 5-minute prompt-cache write/read rates. These
+			// exact dated IDs remain useful even after a newer live model appears;
+			// unknown IDs deliberately remain unpriced until reviewed.
+			"anthropic:claude-opus-4-1-20250805":   {InputMicrosPerMillion: 15000000, OutputMicrosPerMillion: 75000000, CachedMicrosPerMillion: 1500000, CacheWriteMicrosPerMillion: 18750000},
+			"anthropic:claude-opus-4-20250514":     {InputMicrosPerMillion: 15000000, OutputMicrosPerMillion: 75000000, CachedMicrosPerMillion: 1500000, CacheWriteMicrosPerMillion: 18750000},
+			"anthropic:claude-sonnet-4-20250514":   {InputMicrosPerMillion: 3000000, OutputMicrosPerMillion: 15000000, CachedMicrosPerMillion: 300000, CacheWriteMicrosPerMillion: 3750000},
+			"anthropic:claude-3-7-sonnet-20250219": {InputMicrosPerMillion: 3000000, OutputMicrosPerMillion: 15000000, CachedMicrosPerMillion: 300000, CacheWriteMicrosPerMillion: 3750000},
+			"anthropic:claude-3-5-haiku-20241022":  {InputMicrosPerMillion: 800000, OutputMicrosPerMillion: 4000000, CachedMicrosPerMillion: 80000, CacheWriteMicrosPerMillion: 1000000},
 		}}, nil
 	}
 	var catalog Catalog
@@ -189,6 +218,24 @@ func catalogFor(configured string) (Catalog, error) {
 		}
 	}
 	return catalog, nil
+}
+
+// RatesFor returns the exact configured model (or provider wildcard) rate
+// without exposing mutable catalog internals. It is used by the safe model
+// catalogue projection so the dashboard can show the same price basis that
+// the immutable execution ledger will use.
+func RatesFor(provider, model, configured string) (Rates, bool, error) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	model = strings.ToLower(strings.TrimSpace(model))
+	catalog, err := catalogFor(configured)
+	if err != nil {
+		return Rates{}, false, err
+	}
+	rates, ok := catalog.Models[provider+":"+model]
+	if !ok {
+		rates, ok = catalog.Models[provider+":*"]
+	}
+	return rates, ok, nil
 }
 
 // cost keeps the immutable micro-USD ledger inside signed 64-bit range. A

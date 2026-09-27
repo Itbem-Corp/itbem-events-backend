@@ -40,9 +40,15 @@ func queueMessagePriority(raw QueueMessage) QueuePriority {
 }
 
 const (
+	queueReceiveWaitSeconds        int32 = 20
 	queueVisibilityTimeoutSeconds  int32 = 900
 	queueVisibilityHeartbeatPeriod       = 4 * time.Minute
 	queueDeferredReviewSeconds     int32 = 30
+	// A worker with an explicit specialist profile must not hold an unrelated
+	// SQS lease until the generic retry window. Deferring before admission lets
+	// another capable worker receive the message while retaining the safe
+	// fallback for transports that cannot change visibility.
+	queueDeferredCapabilitySeconds int32 = 45
 	// A bounded review burst preserves fast PR feedback while guaranteeing a
 	// queued QA, plan or implementation job eventually receives a slot.
 	queueReviewBurstLimit = 3
@@ -67,73 +73,84 @@ type Queue interface {
 	Delete(context.Context, QueueMessage) error
 }
 
-// retryableQueueReceiveError is intentionally narrower than a generic
-// temporary error. A queue implementation must explicitly opt into this
-// contract and supply a bounded delay before RunQueue keeps the process alive
-// after a failed receive.
-type retryableQueueReceiveError interface {
-	error
-	RetryDelay() time.Duration
-}
-
-func queueReceiveRetryDelay(err error) (time.Duration, bool) {
-	var retryable retryableQueueReceiveError
-	if !errors.As(err, &retryable) {
-		return 0, false
-	}
-	delay := retryable.RetryDelay()
-	if delay <= 0 {
-		return 0, false
-	}
-	if delay < gatewayRetryMinimumDelay {
-		delay = gatewayRetryMinimumDelay
-	}
-	if delay > gatewayRetryMaximumDelay {
-		delay = gatewayRetryMaximumDelay
-	}
-	return delay, true
-}
-
-// retryableDeliveryError translates only explicitly retryable gateway
-// responses into the queue's bounded retry contract. In particular, a 401,
-// 403, malformed task, or arbitrary worker failure remains terminal and keeps
-// the existing fail-closed behavior.
-func retryableDeliveryError(err error) *RetryableError {
-	var providerRetry *RetryableError
-	if errors.As(err, &providerRetry) {
-		return providerRetry
-	}
-	var gatewayRetry retryableQueueReceiveError
-	if !errors.As(err, &gatewayRetry) {
-		return nil
-	}
-	delay := gatewayRetry.RetryDelay()
-	if delay <= 0 {
-		return nil
-	}
-	// gatewayRequestError.Operation is an allow-listed, fixed label (for
-	// example "lease" or "object read"). Retain it in the local journal so an
-	// operator can distinguish a queue lease outage from storage I/O without
-	// logging a URL, object reference, sealed lease, credential, or payload.
-	message := "temporary automation gateway failure"
-	if gatewayErr, ok := err.(*gatewayRequestError); ok {
-		if gatewayErr.operation != "" {
-			message += " during " + gatewayErr.operation
-		}
-		// diagnostic is normalized from a server allow-list. It is useful to
-		// distinguish a backend storage credential or region fault without
-		// logging object references, lease tokens, credentials, or SDK details.
-		if gatewayErr.diagnostic != "" {
-			message += " (" + gatewayErr.diagnostic + ")"
-		}
-	}
-	return &RetryableError{Message: message, RetryAfter: delay}
-}
-
 type scheduledQueueMessage struct {
 	raw       QueueMessage
 	review    bool
 	stopLease func()
+}
+
+// queueOperationLane is the small in-process fairness primitive used for
+// ordinary work. SQS does not promise that a burst of one project or operation
+// will be interleaved with another, so a shared generalist could otherwise
+// drain a whole receive batch for one lane before giving a different lane a
+// turn. The lane key is decoded from the frozen queue contract; caller
+// supplied priority fields never influence this order.
+type queueOperationLane struct {
+	queues map[string][]QueueMessage
+	order  []string
+	cursor int
+}
+
+func (lane *queueOperationLane) enqueue(raw QueueMessage) {
+	key := queueFairnessLaneKey(raw)
+	if _, exists := lane.queues[key]; !exists {
+		lane.order = append(lane.order, key)
+	}
+	lane.queues[key] = append(lane.queues[key], raw)
+}
+
+func (lane *queueOperationLane) len() int {
+	count := 0
+	for _, messages := range lane.queues {
+		count += len(messages)
+	}
+	return count
+}
+
+func (lane *queueOperationLane) next() (QueueMessage, bool) {
+	if lane == nil || len(lane.order) == 0 || lane.len() == 0 {
+		return QueueMessage{}, false
+	}
+	for offset := 0; offset < len(lane.order); offset++ {
+		index := (lane.cursor + offset) % len(lane.order)
+		operation := lane.order[index]
+		messages := lane.queues[operation]
+		if len(messages) == 0 {
+			continue
+		}
+		lane.queues[operation] = messages[1:]
+		lane.cursor = (index + 1) % len(lane.order)
+		return messages[0], true
+	}
+	return QueueMessage{}, false
+}
+
+func queueOperation(raw QueueMessage) string {
+	message, err := DecodeTaskMessage(raw.Body)
+	if err != nil || strings.TrimSpace(message.Payload.Operation) == "" {
+		return "<invalid>"
+	}
+	return message.Payload.Operation
+}
+
+// queueFairnessLaneKey groups work by project and operation when the control
+// plane supplied a project hint. Project-scoped lanes prevent a large burst
+// from one project from starving another while retaining operation fairness
+// for legacy messages that predate the optional field.
+func queueFairnessLaneKey(raw QueueMessage) string {
+	message, err := DecodeTaskMessage(raw.Body)
+	if err != nil {
+		return "<invalid>"
+	}
+	operation := strings.TrimSpace(message.Payload.Operation)
+	if operation == "" {
+		operation = "<invalid>"
+	}
+	project := strings.TrimSpace(message.Payload.ProjectID)
+	if project == "" {
+		return operation
+	}
+	return project + ":" + operation
 }
 
 // VisibilityExtendingQueue is deliberately optional so deterministic unit
@@ -153,15 +170,27 @@ type DeferrableQueue interface {
 }
 
 type AWSQueue struct {
-	client   *sqs.Client
-	queueURL string
+	client             *sqs.Client
+	queueURL           string
+	receiveWaitSeconds int32
 }
 
 func NewAWSQueue(client *sqs.Client, queueURL string) (*AWSQueue, error) {
+	return NewAWSQueueWithWaitTime(client, queueURL, queueReceiveWaitSeconds)
+}
+
+// NewAWSQueueWithWaitTime keeps the transport's long-poll duration explicit.
+// Production callers use NewAWSQueue's 20-second default; integration harnesses
+// can use a short poll so a canceled worker does not leave a test-container
+// long-poll outstanding while the next phase publishes work.
+func NewAWSQueueWithWaitTime(client *sqs.Client, queueURL string, waitSeconds int32) (*AWSQueue, error) {
 	if client == nil || queueURL == "" {
 		return nil, fmt.Errorf("SQS client and queue URL are required")
 	}
-	return &AWSQueue{client: client, queueURL: queueURL}, nil
+	if waitSeconds < 0 || waitSeconds > 20 {
+		return nil, fmt.Errorf("SQS receive wait must be between 0 and 20 seconds")
+	}
+	return &AWSQueue{client: client, queueURL: queueURL, receiveWaitSeconds: waitSeconds}, nil
 }
 
 func (q *AWSQueue) Receive(ctx context.Context, limit int) ([]QueueMessage, error) {
@@ -171,7 +200,11 @@ func (q *AWSQueue) Receive(ctx context.Context, limit int) ([]QueueMessage, erro
 	if limit > 10 {
 		limit = 10
 	}
-	response, err := q.client.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{QueueUrl: aws.String(q.queueURL), MaxNumberOfMessages: int32(limit), WaitTimeSeconds: 20, VisibilityTimeout: queueVisibilityTimeoutSeconds})
+	waitSeconds := q.receiveWaitSeconds
+	if waitSeconds < 0 || waitSeconds > 20 {
+		waitSeconds = queueReceiveWaitSeconds
+	}
+	response, err := q.client.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{QueueUrl: aws.String(q.queueURL), MaxNumberOfMessages: int32(limit), WaitTimeSeconds: waitSeconds, VisibilityTimeout: queueVisibilityTimeoutSeconds})
 	if err != nil {
 		return nil, fmt.Errorf("receive automation message: %w", err)
 	}
@@ -221,12 +254,6 @@ func ProcessQueueMessage(ctx context.Context, worker *Worker, queue Queue, raw Q
 	if err != nil {
 		return err
 	}
-	// HTTP gateway receipt handles are sealed task leases. Carrying the lease in
-	// context binds every object read/write to this exact delivery without
-	// changing the transport-neutral worker and store interfaces.
-	if _, ok := queue.(*HTTPGateway); ok {
-		ctx = context.WithValue(ctx, gatewayLeaseContextKey{}, raw.ReceiptHandle)
-	}
 	if err := worker.Process(ctx, message); err != nil {
 		return err
 	}
@@ -234,6 +261,18 @@ func ProcessQueueMessage(ctx context.Context, worker *Worker, queue Queue, raw Q
 }
 
 func RunQueue(ctx context.Context, worker *Worker, queue Queue, concurrency int, logger *slog.Logger) error {
+	return runQueue(ctx, worker, queue, concurrency, logger, nil)
+}
+
+// RunQueueWithDrain stops receiving new messages when drain is closed, lets
+// already admitted work finish, and returns once those leases are settled.
+// The caller can still cancel ctx as a hard timeout; this keeps graceful
+// shutdown from becoming an unbounded process when a provider is unavailable.
+func RunQueueWithDrain(ctx context.Context, worker *Worker, queue Queue, concurrency int, logger *slog.Logger, drain <-chan struct{}) error {
+	return runQueue(ctx, worker, queue, concurrency, logger, drain)
+}
+
+func runQueue(ctx context.Context, worker *Worker, queue Queue, concurrency int, logger *slog.Logger, drain <-chan struct{}) error {
 	if concurrency < 1 || concurrency > maxAgentConcurrency {
 		return fmt.Errorf("worker concurrency must be between 1 and %d", maxAgentConcurrency)
 	}
@@ -242,6 +281,20 @@ func RunQueue(ctx context.Context, worker *Worker, queue Queue, concurrency int,
 	}
 	jobs := make(chan scheduledQueueMessage, concurrency)
 	slots := make(chan struct{}, concurrency)
+	receiveCtx, cancelReceive := context.WithCancel(ctx)
+	defer cancelReceive()
+	if drain != nil {
+		// Receive may be in an SQS long poll. Cancel only that receive context;
+		// worker executions retain the parent context until the caller's hard
+		// shutdown deadline.
+		go func() {
+			select {
+			case <-drain:
+				cancelReceive()
+			case <-ctx.Done():
+			}
+		}()
+	}
 	// Reviews are intentionally serialized even when implementation/QA work
 	// uses several worker slots. This keeps one coherent reviewer timeline per
 	// local agent, avoids competing provider judgements for a burst of PRs, and
@@ -262,16 +315,19 @@ func RunQueue(ctx context.Context, worker *Worker, queue Queue, concurrency int,
 					if err == nil {
 						return
 					}
-					if retryable := retryableDeliveryError(err); retryable != nil {
+					var retryable *RetryableError
+					if errors.As(err, &retryable) {
 						if extender, ok := queue.(VisibilityExtendingQueue); ok {
-							if visibilityErr := extendRetryVisibility(ctx, extender, scheduled.raw, retryVisibilitySeconds(retryable)); visibilityErr != nil {
-								logger.Warn("automation retry delay could not be applied; SQS default visibility remains active", "error", visibilityErr)
+							retryContext, retryCancel := context.WithTimeout(ctx, 15*time.Second)
+							if visibilityErr := extender.ExtendVisibility(retryContext, scheduled.raw, retryVisibilitySeconds(retryable)); visibilityErr != nil && retryContext.Err() == nil {
+								logger.Warn("automation retry delay could not be applied; SQS default visibility remains active", "error", safePublicErrorMessage(visibilityErr.Error()))
 							}
+							retryCancel()
 						}
-						logger.Warn("automation delivery retained for retry", "reason", retryable.Message, "retry_in_seconds", retryVisibilitySeconds(retryable))
+						logger.Warn("automation delivery retained for retry", "reason", safePublicErrorMessage(retryable.Message), "retry_in_seconds", retryVisibilitySeconds(retryable))
 						return
 					}
-					logger.Error("automation delivery retained", "error", err)
+					logger.Error("automation delivery retained", "error", safePublicErrorMessage(err.Error()))
 				}()
 			}
 		}()
@@ -281,7 +337,8 @@ func RunQueue(ctx context.Context, worker *Worker, queue Queue, concurrency int,
 		workers.Wait()
 	}()
 	pendingReviews := make([]scheduledQueueMessage, 0, 1)
-	pendingWork := make([]QueueMessage, 0, concurrency)
+	var pendingWork queueOperationLane
+	pendingWork.queues = make(map[string][]QueueMessage)
 	defer func() {
 		for _, scheduled := range pendingReviews {
 			if scheduled.stopLease != nil {
@@ -290,10 +347,13 @@ func RunQueue(ctx context.Context, worker *Worker, queue Queue, concurrency int,
 		}
 	}()
 	reviewsSinceWork := 0
+	draining := false
 	nextPending := func() (scheduledQueueMessage, bool) {
-		if len(pendingWork) > 0 && (len(pendingReviews) == 0 || len(reviewSlot) > 0 || reviewsSinceWork >= queueReviewBurstLimit) {
-			message := pendingWork[0]
-			pendingWork = pendingWork[1:]
+		if pendingWork.len() > 0 && (len(pendingReviews) == 0 || len(reviewSlot) > 0 || reviewsSinceWork >= queueReviewBurstLimit) {
+			message, ok := pendingWork.next()
+			if !ok {
+				return scheduledQueueMessage{}, false
+			}
 			reviewsSinceWork = 0
 			return scheduledQueueMessage{raw: message}, true
 		}
@@ -303,9 +363,11 @@ func RunQueue(ctx context.Context, worker *Worker, queue Queue, concurrency int,
 			reviewsSinceWork++
 			return message, true
 		}
-		if len(pendingWork) > 0 {
-			message := pendingWork[0]
-			pendingWork = pendingWork[1:]
+		if pendingWork.len() > 0 {
+			message, ok := pendingWork.next()
+			if !ok {
+				return scheduledQueueMessage{}, false
+			}
 			reviewsSinceWork = 0
 			return scheduledQueueMessage{raw: message}, true
 		}
@@ -341,6 +403,25 @@ func RunQueue(ctx context.Context, worker *Worker, queue Queue, concurrency int,
 		}
 	}
 	for {
+		if !draining && drain != nil {
+			select {
+			case <-drain:
+				draining = true
+				logger.Info("automation worker draining; no new messages will be received")
+			default:
+			}
+		}
+		if draining {
+			if len(slots) == 0 {
+				return nil
+			}
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(10 * time.Millisecond):
+			}
+			continue
+		}
 		if err := ctx.Err(); err != nil {
 			return nil
 		}
@@ -383,29 +464,38 @@ func RunQueue(ctx context.Context, worker *Worker, queue Queue, concurrency int,
 			}
 			continue
 		}
-		// Receive exactly one message per scheduling turn. SQS begins the
+		// Receive only as many messages as there are immediately available
+		// execution slots. SQS begins the
 		// visibility lease at receive time, not when a local worker eventually
-		// starts it. Prefetching a batch of reviews behind the serial review lane
-		// can therefore make those leases expire and duplicate the same PR work.
-		// The loop immediately receives again while capacity remains, preserving
-		// concurrency for independent work without holding a local backlog.
-		messages, err := queue.Receive(ctx, 1)
+		// starts it. Reviews that cannot enter the serialized lane are explicitly
+		// deferred when the transport supports it; otherwise their retained lease
+		// is heartbeated. Ordinary work is held only for this bounded batch and
+		// scheduled round-robin by operation, so one flood cannot starve another.
+		receiveLimit := capacity
+		if receiveLimit > 10 {
+			receiveLimit = 10
+		}
+		messages, err := queue.Receive(receiveCtx, receiveLimit)
 		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			if delay, retryable := queueReceiveRetryDelay(err); retryable {
-				logger.Warn("automation queue receive failed temporarily; retaining worker process", "error", err, "retry_in", delay)
-				select {
-				case <-ctx.Done():
-					return nil
-				case <-time.After(delay):
+			if ctx.Err() != nil || (drain != nil && receiveCtx.Err() != nil) {
+				if drain != nil {
+					select {
+					case <-drain:
+						draining = true
+					default:
+					}
+				}
+				if draining {
 					continue
 				}
+				return nil
 			}
 			return err
 		}
 		for _, raw := range messages {
+			if !worker.canProcessMessage(raw) && deferUnsupportedCapability(ctx, worker, queue, raw, logger) {
+				continue
+			}
 			if queueMessagePriority(raw) == queuePriorityReview {
 				if len(pendingReviews) > 0 || len(reviewSlot) > 0 {
 					if deferrable, ok := queue.(DeferrableQueue); ok {
@@ -416,7 +506,7 @@ func RunQueue(ctx context.Context, worker *Worker, queue Queue, concurrency int,
 							continue
 						}
 						if ctx.Err() == nil {
-							logger.Warn("queued automation review could not be deferred; its current lease remains active", "error", err)
+							logger.Warn("queued automation review could not be deferred; its current lease remains active", "error", safePublicErrorMessage(err.Error()))
 						}
 					}
 					// Non-SQS deterministic transports do not support an explicit
@@ -428,20 +518,38 @@ func RunQueue(ctx context.Context, worker *Worker, queue Queue, concurrency int,
 				// SQS redelivery during a long preceding review.
 				pendingReviews = append(pendingReviews, scheduledQueueMessage{raw: raw, review: true, stopLease: retainPendingQueueLease(ctx, queue, raw, logger)})
 			} else {
-				pendingWork = append(pendingWork, raw)
+				pendingWork.enqueue(raw)
 			}
 		}
 	}
 }
 
-func extendRetryVisibility(ctx context.Context, queue VisibilityExtendingQueue, message QueueMessage, seconds int32) error {
-	// Service shutdown cancels the worker context before an in-flight provider
-	// request returns. Preserve its values but detach that cancellation long
-	// enough to shorten the durable queue lease; otherwise a FIFO lane can stay
-	// blocked for the queue's full default visibility timeout.
-	retryContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
-	defer cancel()
-	return queue.ExtendVisibility(retryContext, message, seconds)
+// deferUnsupportedCapability is a routing hint, not an authorization check.
+// The worker still validates capabilities and targeted profile affinity
+// immediately before claiming work in Process. This early path only prevents
+// a worker from monopolizing a lease that another worker can execute.
+func deferUnsupportedCapability(ctx context.Context, worker *Worker, queue Queue, raw QueueMessage, logger *slog.Logger) bool {
+	message, err := DecodeTaskMessage(raw.Body)
+	if err != nil {
+		return false
+	}
+	if worker == nil || worker.canProcessEnvelope(message) || strings.TrimSpace(message.Payload.Operation) == "" {
+		return false
+	}
+	deferrable, ok := queue.(DeferrableQueue)
+	if !ok {
+		return false
+	}
+	deferCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	deferErr := deferrable.Defer(deferCtx, raw, queueDeferredCapabilitySeconds)
+	cancel()
+	if deferErr != nil {
+		if ctx.Err() == nil && logger != nil {
+			logger.Warn("unsupported automation capability could not be deferred; retaining current lease", "error", safePublicErrorMessage(deferErr.Error()))
+		}
+		return false
+	}
+	return true
 }
 
 func retainPendingQueueLease(ctx context.Context, queue Queue, raw QueueMessage, logger *slog.Logger) func() {
@@ -464,7 +572,7 @@ func retainPendingQueueLease(ctx context.Context, queue Queue, raw QueueMessage,
 				err := extender.ExtendVisibility(heartbeatCtx, raw, queueVisibilityTimeoutSeconds)
 				heartbeatCancel()
 				if err != nil && leaseCtx.Err() == nil && logger != nil {
-					logger.Warn("pending automation review visibility heartbeat failed; SQS may redeliver", "error", err)
+					logger.Warn("pending automation review visibility heartbeat failed; SQS may redeliver", "error", safePublicErrorMessage(err.Error()))
 				}
 			}
 		}
@@ -498,10 +606,10 @@ func processQueueMessageWithVisibilityHeartbeat(ctx context.Context, worker *Wor
 				return
 			case <-ticker.C:
 				heartbeatContext, heartbeatCancel := context.WithTimeout(leaseContext, 15*time.Second)
-				err := extender.ExtendVisibility(heartbeatContext, raw, queueVisibilityTimeoutSeconds)
-				heartbeatCancel()
-				if err != nil && leaseContext.Err() == nil {
-					logger.Warn("automation visibility heartbeat failed; SQS may redeliver after the current lease", "error", err)
+					err := extender.ExtendVisibility(heartbeatContext, raw, queueVisibilityTimeoutSeconds)
+					heartbeatCancel()
+					if err != nil && leaseContext.Err() == nil {
+						logger.Warn("automation visibility heartbeat failed; SQS may redeliver after the current lease", "error", safePublicErrorMessage(err.Error()))
 				}
 			}
 		}

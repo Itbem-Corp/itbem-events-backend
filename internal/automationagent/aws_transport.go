@@ -21,15 +21,19 @@ import (
 // normalizeLocalQueueURL keeps LocalStack virtual-host queue URLs reachable
 // through an explicit loopback endpoint without rewriting real AWS URLs.
 func normalizeLocalQueueURL(queueURL, localEndpoint string) (string, error) {
-	if strings.TrimSpace(localEndpoint) == "" {
-		return queueURL, nil
-	}
 	queue, err := url.Parse(strings.TrimSpace(queueURL))
-	if err != nil {
-		return "", err
+	if err != nil || queue.Hostname() == "" || queue.User != nil || queue.RawQuery != "" || queue.Fragment != "" || queue.Path == "" || queue.Path == "/" {
+		return "", fmt.Errorf("queue URL must be an absolute endpoint with a queue path and no credentials, query, or fragment")
+	}
+	localStackHost := strings.HasSuffix(strings.ToLower(queue.Hostname()), ".localhost.localstack.cloud")
+	if queue.Scheme != "https" && !(queue.Scheme == "http" && (isLoopbackHost(queue.Hostname()) || (strings.TrimSpace(localEndpoint) != "" && localStackHost))) {
+		return "", fmt.Errorf("queue URL must use HTTPS or loopback HTTP")
+	}
+	if strings.TrimSpace(localEndpoint) == "" {
+		return queue.String(), nil
 	}
 	endpoint, err := url.Parse(strings.TrimSpace(localEndpoint))
-	if err != nil || !isLoopbackHost(endpoint.Hostname()) {
+	if err != nil || endpoint.Scheme != "http" || endpoint.Hostname() == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" || !isLoopbackHost(endpoint.Hostname()) {
 		return "", fmt.Errorf("local SQS endpoint must be loopback HTTP")
 	}
 	if !strings.HasSuffix(strings.ToLower(queue.Hostname()), ".localhost.localstack.cloud") {

@@ -4,11 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"events-stocks/internal/inferencecapability"
 )
 
 type fakeQueue struct{ deleted int }
@@ -21,18 +26,15 @@ type heartbeatQueue struct {
 	extensions atomic.Int32
 }
 
-type contextAwareQueue struct {
-	heartbeatQueue
-	contextWasCanceled atomic.Bool
-}
-
 type deferQueue struct {
 	heartbeatQueue
 	deferrals atomic.Int32
+	lastDelay atomic.Int32
 }
 
-func (q *deferQueue) Defer(context.Context, QueueMessage, int32) error {
+func (q *deferQueue) Defer(_ context.Context, _ QueueMessage, delay int32) error {
 	q.deferrals.Add(1)
+	q.lastDelay.Store(delay)
 	return nil
 }
 
@@ -41,27 +43,21 @@ func (q *heartbeatQueue) ExtendVisibility(context.Context, QueueMessage, int32) 
 	return nil
 }
 
-func (q *contextAwareQueue) ExtendVisibility(ctx context.Context, _ QueueMessage, _ int32) error {
-	q.contextWasCanceled.Store(ctx.Err() != nil)
-	q.extensions.Add(1)
-	return nil
-}
-
 func TestCompletionTokensForOperationKeepsPlansBoundedAndExpandsImplementation(t *testing.T) {
 	if got := CompletionTokensForOperation("ai.chat"); got != DefaultCompletionTokens {
 		t.Fatalf("generic operation budget = %d, want %d", got, DefaultCompletionTokens)
 	}
-	if got := CompletionTokensForOperation("delivery.plan"); got != deliveryPlanCompletionLimit {
-		t.Fatalf("delivery plan budget = %d, want %d", got, deliveryPlanCompletionLimit)
+	if got := CompletionTokensForOperation("delivery.plan"); got != DefaultCompletionTokens {
+		t.Fatalf("delivery plan budget = %d, want %d", got, DefaultCompletionTokens)
 	}
-	if got := CompletionTokensForOperation("code.review"); got != codeReviewCompletionLimit {
-		t.Fatalf("code review budget = %d, want %d", got, codeReviewCompletionLimit)
+	if got := CompletionTokensForOperation("delivery.chat"); got != DefaultCompletionTokens {
+		t.Fatalf("delivery chat budget = %d, want %d", got, DefaultCompletionTokens)
 	}
-	if codeReviewCompletionLimit != 65536 {
-		t.Fatalf("segmented code review aggregate budget = %d, want 65536", codeReviewCompletionLimit)
+	if got := CompletionTokensForOperation("delivery.implementation"); got != miniMaxM3CompletionLimit {
+		t.Fatalf("delivery implementation budget = %d, want %d", got, miniMaxM3CompletionLimit)
 	}
-	if got := CompletionTokensForOperation("delivery.implementation"); got != deliveryImplementationCompletionLimit {
-		t.Fatalf("delivery implementation budget = %d, want %d", got, deliveryImplementationCompletionLimit)
+	if got := CompletionTokensForOperation("product.ideate"); got != miniMaxM3CompletionLimit {
+		t.Fatalf("product ideation budget = %d, want %d", got, miniMaxM3CompletionLimit)
 	}
 	if got := CompletionTokensForOperation("delivery.qa"); got != DefaultCompletionTokens {
 		t.Fatalf("QA operation budget = %d, want %d", got, DefaultCompletionTokens)
@@ -69,26 +65,14 @@ func TestCompletionTokensForOperationKeepsPlansBoundedAndExpandsImplementation(t
 	if got := CompletionTokensForOperation("delivery.publish"); got != 0 {
 		t.Fatalf("deterministic publication should have no model budget, got %d", got)
 	}
-	if got := CompletionTokensForOperation("delivery.release_gate"); got != 0 {
-		t.Fatalf("release Gatekeeper completion tokens = %d, want 0", got)
-	}
-	if got := CompletionTokensForOperation("delivery.onboarding_probe"); got != 0 {
-		t.Fatalf("onboarding probe completion tokens = %d, want 0", got)
-	}
 }
 
 func TestBoundedCompletionTokensNeverLetsQueuePayloadRaiseOperationLimit(t *testing.T) {
-	if got := messageCompletionTokens("delivery.plan", miniMaxM3CompletionLimit+1); got != deliveryPlanCompletionLimit {
+	if got := messageCompletionTokens("delivery.plan", miniMaxM3CompletionLimit+1); got != DefaultCompletionTokens {
 		t.Fatalf("queue payload raised delivery limit to %d", got)
 	}
 	if got := messageCompletionTokens("delivery.plan", 1024); got != 1024 {
 		t.Fatalf("queue payload did not retain stricter limit: %d", got)
-	}
-	if got := messageCompletionTokens("code.review", codeReviewCompletionLimit+1); got != codeReviewCompletionLimit {
-		t.Fatalf("queue payload raised code review limit to %d", got)
-	}
-	if got := messageCompletionTokens("code.review", 8192); got != 8192 {
-		t.Fatalf("queue payload did not retain stricter code review limit: %d", got)
 	}
 	if got := messageCompletionTokens("ai.chat", 0); got != DefaultCompletionTokens {
 		t.Fatalf("zero queue payload should retain default: %d", got)
@@ -116,6 +100,194 @@ func TestQueuePrioritizesStructuredCodeReviewsWithoutTrustingPayloadPriority(t *
 	}
 }
 
+func TestSpecialistQueueDefersUnsupportedCapabilityBeforeClaim(t *testing.T) {
+	worker, err := NewWorker(WorkerConfig{
+		InputBucket:       "itbem-ai-inputs-local",
+		OutputBucket:      "itbem-ai-outputs-local",
+		AllowedOperations: []string{"delivery.plan"},
+	}, &fakeStore{}, &fakeCallback{}, fakeProvider{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := validMessage()
+	message.Payload.Operation = "delivery.qa"
+	raw, err := json.Marshal(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queue := &deferQueue{}
+	if !deferUnsupportedCapability(context.Background(), worker, queue, QueueMessage{Body: string(raw), ReceiptHandle: "specialist"}, nil) {
+		t.Fatal("unsupported specialist work should be deferred when the transport supports it")
+	}
+	if queue.deferrals.Load() != 1 || queue.lastDelay.Load() != queueDeferredCapabilitySeconds {
+		t.Fatalf("unexpected capability deferral: count=%d delay=%d", queue.deferrals.Load(), queue.lastDelay.Load())
+	}
+}
+
+func TestTargetedChildDefersOnSpecialistMismatchBeforeClaim(t *testing.T) {
+	targetMachineID := stepCallbackUUID()
+	callback := &fakeCallback{}
+	worker, err := NewWorker(WorkerConfig{
+		InputBucket:       "itbem-ai-inputs-local",
+		OutputBucket:      "itbem-ai-outputs-local",
+		AllowedOperations: []string{"delivery.implementation"},
+		AgentKey:          "backend-engineer",
+		MachineID:         targetMachineID,
+	}, &fakeStore{}, callback, fakeProvider{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := validMessage()
+	message.Payload.Operation = "delivery.implementation"
+	message.Payload.PlanStepID = stepCallbackUUID()
+	message.Payload.TargetMachineID = targetMachineID
+	message.Payload.AgentKey = "frontend-engineer"
+	raw, err := json.Marshal(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queueMessage := QueueMessage{Body: string(raw), ReceiptHandle: "wrong-specialist"}
+	if worker.canProcessMessage(queueMessage) {
+		t.Fatal("worker should not admit another specialist's targeted child task")
+	}
+	queue := &deferQueue{}
+	if !deferUnsupportedCapability(context.Background(), worker, queue, queueMessage, nil) {
+		t.Fatal("specialist mismatch should use the existing capability deferral")
+	}
+	if queue.deferrals.Load() != 1 || queue.lastDelay.Load() != queueDeferredCapabilitySeconds {
+		t.Fatalf("unexpected specialist deferral: count=%d delay=%d", queue.deferrals.Load(), queue.lastDelay.Load())
+	}
+
+	message.Payload.AgentKey = worker.config.AgentKey
+	matchingRaw, _ := json.Marshal(message)
+	if !worker.canProcessMessage(QueueMessage{Body: string(matchingRaw)}) {
+		t.Fatal("targeted task assigned to this worker profile should be admitted")
+	}
+	message.Payload.AgentKey = "frontend-engineer"
+
+	var retryable *RetryableError
+	if err := worker.Process(context.Background(), message); !errors.As(err, &retryable) {
+		t.Fatalf("direct processing must retry/defer instead of terminalizing mismatch: %v", err)
+	}
+	if len(callback.updates) != 0 {
+		t.Fatalf("profile mismatch reached task claim/status update: %#v", callback.updates)
+	}
+
+	message.Payload.AgentKey = ""
+	legacyTarget, _ := json.Marshal(message)
+	if _, err := DecodeTaskMessage(string(legacyTarget)); err == nil {
+		t.Fatal("targeted assignments must carry the persisted profile target")
+	}
+}
+
+func TestTargetedChildAdmitsProfileForCloudValidatedMachineFailover(t *testing.T) {
+	targetMachineID := stepCallbackUUID()
+	newWorker := func(workerID string) *Worker {
+		worker, err := NewWorker(WorkerConfig{
+			InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local",
+			WorkerID: workerID, AgentKey: "generalist", MachineID: targetMachineID,
+			AllowedOperations: []string{"delivery.implementation"},
+		}, &fakeStore{}, &fakeCallback{}, fakeProvider{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return worker
+	}
+	message := validMessage()
+	message.Payload.Operation = "delivery.implementation"
+	message.Payload.PlanStepID = stepCallbackUUID()
+	message.Payload.AgentKey = "generalist"
+	message.Payload.TargetMachineID = targetMachineID
+	firstProcess := newWorker(stepCallbackUUID())
+	if !firstProcess.canProcessMessage(queueMessageForTest(t, message)) {
+		t.Fatal("assigned machine should admit its original worker process")
+	}
+	replacement := newWorker(stepCallbackUUID())
+	if !replacement.canProcessMessage(queueMessageForTest(t, message)) {
+		t.Fatal("same stable machine should admit a replacement WorkerID after restart")
+	}
+
+	otherMachine := newWorker(stepCallbackUUID())
+	otherMachine.config.MachineID = stepCallbackUUID()
+	otherMachineRaw := queueMessageForTest(t, message)
+	if !otherMachine.canProcessMessage(otherMachineRaw) {
+		t.Fatal("a same-profile replacement must receive redelivery; the cloud validates whether its leases and workspace permit failover")
+	}
+
+	wrongProfile := newWorker(stepCallbackUUID())
+	wrongProfile.config.AgentKey = "qa-specialist"
+	wrongProfileRaw := queueMessageForTest(t, message)
+	queue := &deferQueue{}
+	if !deferUnsupportedCapability(context.Background(), wrongProfile, queue, wrongProfileRaw, nil) {
+		t.Fatal("wrong profile should defer/retry rather than consume the assignment")
+	}
+	if queue.deferrals.Load() != 1 {
+		t.Fatalf("wrong profile deferrals = %d, want 1", queue.deferrals.Load())
+	}
+	var retryable *RetryableError
+	if err := wrongProfile.Process(context.Background(), message); !errors.As(err, &retryable) {
+		t.Fatalf("direct wrong-profile processing should be retryable, got %v", err)
+	}
+}
+
+func queueMessageForTest(t *testing.T, message TaskMessage) QueueMessage {
+	t.Helper()
+	raw, err := json.Marshal(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return QueueMessage{Body: string(raw), ReceiptHandle: "targeted"}
+}
+
+type capabilityDispatchQueue struct {
+	deferQueue
+	message QueueMessage
+	cancel  context.CancelFunc
+	sent    atomic.Bool
+}
+
+func (q *capabilityDispatchQueue) Receive(context.Context, int) ([]QueueMessage, error) {
+	if q.sent.Swap(true) {
+		return nil, nil
+	}
+	return []QueueMessage{q.message}, nil
+}
+
+func (q *capabilityDispatchQueue) Defer(ctx context.Context, message QueueMessage, delay int32) error {
+	if err := q.deferQueue.Defer(ctx, message, delay); err != nil {
+		return err
+	}
+	if q.cancel != nil {
+		q.cancel()
+	}
+	return nil
+}
+
+func TestRunQueueRoutesUnsupportedWorkBeforeProviderAdmission(t *testing.T) {
+	worker, err := NewWorker(WorkerConfig{
+		InputBucket:       "itbem-ai-inputs-local",
+		OutputBucket:      "itbem-ai-outputs-local",
+		AllowedOperations: []string{"delivery.plan"},
+	}, &fakeStore{}, &fakeCallback{}, fakeProvider{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := validMessage()
+	message.Payload.Operation = "delivery.qa"
+	raw, err := json.Marshal(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	queue := &capabilityDispatchQueue{message: QueueMessage{Body: string(raw), ReceiptHandle: "route-before-claim"}, cancel: cancel}
+	if err := RunQueue(ctx, worker, queue, 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	if queue.deferrals.Load() != 1 || queue.lastDelay.Load() != queueDeferredCapabilitySeconds {
+		t.Fatalf("unsupported delivery was not deferred before admission: count=%d delay=%d", queue.deferrals.Load(), queue.lastDelay.Load())
+	}
+}
+
 func TestDecodeTaskMessageRejectsAmbiguousOrIncompleteQueuePayloads(t *testing.T) {
 	message := validMessage()
 	encoded, _ := json.Marshal(message)
@@ -129,6 +301,65 @@ func TestDecodeTaskMessageRejectsAmbiguousOrIncompleteQueuePayloads(t *testing.T
 	encoded, _ = json.Marshal(message)
 	if _, err := DecodeTaskMessage(string(encoded)); err == nil {
 		t.Fatal("queue messages must identify a positive delivery attempt")
+	}
+}
+
+func TestDecodeTaskMessageSupportsOptionalTargetPlanStepID(t *testing.T) {
+	legacy := validMessage()
+	legacyEncoded, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeTaskMessage(string(legacyEncoded)); err != nil {
+		t.Fatalf("legacy message without target step must remain valid: %v", err)
+	}
+
+	targeted := validMessage()
+	targeted.Payload.Operation = "delivery.implementation"
+	targeted.Payload.PlanStepID = stepCallbackUUID()
+	targeted.Payload.AgentKey = "generalist"
+	targeted.Payload.TargetMachineID = stepCallbackUUID()
+	targetedEncoded, err := json.Marshal(targeted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeTaskMessage(string(targetedEncoded))
+	if err != nil || decoded.Payload.PlanStepID != targeted.Payload.PlanStepID {
+		t.Fatalf("valid target plan-step id was not decoded: %#v, %v", decoded.Payload, err)
+	}
+	targeted.Payload.AgentKey = "backend-engineer"
+	targetedEncoded, _ = json.Marshal(targeted)
+	decoded, err = DecodeTaskMessage(string(targetedEncoded))
+	if err != nil || decoded.Payload.AgentKey != targeted.Payload.AgentKey {
+		t.Fatalf("valid targeted agent key was not decoded: %#v, %v", decoded.Payload, err)
+	}
+
+	for _, value := range []string{"not-a-uuid", "00000000-0000-0000-0000-000000000000"} {
+		targeted.Payload.PlanStepID = value
+		encoded, _ := json.Marshal(targeted)
+		if _, err := DecodeTaskMessage(string(encoded)); err == nil {
+			t.Fatalf("invalid target plan-step id %q was accepted", value)
+		}
+	}
+	targeted.Payload.TargetMachineID = "not-a-machine"
+	encoded, _ := json.Marshal(targeted)
+	if _, err := DecodeTaskMessage(string(encoded)); err == nil {
+		t.Fatal("targeted assignment without a valid machine identity was accepted")
+	}
+	targeted.Payload.TargetMachineID = stepCallbackUUID()
+	targeted.Payload.PlanStepID = stepCallbackUUID()
+	targeted.Payload.Operation = "delivery.plan"
+	encoded, _ = json.Marshal(targeted)
+	if _, err := DecodeTaskMessage(string(encoded)); err == nil {
+		t.Fatal("target step id on a non-implementation task was accepted")
+	}
+	targeted.Payload.Operation = "delivery.implementation"
+	for _, agentKey := range []string{"Backend Engineer", "a", " backend-engineer"} {
+		targeted.Payload.AgentKey = agentKey
+		encoded, _ = json.Marshal(targeted)
+		if _, err := DecodeTaskMessage(string(encoded)); err == nil {
+			t.Fatalf("malformed agent key %q was accepted", agentKey)
+		}
 	}
 }
 
@@ -171,6 +402,78 @@ func TestReviewQueueBurstPolicyPreservesPriorityWithoutStarvingWork(t *testing.T
 	}
 }
 
+func TestQueueOperationLaneRoundRobinsDistinctOperations(t *testing.T) {
+	makeRaw := func(operation, taskID string) QueueMessage {
+		message := validMessage()
+		message.Payload.Operation, message.Payload.TaskID = operation, taskID
+		encoded, _ := json.Marshal(message)
+		return QueueMessage{Body: string(encoded)}
+	}
+	lane := queueOperationLane{queues: make(map[string][]QueueMessage)}
+	lane.enqueue(makeRaw("delivery.qa", "qa-1"))
+	lane.enqueue(makeRaw("delivery.qa", "qa-2"))
+	lane.enqueue(makeRaw("delivery.chat", "chat-1"))
+	lane.enqueue(makeRaw("delivery.plan", "plan-1"))
+
+	got := make([]string, 0, 4)
+	for index := 0; index < 4; index++ {
+		message, ok := lane.next()
+		if !ok {
+			t.Fatalf("lane ended after %d messages", index)
+		}
+		decoded, err := DecodeTaskMessage(message.Body)
+		if err != nil {
+			t.Fatalf("decode scheduled message: %v", err)
+		}
+		got = append(got, queueOperation(message)+":"+decoded.Payload.TaskID)
+	}
+	want := []string{"delivery.qa:qa-1", "delivery.chat:chat-1", "delivery.plan:plan-1", "delivery.qa:qa-2"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("operation lanes were not round-robin: got %v want %v", got, want)
+	}
+}
+
+func TestQueueOperationLaneRoundRobinsProjectsBeforeAProjectCanMonopolize(t *testing.T) {
+	makeRaw := func(project, operation, taskID string) QueueMessage {
+		message := validMessage()
+		message.Payload.ProjectID = project
+		message.Payload.Operation = operation
+		message.Payload.TaskID = taskID
+		encoded, err := json.Marshal(message)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return QueueMessage{Body: string(encoded)}
+	}
+	var lane queueOperationLane
+	lane.queues = make(map[string][]QueueMessage)
+	for _, message := range []QueueMessage{
+		makeRaw("project-a", "delivery.qa", "a-1"),
+		makeRaw("project-a", "delivery.qa", "a-2"),
+		makeRaw("project-a", "delivery.qa", "a-3"),
+		makeRaw("project-b", "delivery.qa", "b-1"),
+		makeRaw("project-b", "delivery.qa", "b-2"),
+	} {
+		lane.enqueue(message)
+	}
+	got := make([]string, 0, 5)
+	for len(got) < 5 {
+		message, ok := lane.next()
+		if !ok {
+			t.Fatal("lane unexpectedly empty")
+		}
+		decoded, err := DecodeTaskMessage(message.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, decoded.Payload.ProjectID+":"+decoded.Payload.TaskID)
+	}
+	want := []string{"project-a:a-1", "project-b:b-1", "project-a:a-2", "project-b:b-2", "project-a:a-3"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("project fairness order = %#v, want %#v", got, want)
+	}
+}
+
 func TestProcessQueueMessageDeletesOnlyTerminalWork(t *testing.T) {
 	input, _ := json.Marshal(TaskInput{Prompt: "hello"})
 	worker, err := NewWorker(WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"}, &fakeStore{input: input}, &fakeCallback{}, fakeProvider{completion: Completion{Provider: ProviderMiniMax, Model: "MiniMax-M2.7", Content: "ok"}})
@@ -207,6 +510,107 @@ func TestProcessQueueMessageRetainsRetryableWork(t *testing.T) {
 	}
 }
 
+type queueRecoveryProvider struct{ calls int }
+
+func (p *queueRecoveryProvider) Complete(context.Context, []Message, int) (Completion, error) {
+	p.calls++
+	return Completion{Provider: ProviderMiniMax, Model: "MiniMax-M3", Content: "observed result", Usage: map[string]any{}}, nil
+}
+
+func TestQueueBusyRunRedeliverySurvivesUntilRecovery(t *testing.T) {
+	claims, completions := 0, 0
+	var worker *Worker
+	var err error
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var update TaskUpdate
+		if err := json.NewDecoder(request.Body).Decode(&update); err != nil {
+			t.Error(err)
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if update.Status == "running" {
+			claims++
+			if claims == 1 {
+				// Another worker still holds the durable lease. Its eventual
+				// crash must not erase this task's queue recovery path.
+				writer.Header().Set("X-ITBEM-Automation-Run-Busy", "1")
+				writer.WriteHeader(http.StatusConflict)
+				return
+			}
+			identity := worker.identity()
+			token, err := inferencecapability.Mint("test-only-server-signing-key-never-used-by-runtime", inferencecapability.Scope{
+				TaskID: strings.TrimPrefix(request.URL.Path, "/api/internal/automation/tasks/"), RunID: update.RunID, Operation: "ai.chat",
+				WorkerID: identity.WorkerID, AgentKey: identity.AgentKey, MachineID: identity.MachineID,
+			}, time.Minute)
+			if err != nil {
+				t.Error(err)
+				writer.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			writer.Header().Set(inferencecapability.HeaderName, token)
+		} else if update.Status == "completed" {
+			completions++
+		}
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	callback := newTestHTTPCallback(t, server)
+	input, _ := json.Marshal(TaskInput{Prompt: "synthetic recovery"})
+	store, provider := &fakeStore{input: input}, &queueRecoveryProvider{}
+	worker, err = NewWorker(WorkerConfig{
+		InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local",
+		AgentKey: "generalist", MachineID: "b69b7f51-58b9-4f0e-aef3-1fbc23f79827",
+	}, store, callback, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := validMessage()
+	message.Payload.Operation = "ai.chat"
+	encoded, _ := json.Marshal(message)
+	queue := &fakeQueue{}
+	raw := QueueMessage{Body: string(encoded), ReceiptHandle: "duplicate-receipt"}
+	err = ProcessQueueMessage(context.Background(), worker, queue, raw)
+	var retryable *RetryableError
+	if !errors.As(err, &retryable) || queue.deleted != 0 || provider.calls != 0 || len(store.writes) != 0 {
+		t.Fatalf("busy redelivery must retain without inference or writes: error=%v deleted=%d calls=%d writes=%d", err, queue.deleted, provider.calls, len(store.writes))
+	}
+	// Simulate redelivery after the owner has failed and the backend permits
+	// a new lease. There is no model network request or real queue in this test.
+	raw.ReceiptHandle = "recovery-receipt"
+	if err := ProcessQueueMessage(context.Background(), worker, queue, raw); err != nil {
+		t.Fatal(err)
+	}
+	if queue.deleted != 1 || provider.calls != 1 || completions != 1 {
+		t.Fatalf("recovery must complete and ACK once: deleted=%d calls=%d completions=%d", queue.deleted, provider.calls, completions)
+	}
+}
+
+func TestQueueTerminalOrCancelledClaimStillAcknowledges(t *testing.T) {
+	for _, state := range []string{"completed", "failed", "cancelled", "cancel_requested"} {
+		t.Run(state, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				// Terminal and cancelled claims deliberately carry no busy header.
+				writer.WriteHeader(http.StatusConflict)
+			}))
+			defer server.Close()
+			callback := newTestHTTPCallback(t, server)
+			provider := &queueRecoveryProvider{}
+			worker, err := NewWorker(WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"}, &fakeStore{}, callback, provider)
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded, _ := json.Marshal(validMessage())
+			queue := &fakeQueue{}
+			if err := ProcessQueueMessage(context.Background(), worker, queue, QueueMessage{Body: string(encoded), ReceiptHandle: "terminal-receipt"}); err != nil {
+				t.Fatal(err)
+			}
+			if queue.deleted != 1 || provider.calls != 0 {
+				t.Fatalf("terminal claim must ACK without inference: deleted=%d calls=%d", queue.deleted, provider.calls)
+			}
+		})
+	}
+}
+
 func TestRetryVisibilitySecondsIsBoundedAndHonorsProviderDelay(t *testing.T) {
 	if got := retryVisibilitySeconds(nil); got != 120 {
 		t.Fatalf("default retry visibility = %d, want 120", got)
@@ -219,49 +623,6 @@ func TestRetryVisibilitySecondsIsBoundedAndHonorsProviderDelay(t *testing.T) {
 	}
 	if got := retryVisibilitySeconds(&RetryableError{RetryAfter: time.Hour}); got != 900 {
 		t.Fatalf("maximum retry visibility = %d, want 900", got)
-	}
-}
-
-func TestRetryableDeliveryErrorAllowsOnlyExplicitTransientGatewayFailures(t *testing.T) {
-	transient := retryableDeliveryError(&gatewayRequestError{statusCode: 503, operation: "object read", diagnostic: "storage=authorization", retryAfter: 7 * time.Second})
-	if transient == nil || transient.RetryAfter != 7*time.Second {
-		t.Fatalf("expected temporary gateway failure to use the short retry path: %#v", transient)
-	}
-	if transient.Message != "temporary automation gateway failure during object read (storage=authorization)" {
-		t.Fatalf("gateway retry message = %q", transient.Message)
-	}
-	if retryableDeliveryError(&gatewayRequestError{statusCode: 403, retryAfter: 7 * time.Second}) != nil {
-		t.Fatal("authorization failure must remain terminal")
-	}
-	if retryableDeliveryError(errors.New("arbitrary worker failure")) != nil {
-		t.Fatal("arbitrary worker failure must remain terminal")
-	}
-}
-
-func TestQueueReceiveRetryDelayRequiresExplicitBoundedContract(t *testing.T) {
-	if _, retryable := queueReceiveRetryDelay(context.Canceled); retryable {
-		t.Fatal("generic errors must not be retried as queue receives")
-	}
-	if _, retryable := queueReceiveRetryDelay(&gatewayRequestError{statusCode: 401}); retryable {
-		t.Fatal("authentication failures must not be retried as queue receives")
-	}
-	if delay, retryable := queueReceiveRetryDelay(&gatewayRequestError{statusCode: 502, retryAfter: 2 * time.Second}); !retryable || delay != 2*time.Second {
-		t.Fatalf("temporary gateway failure retry = (%s, %t), want (2s, true)", delay, retryable)
-	}
-	if delay, retryable := queueReceiveRetryDelay(&gatewayRequestError{statusCode: 502, retryAfter: time.Millisecond}); !retryable || delay != gatewayRetryMinimumDelay {
-		t.Fatalf("temporary gateway retry minimum = (%s, %t), want (%s, true)", delay, retryable, gatewayRetryMinimumDelay)
-	}
-}
-
-func TestRetryVisibilitySurvivesWorkerContextCancellation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	queue := &contextAwareQueue{}
-	if err := extendRetryVisibility(ctx, queue, QueueMessage{ReceiptHandle: "receipt"}, 120); err != nil {
-		t.Fatal(err)
-	}
-	if queue.extensions.Load() != 1 || queue.contextWasCanceled.Load() {
-		t.Fatalf("shutdown retry visibility = calls:%d cancelled:%t, want one live bounded call", queue.extensions.Load(), queue.contextWasCanceled.Load())
 	}
 }
 
@@ -306,21 +667,6 @@ type drainingQueue struct {
 	deleted  int
 	cancel   context.CancelFunc
 }
-
-type retryThenCancelQueue struct {
-	calls  atomic.Int32
-	cancel context.CancelFunc
-}
-
-func (q *retryThenCancelQueue) Receive(_ context.Context, _ int) ([]QueueMessage, error) {
-	if q.calls.Add(1) == 1 {
-		return nil, &gatewayRequestError{statusCode: 502, retryAfter: gatewayRetryMinimumDelay}
-	}
-	q.cancel()
-	return nil, nil
-}
-
-func (q *retryThenCancelQueue) Delete(context.Context, QueueMessage) error { return nil }
 
 func (q *drainingQueue) Receive(ctx context.Context, limit int) ([]QueueMessage, error) {
 	q.mu.Lock()
@@ -418,19 +764,26 @@ func TestRunQueueHonorsConfiguredConcurrency(t *testing.T) {
 	}
 }
 
-func TestRunQueueKeepsLaneAliveAfterTransientGatewayReceiveFailure(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	queue := &retryThenCancelQueue{cancel: cancel}
-	started := time.Now()
-	if err := RunQueue(ctx, nil, queue, 1, nil); err != nil {
+func TestRunQueueWithDrainStopsReceivingNewMessages(t *testing.T) {
+	input, _ := json.Marshal(TaskInput{Prompt: "must not start"})
+	worker, err := NewWorker(WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"}, &fakeStore{input: input}, &fakeCallback{}, fakeProvider{})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if queue.calls.Load() != 2 {
-		t.Fatalf("queue receives = %d, want retry after one transient failure", queue.calls.Load())
+	message := validMessage()
+	message.Payload.Operation = "ai.chat"
+	encoded, _ := json.Marshal(message)
+	queue := &drainingQueue{messages: []QueueMessage{{Body: string(encoded), ReceiptHandle: "drain"}}}
+	drain := make(chan struct{})
+	close(drain)
+	if err := RunQueueWithDrain(context.Background(), worker, queue, 1, nil, drain); err != nil {
+		t.Fatal(err)
 	}
-	if elapsed := time.Since(started); elapsed < gatewayRetryMinimumDelay {
-		t.Fatalf("queue retry waited %s, want at least %s", elapsed, gatewayRetryMinimumDelay)
+	queue.mu.Lock()
+	deferred := len(queue.messages)
+	queue.mu.Unlock()
+	if deferred != 1 {
+		t.Fatalf("draining worker consumed %d messages, want 0 (deferred=%d)", 1-deferred, deferred)
 	}
 }
 

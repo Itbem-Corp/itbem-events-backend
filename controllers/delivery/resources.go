@@ -13,6 +13,7 @@ import (
 	"events-stocks/internal/automationagent"
 	"events-stocks/models"
 	awsrepository "events-stocks/repositories/awsrepository"
+	"events-stocks/services/deliveryplansteps"
 	"events-stocks/services/deliveryworkflow"
 	"events-stocks/utils"
 	"fmt"
@@ -116,6 +117,12 @@ func validatePlanStructure(structured map[string]any) error {
 	confidence, ok := structured["confidence"].(float64)
 	if !ok || confidence < 0 || confidence > 1 {
 		return fmt.Errorf("structured plan field confidence must be a number from 0 to 1")
+	}
+	if err := automationagent.ValidateDeliveryPlanExecutionContract(structured); err != nil {
+		return err
+	}
+	if _, err := deliveryplansteps.InputsFromStructuredPlan(structured); err != nil {
+		return fmt.Errorf("structured plan execution steps are invalid: %w", err)
 	}
 	return nil
 }
@@ -381,6 +388,9 @@ func CreatePlan(c echo.Context) error {
 		if err := tx.Create(&plan).Error; err != nil {
 			return err
 		}
+		if _, _, err := ensureDeliveryPlanStepsTx(tx, plan, actor.CognitoSub); err != nil {
+			return err
+		}
 		item.PlanJSON = string(structured)
 		return tx.Save(&item).Error
 	})
@@ -467,7 +477,8 @@ func PromoteLatestAgentPlan(c echo.Context) error {
 		// public JSON response key (structured_result).
 		if err := tx.Where("work_item_id = ? AND proposed_by = ? AND structured_json = ?", item.ID, "agent:"+task.ID.String(), string(structured)).First(&existing).Error; err == nil {
 			plan = existing
-			return nil
+			_, _, err := ensureDeliveryPlanStepsTx(tx, plan, actor.CognitoSub)
+			return err
 		} else if err != gorm.ErrRecordNotFound {
 			return err
 		}
@@ -477,6 +488,9 @@ func PromoteLatestAgentPlan(c echo.Context) error {
 		}
 		plan = models.DeliveryPlan{WorkItemID: item.ID, Version: int(count) + 1, Status: "proposed", Summary: strings.TrimSpace(summary), StructuredJSON: string(structured), ContextDigest: contextDigest(tx, item.ID), ProposedBy: "agent:" + task.ID.String()}
 		if err := tx.Create(&plan).Error; err != nil {
+			return err
+		}
+		if _, _, err := ensureDeliveryPlanStepsTx(tx, plan, actor.CognitoSub); err != nil {
 			return err
 		}
 		item.PlanJSON = string(structured)

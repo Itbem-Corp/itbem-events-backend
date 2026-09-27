@@ -155,15 +155,27 @@ func ApplyRequestDecomposition(c echo.Context) error {
 		if err != nil {
 			return err
 		}
+		operationalSources := make([]models.DeliveryContextSource, 0)
+		for _, source := range sources {
+			if mandatoryProjectContextSource(source) {
+				operationalSources = append(operationalSources, source)
+			}
+		}
+		sort.Slice(operationalSources, func(i, j int) bool { return operationalSources[i].Reference < operationalSources[j].Reference })
 		for _, task := range proposal.Tasks {
 			included, _ := json.Marshal(task.IncludedScope)
 			excluded, _ := json.Marshal(task.ExcludedScope)
 			acceptance, _ := json.Marshal(task.AcceptanceCriteria)
 			child := models.DeliveryWorkItem{ProjectID: projectID, RequestID: &requestID, RequestedBy: actor.CognitoSub, Title: task.Title, Description: task.Description, ExpectedOutcome: task.ExpectedOutcome, IncludedScopeJSON: string(included), ExcludedScopeJSON: string(excluded), AcceptanceJSON: string(acceptance), BudgetMicros: task.BudgetMicros, BudgetAlertPercent: defaultTaskBudgetAlertPercent, State: deliveryworkflow.StatePlanning}
-			repositoryRefs := make([]string, 0, len(task.ContextReferences))
+			selectedSources := make([]models.DeliveryContextSource, 0, len(task.ContextReferences))
 			for _, reference := range task.ContextReferences {
-				if strings.EqualFold(strings.TrimSpace(sources[reference].Kind), "repository") {
-					repositoryRefs = append(repositoryRefs, sources[reference].Reference)
+				selectedSources = append(selectedSources, sources[reference])
+			}
+			selectedSources = appendMandatoryProjectContext(selectedSources, operationalSources)
+			repositoryRefs := make([]string, 0, len(selectedSources))
+			for _, source := range selectedSources {
+				if strings.EqualFold(strings.TrimSpace(source.Kind), "repository") {
+					repositoryRefs = append(repositoryRefs, source.Reference)
 				}
 			}
 			mandate, mandateErr := marshalDeliveryMandate(defaultDeliveryMandate(child, repositoryRefs))
@@ -177,9 +189,15 @@ func ApplyRequestDecomposition(c echo.Context) error {
 				return err
 			}
 			keyToID[task.Key] = child.ID
-			for _, reference := range task.ContextReferences {
-				source := sources[reference]
-				snapshot := models.DeliveryContextSnapshot{WorkItemID: child.ID, SourceID: source.ID, Kind: source.Kind, Name: source.Name, Reference: source.Reference, Revision: source.Revision, MetadataJSON: source.MetadataJSON, CapturedAt: now}
+			primarySourceID := ""
+			if task.PrimaryRepositoryRef != "" {
+				primarySourceID = sources[task.PrimaryRepositoryRef].ID.String()
+			}
+			snapshots, snapshotErr := taskContextSnapshots(child.ID, selectedSources, primarySourceID, now)
+			if snapshotErr != nil {
+				return snapshotErr
+			}
+			for _, snapshot := range snapshots {
 				if err := tx.Create(&snapshot).Error; err != nil {
 					return err
 				}
@@ -250,6 +268,12 @@ func decompositionContext(tx *gorm.DB, projectID uuid.UUID) (string, map[string]
 
 func verifyDecompositionReferences(proposal deliverydecomposition.Proposal, sources map[string]models.DeliveryContextSource) error {
 	for _, task := range proposal.Tasks {
+		if task.PrimaryRepositoryRef != "" {
+			primary, exists := sources[task.PrimaryRepositoryRef]
+			if !exists || !strings.EqualFold(primary.Kind, "repository") || !strings.HasPrefix(primary.Reference, "workspace://") {
+				return fmt.Errorf("task %s primary repository is not an available local workspace", task.Key)
+			}
+		}
 		for _, reference := range task.ContextReferences {
 			reference = canonicalDeliveryRepositoryReference(reference)
 			if _, exists := sources[reference]; !exists {

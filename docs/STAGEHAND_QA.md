@@ -41,34 +41,28 @@ whose digest differs. This protects the credential even when an onboarded
 repository configures its own semantic QA command.
 
 The pinned Stagehand release requires Node `^20.19.0` or `>=22.12.0`. The
-runner verifies this before it reads provider configuration or opens a browser.
-It also bounds Stagehand initialization (35 seconds), the MiniMax HTTP request
-(30 seconds) and browser shutdown (10 seconds). A timeout is a failed QA run,
-never an indefinitely leased worker task or a silent pass.
+runner verifies this before it opens a browser. It bounds Stagehand
+initialization (35 seconds), the gateway inference request (30 seconds) and
+browser shutdown (10 seconds). A timeout is a failed QA run, never an
+indefinitely leased worker task or a silent pass.
 
-In the ignored `.env.ai.local`, configure a dedicated key when possible. The
-Go launcher imports this local file only for local development; deployed
-workers receive the same values from their secret manager.
+Do not configure a provider API key, provider base URL, or provider model in
+the Stagehand runner environment. During a delivery run, the active Go worker
+injects only a short-lived inference capability scoped to the authenticated
+task, run and `delivery.qa` operation, plus the gateway URL. The runner fails
+closed if any part of that binding is missing. Provider/model routing and
+credentials remain server-side in the ITBEM inference gateway and the
+project-scoped credential bundle described in
+[`AI_CREDENTIAL_BUNDLE.md`](AI_CREDENTIAL_BUNDLE.md); the worker and Stagehand
+receive only the normalized completion. The local worker needs
+`ITBEM_AI_GATEWAY_URL`, not `MINIMAX_API_KEY`, `OPENAI_API_KEY`,
+`DEEPSEEK_API_KEY`, or `OPENROUTER_API_KEY`.
 
-```dotenv
-STAGEHAND_QA_ENV=LOCAL
-STAGEHAND_QA_MODEL=MiniMax-M3
-STAGEHAND_QA_BASE_URL=https://api.minimax.io/v1
-STAGEHAND_QA_API_KEY=
-ITBEM_STAGEHAND_RUNNER_PATH=/opt/itbem-ai-agent/tools/stagehand-qa/run.mjs
-ITBEM_STAGEHAND_RUNNER_SHA256=
-```
-
-`STAGEHAND_QA_API_KEY` may be omitted only when the worker already has its
-`MINIMAX_API_KEY`. Likewise, `MINIMAX_MODEL` is used when
-`STAGEHAND_QA_MODEL` is not set. Values are never sent as command arguments,
-persisted in the work item, or returned to the dashboard. Browserbase is
-optional and must be explicitly selected with `STAGEHAND_QA_ENV=BROWSERBASE`
-plus its own API key.
-
-The runner adds the `openai/` routing prefix required by Stagehand internally
-when using the MiniMax-compatible endpoint, but retains the original MiniMax
-model name in ITBEM's cost ledger.
+Browserbase is a separate optional browser-service credential, not an
+inference-provider key. It must be explicitly selected with
+`STAGEHAND_QA_ENV=BROWSERBASE` and its own `BROWSERBASE_API_KEY`; the pinned
+runner passes only that value to the browser service. Otherwise, use
+`STAGEHAND_QA_ENV=LOCAL` (the default).
 
 ## Workspace registration
 
@@ -152,19 +146,18 @@ failure. When Stagehand's compact page API does not expose a response event,
 the runner independently reads Chromium Performance Timing after each reviewed
 step; the report declares its observed network source. If neither route is
 available, the run cannot pass because absence of telemetry is not proof of
-absence of request failures. The report also includes a private provider-response excerpt when structured
-extraction is rejected, and token metrics. MiniMax is called through its
-documented OpenAI-compatible Chat Completions endpoint with a validated JSON
-prompt contract: Stagehand remains responsible for the live browser session,
-navigation guardrails, assertions and screenshots, while MiniMax reviews only
-bounded, redacted browser-derived evidence from that completed E2E run. Provider
-keys and browser secrets are not useful QA evidence and remain outside the
-request. Its request is accounted as a separate
-semantic call and is added to—not substituted for—the browser-tool usage.
-When it runs through the Delivery worker, the callback records the aggregate as
-a separate immutable `stagehand` tool execution in the cost ledger. The JSON
-report is the private request/response evidence referenced by that ledger entry;
-it is not exposed in activity feeds or public task summaries.
+absence of request failures. The report also includes a private, bounded
+gateway-response excerpt when structured extraction is rejected, and token
+metrics. The semantic review is sent to the ITBEM gateway with the run-scoped
+capability and validated JSON contract. Stagehand remains responsible for the
+live browser session, navigation guardrails, assertions and screenshots; the
+configured `delivery.qa` route reviews only bounded, redacted browser-derived
+evidence from that completed run. Provider keys and browser secrets are not
+useful QA evidence and remain outside the request. The call is accounted
+separately from browser-tool usage. The callback records it as a separate
+immutable `stagehand` tool execution in the cost ledger using the provider and
+model resolved by the gateway. The JSON report is private request/response
+evidence; it is not exposed in activity feeds or public task summaries.
 
 Each entry in `calls` retains the private request body and provider response
 needed to audit that exact inference. Provider reasoning traces are deliberately

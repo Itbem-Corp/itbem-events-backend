@@ -568,6 +568,9 @@ func completeContinuation(db *gorm.DB, intent models.DeliveryContinuation, task 
 			if err := tx.Create(&plan).Error; err != nil {
 				return err
 			}
+			if _, _, err := ensureDeliveryPlanStepsTx(tx, plan, plan.ProposedBy); err != nil {
+				return err
+			}
 			item.PlanJSON = string(encoded)
 			action = deliveryworkflow.ActionSubmitPlan
 		case "implementation":

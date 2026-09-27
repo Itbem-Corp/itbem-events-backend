@@ -94,3 +94,23 @@ func TestDeliveryQABudgetReservationHonorsConfiguredStagehandBounds(t *testing.T
 		t.Fatalf("QA reservation = %d, want configured Stagehand reserve added to %d", qa, primary)
 	}
 }
+
+func TestFallbackPolicyReservationHoldsEveryCandidate(t *testing.T) {
+	cfg := &models.Config{AutomationPricingJSON: `{
+      "version":"test-v1", "basis":"test",
+      "models":{
+        "opencode-go:kimi-k2.7-code":{"input_microusd_per_million":1000000,"output_microusd_per_million":1000000},
+        "opencode-go:glm-5.3-flash":{"input_microusd_per_million":2000000,"output_microusd_per_million":2000000}
+      }
+    }`}
+	routes := []models.AutomationAIActionRoute{{Provider: "opencode-go", Model: "kimi-k2.7-code"}, {Provider: "opencode-go", Model: "glm-5.3-flash"}}
+	reservation, err := deliveryRunBudgetReservationForRoutes(cfg, routes, "delivery.plan", 100, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Candidate one holds 300 micro-USD and candidate two holds 600. Holding
+	// both keeps a transient primary failure from bypassing the project budget.
+	if reservation != 900 {
+		t.Fatalf("fallback reservation = %d, want 900", reservation)
+	}
+}

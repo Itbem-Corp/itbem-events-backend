@@ -3,11 +3,14 @@ package delivery
 import (
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"events-stocks/models"
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/gofrs/uuid"
 )
 
@@ -156,6 +159,131 @@ func TestAutomationPortfolioReviewQueueKeepsValidReviewsWhenHistoricalRowsAreUns
 	}
 }
 
+func TestAutomationPortfolioProjectSignalsAreAllowlistedNormalizedAndRedacted(t *testing.T) {
+	projectID := uuid.Must(uuid.NewV4())
+	clientID := uuid.Must(uuid.NewV4())
+	input := automationPortfolioBuildInput{
+		GeneratedAt: time.Date(2026, time.August, 12, 15, 4, 5, 0, time.UTC),
+		Projects: []models.DeliveryProject{{
+			ID: projectID, ClientID: clientID, Name: "Project", Status: "active",
+			Client: models.Client{ID: clientID, Name: "Client"},
+		}},
+		ProjectSignals: []automationPortfolioProjectSignalRow{
+			{ProjectID: projectID, Kind: "runbook", Technologies: " Go API ; Next.js, go api\nC#; API_KEY=private-signal-canary; https://private.example/path; owner@example.test; /Users/alice/.ssh/id_rsa"},
+			{ProjectID: projectID, Kind: "repository", RuntimeHintsJSON: `[" go ","Docker Compose","PostgreSQL 17","ghp_veryLongPrivateTokenCanary"]`},
+			{ProjectID: projectID, Kind: "environment", Technologies: "must-not-appear", RuntimeHintsJSON: `["must-not-appear-either"]`},
+		},
+	}
+
+	snapshot := buildAutomationPortfolio(input)
+	if snapshot.SchemaVersion != 5 {
+		t.Fatalf("portfolio schema version should reflect the new projection, got %d", snapshot.SchemaVersion)
+	}
+	if len(snapshot.Projects) != 1 {
+		t.Fatalf("expected one project, got %#v", snapshot.Projects)
+	}
+	project := snapshot.Projects[0]
+	if got, want := strings.Join(project.TechnologyTags, "|"), "Go API|Next.js|C#"; got != want {
+		t.Fatalf("unexpected technology tags: got %q, want %q", got, want)
+	}
+	if got, want := strings.Join(project.RuntimeHints, "|"), "go|Docker Compose|PostgreSQL 17"; got != want {
+		t.Fatalf("unexpected runtime hints: got %q, want %q", got, want)
+	}
+
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{
+		"private-signal-canary", "private.example", "owner@example.test", "/Users/alice", "ghp_veryLongPrivateTokenCanary",
+		"must-not-appear", "metadata_json", "reference",
+	} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("portfolio serialized forbidden source data %q: %s", forbidden, encoded)
+		}
+	}
+	changed := input
+	changed.ProjectSignals = append([]automationPortfolioProjectSignalRow(nil), input.ProjectSignals...)
+	changed.ProjectSignals[0].Technologies = "Go API; SvelteKit"
+	if next := buildAutomationPortfolio(changed); next.Revision == snapshot.Revision {
+		t.Fatal("revision did not change after a visible project technology signal changed")
+	}
+}
+
+func TestAutomationPortfolioProjectSignalsAreBoundedAndMissingSignalsAreEmptyArrays(t *testing.T) {
+	projectID := uuid.Must(uuid.NewV4())
+	clientID := uuid.Must(uuid.NewV4())
+	tooLong := strings.Repeat("x", automationPortfolioMaxProjectSignalLength+1)
+	technologies := []string{tooLong}
+	runtimeHints := []string{tooLong}
+	for i := 0; i < automationPortfolioMaxTechnologyTagsPerProject+8; i++ {
+		technologies = append(technologies, "Tech "+strconv.Itoa(i))
+	}
+	for i := 0; i < automationPortfolioMaxRuntimeHintsPerProject+8; i++ {
+		runtimeHints = append(runtimeHints, "Runtime "+strconv.Itoa(i))
+	}
+	input := automationPortfolioBuildInput{
+		GeneratedAt: time.Date(2026, time.August, 12, 15, 4, 5, 0, time.UTC),
+		Projects: []models.DeliveryProject{
+			{ID: projectID, ClientID: clientID, Name: "Signals", Status: "active", Client: models.Client{ID: clientID, Name: "Client"}},
+			{ID: uuid.Must(uuid.NewV4()), ClientID: clientID, Name: "No signals", Status: "active", Client: models.Client{ID: clientID, Name: "Client"}},
+		},
+		ProjectSignals: []automationPortfolioProjectSignalRow{{
+			ProjectID:    projectID,
+			Kind:         "runbook",
+			Technologies: strings.Join(technologies, ";"),
+		}, {
+			ProjectID:        projectID,
+			Kind:             "repository",
+			RuntimeHintsJSON: mustJSON(t, runtimeHints),
+		}},
+	}
+
+	snapshot := buildAutomationPortfolio(input)
+	if len(snapshot.Projects[0].TechnologyTags) != automationPortfolioMaxTechnologyTagsPerProject {
+		t.Fatalf("technology tag count should be capped at %d, got %d", automationPortfolioMaxTechnologyTagsPerProject, len(snapshot.Projects[0].TechnologyTags))
+	}
+	if len(snapshot.Projects[0].RuntimeHints) != automationPortfolioMaxRuntimeHintsPerProject {
+		t.Fatalf("runtime hint count should be capped at %d, got %d", automationPortfolioMaxRuntimeHintsPerProject, len(snapshot.Projects[0].RuntimeHints))
+	}
+	for _, value := range append(append([]string{}, snapshot.Projects[0].TechnologyTags...), snapshot.Projects[0].RuntimeHints...) {
+		if utf8.RuneCountInString(value) > automationPortfolioMaxProjectSignalLength {
+			t.Fatalf("signal exceeded %d runes: %q", automationPortfolioMaxProjectSignalLength, value)
+		}
+	}
+	missing := snapshot.Projects[1]
+	if missing.TechnologyTags == nil || missing.RuntimeHints == nil || len(missing.TechnologyTags) != 0 || len(missing.RuntimeHints) != 0 {
+		t.Fatalf("missing signals must be non-nil empty arrays: %#v", missing)
+	}
+	encoded, err := json.Marshal(missing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{`"technology_tags":[]`, `"runtime_hints":[]`} {
+		if !strings.Contains(string(encoded), expected) {
+			t.Fatalf("missing signals should serialize as empty arrays (%s): %s", expected, encoded)
+		}
+	}
+}
+
+func TestAutomationPortfolioProjectSignalRuntimeJSONLimit(t *testing.T) {
+	if hints := automationPortfolioRuntimeHints(strings.Repeat(" ", automationPortfolioMaxRuntimeHintsJSONBytes+1)); hints != nil {
+		t.Fatalf("oversized runtime hint JSON should be rejected, got %#v", hints)
+	}
+	if hints := automationPortfolioRuntimeHints(`{"runtime_hints":["not-an-array"]}`); hints != nil {
+		t.Fatalf("runtime hints must be an allowlisted string array, got %#v", hints)
+	}
+}
+
+func mustJSON(t *testing.T, value any) string {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(encoded)
+}
+
 func TestAutomationPortfolioMembershipRequiresDeliveryView(t *testing.T) {
 	ownerID := uuid.Must(uuid.NewV4())
 	viewerID := uuid.Must(uuid.NewV4())
@@ -231,5 +359,93 @@ func TestAutomationPortfolioWorkItemTotalsDoNotCountClosingRunsAsActive(t *testi
 		if !strings.Contains(query, fragment) {
 			t.Fatalf("active work-item query must exclude safe closures; missing %q", fragment)
 		}
+	}
+}
+
+func TestAutomationPortfolioCostsAreAttributedPerProjectAndWithinThirtyDays(t *testing.T) {
+	db, mock := newEpicTestDB(t)
+	projectA, projectB := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
+	clientID := uuid.Must(uuid.NewV4())
+	generatedAt := time.Date(2026, time.September, 25, 15, 0, 0, 0, time.UTC)
+	cutoff := generatedAt.Add(-30 * 24 * time.Hour)
+	input := automationPortfolioBuildInput{
+		GeneratedAt: generatedAt,
+		Projects: []models.DeliveryProject{
+			{ID: projectA, ClientID: clientID, Name: "Project A", Status: "active", Client: models.Client{ID: clientID, Name: "Client"}},
+			{ID: projectB, ClientID: clientID, Name: "Project B", Status: "active", Client: models.Client{ID: clientID, Name: "Client"}},
+		},
+	}
+
+	// The fixture represents agent and tool ledger rows for each project:
+	// verified USD pricing contributes to the amount, while legacy/unpriced USD
+	// and priced EUR executions contribute only to the unpriced counters.
+	mock.ExpectQuery(`(?s)SELECT work_item\.project_id AS project_id,.*UPPER.*currency.*<> 'USD'.*pricing_basis.*IN .*legacy.*unpriced.*completed_at <= \$1.*completed_at >= \$2 AND execution.completed_at <= \$3.*completed_at <= \$4\) AS unpriced_executions.*completed_at >= \$5 AND execution.completed_at <= \$6\) AS unpriced_executions_last_30_days.*FROM .*automation_executions.*UNION ALL.*automation_tool_executions.*WHERE work_item\.project_id IN \(\$7,\$8\).*GROUP BY`).
+		WithArgs(generatedAt, cutoff, generatedAt, generatedAt, cutoff, generatedAt, projectA, projectB).
+		WillReturnRows(sqlmock.NewRows([]string{"project_id", "total_cost_micros", "cost_last_30_days_micros", "unpriced_executions", "unpriced_executions_last_30_days"}).
+			AddRow(projectA, int64(1_200_000), int64(600_000), int64(5), int64(3)).
+			AddRow(projectB, int64(300_000), int64(300_000), int64(2), int64(1)))
+	if err := automationPortfolioProjectCostsQuery(db, []uuid.UUID{projectA, projectB}, cutoff, generatedAt).Scan(&input.ProjectCosts).Error; err != nil {
+		t.Fatalf("load project-scoped cost rows: %v", err)
+	}
+	if len(input.ProjectCosts) != 2 || input.ProjectCosts[0].CostLast30DaysMicros == 0 || input.ProjectCosts[1].CostLast30DaysMicros == 0 {
+		t.Fatalf("project cost rows were not scanned with the expected 30-day field: %#v", input.ProjectCosts)
+	}
+	snapshot := buildAutomationPortfolio(input)
+	if snapshot.Totals.TotalCostMicros != 1_500_000 || snapshot.Totals.CostLast30DaysMicros != 900_000 {
+		t.Fatalf("portfolio totals lost all-time or last-30-day costs: %#v", snapshot.Totals)
+	}
+	if snapshot.Totals.UnpricedExecutions != 7 || snapshot.Totals.UnpricedExecutionsLast30Days != 4 {
+		t.Fatalf("portfolio totals must count historical and last-30-day unpriced agent/tool executions: %#v", snapshot.Totals)
+	}
+	if len(snapshot.Projects) != 2 {
+		t.Fatalf("expected costs for both projects: %#v", snapshot.Projects)
+	}
+	byID := make(map[uuid.UUID]automationPortfolioProject, len(snapshot.Projects))
+	for _, project := range snapshot.Projects {
+		byID[project.ID] = project
+	}
+	if got := byID[projectA]; got.TotalCostMicros != 1_200_000 || got.CostLast30DaysMicros != 600_000 || got.UnpricedExecutions != 5 || got.UnpricedExecutionsLast30Days != 3 {
+		t.Fatalf("project A cost attribution is incorrect: %#v", got)
+	}
+	if got := byID[projectB]; got.TotalCostMicros != 300_000 || got.CostLast30DaysMicros != 300_000 || got.UnpricedExecutions != 2 || got.UnpricedExecutionsLast30Days != 1 {
+		t.Fatalf("project B cost attribution is incorrect: %#v", got)
+	}
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatalf("serialize portfolio snapshot: %v", err)
+	}
+	var serialized struct {
+		Totals struct {
+			CostLast30DaysMicros         int64 `json:"cost_last_30_days_microusd"`
+			UnpricedExecutions           int64 `json:"unpriced_executions"`
+			UnpricedExecutionsLast30Days int64 `json:"unpriced_executions_last_30_days"`
+		} `json:"totals"`
+		Projects []struct {
+			ID                           uuid.UUID `json:"id"`
+			CostLast30DaysMicros         int64     `json:"cost_last_30_days_microusd"`
+			UnpricedExecutions           int64     `json:"unpriced_executions"`
+			UnpricedExecutionsLast30Days int64     `json:"unpriced_executions_last_30_days"`
+		} `json:"projects"`
+	}
+	if err := json.Unmarshal(encoded, &serialized); err != nil {
+		t.Fatalf("deserialize portfolio cost fields: %v", err)
+	}
+	if serialized.Totals.CostLast30DaysMicros != 900_000 || serialized.Totals.UnpricedExecutions != 7 || serialized.Totals.UnpricedExecutionsLast30Days != 4 || len(serialized.Projects) != 2 {
+		t.Fatalf("serialized portfolio response lost the 30-day totals or pricing coverage: %s", encoded)
+	}
+	type serializedProjectCost struct {
+		CostLast30DaysMicros         int64
+		UnpricedExecutions           int64
+		UnpricedExecutionsLast30Days int64
+	}
+	serializedByID := make(map[uuid.UUID]serializedProjectCost, len(serialized.Projects))
+	for _, project := range serialized.Projects {
+		serializedByID[project.ID] = serializedProjectCost{CostLast30DaysMicros: project.CostLast30DaysMicros, UnpricedExecutions: project.UnpricedExecutions, UnpricedExecutionsLast30Days: project.UnpricedExecutionsLast30Days}
+	}
+	if serializedByID[projectA].CostLast30DaysMicros != 600_000 || serializedByID[projectA].UnpricedExecutions != 5 || serializedByID[projectA].UnpricedExecutionsLast30Days != 3 || serializedByID[projectB].CostLast30DaysMicros != 300_000 || serializedByID[projectB].UnpricedExecutions != 2 || serializedByID[projectB].UnpricedExecutionsLast30Days != 1 {
+		t.Fatalf("serialized per-project costs were lost: %s", encoded)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }

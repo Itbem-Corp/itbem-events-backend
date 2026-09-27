@@ -1,6 +1,9 @@
 .env
 .env.ai.local
 /.local/github/*.private-key.pem
+/.local/ai-provider-credentials.json
+/.local/ai-provider-credentials/
+/.local/ai-attempt-policy-signing-key
 tools/stagehand-qa/node_modules/
 
 # Claude Code — personal settings (no subir al repo)

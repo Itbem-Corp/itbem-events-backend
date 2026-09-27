@@ -1,0 +1,72 @@
+name: Build AI Agent
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/build-ai-agent.yml
+      - cmd/itbem-ai-agent/**
+      - docs/AI_AGENT_DISTRIBUTION.md
+      - internal/agentcallbackauth/**
+      - internal/automationagent/**
+      - internal/inferencecapability/**
+      - models/**
+      - services/automationcost/**
+      - services/deliveryplansteps/**
+      - services/deliveryworkflow/**
+      - go.mod
+      - go.sum
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source without persisting credentials
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Test canonical Go worker and command
+        run: go test -count=1 -timeout 10m ./internal/automationagent ./cmd/itbem-ai-agent
+
+      - name: Cross-build Windows and Linux amd64 binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/windows-amd64 dist/linux-amd64
+
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -buildvcs=false \
+            -o dist/windows-amd64/itbem-ai-agent.exe ./cmd/itbem-ai-agent
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false \
+            -o dist/linux-amd64/itbem-ai-agent ./cmd/itbem-ai-agent
+
+          (cd dist/windows-amd64 && sha256sum --binary itbem-ai-agent.exe > SHA256SUMS.txt)
+          (cd dist/linux-amd64 && sha256sum --binary itbem-ai-agent > SHA256SUMS.txt)
+
+      - name: Upload Windows amd64 artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: itbem-ai-agent-windows-amd64
+          path: dist/windows-amd64/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload Linux amd64 artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: itbem-ai-agent-linux-amd64
+          path: dist/linux-amd64/
+          if-no-files-found: error
+          retention-days: 7

@@ -12,7 +12,6 @@ import (
 	"events-stocks/internal/automationagent"
 	"events-stocks/internal/deliveryledger"
 	"events-stocks/internal/products"
-	"events-stocks/internal/projectvault"
 	"events-stocks/internal/releasegate"
 	"events-stocks/models"
 	awsrepository "events-stocks/repositories/awsrepository"
@@ -25,6 +24,7 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -98,18 +98,21 @@ type contextMetadataUpdateRequest struct {
 	Metadata map[string]any `json:"metadata"`
 }
 type workItemRequest struct {
-	RequestID            string   `json:"request_id"`
-	ContextSourceIDs     []string `json:"context_source_ids"`
-	DependsOnWorkItemIDs []string `json:"depends_on_work_item_ids"`
-	Title                string   `json:"title"`
-	Description          string   `json:"description"`
-	ExpectedOutcome      string   `json:"expected_outcome"`
-	AssignedAgent        string   `json:"assigned_agent"`
-	IncludedScope        []string `json:"included_scope"`
-	ExcludedScope        []string `json:"excluded_scope"`
-	AcceptanceCriteria   []string `json:"acceptance_criteria"`
-	BudgetMicros         int64    `json:"budget_microusd"`
-	BudgetAlertPercent   int      `json:"budget_alert_percent"`
+	RequestID                 string   `json:"request_id"`
+	EpicID                    string   `json:"epic_id,omitempty"`
+	ContextSourceIDs          []string `json:"context_source_ids"`
+	PrimaryRepositorySourceID string   `json:"primary_repository_source_id"`
+	DependsOnWorkItemIDs      []string `json:"depends_on_work_item_ids"`
+	Title                     string   `json:"title"`
+	Description               string   `json:"description"`
+	ExpectedOutcome           string   `json:"expected_outcome"`
+	AssignedAgent             string   `json:"assigned_agent"`
+	IncludedScope             []string `json:"included_scope"`
+	ExcludedScope             []string `json:"excluded_scope"`
+	AcceptanceCriteria        []string `json:"acceptance_criteria"`
+	BudgetMicros              int64    `json:"budget_microusd"`
+	BudgetAlertPercent        int      `json:"budget_alert_percent"`
+	MaxConcurrency            *int     `json:"max_concurrency,omitempty"`
 }
 type deliveryCostStep struct {
 	StepKey              string `json:"step_key"`
@@ -212,11 +215,34 @@ const (
 
 func projectActor(c echo.Context, projectID uuid.UUID, permission deliveryPermission) (*models.User, error) {
 	if configuration.DB == nil {
-		return nil, utils.Error(c, http.StatusServiceUnavailable, "Delivery unavailable", "Database is unavailable")
+		return nil, deliveryRespondAndStop(c, http.StatusServiceUnavailable, "Delivery unavailable", "Database is unavailable")
 	}
 	user, err := authz.CurrentUser(c)
 	if err != nil {
-		return nil, authz.Respond(c, err)
+		return nil, deliveryRespondAuthzAndStop(c, err)
+	}
+	workspaceMode, organizationID, err := deliveryWorkspaceScope(c, user)
+	if err != nil {
+		return nil, err
+	}
+	if workspaceMode == "organization" {
+		organizationClientIDs, err := deliveryOrganizationClientIDs(organizationID)
+		if errors.Is(err, errDeliveryOrganizationNotFound) {
+			return nil, deliveryResourceNotFound(c)
+		}
+		if err != nil {
+			return nil, deliveryRespondAndStop(c, http.StatusInternalServerError, "Delivery access unavailable", "Could not validate project organization")
+		}
+		var project models.DeliveryProject
+		if err := configuration.DB.Select("id", "client_id").First(&project, "id = ?", projectID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, deliveryResourceNotFound(c)
+			}
+			return nil, deliveryRespondAndStop(c, http.StatusInternalServerError, "Delivery access unavailable", "Could not validate project organization")
+		}
+		if !deliveryOrganizationContainsClient(organizationClientIDs, project.ClientID) {
+			return nil, deliveryResourceNotFound(c)
+		}
 	}
 	if user.IsPlatformAdmin() {
 		return user, nil
@@ -224,14 +250,107 @@ func projectActor(c echo.Context, projectID uuid.UUID, permission deliveryPermis
 	var member models.DeliveryProjectMember
 	if err := configuration.DB.Where("project_id = ? AND cognito_sub = ?", projectID, user.CognitoSub).First(&member).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
-			return nil, utils.Error(c, http.StatusForbidden, "Delivery access denied", "You are not assigned to this delivery project")
+			return nil, deliveryRespondAndStop(c, http.StatusForbidden, "Delivery access denied", "You are not assigned to this delivery project")
 		}
-		return nil, utils.Error(c, http.StatusInternalServerError, "Delivery access unavailable", "Could not load project membership")
+		return nil, deliveryRespondAndStop(c, http.StatusInternalServerError, "Delivery access unavailable", "Could not load project membership")
 	}
 	if !memberAllows(member, permission) {
-		return nil, utils.Error(c, http.StatusForbidden, "Delivery access denied", "Your project role cannot perform this action")
+		return nil, deliveryRespondAndStop(c, http.StatusForbidden, "Delivery access denied", "Your project role cannot perform this action")
 	}
 	return user, nil
+}
+
+// deliveryWorkspaceScope trusts only the workspace resolved by application
+// middleware. Platform-wide access is explicit and still requires a platform
+// administrator; organization workspaces must carry a selected, nonzero org.
+func deliveryWorkspaceScope(c echo.Context, actor *models.User) (string, uuid.UUID, error) {
+	workspaceMode, _ := c.Get("workspace_mode").(string)
+	workspaceMode = strings.ToLower(strings.TrimSpace(workspaceMode))
+	switch workspaceMode {
+	case "platform":
+		if actor == nil || !actor.IsPlatformAdmin() {
+			return "", uuid.Nil, deliveryResourceNotFound(c)
+		}
+		return workspaceMode, uuid.Nil, nil
+	case "organization":
+		organizationID, ok := c.Get("organization_id").(uuid.UUID)
+		if !ok || organizationID == uuid.Nil {
+			return "", uuid.Nil, deliveryResourceNotFound(c)
+		}
+		return workspaceMode, organizationID, nil
+	default:
+		return "", uuid.Nil, deliveryResourceNotFound(c)
+	}
+}
+
+func deliveryResourceNotFound(c echo.Context) error {
+	return deliveryRespondAndStop(c, http.StatusNotFound, "Delivery resource not found", "")
+}
+
+// The HTTP response is written before returning a status-bearing Echo error so
+// controller callers cannot accidentally continue protected work after a
+// denied project scope or membership check.
+func deliveryRespondAndStop(c echo.Context, status int, message, detail string) error {
+	if err := utils.Error(c, status, message, detail); err != nil {
+		return err
+	}
+	return echo.NewHTTPError(status)
+}
+
+func deliveryRespondAuthzAndStop(c echo.Context, authorizationErr error) error {
+	if err := authz.Respond(c, authorizationErr); err != nil {
+		return err
+	}
+	status := http.StatusInternalServerError
+	var failure *authz.Failure
+	if errors.As(authorizationErr, &failure) && failure.Status >= http.StatusBadRequest && failure.Status <= 599 {
+		status = failure.Status
+	}
+	return echo.NewHTTPError(status)
+}
+
+// AuthorizeProjectView applies the canonical Delivery project-view policy to
+// callers outside this controller package. allowed is false when projectActor
+// has already written an authorization/error response to the Echo context.
+// Keeping this as a delegation prevents other API surfaces from copying the
+// DeliveryProjectMember role matrix.
+func AuthorizeProjectView(c echo.Context, projectID uuid.UUID) (allowed bool, err error) {
+	actor, err := projectActor(c, projectID, deliveryView)
+	return actor != nil, err
+}
+
+// VisibleProjectIDsForActor returns only projects in the supplied client
+// hierarchy that the actor can open. It is used by aggregate APIs that support
+// a client-level view so those responses cannot bypass the canonical project
+// role matrix or leak sibling projects.
+func VisibleProjectIDsForActor(c echo.Context, user *models.User, clientIDs []uuid.UUID) ([]uuid.UUID, error) {
+	if configuration.DB == nil || user == nil {
+		return nil, errors.New("delivery project scope unavailable")
+	}
+	if len(clientIDs) == 0 {
+		return []uuid.UUID{}, nil
+	}
+	type projectRoleRow struct {
+		ProjectID   uuid.UUID `gorm:"column:project_id"`
+		Role        string    `gorm:"column:role"`
+		Permissions string    `gorm:"column:permissions"`
+	}
+	var rows []projectRoleRow
+	query := configuration.DB.WithContext(c.Request().Context()).Table("delivery_projects").
+		Select("delivery_projects.id AS project_id, delivery_project_members.role, delivery_project_members.permissions").
+		Joins("JOIN delivery_project_members ON delivery_project_members.project_id = delivery_projects.id AND delivery_project_members.cognito_sub = ?", user.CognitoSub).
+		Where("delivery_projects.deleted_at IS NULL AND delivery_projects.client_id IN ?", clientIDs).
+		Order("delivery_projects.id ASC")
+	if err := query.Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	projectIDs := make([]uuid.UUID, 0, len(rows))
+	for _, row := range rows {
+		if memberAllows(models.DeliveryProjectMember{Role: row.Role, Permissions: row.Permissions}, deliveryView) {
+			projectIDs = append(projectIDs, row.ProjectID)
+		}
+	}
+	return projectIDs, nil
 }
 
 func workItemActor(c echo.Context, workItemID uuid.UUID, permission deliveryPermission) (*models.User, *models.DeliveryWorkItem, error) {
@@ -293,10 +412,24 @@ func ListProjects(c echo.Context) error {
 	}
 	user, err := authz.CurrentUser(c)
 	if err != nil {
-		return authz.Respond(c, err)
+		return deliveryRespondAuthzAndStop(c, err)
+	}
+	workspaceMode, organizationID, err := deliveryWorkspaceScope(c, user)
+	if err != nil {
+		return err
 	}
 	var projects []models.DeliveryProject
 	query := configuration.DB.Preload("Client").Order("updated_at DESC")
+	if workspaceMode == "organization" {
+		clientIDs, err := deliveryOrganizationClientIDs(organizationID)
+		if errors.Is(err, errDeliveryOrganizationNotFound) {
+			return deliveryResourceNotFound(c)
+		}
+		if err != nil {
+			return utils.Error(c, http.StatusInternalServerError, "Delivery projects unavailable", "Could not load organization projects")
+		}
+		query = query.Where("delivery_projects.client_id IN ?", clientIDs)
+	}
 	if !user.IsPlatformAdmin() {
 		query = query.Joins("JOIN delivery_project_members ON delivery_project_members.project_id = delivery_projects.id AND delivery_project_members.cognito_sub = ?", user.CognitoSub)
 	}
@@ -491,6 +624,15 @@ func CreateContext(c echo.Context) error {
 			// refreshes it through the GitHub App or records a concrete revision.
 			status = "pending_sync"
 		}
+	} else if kind == "environment" {
+		var validationErr error
+		metadataValue, validationErr = normalizeEnvironmentContextMetadata(metadataValue)
+		if validationErr != nil {
+			return utils.Error(c, http.StatusBadRequest, "Invalid environment context", validationErr.Error())
+		}
+		if revision == "" {
+			revision = metadataValue["branch"].(string)
+		}
 	}
 	metadata, err := json.Marshal(metadataValue)
 	if err != nil {
@@ -510,46 +652,68 @@ func CreateContext(c echo.Context) error {
 	return utils.Success(c, 201, "Context source created", source)
 }
 
-// bindRemoteAgentWorkspace records a workspace owned by a separately hosted
-// runner. It does not probe that machine or grant it authority. Instead, the
-// workspace must be tied to a ready github:// checkpoint already owned by the
-// project; the agent runtime verifies that GitHub identity and frozen SHA
-// again before it can inspect or mutate code.
-func bindRemoteAgentWorkspace(projectID uuid.UUID, metadata map[string]any, requestedRevision string) (string, error) {
-	rawRepository, ok := metadata["github_repository"].(string)
-	if !ok || strings.TrimSpace(rawRepository) == "" {
-		return "", fmt.Errorf("register the workspace on this control-plane host or link it to a ready GitHub context in this project")
-	}
-	repositoryReference := strings.TrimSpace(rawRepository)
-	if !strings.HasPrefix(strings.ToLower(repositoryReference), "github://") {
-		repositoryReference = "github://" + strings.Trim(repositoryReference, "/")
-	}
-	repositoryReference = canonicalDeliveryRepositoryReference(repositoryReference)
-	if !strings.HasPrefix(repositoryReference, "github://") || !isDeliveryRepositoryReference(repositoryReference) {
-		return "", fmt.Errorf("linked GitHub repository must use owner/repository")
-	}
+var deliveryEnvironmentBranchPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,119}$`)
 
-	var remote models.DeliveryContextSource
-	if err := configuration.DB.Where("project_id = ? AND kind = ? AND reference = ? AND status = ?", projectID, "repository", repositoryReference, "ready").First(&remote).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return "", fmt.Errorf("the linked GitHub repository must already be a ready context source in this project")
+func normalizeEnvironmentContextMetadata(source map[string]any) (map[string]any, error) {
+	if source == nil {
+		return nil, fmt.Errorf("branch and deployment are required")
+	}
+	allowed := map[string]struct{}{"branch": {}, "deployment": {}, "url": {}, "promotion": {}, "excerpt": {}}
+	for key := range source {
+		if _, ok := allowed[key]; !ok {
+			return nil, fmt.Errorf("%s is not an environment setting", key)
 		}
-		return "", fmt.Errorf("could not verify the linked GitHub repository")
 	}
-	if !projectvault.ValidRevision(remote.Revision) {
-		return "", fmt.Errorf("the linked GitHub repository has no immutable ready revision")
+	branch, branchOK := source["branch"].(string)
+	branch = strings.TrimSpace(branch)
+	if !branchOK || !deliveryEnvironmentBranchPattern.MatchString(branch) || strings.Contains(branch, "..") || strings.Contains(branch, "//") || strings.HasSuffix(branch, ".") || strings.HasSuffix(branch, "/") || strings.HasSuffix(branch, ".lock") {
+		return nil, fmt.Errorf("branch must be a nonempty branch name up to 120 characters")
 	}
-	if requested := strings.TrimSpace(requestedRevision); requested != "" && !strings.EqualFold(requested, remote.Revision) {
-		return "", fmt.Errorf("workspace revision must match the linked GitHub context revision")
+	deployment, deploymentOK := source["deployment"].(string)
+	deployment = strings.ToLower(strings.TrimSpace(deployment))
+	if !deploymentOK || (deployment != "automatic" && deployment != "manual" && deployment != "none") {
+		return nil, fmt.Errorf("deployment must be automatic, manual or none")
 	}
-	metadata["github_repository"] = strings.TrimPrefix(repositoryReference, "github://")
-	metadata["github_context_reference"] = repositoryReference
-	return remote.Revision, nil
+	metadata := map[string]any{"branch": branch, "deployment": deployment}
+	if rawURL, exists := source["url"]; exists {
+		value, ok := rawURL.(string)
+		value = strings.TrimSpace(value)
+		if !ok || (value != "" && !validEnvironmentURL(value)) {
+			return nil, fmt.Errorf("url must be an http or https URL without credentials, query or fragment")
+		}
+		if value != "" {
+			metadata["url"] = value
+		}
+	}
+	for _, field := range []string{"promotion", "excerpt"} {
+		if raw, exists := source[field]; exists {
+			value, ok := raw.(string)
+			value = strings.TrimSpace(value)
+			limit := 2000
+			if field == "excerpt" {
+				limit = 12000
+			}
+			if !ok || len(value) > limit {
+				return nil, fmt.Errorf("%s must be text up to %d characters", field, limit)
+			}
+			if value != "" {
+				metadata[field] = value
+			}
+		}
+	}
+	return metadata, nil
 }
 
-// UpdateContextMetadata lets an operator refine the human-owned project map
-// (role, runtime kind, responsibility and dependency edges) without having to
-// duplicate an existing repository context. Existing work items are unchanged:
+func validEnvironmentURL(value string) bool {
+	if !validWebURL(value) {
+		return false
+	}
+	parsed, err := url.Parse(value)
+	return err == nil && parsed.User == nil && parsed.RawQuery == "" && parsed.Fragment == ""
+}
+
+// UpdateContextMetadata lets an operator refine human-owned project settings
+// without duplicating a context source. Existing work items are unchanged:
 // they retain their immutable context snapshots.
 func UpdateContextMetadata(c echo.Context) error {
 	projectID, err := id(c, "project")
@@ -574,22 +738,47 @@ func UpdateContextMetadata(c echo.Context) error {
 		}
 		return utilsError(c, err)
 	}
-	if source.Kind != "repository" {
-		return conflict(c, "Context update rejected", "Only repository architecture metadata can be updated here")
+	var metadata map[string]any
+	var revision = source.Revision
+	var message string
+	switch source.Kind {
+	case "repository":
+		metadata, err = mergeDeliveryRepositoryMetadata(source.Reference, source.MetadataJSON, request.Metadata)
+		message = "Repository architecture updated"
+	case "environment":
+		metadata, err = mergeDeliveryEnvironmentContextMetadata(source.MetadataJSON, request.Metadata)
+		if err == nil {
+			revision = metadata["branch"].(string)
+		}
+		message = "Environment configuration updated"
+	case "runbook":
+		metadata, err = mergeDeliveryRunbookContextMetadata(source.MetadataJSON, request.Metadata)
+		if err == nil {
+			revision = nextDeliveryRunbookRevision(source.Revision)
+		}
+		message = "Project workflow updated"
+	default:
+		return conflict(c, "Context update rejected", "Only repository, environment and project workflow metadata can be updated here")
 	}
-	metadata, err := mergeDeliveryRepositoryMetadata(source.Reference, source.MetadataJSON, request.Metadata)
 	if err != nil {
-		return utils.Error(c, http.StatusBadRequest, "Invalid repository context", err.Error())
+		return utils.Error(c, http.StatusBadRequest, "Invalid context metadata", err.Error())
 	}
 	encoded, err := json.Marshal(metadata)
 	if err != nil || len(encoded) > 16*1024 {
-		return utils.Error(c, http.StatusBadRequest, "Invalid repository context", "metadata must be valid and at most 16 KiB")
+		return utils.Error(c, http.StatusBadRequest, "Invalid context metadata", "metadata must be valid and at most 16 KiB")
 	}
-	if err := configuration.DB.Model(&source).Update("metadata_json", string(encoded)).Error; err != nil {
+	now := time.Now().UTC()
+	if err := configuration.DB.Model(&source).Updates(map[string]any{
+		"metadata_json": string(encoded),
+		"revision":      revision,
+		"synced_at":     now,
+	}).Error; err != nil {
 		return utilsError(c, err)
 	}
 	source.MetadataJSON = string(encoded)
-	return success(c, "Repository architecture updated", source)
+	source.Revision = revision
+	source.SyncedAt = &now
+	return success(c, message, source)
 }
 
 var editableRepositoryMetadataKeys = map[string]struct{}{
@@ -618,6 +807,84 @@ func mergeDeliveryRepositoryMetadata(reference, stored string, updates map[strin
 		metadata[key] = value
 	}
 	return normalizeRepositoryContextMetadata(reference, metadata)
+}
+
+var editableEnvironmentMetadataKeys = map[string]struct{}{
+	"branch": {}, "deployment": {}, "url": {}, "promotion": {}, "excerpt": {},
+}
+
+func mergeDeliveryEnvironmentContextMetadata(stored string, updates map[string]any) (map[string]any, error) {
+	metadata, err := decodeDeliveryContextMetadata(stored)
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range updates {
+		if _, editable := editableEnvironmentMetadataKeys[key]; !editable {
+			return nil, fmt.Errorf("%s is managed by the control plane and cannot be changed", key)
+		}
+		metadata[key] = value
+	}
+	return normalizeEnvironmentContextMetadata(metadata)
+}
+
+var editableRunbookMetadataKeys = map[string]int{
+	"technologies": 1200, "issue_workflow": 1200, "branch_workflow": 1200,
+	"pull_request_workflow": 1200, "release_workflow": 1200, "excerpt": 12000,
+}
+
+func mergeDeliveryRunbookContextMetadata(stored string, updates map[string]any) (map[string]any, error) {
+	metadata, err := decodeDeliveryContextMetadata(stored)
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range updates {
+		limit, editable := editableRunbookMetadataKeys[key]
+		if !editable {
+			return nil, fmt.Errorf("%s is managed by the control plane and cannot be changed", key)
+		}
+		text, ok := value.(string)
+		text = strings.TrimSpace(text)
+		if !ok || len(text) > limit {
+			return nil, fmt.Errorf("%s must be text up to %d characters", key, limit)
+		}
+		if text == "" {
+			delete(metadata, key)
+			continue
+		}
+		metadata[key] = text
+	}
+	hasWorkflowRule := false
+	for key := range editableRunbookMetadataKeys {
+		if value, ok := metadata[key].(string); ok && strings.TrimSpace(value) != "" {
+			hasWorkflowRule = true
+			break
+		}
+	}
+	if !hasWorkflowRule {
+		return nil, fmt.Errorf("at least one project workflow rule or excerpt is required")
+	}
+	return metadata, nil
+}
+
+func decodeDeliveryContextMetadata(stored string) (map[string]any, error) {
+	metadata := map[string]any{}
+	if strings.TrimSpace(stored) == "" {
+		return metadata, nil
+	}
+	if err := json.Unmarshal([]byte(stored), &metadata); err != nil || metadata == nil {
+		return nil, fmt.Errorf("stored context metadata is invalid")
+	}
+	return metadata, nil
+}
+
+func nextDeliveryRunbookRevision(current string) string {
+	current = strings.TrimSpace(current)
+	if strings.HasPrefix(strings.ToLower(current), "v") {
+		if version, err := strconv.Atoi(current[1:]); err == nil && version > 0 {
+			return fmt.Sprintf("v%d", version+1)
+		}
+	}
+	return "v2"
 }
 
 // normalizeRepositoryContextMetadata makes the project topology valid before
@@ -729,118 +996,119 @@ func CreateWorkItem(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	actor, err := projectActor(c, projectID, deliveryRequest)
+	var request workItemRequest
+	if err := c.Bind(&request); err != nil {
+		return utils.Error(c, http.StatusBadRequest, "Invalid delivery work item", "body must be valid work-item JSON")
+	}
+	actor, err := projectActor(c, projectID, workItemCreatePermission(request))
 	if err != nil {
 		return err
 	}
 	if err := projectPresent(projectID); err != nil {
 		return lookup(c, "Delivery project", err)
 	}
-	var request workItemRequest
-	if err := c.Bind(&request); err != nil {
-		return utils.Error(c, 400, "Invalid delivery work item", err.Error())
+	input, err := normalizeWorkItemRequest(projectID, actor.CognitoSub, request, false)
+	if err != nil {
+		return utils.Error(c, http.StatusBadRequest, "Invalid delivery work item", err.Error())
 	}
-	if strings.TrimSpace(request.Title) == "" || strings.TrimSpace(request.ExpectedOutcome) == "" {
-		return utils.Error(c, 400, "Invalid delivery work item", "title and expected_outcome are required")
-	}
-	if request.BudgetMicros < 0 || request.BudgetMicros > maxDeliveryTaskBudgetMicros || (request.BudgetAlertPercent != 0 && (request.BudgetAlertPercent < 50 || request.BudgetAlertPercent > 100)) {
-		return utils.Error(c, 400, "Invalid delivery work item", "task budget must be between 0 and 100,000 USD; alert percent must be between 50 and 100")
-	}
-	if request.BudgetAlertPercent == 0 {
-		request.BudgetAlertPercent = defaultTaskBudgetAlertPercent
-	}
-	contextSourceIDs := make([]uuid.UUID, 0, len(request.ContextSourceIDs))
-	seenSources := make(map[uuid.UUID]struct{}, len(request.ContextSourceIDs))
-	for _, rawID := range request.ContextSourceIDs {
-		parsed, parseErr := uuid.FromString(strings.TrimSpace(rawID))
-		if parseErr != nil || parsed == uuid.Nil {
-			return utils.Error(c, 400, "Invalid delivery work item", "context_source_ids must contain UUIDs")
-		}
-		if _, exists := seenSources[parsed]; !exists {
-			seenSources[parsed] = struct{}{}
-			contextSourceIDs = append(contextSourceIDs, parsed)
-		}
-	}
-	if len(contextSourceIDs) == 0 {
-		return utils.Error(c, 400, "Invalid delivery work item", "select at least one relevant context source")
-	}
-	dependencyIDs := make([]uuid.UUID, 0, len(request.DependsOnWorkItemIDs))
-	seenDependencies := make(map[uuid.UUID]struct{}, len(request.DependsOnWorkItemIDs))
-	for _, rawID := range request.DependsOnWorkItemIDs {
-		parsed, parseErr := uuid.FromString(strings.TrimSpace(rawID))
-		if parseErr != nil || parsed == uuid.Nil {
-			return utils.Error(c, 400, "Invalid delivery work item", "depends_on_work_item_ids must contain UUIDs")
-		}
-		if _, exists := seenDependencies[parsed]; !exists {
-			seenDependencies[parsed] = struct{}{}
-			dependencyIDs = append(dependencyIDs, parsed)
-		}
-	}
-	included, _ := json.Marshal(request.IncludedScope)
-	excluded, _ := json.Marshal(request.ExcludedScope)
-	acceptance, _ := json.Marshal(request.AcceptanceCriteria)
-	item := models.DeliveryWorkItem{ProjectID: projectID, RequestedBy: actor.CognitoSub, AssignedAgent: strings.TrimSpace(request.AssignedAgent), Title: strings.TrimSpace(request.Title), Description: strings.TrimSpace(request.Description), ExpectedOutcome: strings.TrimSpace(request.ExpectedOutcome), IncludedScopeJSON: string(included), ExcludedScopeJSON: string(excluded), AcceptanceJSON: string(acceptance), BudgetMicros: request.BudgetMicros, BudgetAlertPercent: request.BudgetAlertPercent, State: deliveryworkflow.StatePlanning}
-	if requestID := strings.TrimSpace(request.RequestID); requestID != "" {
-		parsed, parseErr := uuid.FromString(requestID)
-		if parseErr != nil || parsed == uuid.Nil {
-			return utils.Error(c, 400, "Invalid delivery work item", "request_id must be a UUID")
-		}
-		var sourceRequest models.DeliveryRequest
-		if err := configuration.DB.Where("id = ? AND project_id = ?", parsed, projectID).First(&sourceRequest).Error; err != nil {
+	var item models.DeliveryWorkItem
+	if err := configuration.DB.Transaction(func(tx *gorm.DB) error {
+		var createErr error
+		transactionAt := time.Now().UTC()
+		item, createErr = createWorkItemInTransaction(tx, input, transactionAt)
+		return createErr
+	}); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) && input.RequestID != nil {
 			return lookup(c, "Delivery request", err)
 		}
-		item.RequestID = &parsed
-	}
-	if err := configuration.DB.Transaction(func(tx *gorm.DB) error {
-		clientContext, err := snapshotClientContext(tx, projectID)
-		if err != nil {
-			return err
+		if errors.Is(err, errInvalidTaskPrimaryRepository) {
+			return utils.Error(c, http.StatusBadRequest, "Invalid delivery work item", err.Error())
 		}
-		item.ClientContextJSON = clientContext
-		if err := tx.Create(&item).Error; err != nil {
-			return err
+		if errors.Is(err, errWorkItemContextNotReady) {
+			return utils.Error(c, http.StatusBadRequest, "Invalid delivery work item", err.Error())
 		}
-		var sources []models.DeliveryContextSource
-		if err := tx.Where("project_id = ? AND status = ? AND id IN ?", projectID, "ready", contextSourceIDs).Find(&sources).Error; err != nil {
-			return err
+		if errors.Is(err, errWorkItemEpicNotInProject) {
+			return lookup(c, "Delivery epic", gorm.ErrRecordNotFound)
 		}
-		if len(sources) != len(contextSourceIDs) {
-			return fmt.Errorf("every selected context source must belong to this project and be ready")
+		if errors.Is(err, errWorkItemEpicContainsSensitiveMaterial) {
+			return utils.Error(c, http.StatusBadRequest, "Invalid delivery work item", "selected epic contains disallowed sensitive material")
 		}
-		now := time.Now().UTC()
-		snapshots := make([]models.DeliveryContextSnapshot, 0, len(sources))
-		for _, source := range sources {
-			snapshots = append(snapshots, models.DeliveryContextSnapshot{WorkItemID: item.ID, SourceID: source.ID, Kind: source.Kind, Name: source.Name, Reference: source.Reference, Revision: source.Revision, MetadataJSON: source.MetadataJSON, CapturedAt: now})
-		}
-		if len(snapshots) > 0 {
-			if err := tx.Create(&snapshots).Error; err != nil {
-				return err
-			}
-		}
-		if len(dependencyIDs) > 0 {
-			var dependencies []models.DeliveryWorkItem
-			if err := tx.Where("project_id = ? AND id IN ?", projectID, dependencyIDs).Find(&dependencies).Error; err != nil {
-				return err
-			}
-			if len(dependencies) != len(dependencyIDs) {
-				return fmt.Errorf("every dependency must belong to this delivery project")
-			}
-			links := make([]models.DeliveryWorkItemDependency, 0, len(dependencyIDs))
-			for _, dependencyID := range dependencyIDs {
-				links = append(links, models.DeliveryWorkItemDependency{WorkItemID: item.ID, DependsOnWorkItemID: dependencyID})
-			}
-			if err := tx.Create(&links).Error; err != nil {
-				return err
-			}
-		}
-		if item.RequestID != nil {
-			return tx.Model(&models.DeliveryRequest{}).Where("id = ?", *item.RequestID).Update("status", "planned").Error
-		}
-		return nil
-	}); err != nil {
 		return utils.Error(c, 500, "Delivery work item failed", "Could not persist work item")
 	}
 	return utils.Success(c, 201, "Delivery work item created", item)
+}
+
+func workItemCreatePermission(request workItemRequest) deliveryPermission {
+	if strings.TrimSpace(request.EpicID) != "" {
+		return deliveryManage
+	}
+	return deliveryRequest
+}
+
+var errInvalidTaskPrimaryRepository = errors.New("invalid task primary repository")
+
+// A task can change its editable repository without rewriting the project's
+// shared topology. Only the frozen snapshots receive this role override.
+func taskContextSnapshots(workItemID uuid.UUID, sources []models.DeliveryContextSource, primarySourceID string, capturedAt time.Time) ([]models.DeliveryContextSnapshot, error) {
+	primarySourceID = strings.TrimSpace(primarySourceID)
+	var selectedPrimary uuid.UUID
+	if primarySourceID != "" {
+		parsed, err := uuid.FromString(primarySourceID)
+		if err != nil || parsed == uuid.Nil {
+			return nil, fmt.Errorf("%w: primary_repository_source_id must be a selected local repository UUID", errInvalidTaskPrimaryRepository)
+		}
+		selectedPrimary = parsed
+	}
+	foundPrimary := false
+	snapshots := make([]models.DeliveryContextSnapshot, 0, len(sources))
+	for _, source := range sources {
+		metadataJSON := source.MetadataJSON
+		if selectedPrimary != uuid.Nil && strings.EqualFold(strings.TrimSpace(source.Kind), "repository") {
+			metadata := map[string]any{}
+			if strings.TrimSpace(metadataJSON) != "" && json.Unmarshal([]byte(metadataJSON), &metadata) != nil {
+				return nil, fmt.Errorf("selected repository metadata is invalid")
+			}
+			if source.ID == selectedPrimary {
+				if !strings.HasPrefix(strings.TrimSpace(source.Reference), "workspace://") {
+					return nil, fmt.Errorf("%w: primary repository must be a selected local workspace", errInvalidTaskPrimaryRepository)
+				}
+				metadata["repository_role"] = "primary"
+				foundPrimary = true
+			} else {
+				metadata["repository_role"] = "supporting"
+			}
+			encoded, err := json.Marshal(metadata)
+			if err != nil {
+				return nil, err
+			}
+			metadataJSON = string(encoded)
+		}
+		snapshots = append(snapshots, models.DeliveryContextSnapshot{WorkItemID: workItemID, SourceID: source.ID, Kind: source.Kind, Name: source.Name, Reference: source.Reference, Revision: source.Revision, MetadataJSON: metadataJSON, CapturedAt: capturedAt})
+	}
+	if selectedPrimary != uuid.Nil && !foundPrimary {
+		return nil, fmt.Errorf("%w: primary repository must be among the selected local workspaces", errInvalidTaskPrimaryRepository)
+	}
+	return snapshots, nil
+}
+
+func appendMandatoryProjectContext(selected, operational []models.DeliveryContextSource) []models.DeliveryContextSource {
+	seen := make(map[uuid.UUID]struct{}, len(selected)+len(operational))
+	for _, source := range selected {
+		seen[source.ID] = struct{}{}
+	}
+	for _, source := range operational {
+		if _, exists := seen[source.ID]; exists {
+			continue
+		}
+		selected = append(selected, source)
+		seen[source.ID] = struct{}{}
+	}
+	return selected
+}
+
+func mandatoryProjectContextSource(source models.DeliveryContextSource) bool {
+	return strings.EqualFold(source.Kind, "environment") ||
+		(strings.EqualFold(source.Kind, "runbook") && strings.HasPrefix(source.Reference, "workflow://"))
 }
 
 func GetWorkItem(c echo.Context) error {
@@ -935,6 +1203,11 @@ func TransitionWorkItem(c echo.Context) error {
 		}
 		if action == deliveryworkflow.ActionSubmitPlan {
 			if err := requireReleasedDependencies(tx, item.ID); err != nil {
+				return err
+			}
+		}
+		if action == deliveryworkflow.ActionSubmitAssessment {
+			if err := requireReadOnlyAssessmentPlanJSON(item.PlanJSON); err != nil {
 				return err
 			}
 		}
@@ -1295,6 +1568,8 @@ func agentOperationForSubmission(action deliveryworkflow.Action) (operation, pha
 		return "delivery.implementation", "implementation"
 	case deliveryworkflow.ActionSubmitQA:
 		return "delivery.qa", "qa"
+	case deliveryworkflow.ActionSubmitAssessment:
+		return "delivery.assessment", "assessment"
 	case deliveryworkflow.ActionApproveRelease:
 		return "delivery.summary", "summary"
 	default:

@@ -7,13 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"events-stocks/configuration"
+	"events-stocks/internal/authz"
 	"events-stocks/internal/automationagent"
 	"events-stocks/internal/environmentevidence"
 	"events-stocks/internal/projectvault"
 	"events-stocks/internal/qaevidence"
 	"events-stocks/internal/releasegate"
 	"events-stocks/models"
-	"events-stocks/repositories/automationqueuerepository"
+	"events-stocks/services/deliveryplansteps"
 	"events-stocks/services/deliveryworkflow"
 	"fmt"
 	"io"
@@ -25,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	automationqueuerepository "events-stocks/repositories/automationqueuerepository"
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/gofrs/uuid"
 	"github.com/labstack/echo/v4"
@@ -352,28 +354,209 @@ func TestSupersedeQueuedGitHubReviewsTargetsOnlyOlderQueuedHeadsForTheSamePR(t *
 	}
 }
 
-func TestGitHubReviewCorrelationIsBoundedStableAndHeadSpecific(t *testing.T) {
-	repository := strings.Repeat("a", 100) + "/" + strings.Repeat("b", 100)
-	first, err := githubReviewCorrelationID(repository, 123456789, strings.Repeat("c", 40))
+func TestPlanStepFanInWaitsForTerminalChildCallbackAfterStepCompletion(t *testing.T) {
+	stepID := uuid.Must(uuid.NewV4())
+	assignment := models.DeliveryPlanStepAssignment{
+		ID: uuid.Must(uuid.NewV4()), DeliveryPlanStepID: stepID,
+		ChildAutomationTaskID: uuid.Must(uuid.NewV4()), Status: models.DeliveryPlanStepAssignmentCompleted,
+	}
+	status, err := effectivePlanStepAssignmentStatus(assignment.Status, "running")
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := githubReviewCorrelationID(repository, 123456789, strings.Repeat("d", 40))
+	assignment.Status = status
+	decision := deliveryplansteps.AssessFanIn([]uuid.UUID{stepID}, []models.DeliveryPlanStepAssignment{assignment})
+	if !decision.WaitingForChildren || decision.AggregationPending {
+		t.Fatalf("fan-in must wait for the child's terminal output callback, got %#v", decision)
+	}
+	status, err = effectivePlanStepAssignmentStatus(models.DeliveryPlanStepAssignmentCompleted, "failed")
+	if err != nil || status != models.DeliveryPlanStepAssignmentFailed {
+		t.Fatalf("task-level failure must not be hidden by a prior step completion: status=%s err=%v", status, err)
+	}
+}
+
+func TestPlanIntegrationOutputRequiresExactPassingFinalCriteria(t *testing.T) {
+	criteria := []string{"first branch is integrated", "the complete change passes verification"}
+	valid := []planIntegrationOutputCheck{{Criterion: criteria[0], Passed: true}, {Criterion: criteria[1], Passed: true}}
+	if !validPlanIntegrationOutputChecks(criteria, valid) {
+		t.Fatal("exact passing final-verification evidence was rejected")
+	}
+	tests := []struct {
+		name   string
+		checks []planIntegrationOutputCheck
+	}{
+		{name: "missing criterion", checks: valid[:1]},
+		{name: "failed criterion", checks: []planIntegrationOutputCheck{{Criterion: criteria[0], Passed: true}, {Criterion: criteria[1], Passed: false}}},
+		{name: "duplicate criterion", checks: []planIntegrationOutputCheck{{Criterion: criteria[0], Passed: true}, {Criterion: criteria[0], Passed: true}}},
+		{name: "invented criterion", checks: []planIntegrationOutputCheck{{Criterion: criteria[0], Passed: true}, {Criterion: "not in the frozen plan", Passed: true}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if validPlanIntegrationOutputChecks(criteria, test.checks) {
+				t.Fatalf("invalid final-verification evidence was accepted: %#v", test.checks)
+			}
+		})
+	}
+	if sameAutomationStrings(criteria, []string{criteria[1], criteria[0]}) {
+		t.Fatal("reordered frozen criteria must not be treated as an exact result projection")
+	}
+}
+
+func TestPlanFanInChangeSetReplayIsExactAndConflictsFailClosed(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		existingCI string
+		wantError  bool
+	}{
+		{name: "exact replay", existingCI: "passed"},
+		{name: "conflicting repository evidence", existingCI: "pending", wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db, mock := automationCostLedgerTestDB(t)
+			change := models.DeliveryChangeSet{
+				WorkItemID: uuid.Must(uuid.NewV4()), RepositoryRef: "workspace://backend", Branch: "agent/implementation",
+				ReviewType: "local_worktree", CIStatus: "passed", Environment: "local",
+				MetadataJSON: `{"review_diff_sha256":"` + strings.Repeat("a", 64) + `"}`, CreatedBy: "itbem-local-agent",
+			}
+			rows := sqlmock.NewRows([]string{"id", "work_item_id", "repository_ref", "branch", "review_type", "ci_status", "environment", "metadata_json", "created_by"}).
+				AddRow(uuid.Must(uuid.NewV4()), change.WorkItemID, change.RepositoryRef, change.Branch, change.ReviewType, test.existingCI, change.Environment, change.MetadataJSON, change.CreatedBy)
+			mock.ExpectQuery(`SELECT \* FROM "delivery_change_sets" WHERE work_item_id = \$1 AND repository_ref = \$2 AND branch = \$3 ORDER BY "delivery_change_sets"\."id" LIMIT \$4`).
+				WithArgs(change.WorkItemID, change.RepositoryRef, change.Branch, 1).WillReturnRows(rows)
+			err := persistVerifiedPlanFanInChangeSets(db, []models.DeliveryChangeSet{change}, time.Now().UTC())
+			if (err != nil) != test.wantError {
+				t.Fatalf("fan-in review change-set replay error = %v, wantError=%v", err, test.wantError)
+			}
+			if test.wantError && !strings.Contains(err.Error(), "conflicts") {
+				t.Fatalf("conflicting immutable evidence returned an unclear error: %v", err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestVerifiedPlanFanInCompletionReplayRequiresCommittedExactReceipt(t *testing.T) {
+	db, mock := automationCostLedgerTestDB(t)
+	childID, parentID, workItemID, executionID, planID, stepID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
+	runID, workerID, machineID := uuid.Must(uuid.NewV4()).String(), uuid.Must(uuid.NewV4()).String(), uuid.Must(uuid.NewV4()).String()
+	planHash := strings.Repeat("b", 64)
+	identity := automationagent.AgentIdentity{WorkerID: workerID, AgentKey: "integrator", MachineID: machineID}
+	child := models.AutomationTask{
+		ID: childID, DeliveryWorkItemID: &workItemID, Operation: "delivery.implementation", Status: "completed", RunID: runID,
+		WorkerID: workerID, AgentKey: identity.AgentKey, MachineID: machineID,
+		OutputRef: "s3://outputs/automation/" + childID.String() + "/runs/" + runID + "/result.json",
+	}
+	cfg := &models.Config{AutomationOutputBucket: "outputs"}
+	receipt := planIntegrationCallbackReceipt{
+		ParentTaskID: parentID.String(), PlanID: planID.String(), PlanVersion: 4, PlanHash: planHash,
+		StepID: stepID.String(), ChildTaskID: childID.String(), RunID: runID,
+	}
+	handoff, err := json.Marshal(map[string]any{"fan_in_receipt": receipt})
 	if err != nil {
 		t.Fatal(err)
 	}
-	prefix, err := githubReviewCorrelationPrefix(repository, 123456789)
+	request := callbackRequest{Status: "completed", RunID: runID, OutputRef: child.OutputRef, Execution: handoff}
+	parentOutput := map[string]any{
+		"task_id": parentID.String(), "integration_task_id": childID.String(), "run_id": runID,
+		"integration_receipt": receipt, "execution": map[string]any{"fan_in_receipt": receipt},
+		"fan_in": planIntegrationFanInProof{
+			SchemaVersion: 1, ParentTaskID: parentID.String(), ExecutionID: executionID.String(), PlanID: planID.String(), PlanVersion: 4, PlanHash: planHash,
+			IntegrationStepID: stepID.String(), IntegrationStepKey: "integrate", IntegrationTaskID: childID.String(), RunID: runID, FencingToken: 12,
+			WorkerID: workerID, AgentKey: identity.AgentKey, MachineID: machineID,
+		},
+	}
+	encodedParent, err := json.Marshal(parentOutput)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(first) > 64 || first == second || !strings.HasPrefix(first, prefix+":") || !strings.HasPrefix(second, prefix+":") {
-		t.Fatalf("review correlation lost its bounded PR/head identity: %q / %q", first, second)
+	previousObject := getPlanStepPatchObject
+	getPlanStepPatchObject = func(_ context.Context, key, bucket string) (io.ReadCloser, error) {
+		if key != "automation/"+parentID.String()+"/runs/"+runID+"/result.json" || bucket != cfg.AutomationOutputBucket {
+			return nil, fmt.Errorf("unexpected parent result reference %s/%s", bucket, key)
+		}
+		return io.NopCloser(strings.NewReader(string(encodedParent))), nil
 	}
-	if _, err := githubReviewCorrelationID("invalid", 1, strings.Repeat("c", 40)); err == nil {
-		t.Fatal("invalid repository correlation was accepted")
+	t.Cleanup(func() { getPlanStepPatchObject = previousObject })
+
+	assignment := uuid.Must(uuid.NewV4())
+	mock.ExpectQuery(`SELECT \* FROM "delivery_plan_step_assignments" WHERE child_automation_task_id = \$1 LIMIT \$2`).
+		WithArgs(childID, 1).WillReturnRows(sqlmock.NewRows([]string{"id", "execution_id", "delivery_plan_step_id", "child_automation_task_id", "status"}).
+		AddRow(assignment, executionID, stepID, childID, models.DeliveryPlanStepAssignmentCompleted))
+	mock.ExpectQuery(`SELECT \* FROM "delivery_plan_executions" WHERE id = \$1 LIMIT \$2`).
+		WithArgs(executionID, 1).WillReturnRows(sqlmock.NewRows([]string{"id", "automation_task_id", "plan_id", "plan_version", "plan_hash", "status"}).
+		AddRow(executionID, parentID, planID, 4, planHash, models.DeliveryPlanExecutionCompleted))
+	mock.ExpectQuery(`SELECT \* FROM "automation_tasks" WHERE id = \$1 LIMIT \$2`).
+		WithArgs(parentID, 1).WillReturnRows(sqlmock.NewRows([]string{"id", "delivery_work_item_id", "operation", "status", "output_ref"}).
+		AddRow(parentID, workItemID, "delivery.implementation", "completed", "s3://outputs/automation/"+parentID.String()+"/runs/"+runID+"/result.json"))
+	mock.ExpectQuery(`SELECT \* FROM "delivery_plan_steps" WHERE id = \$1 AND plan_id = \$2 LIMIT \$3`).
+		WithArgs(stepID, planID, 1).WillReturnRows(sqlmock.NewRows([]string{"id", "plan_id", "step_key", "role", "automation_task_id", "run_id", "lease_fence", "worker_id", "agent_key", "machine_id"}).
+		AddRow(stepID, planID, "integrate", models.DeliveryPlanStepRoleIntegration, childID, runID, 12, workerID, identity.AgentKey, machineID))
+
+	got, err := verifiedPlanFanInCompletionReplay(db, cfg, child, request, runID, identity)
+	if err != nil || !got {
+		t.Fatalf("exact committed fan-in replay was not acknowledged: got=%v err=%v", got, err)
 	}
-	if _, err := githubReviewCorrelationID("itbem/backend", 1, "short"); err == nil {
-		t.Fatal("invalid head correlation was accepted")
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestChildStepQueueEnvelopeBindsStepProfileAndSharedPrivateInput(t *testing.T) {
+	workItemID, projectID, taskID, jobID, stepID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
+	inputRef := "s3://private-inputs/automation/inputs/parent/input.json"
+	item := models.DeliveryWorkItem{ID: workItemID, ProjectID: projectID}
+	child := models.AutomationTask{ID: taskID, JobID: jobID, CorrelationID: "corr-fanout", Operation: "delivery.implementation", InputRef: inputRef, MaxCompletionTokens: 700}
+	step := deliveryplansteps.StepDTO{ID: stepID.String(), AgentKey: "backend_engineer"}
+	message := planStepChildQueueMessage(item, child, step)
+	if message.JobID != jobID.String() || message.Payload.TaskID != taskID.String() || message.Payload.ProjectID != projectID.String() {
+		t.Fatalf("child queue envelope lost its scoped identity: %#v", message)
+	}
+	if message.Payload.PlanStepID != stepID.String() || message.Payload.AgentKey != step.AgentKey || message.Payload.InputRef != inputRef {
+		t.Fatalf("child queue envelope must target one step/profile and reuse only the private input reference: %#v", message.Payload)
+	}
+}
+
+func TestPlanAggregationPendingMessageIsAuditableAndIdempotent(t *testing.T) {
+	workItemID, executionID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
+	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	item := models.DeliveryWorkItem{ID: workItemID}
+	execution := models.DeliveryPlanExecution{ID: executionID}
+	first := planAggregationPendingMessage(item, execution, "aggregation_pending: merge evidence is absent", now)
+	replay := planAggregationPendingMessage(item, execution, "aggregation_pending: merge evidence is absent", now.Add(time.Minute))
+	if first.ID == uuid.Nil || first.ID != replay.ID || first.WorkItemID != workItemID || first.Phase != "implementation" {
+		t.Fatalf("aggregation-pending audit event must be deterministic for one execution: %#v %#v", first, replay)
+	}
+	var receipt map[string]any
+	if err := json.Unmarshal([]byte(first.ReceiptJSON), &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if receipt["status"] != "aggregation_pending" || receipt["required_artifact"] != "verified_parent_workspace_merge_and_full_plan_acceptance_receipt" {
+		t.Fatalf("audit receipt must name the missing verified artifact: %#v", receipt)
+	}
+	if first.Effect != "workflow_observation" || first.AuthorType != "agent" {
+		t.Fatalf("aggregation pending is an audit observation, not a human decision: %#v", first)
+	}
+}
+
+func TestChildClaimsRenewOnlyTheSingleParentAggregateBudgetHold(t *testing.T) {
+	db, mock := automationCostLedgerTestDB(t)
+	childID, parentID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
+	expiresAt, now := time.Date(2026, 9, 23, 13, 0, 0, 0, time.UTC), time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT .*parent_task_id.*delivery_plan_step_assignments.*`).
+		WillReturnRows(sqlmock.NewRows([]string{"parent_task_id"}).AddRow(parentID))
+	mock.ExpectExec(`UPDATE "automation_tasks"`).
+		WithArgs(expiresAt, now, parentID, "queued").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		return renewPlanExecutionParentReservationInTransaction(tx, childID, expiresAt, now)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -826,6 +1009,7 @@ func TestRecentCostLedgerSelectionIncludesEveryBillableComponentWithoutPrivateRe
 		"execution.cached_cost_micros",
 		"execution.cache_write_cost_micros",
 		"execution.pricing_basis",
+		"execution.agent_instance_id AS agent_instance_id",
 	} {
 		if !strings.Contains(automationCostRecentExecutionSelect, column) {
 			t.Fatalf("recent cost selection omitted %s", column)
@@ -909,7 +1093,8 @@ func TestCurrentAutomationWorkersUsesNewestHeartbeatForEachRoleLane(t *testing.T
 
 func TestToolExecutionLedgerCostsOnlyUploadedStagehandReport(t *testing.T) {
 	taskID, workItemID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
-	task := &models.AutomationTask{ID: taskID, DeliveryWorkItemID: &workItemID, Operation: "delivery.qa"}
+	workerID, machineID := uuid.Must(uuid.NewV4()).String(), uuid.Must(uuid.NewV4()).String()
+	task := &models.AutomationTask{ID: taskID, DeliveryWorkItemID: &workItemID, Operation: "delivery.qa", WorkerID: workerID, AgentKey: "qa_specialist", MachineID: machineID}
 	reference := "s3://itbem-ai-outputs-local/automation/" + taskID.String() + "/artifacts/01-dashboard-semantic-qa.json"
 	artifacts := []callbackArtifact{{Name: "01-dashboard-semantic-qa.json", Reference: reference, ContentType: "application/json", SizeBytes: 120, SHA256: strings.Repeat("a", 64)}}
 	usage := json.RawMessage(`{"input_tokens":120,"output_tokens":40,"cached_input_tokens":10,"total_tokens":160}`)
@@ -919,6 +1104,9 @@ func TestToolExecutionLedgerCostsOnlyUploadedStagehandReport(t *testing.T) {
 	}
 	if rows[0].CallKey != "semantic-assessment" || rows[0].InputTokens != 120 || rows[0].OutputTokens != 40 || rows[0].CachedInputTokens != 10 || rows[0].TotalCostMicros <= 0 || rows[0].RequestRef != reference || rows[0].ResponseRef != reference {
 		t.Fatalf("Stagehand row lost accounting or audit linkage: %#v", rows[0])
+	}
+	if rows[0].WorkerID != workerID || rows[0].AgentKey != "qa_specialist" || rows[0].MachineID != machineID {
+		t.Fatalf("tool ledger row must inherit the persisted parent task attribution: got worker=%q agent=%q machine=%q", rows[0].WorkerID, rows[0].AgentKey, rows[0].MachineID)
 	}
 	_, err = buildToolExecutionLedger(nil, task, uuid.Must(uuid.NewV4()).String(), "completed", []callbackToolExecution{{Tool: "stagehand", StepKey: "qa.semantic_browser", Provider: "minimax", Model: "MiniMax-M3", Usage: usage, RequestRef: reference, ResponseRef: "s3://arbitrary/report.json"}}, artifacts, time.Now().UTC())
 	if err == nil {
@@ -947,7 +1135,7 @@ func TestToolExecutionLedgerAcceptsDistinctCallsAndRejectsDuplicates(t *testing.
 }
 
 func TestCostLedgerUnionIncludesPrimaryAndToolExecutions(t *testing.T) {
-	for _, expected := range []string{"FROM automation_executions", "FROM automation_tool_executions", "'agent' AS execution_kind", "'tool' AS execution_kind", "call_key"} {
+	for _, expected := range []string{"FROM automation_executions", "FROM automation_tool_executions", "'agent' AS execution_kind", "'tool' AS execution_kind", "agent_key", "agent_instance_id", "call_key"} {
 		if !strings.Contains(automationCostLedgerUnion, expected) {
 			t.Fatalf("ledger union omitted %q: %s", expected, automationCostLedgerUnion)
 		}
@@ -1018,7 +1206,9 @@ func TestCostLedgerProjectionKeepsLegacyAgentTotalsWithoutInventingToolCalls(t *
 	}
 	for _, expected := range []string{
 		"automation_executions.total_cost_micros",
+		"NULL::uuid AS agent_instance_id",
 		"0::bigint AS cached_input_tokens",
+		"''::text AS agent_key",
 		"'legacy'::text AS pricing_basis",
 		"'agent'::text AS execution_kind",
 		"''::text AS tool",
@@ -1032,6 +1222,48 @@ func TestCostLedgerProjectionKeepsLegacyAgentTotalsWithoutInventingToolCalls(t *
 	}
 	if !strings.Contains(strings.Join(missing, ","), "cached_input_tokens") {
 		t.Fatalf("legacy dimensions must be marked rather than silently claimed complete: %#v", missing)
+	}
+}
+
+func TestCostLedgerProjectionPreservesImmutableAgentAttribution(t *testing.T) {
+	projection, missing, ok := automationCostLedgerProjection(automationExecutionLedgerTable, costLedgerColumns(
+		"id", "automation_task_id", "total_cost_micros", "completed_at", "agent_key", "agent_instance_id",
+	), "agent")
+	if !ok {
+		t.Fatalf("agent ledger projection should be available: missing=%#v", missing)
+	}
+	if !strings.Contains(projection, "automation_executions.agent_key") {
+		t.Fatalf("immutable agent attribution was not selected: %s", projection)
+	}
+	if !strings.Contains(projection, "automation_executions.agent_instance_id") {
+		t.Fatalf("immutable instance attribution was not selected: %s", projection)
+	}
+	if strings.Contains(strings.Join(missing, ","), "agent_key") {
+		t.Fatalf("present agent attribution was incorrectly marked missing: %#v", missing)
+	}
+	if strings.Contains(strings.Join(missing, ","), "agent_instance_id") {
+		t.Fatalf("present instance attribution was incorrectly marked missing: %#v", missing)
+	}
+}
+
+func TestCostLedgerProjectionSupportsStableCreationSnapshot(t *testing.T) {
+	legacyProjection, legacyMissing, ok := automationCostLedgerProjection(automationExecutionLedgerTable, costLedgerColumns(
+		"id", "automation_task_id", "total_cost_micros", "completed_at",
+	), "agent")
+	if !ok {
+		t.Fatalf("legacy ledger should support a completion-time snapshot: missing=%#v", legacyMissing)
+	}
+	if !strings.Contains(legacyProjection, "completed_at AS created_at") || !strings.Contains(strings.Join(legacyMissing, ","), "created_at") {
+		t.Fatalf("legacy fallback must be explicit and marked: %s missing=%#v", legacyProjection, legacyMissing)
+	}
+	currentProjection, currentMissing, ok := automationCostLedgerProjection(automationExecutionLedgerTable, costLedgerColumns(
+		"id", "automation_task_id", "total_cost_micros", "completed_at", "created_at",
+	), "agent")
+	if !ok {
+		t.Fatalf("current ledger should remain readable: missing=%#v", currentMissing)
+	}
+	if !strings.Contains(currentProjection, "automation_executions.created_at") || strings.Contains(strings.Join(currentMissing, ","), "created_at") {
+		t.Fatalf("current ledger must use its immutable creation timestamp: %s missing=%#v", currentProjection, currentMissing)
 	}
 }
 
@@ -1171,19 +1403,20 @@ func TestRunningTaskWithoutLeaseCancellationSettlesAsAbandoned(t *testing.T) {
 func TestCanonicalTraceEntriesKeepKindsAndPrivateReferencesOutOfTheResponse(t *testing.T) {
 	finishedAt := time.Now().UTC()
 	taskID := uuid.Must(uuid.NewV4())
+	instanceID := uuid.Must(uuid.NewV4())
 	agent := traceEntryFromAgentExecution(models.AutomationExecution{
-		ID: uuid.Must(uuid.NewV4()), AutomationTaskID: taskID, StepKey: "delivery.plan", Provider: "minimax", Model: "MiniMax-M3",
+		ID: uuid.Must(uuid.NewV4()), AutomationTaskID: taskID, AgentInstanceID: &instanceID, StepKey: "delivery.plan", Provider: "minimax", Model: "MiniMax-M3",
 		InputTokens: 100, OutputTokens: 20, TotalTokens: 120, TotalCostMicros: 47, PricingBasis: "snapshot", CompletedAt: finishedAt,
 		RequestRef: "s3://private/request.json", ResponseRef: "s3://private/response.json",
 		UsageJSON: `{"input_tokens":100,"_itbem_provider":{"finish_reason":"stop","input_sensitive":true,"status_code":200,"ignored":"must-not-leak"}}`,
 	})
 	tool := traceEntryFromToolExecution(models.AutomationToolExecution{
-		ID: uuid.Must(uuid.NewV4()), AutomationTaskID: taskID, Tool: "stagehand", StepKey: "qa.semantic_browser", Provider: "minimax", Model: "MiniMax-M3",
+		ID: uuid.Must(uuid.NewV4()), AutomationTaskID: taskID, AgentInstanceID: &instanceID, Tool: "stagehand", StepKey: "qa.semantic_browser", Provider: "minimax", Model: "MiniMax-M3",
 		InputTokens: 50, OutputTokens: 10, TotalTokens: 60, TotalCostMicros: 23, PricingBasis: "snapshot", CompletedAt: finishedAt,
 		RequestRef: "s3://private/report.json", ResponseRef: "s3://private/report.json",
 		UsageJSON: `{"_itbem_provider":{"finish_reason":"length","output_sensitive":true,"status_code":429}}`,
 	})
-	if agent.ExecutionKind != "agent" || tool.ExecutionKind != "tool" || tool.Tool != "stagehand" || agent.TotalCostMicros != 47 || tool.TotalTokens != 60 || agent.ProviderOutcome == nil || agent.ProviderOutcome.FinishReason != "stop" || tool.ProviderOutcome == nil || tool.ProviderOutcome.StatusCode != 429 {
+	if agent.ExecutionKind != "agent" || tool.ExecutionKind != "tool" || tool.Tool != "stagehand" || agent.AgentInstanceID == nil || *agent.AgentInstanceID != instanceID || tool.AgentInstanceID == nil || *tool.AgentInstanceID != instanceID || agent.TotalCostMicros != 47 || tool.TotalTokens != 60 || agent.ProviderOutcome == nil || agent.ProviderOutcome.FinishReason != "stop" || tool.ProviderOutcome == nil || tool.ProviderOutcome.StatusCode != 429 {
 		t.Fatalf("canonical entries lost billing metadata: agent=%#v tool=%#v", agent, tool)
 	}
 	encoded, err := json.Marshal([]automationCostExecution{agent, tool})
@@ -1194,6 +1427,34 @@ func TestCanonicalTraceEntriesKeepKindsAndPrivateReferencesOutOfTheResponse(t *t
 		if strings.Contains(string(encoded), forbidden) {
 			t.Fatalf("canonical trace entry leaked private data %q: %s", forbidden, encoded)
 		}
+	}
+}
+
+func TestCostLedgerAttributionUsesOnlyAuthenticatedCallbackIdentity(t *testing.T) {
+	trustedInstanceID := uuid.Must(uuid.NewV4())
+	spoofedInstanceID := uuid.Must(uuid.NewV4())
+	e := echo.New()
+	request := httptest.NewRequest(http.MethodPost, "/internal/automation/result", strings.NewReader(`{"agent_instance_id":"`+spoofedInstanceID.String()+`"}`))
+	request.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	c := e.NewContext(request, httptest.NewRecorder())
+	c.Set(agentCallbackIdentityContextKey, authenticatedAgentCallback{InstanceID: trustedInstanceID, AgentKey: "generalist", MachineID: uuid.Must(uuid.NewV4()).String()})
+	var untrusted callbackRequest
+	if err := c.Bind(&untrusted); err != nil {
+		t.Fatalf("callback request with unknown instance field should bind without granting it authority: %v", err)
+	}
+	execution := &models.AutomationExecution{}
+	toolExecutions := []models.AutomationToolExecution{{}}
+	if !attributeAutomationCostRowsToCallbackIdentity(c, execution, toolExecutions) {
+		t.Fatal("authenticated callback identity was not available for ledger attribution")
+	}
+	if execution.AgentInstanceID == nil || *execution.AgentInstanceID != trustedInstanceID || toolExecutions[0].AgentInstanceID == nil || *toolExecutions[0].AgentInstanceID != trustedInstanceID {
+		t.Fatalf("cost rows were not attributed to authenticated instance: execution=%#v tool=%#v", execution.AgentInstanceID, toolExecutions[0].AgentInstanceID)
+	}
+	if *execution.AgentInstanceID == spoofedInstanceID || *toolExecutions[0].AgentInstanceID == spoofedInstanceID {
+		t.Fatal("cost attribution trusted agent_instance_id from request JSON")
+	}
+	if attributeAutomationCostRowsToCallbackIdentity(e.NewContext(httptest.NewRequest(http.MethodPost, "/", nil), httptest.NewRecorder()), execution, toolExecutions) {
+		t.Fatal("ledger attribution succeeded without an authenticated callback identity")
 	}
 }
 
@@ -1334,7 +1595,7 @@ func TestExecutionResultReferenceMatchesOnlyItsOriginalRun(t *testing.T) {
 func TestDeliveryOperationsRemainExplicitlyAllowlisted(t *testing.T) {
 	for _, operation := range []string{
 		"ai.chat", "document.analyze", "code.review", "product.ideate",
-		"delivery.plan", "delivery.implementation", "delivery.onboarding_probe", "delivery.publish", "delivery.qa", "delivery.summary",
+		"delivery.plan", "delivery.implementation", "delivery.assessment", "delivery.onboarding_probe", "delivery.publish", "delivery.qa", "delivery.summary",
 	} {
 		if _, allowed := allowedOperations[operation]; !allowed {
 			t.Fatalf("expected operation to be enabled: %s", operation)
@@ -1351,7 +1612,7 @@ func TestGenericTaskOperationsCannotBypassDeliveryGates(t *testing.T) {
 			t.Fatalf("generic operation %s should remain available", operation)
 		}
 	}
-	for _, operation := range []string{"delivery.plan", "delivery.implementation", "delivery.onboarding_probe", "delivery.publish", "delivery.qa", "delivery.summary", "shell.execute"} {
+	for _, operation := range []string{"delivery.plan", "delivery.implementation", "delivery.assessment", "delivery.onboarding_probe", "delivery.publish", "delivery.qa", "delivery.summary", "shell.execute"} {
 		if genericTaskOperationAllowed(operation) {
 			t.Fatalf("operation %s must not be started through the generic task endpoint", operation)
 		}
@@ -1359,7 +1620,7 @@ func TestGenericTaskOperationsCannotBypassDeliveryGates(t *testing.T) {
 }
 
 func TestProviderAllowedUsesStrictNormalizedAllowlist(t *testing.T) {
-	for _, provider := range []string{"minimax", " OpenAI ", "ANTHROPIC"} {
+	for _, provider := range []string{"minimax", " OpenAI ", "ANTHROPIC", "deepseek", "OpenRouter"} {
 		if !providerAllowed(provider) {
 			t.Fatalf("expected provider to be allowed: %s", provider)
 		}
@@ -1389,6 +1650,53 @@ func TestTaskOwnerAccessDoesNotNeedRootLookup(t *testing.T) {
 	task := &models.AutomationTask{RequestedBy: "owner"}
 	if !mayAccessTask(context, task, "owner") {
 		t.Fatal("task owner should be allowed")
+	}
+}
+
+func TestAuthorizedToolExecutionReportHidesDeliveryReportFromRemovedRequester(t *testing.T) {
+	db, mock := automationCostLedgerTestDB(t)
+	previousDB := configuration.DB
+	configuration.DB = db
+	t.Cleanup(func() { configuration.DB = previousDB })
+	requester := "former-project-member"
+	restoreHooks := authz.ReplaceHooksForTest(authz.Hooks{SyncUser: func(cognitoSub string) (*models.User, error) {
+		return &models.User{CognitoSub: cognitoSub}, nil
+	}})
+	t.Cleanup(restoreHooks)
+
+	executionID, taskID, workItemID, projectID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
+	mock.ExpectQuery(`SELECT .* FROM "automation_tool_executions".*`).
+		WithArgs(executionID, 1).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "automation_task_id", "tool", "call_key", "run_id", "request_ref", "response_ref"}).
+			AddRow(executionID, taskID, "stagehand", "semantic-assessment", uuid.Must(uuid.NewV4()).String(), "", ""))
+	mock.ExpectQuery(`SELECT .* FROM "automation_tasks".*`).
+		WithArgs(taskID, 1).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "requested_by", "delivery_work_item_id", "operation"}).
+			AddRow(taskID, requester, workItemID, "delivery.qa"))
+	mock.ExpectQuery(`SELECT .* FROM "delivery_work_items".*`).
+		WithArgs(workItemID, 1).
+		WillReturnRows(sqlmock.NewRows([]string{"project_id"}).AddRow(projectID))
+	mock.ExpectQuery(`SELECT .* FROM "delivery_project_members".*`).
+		WithArgs(projectID, requester, 1).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "project_id", "cognito_sub", "role", "permissions", "created_by"}))
+
+	e := echo.New()
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/automation/tool-executions/"+executionID.String()+"/report", nil)
+	context := e.NewContext(request, recorder)
+	context.SetParamNames("id")
+	context.SetParamValues(executionID.String())
+	context.Set("cognito_sub", requester)
+	context.Set("config", &models.Config{AutomationOutputBucket: "private-output"})
+	_, _, err := authorizedToolExecutionReport(context)
+	if err != nil {
+		t.Fatalf("authorization denial should be a handled HTTP response: %v", err)
+	}
+	if recorder.Code != http.StatusNotFound || !strings.Contains(recorder.Body.String(), "Automation tool execution not found") {
+		t.Fatalf("removed project member must receive the same not-found response as an absent report: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expected project membership to be checked before exposing the report: %v", err)
 	}
 }
 
@@ -1463,6 +1771,70 @@ func TestToolReportReferenceStaysInsideTheTaskArtifactNamespace(t *testing.T) {
 	} {
 		if toolReportReferenceMatches(cfg, taskID, reference) {
 			t.Fatalf("tool report inspector accepted an unrelated reference: %s", reference)
+		}
+	}
+}
+
+func TestPrivateToolExecutionReportRedactsNestedCredentialsAndPrivateReasoning(t *testing.T) {
+	const providerKeyCanary = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
+	const apiKeyCanary = "nested-api-key-canary"
+	const bearerCanary = "nested-bearer-canary"
+	const urlCanary = "signed-url-query-canary"
+	const reasoningCanary = "private-reasoning-canary"
+	raw := []byte(`{
+		"summary":"QA completed; api_key=` + apiKeyCanary + `",
+		"status":"passed",
+		"url":"https://preview.example.test/result?X-Amz-Signature=` + urlCanary + `&page=2#` + reasoningCanary + `",
+		"usage":{"input_tokens":12,"output_tokens":8,"reasoning_tokens":3,"total_cost_microusd":21},
+		"provider_items":[{"type":"reasoning","summary":"` + reasoningCanary + `"},{"role":"analysis","content":"` + reasoningCanary + `"},{"type":"message","content":"safe final answer"}],
+		"calls":[{"request":{"headers":{"Authorization":"Bearer ` + bearerCanary + `","X-Api-Key":"` + apiKeyCanary + `"},"body":{"prompt":"safe request"}},
+			"response":{"summary":"safe provider summary","text":"provider echoed ` + providerKeyCanary + `","reasoning_content":"` + reasoningCanary + `","chain_of_thought":"` + reasoningCanary + `","analysis":"` + reasoningCanary + `"}}]
+	}`)
+	sanitized, err := sanitizePrivateExecutionReport(raw)
+	if err != nil {
+		t.Fatalf("sanitizePrivateExecutionReport() error = %v", err)
+	}
+	for _, canary := range []string{providerKeyCanary, apiKeyCanary, bearerCanary, urlCanary, reasoningCanary} {
+		if strings.Contains(string(sanitized), canary) {
+			t.Fatalf("sanitized report retained a sensitive canary %q", canary)
+		}
+	}
+	var result map[string]any
+	if err := json.Unmarshal(sanitized, &result); err != nil {
+		t.Fatalf("sanitized report is not valid JSON: %v", err)
+	}
+	if result["summary"] != "QA completed; api_key=<redacted>" || result["status"] != "passed" || result["url"] != "https://preview.example.test/result" {
+		t.Fatalf("safe summary, status, or URL projection was not preserved: %#v", result)
+	}
+	usage, ok := result["usage"].(map[string]any)
+	if !ok || usage["input_tokens"] != float64(12) || usage["output_tokens"] != float64(8) || usage["reasoning_tokens"] != float64(3) || usage["total_cost_microusd"] != float64(21) {
+		t.Fatalf("operational token and cost metrics should remain available: %#v", result["usage"])
+	}
+	calls := result["calls"].([]any)
+	response := calls[0].(map[string]any)["response"].(map[string]any)
+	if response["summary"] != "safe provider summary" || response["text"] != "provider echoed [REDACTED]" {
+		t.Fatalf("safe provider response fields were not preserved/redacted: %#v", response)
+	}
+	providerItems := result["provider_items"].([]any)
+	if len(providerItems) != 1 || providerItems[0].(map[string]any)["content"] != "safe final answer" {
+		t.Fatalf("private reasoning items should be omitted while normal provider output is retained: %#v", providerItems)
+	}
+	for _, privateField := range []string{"reasoning_content", "chain_of_thought", "analysis"} {
+		if _, exists := response[privateField]; exists {
+			t.Fatalf("private reasoning field %q must be omitted", privateField)
+		}
+	}
+	request := calls[0].(map[string]any)["request"].(map[string]any)
+	headers := request["headers"].(map[string]any)
+	if len(headers) != 0 {
+		t.Fatalf("credential-bearing headers must be omitted recursively: %#v", headers)
+	}
+}
+
+func TestPrivateToolExecutionReportRejectsNonObjectAndInvalidJSON(t *testing.T) {
+	for _, body := range [][]byte{[]byte(`[]`), []byte(`"not-an-object"`), []byte(`{invalid}`)} {
+		if _, err := sanitizePrivateExecutionReport(body); err == nil {
+			t.Fatalf("invalid or non-object report must fail closed: %q", body)
 		}
 	}
 }
@@ -1596,5 +1968,25 @@ func TestLocalAutomationInputProxyIsExplicitlyLocalOnly(t *testing.T) {
 		if localAutomationInputProxyAllowed() {
 			t.Fatalf("input proxy must not be available when ENV=%q", environment)
 		}
+	}
+}
+
+func TestPlanStepFailoverAdmissionIsSameProfileButDelegatesMachineToLeaseValidator(t *testing.T) {
+	assignment, _, _, _, _, _, _ := validPlanStepAssignmentFixture()
+	replacement := automationagent.AgentIdentity{
+		WorkerID: uuid.Must(uuid.NewV4()).String(), AgentKey: assignment.TargetAgentKey,
+		MachineID: uuid.Must(uuid.NewV4()).String(),
+	}
+	if !planStepAssignmentTargetProfileMatches(assignment, replacement) {
+		t.Fatal("same-profile replacement should reach the transactional lease and heartbeat validator")
+	}
+	replacement.AgentKey = "different-profile"
+	if planStepAssignmentTargetProfileMatches(assignment, replacement) {
+		t.Fatal("a different profile must never pass failover admission")
+	}
+	assignment.Status = models.DeliveryPlanStepAssignmentCompleted
+	replacement.AgentKey = assignment.TargetAgentKey
+	if planStepAssignmentTargetProfileMatches(assignment, replacement) {
+		t.Fatal("terminal assignments must not be admitted for failover")
 	}
 }

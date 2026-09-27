@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"events-stocks/models"
 	"github.com/gofrs/uuid"
 )
 
@@ -37,10 +39,9 @@ func newSandboxLease(ctx context.Context, workspace Workspace, directory string)
 		runtime = WorkspaceSandboxProcess
 	}
 	isolation := "host_process"
-	switch runtime {
-	case WorkspaceSandboxDocker:
+	if runtime == WorkspaceSandboxDocker {
 		isolation = "docker_container"
-	case WorkspaceSandboxFirecracker:
+	} else if runtime == WorkspaceSandboxFirecracker {
 		isolation = "firecracker_microvm"
 	}
 	lease := map[string]any{
@@ -88,6 +89,36 @@ func finishSandboxLease(lease map[string]any, runErr error) {
 // existing workspaces, while Docker mode provides a real filesystem/process,
 // network, CPU, memory, PID and temporary-disk boundary.
 func runWorkspaceCommand(parent context.Context, workspace Workspace, directory string, timeout time.Duration, input string, environment map[string]string, command string, arguments ...string) (commandResult, error) {
+	if stepActivityFromContext(parent) == nil || stepActivityIsSuppressed(parent) {
+		return runWorkspaceCommandUninstrumented(parent, workspace, directory, timeout, input, environment, command, arguments...)
+	}
+	action, toolName := activityActionFromContext(parent, "command", "sandbox_command")
+	var result commandResult
+	observed := false
+	operationErr, reportErr := runStepActivityWithDetails(parent, action, toolName, func(phase string) *models.DeliveryPlanStepActivityDetails {
+		if !observed {
+			return nil
+		}
+		return commandActivityDetails(action, phase, command, arguments, result, "workspace://"+workspace.ID)
+	}, func() error {
+		var runErr error
+		result, runErr = runWorkspaceCommandUninstrumented(withStepActivitySuppressed(parent), workspace, directory, timeout, input, environment, command, arguments...)
+		observed = runErr == nil
+		if runErr == nil && result.ExitCode != 0 {
+			return errActivityReportedNonzeroExit
+		}
+		return runErr
+	})
+	if reportErr != nil {
+		return result, reportErr
+	}
+	if errors.Is(operationErr, errActivityReportedNonzeroExit) {
+		return result, nil
+	}
+	return result, operationErr
+}
+
+func runWorkspaceCommandUninstrumented(parent context.Context, workspace Workspace, directory string, timeout time.Duration, input string, environment map[string]string, command string, arguments ...string) (commandResult, error) {
 	lease := newSandboxLease(parent, workspace, directory)
 	runtime := strings.ToLower(strings.TrimSpace(workspace.Config.SandboxRuntime))
 	if workspace.Config.RequireSandbox && runtime != WorkspaceSandboxDocker && runtime != WorkspaceSandboxFirecracker {

@@ -73,7 +73,7 @@ func TestWorkerRunsOnboardingProbeDeterministicallyWithoutProvider(t *testing.T)
 		t.Fatal(err)
 	}
 	input, _ := json.Marshal(TaskInput{Delivery: delivery})
-	store, callback := &fakeStore{input: input}, &fakeCallback{}
+	store, callback := &fakeStore{input: input, outputBucket: "acme-private-evidence"}, &fakeCallback{}
 	worker, err := NewWorker(WorkerConfig{InputBucket: "acme-private-inputs", OutputBucket: "acme-private-evidence", Role: agentwork.RoleQA, Lane: agentwork.LaneQA}, store, callback, fakeProvider{err: errors.New("provider must not be called")})
 	if err != nil {
 		t.Fatal(err)

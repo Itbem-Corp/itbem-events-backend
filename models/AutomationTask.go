@@ -18,13 +18,28 @@ type AutomationTask struct {
 	RequestedBy          string     `gorm:"type:varchar(128);not null;index" json:"requested_by"`
 	DeliveryWorkItemID   *uuid.UUID `gorm:"type:uuid;index" json:"delivery_work_item_id,omitempty"`
 	DeliveryOnboardingID *uuid.UUID `gorm:"type:uuid;index" json:"delivery_onboarding_id,omitempty"`
-	CorrelationID        string     `gorm:"type:varchar(64);not null;index" json:"correlation_id"`
-	Operation            string     `gorm:"type:varchar(96);not null;index" json:"operation"`
-	// EvidenceSubjectDigest binds deterministic evidence-producing work to the
-	// exact control-plane subject selected when it was enqueued (for example a
-	// coordinated repository/target/SHA matrix). It grants no capability.
-	EvidenceSubjectDigest string `gorm:"type:varchar(64);not null;default:'';index" json:"evidence_subject_digest,omitempty"`
+	// These identify the currently leased worker process. They stay out of the
+	// generic task API; the root-only agent directory projects opaque IDs.
+	WorkerID  string `gorm:"type:varchar(64);not null;default:'';index" json:"-"`
+	AgentKey  string `gorm:"type:varchar(64);not null;default:'';index" json:"-"`
+	MachineID string `gorm:"type:varchar(64);not null;default:'';index" json:"-"`
+	// AgentInstanceID is populated only from the authenticated Ed25519 callback
+	// identity. It follows the active worker lease and is captured in the
+	// append-only task lifecycle event whenever ownership or status changes.
+	AgentInstanceID *uuid.UUID `gorm:"type:uuid;index" json:"-"`
+	CorrelationID   string     `gorm:"type:varchar(64);not null;index" json:"correlation_id"`
+	Operation       string     `gorm:"type:varchar(96);not null;index" json:"operation"`
+	// EvidenceSubjectDigest binds deterministic gate tasks and review retries to
+	// the exact immutable evidence subject approved by the control plane.
+	EvidenceSubjectDigest string `gorm:"type:varchar(64);not null;default:'';index" json:"-"`
 	MaxCompletionTokens   int    `gorm:"not null;default:0" json:"max_completion_tokens"`
+	// AIActionRoutesJSON and its revision/hash freeze the operator-selected
+	// inference route for this execution. Provider settings may change while a
+	// queued/running task is alive; subsequent calls must keep using this exact
+	// snapshot rather than silently switching billing or model behavior.
+	AIActionRoutesJSON     string `gorm:"type:jsonb;not null;default:'[]'" json:"-"`
+	AIActionRoutesHash     string `gorm:"type:varchar(64);not null;default:''" json:"-"`
+	AIActionPolicyRevision int64  `gorm:"not null;default:0" json:"-"`
 	// BudgetReservationMicros is the conservative upper bound held while this
 	// non-deterministic run is queued or running. Once it completes, the
 	// immutable execution ledger replaces the reservation with actual cost.

@@ -302,6 +302,31 @@ Environment variables loaded via `configuration/environmentVariables.go`:
 - Field names auto-converted to UPPER_SNAKE_CASE
 - Missing required variables cause fatal error
 
+### AI provider credentials
+
+Provider API keys are not runtime variables on deployed local workers. The
+cloud backend resolves the environment-scoped `AI_PROVIDER_CREDENTIALS_SECRET_ID`
+bundle only for the internal automation inference gateway; a worker submits its
+active task/run lease and receives a normalized completion. The Settings write
+path is primary-platform-admin only and never returns a credential. See
+`docs/AI_CREDENTIAL_BUNDLE.md` for the IAM and rollout boundary.
+
+`ENV=local` is intentionally separate: it may use the ignored
+`AI_PROVIDER_CREDENTIALS_LOCAL_FILE` test bundle and rejects the Secrets
+Manager identifier before an AWS secret client is constructed. Deployed
+environments reject the local-file setting. In both cases workers call the
+gateway and do not receive a provider key.
+
+Routing is frozen when a task run lease is claimed, not on the first provider
+request. The append-only `AutomationInferenceAttemptPolicy` row binds the
+task/run pair, operation, project, policy revision, ordered routes and token
+ceiling; the gateway verifies its hashes and lease binding before resolving a
+credential. A policy edit therefore applies to a later run ID, never midway
+through an active lease. The snapshot hash detects inconsistent payloads, a
+server-only HMAC key authenticates the route recipe against database tampering,
+and the append-only database trigger prevents ordinary row mutation. Keep the
+previous HMAC key during rotation until all attempts signed by it have ended.
+
 ## Multi-Tenancy
 
 Client hierarchy support:

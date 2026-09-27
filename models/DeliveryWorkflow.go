@@ -9,6 +9,10 @@ import (
 	"gorm.io/gorm"
 )
 
+// DefaultDeliveryMandateMaxConcurrency allows independent approved plan steps
+// to run in parallel while keeping legacy/new work items bounded by default.
+const DefaultDeliveryMandateMaxConcurrency = 2
+
 // deliveryMetadataObject makes JSONB metadata a stable API object. Storage
 // intentionally remains a string so GORM can read and write jsonb without a
 // custom database type, but clients must never need to parse JSON embedded in
@@ -162,25 +166,44 @@ type DeliveryWorkItem struct {
 
 func (item DeliveryWorkItem) MarshalJSON() ([]byte, error) {
 	type alias DeliveryWorkItem
-	mandate := strings.TrimSpace(item.MandateJSON)
-	if mandate == "" || mandate == "{}" {
+	raw := strings.TrimSpace(item.MandateJSON)
+	if raw == "" || raw == "{}" {
+		// Legacy rows predate the durable mandate column. Present the same
+		// conservative contract the input builder derives, without pretending
+		// that repository references are known at this projection layer.
 		objective := strings.TrimSpace(item.ExpectedOutcome)
 		if objective == "" {
 			objective = strings.TrimSpace(item.Title)
 		}
-		included, excluded := []string{}, []string{}
-		_ = json.Unmarshal([]byte(item.IncludedScopeJSON), &included)
-		_ = json.Unmarshal([]byte(item.ExcludedScopeJSON), &excluded)
-		encoded, _ := json.Marshal(map[string]any{"version": 1, "objective": objective, "included_scope": included, "excluded_scope": excluded, "repository_refs": []string{}, "autonomy_policy": "bounded_autonomy"})
-		mandate = string(encoded)
+		if objective == "" {
+			objective = "bounded delivery task"
+		}
+		included := []string{}
+		excluded := []string{}
+		_ = json.Unmarshal([]byte(strings.TrimSpace(item.IncludedScopeJSON)), &included)
+		_ = json.Unmarshal([]byte(strings.TrimSpace(item.ExcludedScopeJSON)), &excluded)
+		derived, _ := json.Marshal(map[string]any{
+			"version": 1, "objective": objective, "included_scope": included,
+			"excluded_scope": excluded, "repository_refs": []string{},
+			"allowed_tools":   []string{"artifact.capture", "context.read", "conversation.respond", "evidence.read", "evidence.record", "git.commit", "github.pr.create", "patch.apply", "plan.propose", "repository.read", "report.write", "test.run", "worktree.create"},
+			"max_concurrency": DefaultDeliveryMandateMaxConcurrency, "budget_microusd": item.BudgetMicros,
+			"autonomy_policy": "bounded_autonomy",
+			"stop_conditions": []string{"budget_exhausted", "concurrency_limit_reached", "context_stale_or_incomplete", "evidence_missing", "human_gate_required", "scope_exceeded", "uncertain_external_effect"},
+			"human_actions":   []string{"approve_code_review", "approve_plan", "approve_qa", "approve_release", "authorize_publication", "resolve_blocker"},
+		})
+		raw = string(derived)
 	}
-	if !json.Valid([]byte(mandate)) {
-		mandate = "{}"
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &object); err != nil || object == nil {
+		raw = `{}`
 	}
 	return json.Marshal(struct {
 		alias
 		Mandate json.RawMessage `json:"mandate"`
-	}{alias: alias(item), Mandate: json.RawMessage(mandate)})
+	}{
+		alias:   alias(item),
+		Mandate: json.RawMessage(raw),
+	})
 }
 
 // DeliveryWorkItemDependency records an explicit ordering constraint between

@@ -2,11 +2,14 @@ package automationagent
 
 import (
 	"context"
-	"events-stocks/internal/agentwork"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
+
+	"events-stocks/internal/agentwork"
+	"github.com/gofrs/uuid"
 )
 
 const (
@@ -14,17 +17,20 @@ const (
 	maxAgentConcurrency     = 8
 )
 
+var runtimeAgentKeyPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{1,63}$`)
+
 type RuntimeConfig struct {
 	WorkerConfig
-	Transport      string
-	GatewayToken   string
-	QueueURL       string
-	AWSRegion      string
-	APIBaseURL     string
-	CallbackSecret string
-	Concurrency    int
-	SQSEndpoint    string
-	S3Endpoint     string
+	Transport        string
+	GatewayToken     string
+	QueueURL         string
+	AWSRegion        string
+	APIBaseURL       string
+	AgentInstanceID  string
+	CallbackIdentity MachineIdentity
+	Concurrency      int
+	SQSEndpoint      string
+	S3Endpoint       string
 }
 
 func LoadRuntimeConfig(lookup func(string) string) (RuntimeConfig, error) {
@@ -41,64 +47,75 @@ func LoadRuntimeConfig(lookup func(string) string) (RuntimeConfig, error) {
 	if err != nil {
 		return RuntimeConfig{}, err
 	}
+	agentKey := value("ITBEM_AI_AGENT_KEY")
+	if agentKey == "" {
+		agentKey = "generalist"
+	}
+	if !runtimeAgentKeyPattern.MatchString(agentKey) {
+		return RuntimeConfig{}, fmt.Errorf("ITBEM_AI_AGENT_KEY must be a lowercase stable key")
+	}
+	instanceID, err := uuid.FromString(value("ITBEM_AGENT_INSTANCE_ID"))
+	if err != nil || instanceID == uuid.Nil {
+		return RuntimeConfig{}, fmt.Errorf("ITBEM_AGENT_INSTANCE_ID must be a registered opaque UUID")
+	}
+	identity, err := LoadLocalMachineIdentity(value("ITBEM_AI_MACHINE_ID"), value("ITBEM_AI_STATE_DIR"))
+	if err != nil {
+		return RuntimeConfig{}, err
+	}
 	config := RuntimeConfig{
-		WorkerConfig: WorkerConfig{
-			InputBucket: value("ITBEM_AI_INPUT_BUCKET"), OutputBucket: value("ITBEM_AI_OUTPUT_BUCKET"),
-			Role: agentwork.Role(value("ITBEM_AI_ROLE")), Lane: agentwork.Lane(value("ITBEM_AI_QUEUE_LANE")),
-			AllowedOperations: capabilities, RequireProviderCapabilities: true,
-		},
-		Transport:      strings.ToLower(value("ITBEM_AI_TRANSPORT")),
-		GatewayToken:   value("ITBEM_AI_GATEWAY_TOKEN"),
-		QueueURL:       value("ITBEM_AI_QUEUE_URL"),
-		AWSRegion:      value("AWS_REGION"),
-		APIBaseURL:     strings.TrimRight(value("ITBEM_API_BASE_URL"), "/"),
-		CallbackSecret: value("AUTOMATION_CALLBACK_SECRET"),
-		Concurrency:    concurrency,
-		SQSEndpoint:    value("ITBEM_AI_SQS_ENDPOINT"),
-		S3Endpoint:     value("ITBEM_AI_S3_ENDPOINT"),
+		WorkerConfig:     WorkerConfig{InputBucket: value("ITBEM_AI_INPUT_BUCKET"), OutputBucket: value("ITBEM_AI_OUTPUT_BUCKET"), AllowedOperations: capabilities, RequireProviderCapabilities: true, AgentKey: agentKey, MachineID: identity.MachineID(), Role: agentwork.Role(value("ITBEM_AI_ROLE")), Lane: agentwork.Lane(value("ITBEM_AI_QUEUE_LANE"))},
+		Transport:        strings.ToLower(value("ITBEM_AI_TRANSPORT")),
+		GatewayToken:     value("ITBEM_AI_GATEWAY_TOKEN"),
+		QueueURL:         value("ITBEM_AI_QUEUE_URL"),
+		AWSRegion:        value("AWS_REGION"),
+		APIBaseURL:       strings.TrimRight(value("ITBEM_API_BASE_URL"), "/"),
+		AgentInstanceID:  instanceID.String(),
+		CallbackIdentity: identity,
+		Concurrency:      concurrency,
+		SQSEndpoint:      value("ITBEM_AI_SQS_ENDPOINT"),
+		S3Endpoint:       value("ITBEM_AI_S3_ENDPOINT"),
 	}
 	if config.Transport == "" {
-		// Preserve the explicit local AWS emulator contract while making a
-		// queue-less physical-host configuration select the HTTPS gateway.
 		if config.QueueURL != "" {
 			config.Transport = "aws"
 		} else {
 			config.Transport = "gateway"
 		}
 	}
+	if config.Transport == "aws" {
+		normalizedQueueURL, err := normalizeLocalQueueURL(config.QueueURL, config.SQSEndpoint)
+		if err != nil {
+			return RuntimeConfig{}, fmt.Errorf("ITBEM_AI_QUEUE_URL: %w", err)
+		}
+		config.QueueURL = normalizedQueueURL
+	}
 	for name, value := range map[string]string{
-		"ITBEM_API_BASE_URL":     config.APIBaseURL,
-		"ITBEM_AI_INPUT_BUCKET":  config.InputBucket,
-		"ITBEM_AI_OUTPUT_BUCKET": config.OutputBucket,
+		"ITBEM_API_BASE_URL":      config.APIBaseURL,
+		"ITBEM_AGENT_INSTANCE_ID": config.AgentInstanceID,
+		"ITBEM_AI_INPUT_BUCKET":   config.InputBucket,
+		"ITBEM_AI_OUTPUT_BUCKET":  config.OutputBucket,
 	} {
 		if value == "" {
 			return RuntimeConfig{}, fmt.Errorf("%s is required", name)
 		}
 	}
 	switch config.Transport {
+	case "aws":
+		if config.QueueURL == "" || config.AWSRegion == "" {
+			return RuntimeConfig{}, fmt.Errorf("ITBEM_AI_QUEUE_URL and AWS_REGION are required for aws transport")
+		}
 	case "gateway":
 		if config.GatewayToken == "" {
-			return RuntimeConfig{}, fmt.Errorf("ITBEM_AI_GATEWAY_TOKEN is required")
+			return RuntimeConfig{}, fmt.Errorf("ITBEM_AI_GATEWAY_TOKEN is required for gateway transport")
 		}
-		// The lane token is also used for lifecycle callbacks; the backend binds
-		// it to the role/lane headers and never exposes its root signing secret.
-		config.CallbackSecret = config.GatewayToken
-	case "aws":
-		for name, value := range map[string]string{"ITBEM_AI_QUEUE_URL": config.QueueURL, "AWS_REGION": config.AWSRegion, "AUTOMATION_CALLBACK_SECRET": config.CallbackSecret} {
-			if value == "" {
-				return RuntimeConfig{}, fmt.Errorf("%s is required for aws transport", name)
-			}
+		if !agentwork.IsKnownRoleLane(config.Role, config.Lane) {
+			return RuntimeConfig{}, fmt.Errorf("gateway transport requires an exact registered ITBEM_AI_ROLE and ITBEM_AI_QUEUE_LANE")
 		}
 	default:
 		return RuntimeConfig{}, fmt.Errorf("ITBEM_AI_TRANSPORT must be gateway or aws")
 	}
 	if _, err := NewWorker(config.WorkerConfig, discardStore{}, discardCallback{}, discardProvider{}); err != nil {
 		return RuntimeConfig{}, err
-	}
-	if config.Transport == "aws" {
-		if err := validateQueueURL(config.QueueURL); err != nil {
-			return RuntimeConfig{}, err
-		}
 	}
 	if err := validateAPIBaseURL(config.APIBaseURL); err != nil {
 		return RuntimeConfig{}, err
@@ -125,17 +142,6 @@ func parseWorkerCapabilities(raw string) ([]string, error) {
 		return nil, fmt.Errorf("ITBEM_AI_CAPABILITIES: %w", err)
 	}
 	return capabilities, nil
-}
-
-func validateQueueURL(raw string) error {
-	endpoint, err := url.Parse(raw)
-	if err != nil || endpoint.Hostname() == "" || strings.Trim(endpoint.Path, "/") == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
-		return fmt.Errorf("ITBEM_AI_QUEUE_URL must be an absolute queue URL")
-	}
-	if endpoint.Scheme == "https" || (endpoint.Scheme == "http" && isLoopbackHost(endpoint.Hostname())) {
-		return nil
-	}
-	return fmt.Errorf("ITBEM_AI_QUEUE_URL must use HTTPS or loopback HTTP")
 }
 
 func validateAPIBaseURL(raw string) error {

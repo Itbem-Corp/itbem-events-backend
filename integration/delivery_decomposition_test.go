@@ -95,6 +95,7 @@ func TestDeliveryDecompositionApplyIsAtomicAndContextBound(t *testing.T) {
 		c.SetParamValues(project.ID.String(), request.ID.String())
 		c.Set("cognito_sub", subject)
 		c.Set("tenant_code", "itbem")
+		setDeliveryPlatformWorkspace(c)
 		require.NoError(t, delivery.CreateRequestDecomposition(c))
 		require.Equal(t, http.StatusCreated, recorder.Code, recorder.Body.String())
 		var created models.DeliveryDecomposition
@@ -115,6 +116,7 @@ func TestDeliveryDecompositionApplyIsAtomicAndContextBound(t *testing.T) {
 		c.SetParamValues(project.ID.String(), request.ID.String(), decompositionID.String())
 		c.Set("cognito_sub", subject)
 		c.Set("tenant_code", "itbem")
+		setDeliveryPlatformWorkspace(c)
 		require.NoError(t, delivery.ApplyRequestDecomposition(c))
 		return recorder
 	}
@@ -207,17 +209,18 @@ func TestDeliveryDecompositionApplyIsAtomicAndContextBound(t *testing.T) {
 	c.SetParamValues(implementation.ID.String())
 	c.Set("cognito_sub", subject)
 	c.Set("tenant_code", "itbem")
+	setDeliveryPlatformWorkspace(c)
 	require.NoError(t, delivery.TransitionWorkItem(c))
 	require.Equal(t, http.StatusConflict, recorder.Code, recorder.Body.String())
 	require.Contains(t, recorder.Body.String(), "dependencies")
 	var unchanged models.DeliveryWorkItem
 	require.NoError(t, db.First(&unchanged, implementation.ID).Error)
 	require.Equal(t, deliveryworkflow.StatePlanning, unchanged.State)
-	// Remove the synthetic downstream plan/run used for the rejected gate, then
-	// release the prerequisite. The next scheduler tick may now admit exactly
-	// that downstream plan and still must not duplicate it.
+	// Remove the synthetic downstream task used for the rejected gate, then
+	// release the prerequisite. Keep the proposed plan: plan versions are
+	// append-only, and this fixture intentionally preserves that audit record.
+	// The next scheduler tick may now admit exactly one durable plan intent.
 	require.NoError(t, db.Unscoped().Delete(&agentTask).Error)
-	require.NoError(t, db.Unscoped().Delete(&plan).Error)
 	require.NoError(t, db.Model(&models.DeliveryWorkItem{}).Where("id = ?", byTitle["Preparar base"].ID).Update("state", deliveryworkflow.StateReleased).Error)
 	require.NoError(t, delivery.ScheduleReadyDecompositionPlansOnce(db))
 	var downstreamIntent models.DeliveryContinuation

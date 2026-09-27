@@ -226,7 +226,7 @@ func TestLocalLaunchersSupportExplicitRoleLanesWithoutBreakingCombinedMode(t *te
 		"$env:ITBEM_AI_ROLE = $Role", "$env:ITBEM_AI_QUEUE_LANE = $Lane",
 		"Role and Lane must form one exact supported worker assignment.",
 		"itbem-ai-local-$Lane", "$providerRequired = -not ($Role -eq 'release_manager' -and $Lane -eq 'release')",
-		"SetEnvironmentVariable($modelSecret, $null, 'Process')", "if ($providerRequired)",
+		"Remove-ProviderCredentialEnvironment", "if ($providerRequired)",
 		"ITBEM.LocalAIAgent.Worker.$lockLane", "Enter-LocalAgentWorkerLock $Lane",
 	} {
 		if !strings.Contains(worker, required) {

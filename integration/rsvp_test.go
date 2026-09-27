@@ -55,9 +55,15 @@ func dockerAvailable() bool {
 //   - Docker daemon running and accessible from WSL
 //   - Docker Desktop: Settings → Resources → WSL Integration → enable for Ubuntu
 func TestMain(m *testing.M) {
+	os.Exit(runIntegrationTests(m))
+}
+
+// runIntegrationTests owns the test-only infrastructure lifecycle. Keep this
+// separate from TestMain so cleanup defers run before TestMain calls os.Exit.
+func runIntegrationTests(m *testing.M) (exitCode int) {
 	if !dockerAvailable() {
 		fmt.Println("SKIP: Docker not available — enable WSL integration in Docker Desktop")
-		os.Exit(0)
+		return 0
 	}
 
 	ctx := context.Background()
@@ -70,33 +76,60 @@ func TestMain(m *testing.M) {
 		tcpostgres.BasicWaitStrategies(),
 	)
 	if err != nil {
-		panic("could not start postgres container: " + err.Error())
+		fmt.Println("ERROR: could not start disposable PostgreSQL test container")
+		return 1
 	}
-	defer func() { _ = pgContainer.Terminate(ctx) }()
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := pgContainer.Terminate(cleanupCtx); err != nil {
+			fmt.Println("ERROR: could not terminate disposable PostgreSQL test container")
+			exitCode = 1
+		}
+	}()
 
 	connStr, err := pgContainer.ConnectionString(ctx, "sslmode=disable")
 	if err != nil {
-		panic("could not get connection string: " + err.Error())
+		fmt.Println("ERROR: could not obtain disposable PostgreSQL test connection")
+		return 1
 	}
 	testPostgresConnectionString = connStr
+	defer func() { testPostgresConnectionString = "" }()
 
 	db, err := gorm.Open(gormpostgres.Open(connStr), &gorm.Config{
 		Logger: gormlogger.Default.LogMode(gormlogger.Silent),
 	})
 	if err != nil {
-		panic("gorm open failed: " + err.Error())
+		fmt.Println("ERROR: could not open disposable PostgreSQL test database")
+		return 1
 	}
 	configuration.DB = db
+	defer func() { configuration.DB = nil }()
+	rawDB, err := db.DB()
+	if err != nil {
+		fmt.Println("ERROR: could not acquire disposable PostgreSQL test connection pool")
+		return 1
+	}
+	defer func() {
+		if err := rawDB.Close(); err != nil {
+			fmt.Println("ERROR: could not close disposable PostgreSQL test connection pool")
+			exitCode = 1
+		}
+	}()
 
 	// uuid_generate_v4() is used as the default for UUID primary keys
-	configuration.DB.Exec(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`)
+	if err := configuration.DB.Exec(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`).Error; err != nil {
+		fmt.Println("ERROR: could not prepare disposable PostgreSQL test database")
+		return 1
+	}
 
 	// Migrate through the same ordered, transactional path used by production.
 	// A single variadic AutoMigrate call lets GORM infer associations in an
 	// unstable order on a fresh schema (notably DeliveryWorkItem and its
 	// automation relation).
 	if err := configuration.MigrateModelsForTest(configuration.DB); err != nil {
-		panic("migration failed: " + err.Error())
+		fmt.Println("ERROR: could not migrate disposable PostgreSQL test database")
+		return 1
 	}
 
 	// Seed GuestStatus reference data (pending / confirmed / declined)
@@ -105,14 +138,22 @@ func TestMain(m *testing.M) {
 	// ── Miniredis (in-memory Redis, no container needed) ──────────────────────
 	mr, err := miniredis.Run()
 	if err != nil {
-		panic("could not start miniredis: " + err.Error())
+		fmt.Println("ERROR: could not start in-memory Redis test service")
+		return 1
 	}
 	defer mr.Close()
 	configuration.RedisClient = redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer func() {
+		if err := configuration.RedisClient.Close(); err != nil {
+			fmt.Println("ERROR: could not close Redis test client")
+			exitCode = 1
+		}
+		configuration.RedisClient = nil
+	}()
 	momentsSvc.SetDefaultMomentService(momentsSvc.NewMomentService(momentrepository.NewMomentRepo(), redisrepository.NewRedisRepo()))
 	defer momentsSvc.SetDefaultMomentService(nil)
 
-	os.Exit(m.Run())
+	return m.Run()
 }
 
 // TestRSVP_HappyPath_Confirmed validates the full RSVP happy path at the HTTP layer:

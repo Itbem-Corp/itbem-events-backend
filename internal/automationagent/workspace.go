@@ -17,8 +17,6 @@ import (
 	"strings"
 	"time"
 	"unicode"
-
-	"events-stocks/internal/projectvault"
 )
 
 const (
@@ -28,6 +26,8 @@ const (
 	maxWorkspaceExcerptBytes = 24000
 	maxWorkspaceExcerpts     = 24
 	maxReadOnlyFixturePaths  = 16
+	maxReadOnlyFixtureFiles  = 500
+	maxReadOnlyFixtureBytes  = 64 << 20
 )
 
 // sensitiveWorkspaceKey matches common secret-bearing configuration keys with
@@ -35,8 +35,11 @@ const (
 // GITHUB_API_TOKEN, without treating arbitrary prose as a credential.
 const sensitiveWorkspaceKey = `(?:[A-Za-z0-9]+[_-])*(?:api[_-]?key|apikey|access[_-]?key|client[_-]?secret|private[_-]?key|password|secret|token|authorization|service[_-]?account)(?:[_-][A-Za-z0-9]+)*`
 
+var workspaceTestKind = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:/+-]{0,127}$`)
+
 type WorkspaceConfig struct {
-	Path string `json:"path"`
+	AcceptanceChecks []AcceptanceCheck `json:"acceptance_checks"`
+	Path             string            `json:"path"`
 	// RepositoryURL and BaseBranch are used only by the operator-invoked
 	// checkout synchronizer. They let one worker host maintain dedicated,
 	// reproducible base checkouts for many projects without letting a task pick
@@ -45,49 +48,46 @@ type WorkspaceConfig struct {
 	BaseBranch         string     `json:"base_branch"`
 	Capabilities       []string   `json:"capabilities"`
 	ValidationCommands [][]string `json:"validation_commands"`
-	// ValidationCommandKinds and QACommandKinds are operator-owned identities
-	// for the commands at the matching index. Agent input may choose whether an
-	// approved command runs, but it can never rename a command to satisfy a
-	// release policy. Empty lists retain legacy execution without gate-bearing
-	// named evidence.
-	ValidationCommandKinds []string   `json:"validation_command_kinds"`
-	QACommands             [][]string `json:"qa_commands"`
-	QACommandKinds         []string   `json:"qa_command_kinds"`
-	// ReadOnlyFixturePaths names operator-owned, repository-relative content
-	// that is intentionally outside Git but required by isolated validation
-	// worktrees (for example a pinned local contract checkout). The paths are
-	// copied without Git metadata, links, credentials or special files. A task
-	// can never add to or override this allowlist.
+	// Command kinds are operator-owned labels for the matching command. Agents
+	// may request an approved command, but cannot invent or rename the evidence.
+	ValidationCommandKinds []string `json:"validation_command_kinds"`
+	QACommandKinds         []string `json:"qa_command_kinds"`
+	// ReadOnlyFixturePaths are bounded, operator-owned files copied into exact-
+	// revision worktrees without Git metadata, symlinks, or credential paths.
 	ReadOnlyFixturePaths []string `json:"read_only_fixture_paths"`
-	QAArtifactPatterns   []string `json:"qa_artifact_patterns"`
-	QAScreenshotCommand  []string `json:"qa_screenshot_command"`
+	// ComponentValidationCommands maps an operator-owned monorepo component
+	// root to the additional validation commands that cover that component.
+	// The model can select an already-approved scope, but never a command.
+	ComponentValidationCommands map[string][][]string `json:"component_validation_commands"`
+	QACommands                  [][]string            `json:"qa_commands"`
+	QAArtifactPatterns          []string              `json:"qa_artifact_patterns"`
+	QAScreenshotCommand         []string              `json:"qa_screenshot_command"`
 	// QASemanticCommand is an operator-owned, opt-in browser QA layer (for
 	// example the pinned Stagehand runner). It receives only the reviewed
 	// preview URL and a private evidence output path; a task or model response
 	// can never select its executable or arguments.
 	QASemanticCommand []string `json:"qa_semantic_command"`
-	// AcceptanceChecks bind task criteria to operator-owned commands. The
-	// agent can request a criterion, never its executable or arguments.
-	AcceptanceChecks []AcceptanceCheck `json:"acceptance_checks"`
-	// Sandbox configuration is operator-owned. Process is explicit legacy mode;
-	// Docker and Firecracker provide the execution boundaries used for hostile
-	// repository-owned toolchains.
-	SandboxRuntime           string   `json:"sandbox_runtime"`
-	RequireSandbox           bool     `json:"require_sandbox"`
-	SandboxImage             string   `json:"sandbox_image"`
-	SandboxImageDigest       string   `json:"sandbox_image_digest"`
-	SandboxNetwork           string   `json:"sandbox_network"`
-	SandboxCPUs              string   `json:"sandbox_cpus"`
-	SandboxMemory            string   `json:"sandbox_memory"`
-	SandboxPIDsLimit         int      `json:"sandbox_pids_limit"`
+	// SandboxRuntime controls where registered validation/QA commands execute.
+	// "process" preserves the existing operator-trusted runner; "docker"
+	// enables the explicit resource/network boundary in sandbox.go. Git
+	// plumbing remains host-side and is never inferred from this setting.
+	SandboxRuntime     string `json:"sandbox_runtime"`
+	SandboxImage       string `json:"sandbox_image"`
+	SandboxImageDigest string `json:"sandbox_image_digest"`
+	SandboxNetwork     string `json:"sandbox_network"`
+	SandboxCPUs        string `json:"sandbox_cpus"`
+	SandboxMemory      string `json:"sandbox_memory"`
+	SandboxPIDsLimit   int    `json:"sandbox_pids_limit"`
+	// SandboxSupervisorCommand is an operator-owned executable that creates
+	// and tears down one Firecracker VM per command. It receives a bounded JSON
+	// request on stdin and must return the supervised result plus a verified
+	// guest attestation. A task/model can never select or alter this command.
 	SandboxSupervisorCommand []string `json:"sandbox_supervisor_command"`
+	// RequireSandbox makes process mode invalid for this workspace. It is the
+	// fail-closed switch for repositories whose validation/QA toolchain is not
+	// operator-trusted; a worktree alone is never treated as a sandbox.
+	RequireSandbox bool `json:"require_sandbox"`
 }
-
-const (
-	WorkspaceSandboxProcess     = "process"
-	WorkspaceSandboxDocker      = "docker"
-	WorkspaceSandboxFirecracker = "firecracker"
-)
 
 const (
 	WorkspaceCapabilityReadRepository = "repository:read"
@@ -99,6 +99,12 @@ const (
 	WorkspaceCapabilityStageCommit    = "commit:stage"
 	WorkspaceCapabilityPublishBranch  = "branch:publish"
 	WorkspaceCapabilityCreatePullReq  = "pull_request:create"
+)
+
+const (
+	WorkspaceSandboxProcess     = "process"
+	WorkspaceSandboxDocker      = "docker"
+	WorkspaceSandboxFirecracker = "firecracker"
 )
 
 var workspaceCapabilities = map[string]struct{}{
@@ -126,6 +132,14 @@ type Workspace struct {
 	ID     string
 	Root   string
 	Config WorkspaceConfig
+}
+
+// WorkspaceValidationCommand is the executable plus its operator-owned
+// component scope. Scope is evidence metadata; it never comes from model
+// supplied command text.
+type WorkspaceValidationCommand struct {
+	Scope   string
+	Command []string
 }
 
 // Harness returns the safe capability summary that may be persisted in
@@ -180,6 +194,9 @@ func loadWorkspaces(raw string, requireDirectory bool) (map[string]Workspace, er
 		config.Path = root
 		config.RepositoryURL = strings.TrimSpace(config.RepositoryURL)
 		config.BaseBranch = strings.TrimSpace(config.BaseBranch)
+		if config.BaseBranch == "" {
+			config.BaseBranch = "main"
+		}
 		if err := validateWorkspaceBase(config.RepositoryURL, config.BaseBranch); err != nil {
 			return nil, fmt.Errorf("workspace %s: %w", id, err)
 		}
@@ -195,10 +212,24 @@ func loadWorkspaces(raw string, requireDirectory bool) (map[string]Workspace, er
 		if err := validateCommandList("validation_commands", config.ValidationCommands); err != nil {
 			return nil, fmt.Errorf("workspace %s: %w", id, err)
 		}
-		if err := validateCommandList("qa_commands", config.QACommands); err != nil {
+		if err := validateCommandKinds(config.ValidationCommands, config.ValidationCommandKinds, config.QACommands, config.QACommandKinds); err != nil {
 			return nil, fmt.Errorf("workspace %s: %w", id, err)
 		}
-		if err := validateCommandKinds(config.ValidationCommands, config.ValidationCommandKinds, config.QACommands, config.QACommandKinds); err != nil {
+		if err := normalizeComponentValidationCommands(&config); err != nil {
+			return nil, fmt.Errorf("workspace %s: %w", id, err)
+		}
+		if len(config.AcceptanceChecks) > 6 {
+			return nil, fmt.Errorf("acceptance_checks may contain at most six checks")
+		}
+		for _, check := range config.AcceptanceChecks {
+			if strings.TrimSpace(check.Criterion) == "" {
+				return nil, fmt.Errorf("acceptance check needs an exact criterion")
+			}
+			if err := validateCommandList("acceptance_checks", [][]string{check.Command}); err != nil {
+				return nil, err
+			}
+		}
+		if err := validateCommandList("qa_commands", config.QACommands); err != nil {
 			return nil, fmt.Errorf("workspace %s: %w", id, err)
 		}
 		if err := validateReadOnlyFixturePaths(config.ReadOnlyFixturePaths); err != nil {
@@ -213,9 +244,6 @@ func loadWorkspaces(raw string, requireDirectory bool) (map[string]Workspace, er
 		if err := validateSemanticQACommand(config.QASemanticCommand); err != nil {
 			return nil, fmt.Errorf("workspace %s: %w", id, err)
 		}
-		if err := validateAcceptanceChecks(config.AcceptanceChecks); err != nil {
-			return nil, fmt.Errorf("workspace %s: %w", id, err)
-		}
 		if err := validateWorkspaceSandbox(&config); err != nil {
 			return nil, fmt.Errorf("workspace %s: %w", id, err)
 		}
@@ -224,23 +252,105 @@ func loadWorkspaces(raw string, requireDirectory bool) (map[string]Workspace, er
 	return result, nil
 }
 
-func validateAcceptanceChecks(checks []AcceptanceCheck) error {
-	seen := map[string]struct{}{}
-	for _, check := range checks {
-		criterion := strings.TrimSpace(check.Criterion)
-		if criterion == "" || len(criterion) > 500 || len(check.Command) == 0 {
-			return fmt.Errorf("acceptance_checks contains an invalid criterion or command")
+func normalizeComponentValidationCommands(config *WorkspaceConfig) error {
+	if len(config.ComponentValidationCommands) > 32 {
+		return fmt.Errorf("component_validation_commands may contain at most 32 components")
+	}
+	normalized := make(map[string][][]string, len(config.ComponentValidationCommands))
+	for rawRoot, commands := range config.ComponentValidationCommands {
+		root := normalizeWorkspaceComponentRoot(rawRoot)
+		if root == "" {
+			return fmt.Errorf("component_validation_commands contains an unsafe component root")
 		}
-		if _, ok := seen[criterion]; ok {
-			return fmt.Errorf("acceptance_checks duplicates criterion %q", criterion)
+		if _, duplicate := normalized[root]; duplicate {
+			return fmt.Errorf("component_validation_commands repeats component root %s", root)
 		}
-		seen[criterion] = struct{}{}
-		if err := validateCommandList("acceptance_checks", [][]string{check.Command}); err != nil {
+		if err := validateCommandList("component_validation_commands", commands); err != nil {
 			return err
 		}
+		normalized[root] = append([][]string(nil), commands...)
 	}
+	config.ComponentValidationCommands = normalized
 	return nil
 }
+
+func normalizeWorkspaceComponentRoot(raw string) string {
+	root := strings.ReplaceAll(strings.TrimSpace(raw), "\\", "/")
+	if strings.HasPrefix(root, "/") || workspaceAbsolutePathPattern.MatchString(root) {
+		return ""
+	}
+	root = strings.Trim(root, " /")
+	if root == "" || root == "." || root == ".." || strings.HasPrefix(root, ".git") || strings.HasPrefix(root, ".env") || strings.Contains(root, "../") || strings.ContainsAny(root, "\x00\r\n") {
+		return ""
+	}
+	return root
+}
+
+// ValidationCommandsForScopes returns only configured component checks whose
+// roots overlap an approved plan scope. Empty scopes intentionally return no
+// component-specific commands: the legacy repository-wide validation suite is
+// still authoritative for whole-repository work.
+func (workspace Workspace) ValidationCommandsForScopes(scopes []string) []WorkspaceValidationCommand {
+	if len(scopes) == 0 || len(workspace.Config.ComponentValidationCommands) == 0 {
+		return nil
+	}
+	roots := make([]string, 0, len(workspace.Config.ComponentValidationCommands))
+	for rawRoot := range workspace.Config.ComponentValidationCommands {
+		if root := normalizeWorkspaceComponentRoot(rawRoot); root != "" {
+			roots = append(roots, root)
+		}
+	}
+	sort.Strings(roots)
+	result := make([]WorkspaceValidationCommand, 0)
+	seen := map[string]struct{}{}
+	for _, root := range roots {
+		matched := false
+		for _, rawScope := range scopes {
+			scope := normalizeWorkspaceComponentRoot(rawScope)
+			if scope == "" {
+				continue
+			}
+			if workspaceScopeWithin(root, scope) || workspaceScopeWithin(scope, root) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		commands := workspace.Config.ComponentValidationCommands[root]
+		if commands == nil {
+			for rawRoot, configured := range workspace.Config.ComponentValidationCommands {
+				if normalizeWorkspaceComponentRoot(rawRoot) == root {
+					commands = configured
+					break
+				}
+			}
+		}
+		for _, command := range commands {
+			keyBytes, _ := json.Marshal(command)
+			key := root + "\x00" + string(keyBytes)
+			if _, duplicate := seen[key]; duplicate {
+				continue
+			}
+			seen[key] = struct{}{}
+			result = append(result, WorkspaceValidationCommand{Scope: root, Command: append([]string(nil), command...)})
+		}
+	}
+	return result
+}
+
+func workspaceScopeWithin(root, candidate string) bool {
+	root = strings.Trim(strings.ReplaceAll(root, "\\", "/"), " /")
+	candidate = strings.Trim(strings.ReplaceAll(candidate, "\\", "/"), " /")
+	return root != "" && candidate != "" && (candidate == root || strings.HasPrefix(candidate, root+"/"))
+}
+
+var sandboxImagePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9./:_@-]{0,255}$`)
+var sandboxImageDigestPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
+var sandboxCPUPattern = regexp.MustCompile(`^[0-9]+(?:\.[0-9]+)?$`)
+var sandboxMemoryPattern = regexp.MustCompile(`^[0-9]+[KkMmGgTt]?$`)
+var workspaceAbsolutePathPattern = regexp.MustCompile(`^[A-Za-z]:/`)
 
 func validateWorkspaceSandbox(config *WorkspaceConfig) error {
 	runtime := strings.ToLower(strings.TrimSpace(config.SandboxRuntime))
@@ -251,41 +361,54 @@ func validateWorkspaceSandbox(config *WorkspaceConfig) error {
 		return fmt.Errorf("sandbox_runtime must be process, docker, or firecracker")
 	}
 	config.SandboxRuntime = runtime
-	if runtime == WorkspaceSandboxProcess {
+	if runtime != WorkspaceSandboxDocker {
 		if config.RequireSandbox {
-			return fmt.Errorf("require_sandbox requires docker or firecracker")
+			if runtime != WorkspaceSandboxFirecracker {
+				return fmt.Errorf("require_sandbox requires sandbox_runtime=docker or firecracker")
+			}
 		}
+		if runtime == WorkspaceSandboxFirecracker {
+			if err := validateSandboxSupervisorCommand(config.SandboxSupervisorCommand); err != nil {
+				return err
+			}
+			config.SandboxSupervisorCommand = append([]string(nil), config.SandboxSupervisorCommand...)
+			config.SandboxNetwork = "isolated"
+			return nil
+		}
+		// Process mode is explicitly honest: it inherits the worker network and
+		// therefore is not a network sandbox. Resource values are ignored.
 		config.SandboxNetwork = "inherited"
 		return nil
 	}
-	if runtime == WorkspaceSandboxFirecracker {
-		if len(config.SandboxSupervisorCommand) == 0 {
-			return fmt.Errorf("firecracker sandbox requires a supervisor command")
-		}
-		for _, argument := range config.SandboxSupervisorCommand {
-			if strings.TrimSpace(argument) == "" || strings.ContainsAny(argument, "\x00\r\n;&|<>`$(){}") {
-				return fmt.Errorf("sandbox_supervisor_command contains an unsafe argument")
-			}
-		}
-		config.SandboxNetwork = "isolated"
-		return nil
-	}
-	if strings.TrimSpace(config.SandboxImage) == "" {
-		return fmt.Errorf("docker sandbox requires sandbox_image")
-	}
-	if config.SandboxNetwork == "" {
+	if strings.TrimSpace(config.SandboxNetwork) == "" {
 		config.SandboxNetwork = "none"
 	}
 	config.SandboxNetwork = strings.ToLower(strings.TrimSpace(config.SandboxNetwork))
 	if config.SandboxNetwork != "none" && config.SandboxNetwork != "bridge" {
 		return fmt.Errorf("sandbox_network must be none or bridge")
 	}
-	if config.SandboxCPUs == "" {
+	if !sandboxImagePattern.MatchString(strings.TrimSpace(config.SandboxImage)) {
+		return fmt.Errorf("docker sandbox requires a valid sandbox_image")
+	}
+	config.SandboxImage = strings.TrimSpace(config.SandboxImage)
+	config.SandboxImageDigest = strings.ToLower(strings.TrimSpace(config.SandboxImageDigest))
+	if config.SandboxImageDigest != "" && !sandboxImageDigestPattern.MatchString(config.SandboxImageDigest) {
+		return fmt.Errorf("sandbox_image_digest must be a sha256 digest")
+	}
+	if strings.TrimSpace(config.SandboxCPUs) == "" {
 		config.SandboxCPUs = "2"
 	}
-	if config.SandboxMemory == "" {
+	if !sandboxCPUPattern.MatchString(strings.TrimSpace(config.SandboxCPUs)) {
+		return fmt.Errorf("sandbox_cpus must be a positive Docker CPU value")
+	}
+	config.SandboxCPUs = strings.TrimSpace(config.SandboxCPUs)
+	if strings.TrimSpace(config.SandboxMemory) == "" {
 		config.SandboxMemory = "2g"
 	}
+	if !sandboxMemoryPattern.MatchString(strings.TrimSpace(config.SandboxMemory)) {
+		return fmt.Errorf("sandbox_memory must be a Docker memory value")
+	}
+	config.SandboxMemory = strings.TrimSpace(config.SandboxMemory)
 	if config.SandboxPIDsLimit == 0 {
 		config.SandboxPIDsLimit = 256
 	}
@@ -295,82 +418,30 @@ func validateWorkspaceSandbox(config *WorkspaceConfig) error {
 	return nil
 }
 
-// SandboxAttestation is observational evidence from an operator-owned
-// Firecracker supervisor. It never acts as a permission grant on its own.
-type SandboxAttestation struct {
-	Runtime              string `json:"runtime"`
-	RuntimeVersion       string `json:"runtime_version,omitempty"`
-	Transport            string `json:"transport,omitempty"`
-	EvidenceScope        string `json:"evidence_scope"`
-	GuestCommandVerified bool   `json:"guest_command_verified"`
-	EvidenceDigest       string `json:"evidence_digest,omitempty"`
-}
-
-func sandboxAttestation(raw string) *SandboxAttestation {
-	if strings.TrimSpace(raw) == "" || len(raw) > 2048 {
-		return nil
+func validateSandboxSupervisorCommand(command []string) error {
+	if len(command) == 0 || len(command) > 8 {
+		return fmt.Errorf("firecracker sandbox requires one supervisor command with at most eight arguments")
 	}
-	var value SandboxAttestation
-	if json.Unmarshal([]byte(raw), &value) != nil {
-		return nil
-	}
-	value.Runtime = strings.ToLower(strings.TrimSpace(value.Runtime))
-	value.Transport = strings.ToLower(strings.TrimSpace(value.Transport))
-	value.EvidenceScope = strings.ToLower(strings.TrimSpace(value.EvidenceScope))
-	if value.Runtime != WorkspaceSandboxFirecracker || !value.GuestCommandVerified || value.EvidenceScope == "" || (value.Transport != "virtio_vsock" && (value.Transport != "serial_console" || value.EvidenceScope != "local_task_guest_command")) {
-		return nil
-	}
-	return &value
-}
-
-func validateReadOnlyFixturePaths(paths []string) error {
-	if len(paths) > maxReadOnlyFixturePaths {
-		return fmt.Errorf("read_only_fixture_paths may contain at most %d entries", maxReadOnlyFixturePaths)
-	}
-	seen := make(map[string]struct{}, len(paths))
-	for index, configured := range paths {
-		configured = strings.TrimSpace(configured)
-		if configured == "" || filepath.IsAbs(configured) || filepath.VolumeName(configured) != "" || strings.ContainsAny(configured, "\x00\r\n") {
-			return fmt.Errorf("read_only_fixture_paths[%d] is invalid", index)
+	for index, part := range command {
+		part = strings.TrimSpace(part)
+		if part == "" || strings.ContainsAny(part, "\x00\r\n") || strings.ContainsAny(part, ";&|<>`$(){}") {
+			return fmt.Errorf("sandbox_supervisor_command contains an unsafe argument")
 		}
-		clean := filepath.Clean(configured)
-		if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-			return fmt.Errorf("read_only_fixture_paths[%d] must remain inside the workspace", index)
+		if workspaceSensitiveCommandArgument.MatchString(part) {
+			return fmt.Errorf("sandbox_supervisor_command must not contain secret-shaped arguments")
 		}
-		for _, segment := range strings.FieldsFunc(filepath.ToSlash(clean), func(r rune) bool { return r == '/' }) {
-			if segment == ".git" || excludedDirectory(segment) {
-				return fmt.Errorf("read_only_fixture_paths[%d] targets an excluded directory", index)
-			}
+		if index == 0 && (part == "." || part == ".." || strings.HasPrefix(part, "-")) {
+			return fmt.Errorf("sandbox_supervisor_command executable is invalid")
 		}
-		if !safeContextFile(clean) {
-			return fmt.Errorf("read_only_fixture_paths[%d] may contain credentials", index)
-		}
-		key := strings.ToLower(filepath.ToSlash(clean))
-		if _, duplicate := seen[key]; duplicate {
-			return fmt.Errorf("read_only_fixture_paths[%d] is duplicated", index)
-		}
-		seen[key] = struct{}{}
-		paths[index] = clean
 	}
 	return nil
 }
 
 var gitBranchName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,126}$`)
-var workspaceSSHHostPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$`)
 
 func validateWorkspaceBase(repositoryURL, baseBranch string) error {
 	if strings.ContainsAny(repositoryURL, "\x00\r\n") {
 		return fmt.Errorf("repository_url is invalid")
-	}
-	// A managed checkout must name the branch detected during onboarding (or
-	// another explicitly approved branch). Silently assuming `main` would make
-	// non-main repositories sync the wrong ref and violate the frozen context.
-	// Read-only local workspaces do not need a configured remote or base branch.
-	if repositoryURL == "" && baseBranch == "" {
-		return nil
-	}
-	if repositoryURL == "" || baseBranch == "" {
-		return fmt.Errorf("repository_url and base_branch must be configured together")
 	}
 	if !gitBranchName.MatchString(baseBranch) || strings.Contains(baseBranch, "..") || strings.HasSuffix(baseBranch, "/") {
 		return fmt.Errorf("base_branch is invalid")
@@ -438,7 +509,10 @@ func validateCommandList(name string, commands [][]string) error {
 	}
 	allowed := map[string]bool{
 		"npm": true, "npx": true, "go": true, "python": true, "pytest": true, "cargo": true,
-		"gitleaks": true, "govulncheck": true, "osv-scanner": true, "cargo-audit": true,
+		// These are deterministic, operator-owned security gates used by the
+		// registered Go and TypeScript workspaces. They remain command-array
+		// only; shell interpreters are intentionally not allowed.
+		"gitleaks": true, "govulncheck": true,
 	}
 	for _, command := range commands {
 		if len(command) == 0 || !allowed[command[0]] {
@@ -454,42 +528,6 @@ func validateCommandList(name string, commands [][]string) error {
 		}
 	}
 	return nil
-}
-
-var workspaceTestKind = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:/+-]{0,127}$`)
-
-// validateCommandKinds keeps test identity next to operator-owned executable
-// configuration. A partial positional map is ambiguous and duplicate names
-// could let one command masquerade as multiple policy requirements.
-func validateCommandKinds(validationCommands [][]string, validationKinds []string, qaCommands [][]string, qaKinds []string) error {
-	for _, pair := range []struct {
-		name     string
-		commands [][]string
-		kinds    []string
-	}{{"validation_command_kinds", validationCommands, validationKinds}, {"qa_command_kinds", qaCommands, qaKinds}} {
-		if len(pair.kinds) != 0 && len(pair.kinds) != len(pair.commands) {
-			return fmt.Errorf("%s must be empty or contain one identity per command", pair.name)
-		}
-	}
-	seen := make(map[string]struct{}, len(validationKinds)+len(qaKinds))
-	for _, kind := range append(append([]string(nil), validationKinds...), qaKinds...) {
-		if kind != strings.TrimSpace(kind) || !workspaceTestKind.MatchString(kind) {
-			return fmt.Errorf("test command identity %q is invalid", kind)
-		}
-		key := strings.ToLower(kind)
-		if _, duplicate := seen[key]; duplicate {
-			return fmt.Errorf("test command identity %q is duplicated", kind)
-		}
-		seen[key] = struct{}{}
-	}
-	return nil
-}
-
-func configuredCommandKind(kinds []string, index int) string {
-	if len(kinds) == 0 || index < 0 || index >= len(kinds) {
-		return ""
-	}
-	return kinds[index]
 }
 
 func validateArtifactPatterns(patterns []string) error {
@@ -574,8 +612,16 @@ func approvedSemanticRuntime(command string) bool {
 	if command == "npx" || command == "node" || command == "go" {
 		return true
 	}
-	windowsAbsolute := len(command) >= 3 && command[1] == ':' && (command[2] == '/' || command[2] == '\\')
-	return (filepath.IsAbs(command) || windowsAbsolute) && strings.EqualFold(filepath.Base(command), "node.exe")
+	// Workspace configuration is shared by Windows and WSL workers, so check
+	// POSIX-rooted and Windows-rooted paths independently of the host OS.
+	normalized := strings.ReplaceAll(command, `\`, "/")
+	absPath := filepath.IsAbs(command) || strings.HasPrefix(command, "/") ||
+		workspaceAbsolutePathPattern.MatchString(normalized) || strings.HasPrefix(command, `\\`)
+	if !absPath || strings.HasSuffix(command, "/") || strings.HasSuffix(command, `\`) {
+		return false
+	}
+	base := filepath.Base(normalized)
+	return base == "node" || base == "node.exe"
 }
 
 type WorkspaceContext struct {
@@ -609,13 +655,15 @@ type WorkspaceArchitecture struct {
 // configuration can contain internal paths or credentials and is executed by
 // the deterministic QA/validation runner rather than the model.
 type WorkspaceHarness struct {
-	ValidationCommandCount      int    `json:"validation_command_count"`
-	NamedValidationCommandCount int    `json:"named_validation_command_count"`
-	QACommandCount              int    `json:"qa_command_count"`
-	NamedQACommandCount         int    `json:"named_qa_command_count"`
-	ArtifactCollection          bool   `json:"artifact_collection"`
-	ScreenshotMode              string `json:"screenshot_mode"`
-	SemanticQAMode              string `json:"semantic_qa_mode"`
+	ValidationCommandCount   int    `json:"validation_command_count"`
+	ComponentValidationCount int    `json:"component_validation_count"`
+	QACommandCount           int    `json:"qa_command_count"`
+	ArtifactCollection       bool   `json:"artifact_collection"`
+	ScreenshotMode           string `json:"screenshot_mode"`
+	SemanticQAMode           string `json:"semantic_qa_mode"`
+	SandboxMode              string `json:"sandbox_mode"`
+	SandboxNetwork           string `json:"sandbox_network"`
+	SandboxResourcePolicy    string `json:"sandbox_resource_policy"`
 }
 
 // RemoteRepositoryContext distinguishes a frozen GitHub checkpoint from a
@@ -650,45 +698,6 @@ type WorkspaceGitState struct {
 	RemoteAhead    int    `json:"remote_ahead,omitempty"`
 }
 
-// WorkspaceAttestationSnapshot is the intentionally narrow checkpoint that a
-// local worker can send to the Delivery control plane. It does not issue any
-// Git or network write and never exposes paths, origin URLs, commands or
-// repository contents. The control plane must still reconcile every accepted
-// value with the project's exact GitHub checkpoint before using it.
-func WorkspaceAttestationSnapshot(lookup func(string) string) ([]WorkspaceAttestation, error) {
-	workspaces, err := LoadWorkspaces(lookup("ITBEM_AI_WORKSPACES_JSON"))
-	if err != nil {
-		return nil, err
-	}
-	ids := make([]string, 0, len(workspaces))
-	for id := range workspaces {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	attestations := make([]WorkspaceAttestation, 0, len(ids))
-	for _, id := range ids {
-		workspace := workspaces[id]
-		state := ReadWorkspaceGitState(workspace)
-		attestation := WorkspaceAttestation{
-			ID:           id,
-			Available:    state.Available,
-			Capabilities: append([]string(nil), workspace.Config.Capabilities...),
-		}
-		if state.Available {
-			attestation.GitHubRepository = state.GitHubRepository
-			attestation.HeadSHA = state.HeadSHA
-			attestation.Branch = state.Branch
-			attestation.Clean = !state.HasLocalChanges
-			attestation.ChangeCount = state.LocalChangeCount
-			attestation.TrackingBranch = state.TrackingBranch
-			attestation.LocalAhead = state.LocalAhead
-			attestation.RemoteAhead = state.RemoteAhead
-		}
-		attestations = append(attestations, attestation)
-	}
-	return attestations, nil
-}
-
 type WorkspaceExcerpt struct {
 	Path    string `json:"path"`
 	Content string `json:"content"`
@@ -696,14 +705,13 @@ type WorkspaceExcerpt struct {
 
 var (
 	workspaceSensitiveJSONValue  = regexp.MustCompile(`(?im)("` + sensitiveWorkspaceKey + `"\s*:\s*")[^"\r\n]*(")`)
-	workspaceSensitiveAssignment = regexp.MustCompile(`(?im)(\b` + sensitiveWorkspaceKey + `\b\s*[:=]\s*)(?:"([^"\r\n]*)"|'([^'\r\n]*)'|([^\s"'\r\n]+))`)
+	workspaceSensitiveAssignment = regexp.MustCompile(`(?im)(\b` + sensitiveWorkspaceKey + `\b\s*[:=]\s*)["']?[^\s"'\r\n]+`)
 	workspaceBearerCredential    = regexp.MustCompile(`(?im)(\bauthorization\s*:\s*bearer\s+)[^\s\r\n]+`)
 	workspaceURLCredential       = regexp.MustCompile(`(?i)(\b[a-z][a-z0-9+.-]*://[^\s:@/]+:)[^\s@/]+(@)`)
 	workspacePEMBlock            = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`)
 	workspaceGitHubToken         = regexp.MustCompile(`\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{20,}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b`)
 	workspaceAWSAccessKey        = regexp.MustCompile(`\b(?:AKIA|ASIA)[A-Z0-9]{16}\b`)
 	workspaceSlackToken          = regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}\b`)
-	workspaceFormatVerb          = regexp.MustCompile(`^%[A-Za-z]$`)
 	// A workspace harness must never use command arguments as a secret
 	// transport. The runner config is operator-owned, but rejecting common
 	// secret-shaped flags here prevents accidental persistence and makes the
@@ -726,46 +734,7 @@ func redactWorkspaceExcerpt(content string) (string, int) {
 	content = replace(workspacePEMBlock, content, func(_ []string) string { return "<redacted private key>" })
 	content = replace(workspaceSensitiveJSONValue, content, func(parts []string) string { return parts[1] + "<redacted>" + parts[2] })
 	content = replace(workspaceBearerCredential, content, func(parts []string) string { return parts[1] + "<redacted>" })
-	assignmentSource := content
-	assignmentOffset := 0
-	content = workspaceSensitiveAssignment.ReplaceAllStringFunc(content, func(match string) string {
-		parts := workspaceSensitiveAssignment.FindStringSubmatch(match)
-		relativeStart := strings.Index(assignmentSource[assignmentOffset:], match)
-		matchStart := assignmentOffset + relativeStart
-		assignmentOffset = matchStart + len(match)
-		valueStart := matchStart + len(parts[1])
-		if relativeStart >= 0 && valueStart < len(assignmentSource) {
-			quote := sourceQuoteAt(assignmentSource, matchStart)
-			if quote != 0 && assignmentSource[valueStart] == quote {
-				// The assignment-shaped token ends at the surrounding source
-				// literal's closing quote, so it names a key but carries no value.
-				return match
-			}
-		}
-		value := ""
-		quote := ""
-		switch {
-		case parts[2] != "":
-			value, quote = parts[2], `"`
-		case parts[3] != "":
-			value, quote = parts[3], `'`
-		case parts[4] != "":
-			value = parts[4]
-		default:
-			// Empty quoted assignments and source-code string literals such as
-			// `"API_KEY ="` carry no credential. Preserving them byte-for-byte
-			// prevents redaction from fabricating review evidence.
-			return match
-		}
-		if workspaceFormatVerb.MatchString(value) {
-			// A label such as `token: %w` in source code describes an error and
-			// does not carry a credential. Preserving the format verb is important:
-			// replacing it changes program semantics and can fabricate findings.
-			return match
-		}
-		redactions++
-		return parts[1] + quote + "<redacted>" + quote
-	})
+	content = replace(workspaceSensitiveAssignment, content, func(parts []string) string { return parts[1] + "<redacted>" })
 	for _, pattern := range []*regexp.Regexp{workspaceURLCredential, workspaceGitHubToken, workspaceAWSAccessKey, workspaceSlackToken} {
 		content = replace(pattern, content, func(parts []string) string {
 			if len(parts) == 3 { // URL credentials retain a valid structural delimiter.
@@ -775,33 +744,6 @@ func redactWorkspaceExcerpt(content string) (string, int) {
 		})
 	}
 	return content, redactions
-}
-
-func sourceQuoteAt(content string, position int) byte {
-	lineStart := strings.LastIndex(content[:position], "\n") + 1
-	var quote byte
-	escaped := false
-	for index := lineStart; index < position; index++ {
-		character := content[index]
-		if quote != 0 {
-			if quote != '`' && escaped {
-				escaped = false
-				continue
-			}
-			if quote != '`' && character == '\\' {
-				escaped = true
-				continue
-			}
-			if character == quote {
-				quote = 0
-			}
-			continue
-		}
-		if character == '"' || character == '\'' || character == '`' {
-			quote = character
-		}
-	}
-	return quote
 }
 
 // RedactSourceExcerpt is the common final redaction boundary for source text
@@ -963,15 +905,35 @@ func workspaceHarness(config WorkspaceConfig) WorkspaceHarness {
 	if len(config.QASemanticCommand) > 0 {
 		semanticQAMode = "configured_command"
 	}
-	return WorkspaceHarness{
-		ValidationCommandCount:      len(config.ValidationCommands),
-		NamedValidationCommandCount: len(config.ValidationCommandKinds),
-		QACommandCount:              len(config.QACommands),
-		NamedQACommandCount:         len(config.QACommandKinds),
-		ArtifactCollection:          len(config.QAArtifactPatterns) > 0,
-		ScreenshotMode:              screenshotMode,
-		SemanticQAMode:              semanticQAMode,
+	sandboxMode := strings.ToLower(strings.TrimSpace(config.SandboxRuntime))
+	if sandboxMode == "" {
+		sandboxMode = WorkspaceSandboxProcess
 	}
+	resourcePolicy := "process-group-timeout-output-bounded"
+	if sandboxMode == WorkspaceSandboxDocker {
+		resourcePolicy = fmt.Sprintf("docker:cpus=%s,memory=%s,pids=%d", config.SandboxCPUs, config.SandboxMemory, config.SandboxPIDsLimit)
+	} else if sandboxMode == WorkspaceSandboxFirecracker {
+		resourcePolicy = "firecracker:operator-supervisor-per-task"
+	}
+	return WorkspaceHarness{
+		ValidationCommandCount:   len(config.ValidationCommands),
+		ComponentValidationCount: componentValidationCommandCount(config.ComponentValidationCommands),
+		QACommandCount:           len(config.QACommands),
+		ArtifactCollection:       len(config.QAArtifactPatterns) > 0,
+		ScreenshotMode:           screenshotMode,
+		SemanticQAMode:           semanticQAMode,
+		SandboxMode:              sandboxMode,
+		SandboxNetwork:           config.SandboxNetwork,
+		SandboxResourcePolicy:    resourcePolicy,
+	}
+}
+
+func componentValidationCommandCount(commands map[string][][]string) int {
+	total := 0
+	for _, component := range commands {
+		total += len(component)
+	}
+	return total
 }
 
 func contextFilePriority(relative string, scope, focus []string) int {
@@ -1051,63 +1013,7 @@ func parseGitAheadBehind(raw string) (localAhead, remoteAhead int) {
 // by the delivery control plane when a registered workspace is attached to a
 // project. It never contacts a remote, fetches, pulls, or returns a diff.
 func ReadWorkspaceGitState(workspace Workspace) WorkspaceGitState {
-	state := workspaceGitState(workspace.Root)
-	if !state.Available || state.GitHubRepository != "" {
-		return state
-	}
-	// A developer may use an SSH Host alias (for example github.com-work) in
-	// their local Git configuration. That alias is deliberately not accepted as
-	// proof that an arbitrary network endpoint is GitHub. It can, however, be
-	// bound to the operator-owned registry only when the actual origin is the
-	// exact registered remote. This restores the Vault identity used for local
-	// planning without widening publication: publication still requires the
-	// canonical GitHub App checkpoint and its independent remote validation.
-	if repository, err := operatorRegisteredGitHubRepository(workspace); err == nil {
-		state.GitHubRepository = repository.Owner + "/" + repository.Name
-	}
-	return state
-}
-
-func operatorRegisteredGitHubRepository(workspace Workspace) (githubRepository, error) {
-	registered := strings.TrimSpace(workspace.Config.RepositoryURL)
-	if registered == "" {
-		return githubRepository{}, fmt.Errorf("workspace has no operator-registered remote")
-	}
-	origin, err := managedWorkspaceOrigin(context.Background(), workspace)
-	if err != nil || !sameOperatorRegisteredRemote(origin, registered) {
-		return githubRepository{}, fmt.Errorf("workspace origin does not match its operator-registered remote")
-	}
-	if repository, parseErr := parseGitHubRemote(registered); parseErr == nil {
-		return repository, nil
-	}
-	return parseOperatorSSHGitHubAlias(registered)
-}
-
-// sameOperatorRegisteredRemote intentionally does not canonicalize SSH aliases
-// to HTTPS URLs. The registry's remote is the operator's explicit trust
-// binding; accepting a different transport or host would let a task attach a
-// Vault identity to a checkout that the operator did not register.
-func sameOperatorRegisteredRemote(actual, registered string) bool {
-	canonical := func(value string) string {
-		return strings.TrimSuffix(strings.TrimSpace(value), "/")
-	}
-	return canonical(actual) != "" && canonical(actual) == canonical(registered)
-}
-
-// parseOperatorSSHGitHubAlias extracts only the owner/repository identity from
-// the standard git@host:owner/repository.git SSH form. The host can be an SSH
-// alias solely because repository_url is operator-owned and must exactly match
-// origin above. This function never authorizes a network request or a push.
-func parseOperatorSSHGitHubAlias(value string) (githubRepository, error) {
-	value = strings.TrimSpace(value)
-	if !strings.HasPrefix(value, "git@") {
-		return githubRepository{}, fmt.Errorf("operator remote is not a supported SSH alias")
-	}
-	parts := strings.SplitN(strings.TrimPrefix(value, "git@"), ":", 2)
-	if len(parts) != 2 || !workspaceSSHHostPattern.MatchString(parts[0]) || strings.ContainsAny(parts[1], "?#@\\\r\n") {
-		return githubRepository{}, fmt.Errorf("operator remote is not a safe SSH alias")
-	}
-	return parseGitHubRemote("https://github.com/" + parts[1])
+	return workspaceGitState(workspace.Root)
 }
 
 // FetchWorkspaceRemote refreshes only origin's remote refs for a registered
@@ -1115,51 +1021,6 @@ func parseOperatorSSHGitHubAlias(value string) (githubRepository, error) {
 // apply a merge/rebase, create a worktree or make a commit. Credentials remain
 // outside the process environment and interactive prompts are disabled.
 func FetchWorkspaceRemote(ctx context.Context, workspace Workspace) (WorkspaceGitState, error) {
-	return fetchWorkspaceRemote(ctx, workspace, "origin", nil)
-}
-
-// FetchAuthorizedWorkspaceRemote refreshes a GitHub workspace through the
-// dedicated read-only Source App. GitHub repositories never fall back to a
-// developer credential, a cached credential helper, SSH, or unauthenticated
-// public access merely because a repository happens to be public today.
-// Local/non-GitHub fixtures keep the legacy operator-owned fetch path so the
-// deterministic test harness does not need a cloud identity.
-func FetchAuthorizedWorkspaceRemote(ctx context.Context, workspace Workspace, lookup func(string) string) (WorkspaceGitState, error) {
-	repository, remote, required, err := gitHubSourceWorkspaceRemote(workspace)
-	if err != nil {
-		return WorkspaceGitState{}, err
-	}
-	if !required {
-		return FetchWorkspaceRemote(ctx, workspace)
-	}
-	config, err := LoadGitHubSourceAppConfig(lookup)
-	if err != nil {
-		return WorkspaceGitState{}, fmt.Errorf("GitHub source App is required for workspace %s: %w", workspace.ID, err)
-	}
-	return FetchWorkspaceRemoteWithGitHubApp(ctx, workspace, repository, remote, config, nil, time.Now().UTC())
-}
-
-// FetchWorkspaceRemoteWithGitHubApp performs one remote-ref refresh using an
-// installation token scoped to the exact operator-registered repository. It
-// is exported for the process entrypoint and test fixtures; callers should use
-// FetchAuthorizedWorkspaceRemote with their process configuration.
-func FetchWorkspaceRemoteWithGitHubApp(ctx context.Context, workspace Workspace, repository githubRepository, remote string, config GitHubAppConfig, client *http.Client, now time.Time) (WorkspaceGitState, error) {
-	if err := ensureManagedWorkspaceOrigin(ctx, workspace); err != nil {
-		return WorkspaceGitState{}, err
-	}
-	token, err := MintGitHubRepositoryToken(ctx, config, client, now, repository.Owner+"/"+repository.Name)
-	if err != nil {
-		return WorkspaceGitState{}, fmt.Errorf("GitHub source App could not authenticate the registered repository")
-	}
-	environment, cleanup, err := gitHubInstallationTokenEnvironment(token.Token)
-	if err != nil {
-		return WorkspaceGitState{}, err
-	}
-	defer cleanup()
-	return fetchWorkspaceRemote(ctx, workspace, remote, environment)
-}
-
-func fetchWorkspaceRemote(ctx context.Context, workspace Workspace, remote string, environment map[string]string) (WorkspaceGitState, error) {
 	if err := workspace.RequireCapability(WorkspaceCapabilityFetchRemote); err != nil {
 		return WorkspaceGitState{}, err
 	}
@@ -1171,7 +1032,7 @@ func fetchWorkspaceRemote(ctx context.Context, workspace Workspace, remote strin
 	if err != nil || origin.ExitCode != 0 || strings.TrimSpace(origin.Output) == "" {
 		return WorkspaceGitState{}, fmt.Errorf("workspace has no readable origin remote")
 	}
-	fetched, err := runLocalWithEnv(ctx, workspace.Root, 60*time.Second, "", gitWorkspaceEnvironment(environment), "git", gitWorkspaceFetchArguments(remote, gitWorkspaceUsesInstallationToken(environment))...)
+	fetched, err := runLocalWithEnv(ctx, workspace.Root, 60*time.Second, "", map[string]string{"GIT_TERMINAL_PROMPT": "0"}, "git", "fetch", "--prune", "--tags", "--no-recurse-submodules", "origin")
 	if err != nil || fetched.ExitCode != 0 {
 		return WorkspaceGitState{}, fmt.Errorf("remote fetch could not complete")
 	}
@@ -1190,10 +1051,9 @@ func SyncManagedWorkspace(ctx context.Context, workspace Workspace) (WorkspaceGi
 	return syncManagedWorkspace(ctx, workspace, "", nil)
 }
 
-// SyncAuthorizedManagedWorkspace is the Delivery path for managed source
-// checkouts. Every GitHub repository is synchronized with a dedicated,
-// read-only Source App token selected for that exact repository. The legacy
-// synchronizer remains available only for local/non-GitHub fixtures.
+// SyncAuthorizedManagedWorkspace uses only the dedicated contents-read Source
+// App for registered GitHub repositories. Non-GitHub local fixtures retain the
+// operator-owned legacy fetch path.
 func SyncAuthorizedManagedWorkspace(ctx context.Context, workspace Workspace, lookup func(string) string) (WorkspaceGitState, error) {
 	repository, remote, required, err := gitHubSourceWorkspaceRemote(workspace)
 	if err != nil {
@@ -1209,10 +1069,6 @@ func SyncAuthorizedManagedWorkspace(ctx context.Context, workspace Workspace, lo
 	return SyncManagedWorkspaceWithGitHubApp(ctx, workspace, repository, remote, config, nil, time.Now().UTC())
 }
 
-// SyncManagedWorkspaceWithGitHubApp keeps an operator-managed GitHub checkout
-// on its configured base branch using only a short-lived, repository-scoped
-// Source App token. The token is never written into a remote URL, command
-// argument, log, task result, Vault, or evidence object.
 func SyncManagedWorkspaceWithGitHubApp(ctx context.Context, workspace Workspace, repository githubRepository, remote string, config GitHubAppConfig, client *http.Client, now time.Time) (WorkspaceGitState, error) {
 	token, err := MintGitHubRepositoryToken(ctx, config, client, now, repository.Owner+"/"+repository.Name)
 	if err != nil {
@@ -1223,6 +1079,10 @@ func SyncManagedWorkspaceWithGitHubApp(ctx context.Context, workspace Workspace,
 		return WorkspaceGitState{}, err
 	}
 	defer cleanup()
+	registeredRepository, registeredRemote, required, err := gitHubSourceWorkspaceRemote(workspace)
+	if err != nil || !required || !strings.EqualFold(registeredRepository.Owner+"/"+registeredRepository.Name, repository.Owner+"/"+repository.Name) || !sameManagedRemote(registeredRemote, remote) {
+		return WorkspaceGitState{}, fmt.Errorf("GitHub source sync target does not match the registered workspace")
+	}
 	return syncManagedWorkspace(ctx, workspace, remote, environment)
 }
 
@@ -1259,13 +1119,6 @@ func syncManagedWorkspace(ctx context.Context, workspace Workspace, authenticate
 	} else if err != nil {
 		return WorkspaceGitState{}, fmt.Errorf("inspect managed workspace: %w", err)
 	}
-	// Implementation worktrees are runtime-owned children of the dedicated
-	// managed checkout.  Tell Git about that reserved directory as well as
-	// excluding it in workspaceGitState: command-line status, external tooling
-	// and a later agent restart must all see the base checkout as clean while
-	// the separately reviewable task worktree exists.  This is deliberately a
-	// local git-info exclude, never a repository .gitignore change, and it
-	// exempts no other local path from the dirty-check gate.
 	if err := ensureManagedWorkspaceRuntimeExclude(ctx, workspace.Root); err != nil {
 		return WorkspaceGitState{}, err
 	}
@@ -1276,11 +1129,11 @@ func syncManagedWorkspace(ctx context.Context, workspace Workspace, authenticate
 	if state.HasLocalChanges {
 		return WorkspaceGitState{}, fmt.Errorf("managed workspace has local changes; refusing to switch its base branch")
 	}
-	origin, err := managedWorkspaceOrigin(ctx, workspace)
-	if err != nil {
+	origin, err := runLocal(ctx, workspace.Root, 20*time.Second, "", "git", "remote", "get-url", "origin")
+	if err != nil || origin.ExitCode != 0 || strings.TrimSpace(origin.Output) == "" {
 		return WorkspaceGitState{}, fmt.Errorf("managed workspace has no readable origin remote")
 	}
-	if !sameManagedRemote(origin, remoteURL) {
+	if !sameManagedRemote(origin.Output, remoteURL) {
 		return WorkspaceGitState{}, fmt.Errorf("managed workspace origin does not match its registered repository_url")
 	}
 	fetched, err := runLocalWithEnv(ctx, workspace.Root, 60*time.Second, "", gitWorkspaceEnvironment(environment), "git", gitWorkspaceFetchArguments(fetchRemote, gitWorkspaceUsesInstallationToken(environment))...)
@@ -1311,185 +1164,12 @@ func syncManagedWorkspace(ctx context.Context, workspace Workspace, authenticate
 	if err != nil || updated.ExitCode != 0 {
 		return WorkspaceGitState{}, fmt.Errorf("managed workspace base branch cannot fast-forward; resolve it without rewriting history")
 	}
-	// A successful fast-forward alone is not enough: Git accepts the no-op
-	// merge when a locally-created base branch is ahead of origin. Delivery
-	// must never start from unpublished local history, so the operator-managed
-	// checkout has to be byte-for-byte at the fetched remote base afterwards.
-	// This also makes the later task worktree's base an explicit GitHub
-	// checkpoint rather than an implicit local HEAD.
 	head, headErr := runLocal(ctx, workspace.Root, 20*time.Second, "", "git", "rev-parse", "HEAD")
 	remoteHead, remoteErr := runLocal(ctx, workspace.Root, 20*time.Second, "", "git", "rev-parse", remoteBase)
 	if headErr != nil || remoteErr != nil || head.ExitCode != 0 || remoteHead.ExitCode != 0 || !strings.EqualFold(strings.TrimSpace(head.Output), strings.TrimSpace(remoteHead.Output)) {
 		return WorkspaceGitState{}, fmt.Errorf("managed workspace base branch is not identical to fetched origin")
 	}
 	return workspaceGitState(workspace.Root), nil
-}
-
-const managedWorkspaceRuntimeExclude = ".itbem-agent-worktrees/"
-
-func ensureManagedWorkspaceRuntimeExclude(ctx context.Context, root string) error {
-	resolved, err := runLocal(ctx, root, 20*time.Second, "", "git", "rev-parse", "--path-format=absolute", "--git-path", "info/exclude")
-	if err != nil || resolved.ExitCode != 0 {
-		return fmt.Errorf("resolve managed workspace runtime exclude")
-	}
-	path := filepath.Clean(strings.TrimSpace(resolved.Output))
-	if path == "." || !filepath.IsAbs(path) {
-		return fmt.Errorf("managed workspace runtime exclude path is invalid")
-	}
-	common, commonErr := runLocal(ctx, root, 20*time.Second, "", "git", "rev-parse", "--path-format=absolute", "--git-common-dir")
-	if commonErr != nil || common.ExitCode != 0 {
-		return fmt.Errorf("resolve managed workspace git directory")
-	}
-	gitDirectory := filepath.Clean(strings.TrimSpace(common.Output))
-	relative, relativeErr := filepath.Rel(gitDirectory, path)
-	if relativeErr != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("managed workspace runtime exclude is outside its Git directory")
-	}
-	if info, statErr := os.Lstat(path); statErr == nil {
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return fmt.Errorf("managed workspace runtime exclude is not a regular file")
-		}
-	} else if !errors.Is(statErr, os.ErrNotExist) {
-		return fmt.Errorf("inspect managed workspace runtime exclude: %w", statErr)
-	}
-	contents, readErr := os.ReadFile(path)
-	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
-		return fmt.Errorf("read managed workspace runtime exclude: %w", readErr)
-	}
-	for _, line := range strings.Split(string(contents), "\n") {
-		if strings.TrimSpace(line) == managedWorkspaceRuntimeExclude {
-			return nil
-		}
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return fmt.Errorf("prepare managed workspace runtime exclude: %w", err)
-	}
-	entry := string(contents)
-	if entry != "" && !strings.HasSuffix(entry, "\n") {
-		entry += "\n"
-	}
-	entry += managedWorkspaceRuntimeExclude + "\n"
-	if err := os.WriteFile(path, []byte(entry), 0600); err != nil {
-		return fmt.Errorf("write managed workspace runtime exclude: %w", err)
-	}
-	return nil
-}
-
-func gitHubSourceWorkspaceRemote(workspace Workspace) (githubRepository, string, bool, error) {
-	registered := strings.TrimSpace(workspace.Config.RepositoryURL)
-	if registered == "" {
-		return githubRepository{}, "", false, nil
-	}
-	lower := strings.ToLower(registered)
-	if !strings.HasPrefix(lower, "https://github.com/") && !strings.HasPrefix(lower, "git@") {
-		return githubRepository{}, "", false, nil
-	}
-	repository, err := parseGitHubRemote(registered)
-	if err != nil {
-		repository, err = parseOperatorSSHGitHubAlias(registered)
-	}
-	if err != nil {
-		return githubRepository{}, "", true, fmt.Errorf("workspace %s has an invalid GitHub repository_url", workspace.ID)
-	}
-	return repository, "https://github.com/" + repository.Owner + "/" + repository.Name + ".git", true, nil
-}
-
-// GitHubSourceAccessRequired reports whether this lane has any
-// operator-registered GitHub workspace that must be synchronized through the
-// dedicated Source App. It is safe for doctor/preflight use: it reads only the
-// registry and never opens a checkout, contacts GitHub, or loads a credential.
-func GitHubSourceAccessRequired(lookup func(string) string) (bool, error) {
-	workspaces, err := LoadWorkspaceRegistry(lookup("ITBEM_AI_WORKSPACES_JSON"))
-	if err != nil {
-		return false, err
-	}
-	for _, workspace := range workspaces {
-		_, _, required, sourceErr := gitHubSourceWorkspaceRemote(workspace)
-		if sourceErr != nil {
-			return false, sourceErr
-		}
-		if required {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-func ensureManagedWorkspaceOrigin(ctx context.Context, workspace Workspace) error {
-	if err := workspace.RequireCapability(WorkspaceCapabilityFetchRemote); err != nil {
-		return err
-	}
-	state := workspaceGitState(workspace.Root)
-	if !state.Available || strings.TrimSpace(state.HeadSHA) == "" {
-		return fmt.Errorf("workspace is not a readable Git repository")
-	}
-	origin, err := managedWorkspaceOrigin(ctx, workspace)
-	if err != nil || !sameManagedRemote(origin, workspace.Config.RepositoryURL) {
-		return fmt.Errorf("workspace origin does not match its registered repository_url")
-	}
-	return nil
-}
-
-// managedWorkspaceOrigin reads the literal remote value owned by the
-// checkout. Unlike `git remote get-url`, this deliberately does not expand
-// url.*.insteadOf rules: those rules are transport routing, not evidence that
-// the checkout is registered to a particular repository.
-func managedWorkspaceOrigin(ctx context.Context, workspace Workspace) (string, error) {
-	origin, err := runLocal(ctx, workspace.Root, 20*time.Second, "", "git", "config", "--get", "remote.origin.url")
-	if err != nil || origin.ExitCode != 0 || strings.TrimSpace(origin.Output) == "" {
-		return "", fmt.Errorf("workspace has no readable origin remote")
-	}
-	return strings.TrimSpace(origin.Output), nil
-}
-
-func gitWorkspaceEnvironment(environment map[string]string) map[string]string {
-	if len(environment) == 0 {
-		return map[string]string{"GIT_TERMINAL_PROMPT": "0"}
-	}
-	result := make(map[string]string, len(environment)+1)
-	for key, value := range environment {
-		result[key] = value
-	}
-	result["GIT_TERMINAL_PROMPT"] = "0"
-	return result
-}
-
-func gitWorkspaceUsesInstallationToken(environment map[string]string) bool {
-	return strings.TrimSpace(environment["ITBEM_GITHUB_INSTALLATION_TOKEN"]) != ""
-}
-
-func gitWorkspaceCloneArguments(branch, remote, directory string, suppressCredentialHelper bool) []string {
-	arguments := []string{"clone", "--origin", "origin", "--branch", branch, "--no-recurse-submodules", remote, directory}
-	if suppressCredentialHelper {
-		arguments = append(gitHubInstallationGitConfigArguments(), arguments...)
-	}
-	return arguments
-}
-
-func gitWorkspaceFetchArguments(remote string, suppressCredentialHelper bool) []string {
-	arguments := []string{"fetch", "--prune", "--tags", "--no-recurse-submodules", remote}
-	if suppressCredentialHelper {
-		arguments = append(gitHubInstallationGitConfigArguments(), arguments...)
-	}
-	if remote != "origin" {
-		arguments = append(arguments, "+refs/heads/*:refs/remotes/origin/*")
-	}
-	return arguments
-}
-
-// gitHubInstallationGitConfigArguments overrides the few local Git settings
-// that could replace or intercept a repository-scoped App token. The checkout
-// is still used for Git objects and the registered origin binding, but an
-// operator/developer local configuration cannot silently select a credential
-// helper, an HTTP proxy, a weakened TLS policy, or an extra authorization
-// header for the authenticated network operation.
-func gitHubInstallationGitConfigArguments() []string {
-	return []string{
-		"-c", "credential.helper=",
-		"-c", "http.proxy=",
-		"-c", "http.sslVerify=true",
-		"-c", "http.extraHeader=",
-	}
 }
 
 // sameManagedRemote deliberately accepts only cosmetic trailing slashes. A
@@ -1507,17 +1187,21 @@ func sameManagedRemote(actual, registered string) bool {
 // operator verify that a local runner can safely serve a project without
 // emitting paths, remotes, source excerpts, credentials, or command output.
 type WorkspaceDiagnostic struct {
-	ID                          string            `json:"id"`
-	Ready                       bool              `json:"ready"`
-	Issue                       string            `json:"issue,omitempty"`
-	Capabilities                []string          `json:"capabilities"`
-	ValidationCommandCount      int               `json:"validation_command_count"`
-	NamedValidationCommandCount int               `json:"named_validation_command_count"`
-	QACommandCount              int               `json:"qa_command_count"`
-	NamedQACommandCount         int               `json:"named_qa_command_count"`
-	ScreenshotMode              string            `json:"screenshot_mode"`
-	SemanticQAMode              string            `json:"semantic_qa_mode"`
-	Git                         WorkspaceGitState `json:"git"`
+	ID                     string            `json:"id"`
+	Ready                  bool              `json:"ready"`
+	Issue                  string            `json:"issue,omitempty"`
+	DependencyState        string            `json:"dependency_state,omitempty"`
+	DependencyReason       string            `json:"dependency_reason,omitempty"`
+	DependencyNextAction   string            `json:"dependency_next_action,omitempty"`
+	SandboxMode            string            `json:"sandbox_mode"`
+	IsolationMode          string            `json:"isolation_mode"`
+	SandboxReady           bool              `json:"sandbox_ready"`
+	Capabilities           []string          `json:"capabilities"`
+	ValidationCommandCount int               `json:"validation_command_count"`
+	QACommandCount         int               `json:"qa_command_count"`
+	ScreenshotMode         string            `json:"screenshot_mode"`
+	SemanticQAMode         string            `json:"semantic_qa_mode"`
+	Git                    WorkspaceGitState `json:"git"`
 }
 
 // WorkspaceReadiness is the small, continuously reportable projection of a
@@ -1527,15 +1211,42 @@ type WorkspaceDiagnostic struct {
 // a live worker with a worker that is actually ready to execute a given kind
 // of Delivery work.
 type WorkspaceReadiness struct {
-	ID                          string `json:"id"`
-	Ready                       bool   `json:"ready"`
-	QAReady                     bool   `json:"qa_ready"`
-	VisualQAReady               bool   `json:"visual_qa_ready"`
-	PublicationReady            bool   `json:"publication_ready"`
-	ValidationCommandCount      int    `json:"validation_command_count"`
-	NamedValidationCommandCount int    `json:"named_validation_command_count"`
-	QACommandCount              int    `json:"qa_command_count"`
-	NamedQACommandCount         int    `json:"named_qa_command_count"`
+	ID    string `json:"id"`
+	Ready bool   `json:"ready"`
+	// IsolationMode is an honest attestation, not a capability grant. The
+	// host_process value means repository commands inherit the worker host and
+	// must never be treated as a hostile-code sandbox by the control plane.
+	IsolationMode    string `json:"isolation_mode"`
+	SandboxReady     bool   `json:"sandbox_ready"`
+	QAReady          bool   `json:"qa_ready"`
+	VisualQAReady    bool   `json:"visual_qa_ready"`
+	PublicationReady bool   `json:"publication_ready"`
+	// Dependency fields explain an unavailable local prerequisite. They are
+	// observational and never grant a capability or bypass a server gate.
+	DependencyState      string `json:"dependency_state,omitempty"`
+	DependencyReason     string `json:"dependency_reason,omitempty"`
+	DependencyNextAction string `json:"dependency_next_action,omitempty"`
+	// SandboxAttestation is observational metadata from an operator-owned
+	// supervisor. It never grants readiness by itself; the control plane still
+	// enforces the runtime-specific sandbox checks below.
+	SandboxAttestation     *SandboxAttestation `json:"sandbox_attestation,omitempty"`
+	ValidationCommandCount int                 `json:"validation_command_count"`
+	QACommandCount         int                 `json:"qa_command_count"`
+}
+
+// SandboxAttestation is deliberately small and credential-free. It records
+// what the supervisor actually proved, not what a model requested. A missing
+// or invalid value is omitted from the heartbeat rather than treated as a
+// successful sandbox. The local Firecracker fixture may use serial_console only
+// with evidence_scope=local_task_guest_command; production profiles must use
+// virtio_vsock.
+type SandboxAttestation struct {
+	Runtime              string `json:"runtime"`
+	RuntimeVersion       string `json:"runtime_version,omitempty"`
+	Transport            string `json:"transport,omitempty"`
+	EvidenceScope        string `json:"evidence_scope"`
+	GuestCommandVerified bool   `json:"guest_command_verified"`
+	EvidenceDigest       string `json:"evidence_digest,omitempty"`
 }
 
 // WorkspaceReadinessSnapshot validates only local registry state and returns
@@ -1547,18 +1258,59 @@ func WorkspaceReadinessSnapshot(lookup func(string) string) ([]WorkspaceReadines
 		return nil, err
 	}
 	result := make([]WorkspaceReadiness, 0, len(diagnostics))
+	attestation := sandboxAttestation(lookup("ITBEM_AI_SANDBOX_ATTESTATION_JSON"))
 	for _, diagnostic := range diagnostics {
 		canPublish := capabilityPresent(diagnostic.Capabilities, WorkspaceCapabilityStageCommit) &&
 			capabilityPresent(diagnostic.Capabilities, WorkspaceCapabilityPublishBranch) &&
 			capabilityPresent(diagnostic.Capabilities, WorkspaceCapabilityCreatePullReq)
 		result = append(result, WorkspaceReadiness{
-			ID: diagnostic.ID, Ready: diagnostic.Ready,
-			QAReady: diagnostic.Ready && diagnostic.QACommandCount > 0, VisualQAReady: diagnostic.Ready && diagnostic.SemanticQAMode == "configured_command",
-			PublicationReady: diagnostic.Ready && canPublish, ValidationCommandCount: diagnostic.ValidationCommandCount,
-			NamedValidationCommandCount: diagnostic.NamedValidationCommandCount, QACommandCount: diagnostic.QACommandCount, NamedQACommandCount: diagnostic.NamedQACommandCount,
+			ID:                     diagnostic.ID,
+			Ready:                  diagnostic.Ready,
+			IsolationMode:          diagnostic.IsolationMode,
+			SandboxReady:           diagnostic.SandboxReady,
+			QAReady:                diagnostic.Ready && diagnostic.QACommandCount > 0,
+			VisualQAReady:          diagnostic.Ready && diagnostic.SemanticQAMode == "configured_command",
+			PublicationReady:       diagnostic.Ready && canPublish,
+			DependencyState:        diagnostic.DependencyState,
+			DependencyReason:       diagnostic.DependencyReason,
+			DependencyNextAction:   diagnostic.DependencyNextAction,
+			SandboxAttestation:     attestation,
+			ValidationCommandCount: diagnostic.ValidationCommandCount,
+			QACommandCount:         diagnostic.QACommandCount,
 		})
 	}
 	return result, nil
+}
+
+func sandboxAttestation(raw string) *SandboxAttestation {
+	if strings.TrimSpace(raw) == "" || len(raw) > 2048 {
+		return nil
+	}
+	var value SandboxAttestation
+	if json.Unmarshal([]byte(raw), &value) != nil {
+		return nil
+	}
+	value.Runtime = strings.ToLower(strings.TrimSpace(value.Runtime))
+	value.RuntimeVersion = strings.TrimSpace(value.RuntimeVersion)
+	value.Transport = strings.ToLower(strings.TrimSpace(value.Transport))
+	value.EvidenceScope = strings.ToLower(strings.TrimSpace(value.EvidenceScope))
+	value.EvidenceDigest = strings.TrimSpace(value.EvidenceDigest)
+	transportValid := value.Transport == "virtio_vsock" || (value.Transport == "serial_console" && value.EvidenceScope == "local_task_guest_command")
+	if value.Runtime != "firecracker" || !transportValid || value.EvidenceScope == "" || !value.GuestCommandVerified {
+		return nil
+	}
+	if len(value.RuntimeVersion) > 64 || len(value.EvidenceScope) > 64 || len(value.EvidenceDigest) > 128 {
+		return nil
+	}
+	return &value
+}
+
+// SandboxAttestationSnapshot exposes the already-validated, observational
+// evidence carried by the worker heartbeat. It deliberately does not turn
+// Firecracker evidence into a readiness grant: lifecycle ownership,
+// worktree binding and task execution still belong to the control plane.
+func SandboxAttestationSnapshot(lookup func(string) string) *SandboxAttestation {
+	return sandboxAttestation(lookup("ITBEM_AI_SANDBOX_ATTESTATION_JSON"))
 }
 
 func capabilityPresent(capabilities []string, capability string) bool {
@@ -1588,47 +1340,205 @@ func DiagnoseWorkspaces(lookup func(string) string) ([]WorkspaceDiagnostic, erro
 		workspace := workspaces[id]
 		state := ReadWorkspaceGitState(workspace)
 		harness := workspace.Harness()
-		harnessExecutablesReady := workspaceHarnessExecutablesReady(workspace.Config)
 		screenshotMode := "default_responsive"
 		if harness.ScreenshotMode == "configured_command" {
 			screenshotMode = "configured_command"
 		}
+		isolationMode := workspaceIsolationMode(workspace)
+		dependencyState, dependencyReason, dependencyNextAction := workspaceDependency(workspace)
 		diagnostic := WorkspaceDiagnostic{
-			ID: id, Ready: state.Available && harnessExecutablesReady, Capabilities: append([]string(nil), workspace.Config.Capabilities...),
-			ValidationCommandCount: len(workspace.Config.ValidationCommands), NamedValidationCommandCount: len(workspace.Config.ValidationCommandKinds),
-			QACommandCount: len(workspace.Config.QACommands), NamedQACommandCount: len(workspace.Config.QACommandKinds),
+			ID: id, Ready: state.Available, Capabilities: append([]string(nil), workspace.Config.Capabilities...),
+			SandboxMode:     strings.ToLower(strings.TrimSpace(workspace.Config.SandboxRuntime)),
+			IsolationMode:   isolationMode,
+			DependencyState: dependencyState, DependencyReason: dependencyReason, DependencyNextAction: dependencyNextAction,
+			// A host process is an operator-trusted execution mode, not a
+			// sandbox. Keep this false so downstream readiness cannot mistake
+			// an inherited host boundary for isolation.
+			SandboxReady:           isolationMode == "docker_container",
+			ValidationCommandCount: len(workspace.Config.ValidationCommands), QACommandCount: len(workspace.Config.QACommands),
 			ScreenshotMode: screenshotMode, SemanticQAMode: harness.SemanticQAMode, Git: state,
 		}
 		if !state.Available {
 			diagnostic.Issue = "configured directory is not a readable Git worktree"
-		} else if !harnessExecutablesReady {
-			// Keep the diagnostic useful without publishing a local executable or
-			// absolute path through doctor output or recurring heartbeats.
-			diagnostic.Issue = "configured workspace harness executable is unavailable"
+		}
+		if workspace.Config.RequireSandbox || diagnostic.SandboxMode == WorkspaceSandboxDocker || diagnostic.SandboxMode == WorkspaceSandboxFirecracker {
+			diagnostic.SandboxReady = sandboxRuntimeReady(workspace)
+			if !diagnostic.SandboxReady {
+				diagnostic.Ready = false
+				diagnostic.Issue = "configured sandbox runtime is unavailable"
+				if diagnostic.DependencyState == "ready" {
+					diagnostic.DependencyState = "sandbox_unavailable"
+					diagnostic.DependencyReason = diagnostic.Issue
+					diagnostic.DependencyNextAction = "Repair the registered sandbox runtime and rerun the worker doctor."
+				}
+			}
 		}
 		diagnostics = append(diagnostics, diagnostic)
 	}
 	return diagnostics, nil
 }
 
-func workspaceHarnessExecutablesReady(config WorkspaceConfig) bool {
-	commands := make([][]string, 0, len(config.ValidationCommands)+len(config.QACommands)+2)
-	commands = append(commands, config.ValidationCommands...)
-	commands = append(commands, config.QACommands...)
-	if len(config.QAScreenshotCommand) > 0 {
-		commands = append(commands, config.QAScreenshotCommand)
+func workspaceIsolationMode(workspace Workspace) string {
+	if strings.EqualFold(strings.TrimSpace(workspace.Config.SandboxRuntime), WorkspaceSandboxDocker) {
+		return "docker_container"
 	}
-	if len(config.QASemanticCommand) > 0 {
-		commands = append(commands, config.QASemanticCommand)
+	if strings.EqualFold(strings.TrimSpace(workspace.Config.SandboxRuntime), WorkspaceSandboxFirecracker) {
+		return "firecracker_microvm"
 	}
-	for _, command := range commands {
-		if len(command) == 0 {
-			return false
+	return "host_process"
+}
+
+// workspaceDependency turns local preflight failures into an actionable,
+// privacy-safe signal. It is explanatory only: a task must still pass the
+// runtime-specific sandbox and authorization gates at execution time.
+func workspaceDependency(workspace Workspace) (state, reason, nextAction string) {
+	runtime := strings.ToLower(strings.TrimSpace(workspace.Config.SandboxRuntime))
+	switch runtime {
+	case WorkspaceSandboxDocker:
+		return "ready", "Docker is the registered local sandbox runtime.", ""
+	case WorkspaceSandboxFirecracker:
+		command := workspace.Config.SandboxSupervisorCommand
+		if !firecrackerSupervisorAvailable(command) {
+			return "supervisor_unavailable", "The operator-owned Firecracker supervisor is not available on this worker.", "Register an executable supervisor command and rerun the worker doctor."
 		}
-		if _, err := exec.LookPath(command[0]); err != nil {
-			return false
+		device, err := os.Stat("/dev/kvm")
+		if err != nil || device.IsDir() {
+			return "kvm_device_missing", "The WSL host does not expose a usable /dev/kvm device.", "Enable KVM for this WSL instance before starting a Firecracker worker."
+		}
+		file, err := os.OpenFile("/dev/kvm", os.O_RDWR, 0)
+		if err != nil {
+			return "kvm_permission_denied", "The current WSL user cannot read/write /dev/kvm.", "In WSL run `sudo usermod -aG kvm $(whoami)`, restart the WSL session, then rerun the Firecracker round-trip."
+		}
+		_ = file.Close()
+		if !firecrackerSupervisorProductionProfile(command) {
+			return "production_profile_not_registered", "The Firecracker supervisor is not registered with the production Jailer profile.", "Register the operator-owned supervisor with `--profile production --jailer`; keep the local proof profile out of hostile repository execution."
+		}
+		if cgroupState, ok := firecrackerCgroupState(); ok && cgroupState == "not_delegated" {
+			return "cgroup_delegation_required", "The WSL worker cannot create the delegated Firecracker parent cgroup.", "Delegate a root-owned cgroup with CPU, memory and PID limits to the worker, then rerun the production preflight."
+		}
+		return "runtime_ready_requires_lifecycle", "Firecracker is reachable and KVM is accessible; task-scoped lifecycle is still verified at execution time.", "Run the control-plane supervisor lifecycle and persist its attestation before claiming microVM readiness."
+	default:
+		return "host_process_not_sandbox", "This workspace uses a host process and is not a hostile-code sandbox.", "Register Docker or Firecracker for implementation work that requires isolation."
+	}
+}
+
+// sandboxRuntimeReady probes only the local Docker daemon. It never mounts a
+// workspace, runs repository code or contacts a provider. A required sandbox
+// is not considered ready merely because its JSON configuration parsed.
+func sandboxRuntimeReady(workspace Workspace) bool {
+	if strings.ToLower(strings.TrimSpace(workspace.Config.SandboxRuntime)) != WorkspaceSandboxDocker {
+		if strings.ToLower(strings.TrimSpace(workspace.Config.SandboxRuntime)) == WorkspaceSandboxFirecracker {
+			return firecrackerSupervisorAvailable(workspace.Config.SandboxSupervisorCommand)
+		}
+		return !workspace.Config.RequireSandbox
+	}
+	result, err := runLocal(context.Background(), workspace.Root, 5*time.Second, "", "docker", "version", "--format", "{{.Server.Version}}")
+	if err != nil || result.ExitCode != 0 || strings.TrimSpace(result.Output) == "" {
+		return false
+	}
+	image := workspace.Config.SandboxImage
+	if digest := strings.TrimSpace(workspace.Config.SandboxImageDigest); digest != "" && !strings.Contains(image, "@") {
+		image += "@" + digest
+	}
+	imageResult, imageErr := runLocal(context.Background(), workspace.Root, 5*time.Second, "", "docker", "image", "inspect", image, "--format", "{{.Id}}")
+	return imageErr == nil && imageResult.ExitCode == 0 && strings.TrimSpace(imageResult.Output) != ""
+}
+
+func firecrackerSupervisorAvailable(command []string) bool {
+	if len(command) == 0 || strings.TrimSpace(command[0]) == "" {
+		return false
+	}
+	path := strings.TrimSpace(command[0])
+	if filepath.IsAbs(path) || workspaceAbsolutePathPattern.MatchString(filepath.ToSlash(path)) {
+		info, err := os.Stat(path)
+		return err == nil && !info.IsDir()
+	}
+	// Resolve through the operator's PATH without executing it. The supervisor
+	// itself remains responsible for proving a VM was actually created.
+	_, err := exec.LookPath(path)
+	return err == nil
+}
+
+func firecrackerSupervisorProductionProfile(command []string) bool {
+	for index := 0; index < len(command); index++ {
+		if command[index] == "--profile" && index+1 < len(command) && strings.EqualFold(strings.TrimSpace(command[index+1]), "production") {
+			for _, argument := range command[index+2:] {
+				if argument == "--jailer" {
+					return true
+				}
+			}
 		}
 	}
+	return false
+}
+
+// firecrackerCgroupState is deliberately conservative and read-only. An
+// absent cgroup mount means this process is not running on the WSL worker host;
+// in that case the operator-owned worker doctor remains the authority.
+func firecrackerCgroupState() (string, bool) {
+	root := "/sys/fs/cgroup"
+	controllers, err := os.ReadFile(filepath.Join(root, "cgroup.controllers"))
+	if err != nil {
+		return "", false
+	}
+	for _, required := range []string{"cpu", "memory", "pids"} {
+		if !strings.Contains(" "+string(controllers)+" ", " "+required+" ") {
+			return "controllers_missing", true
+		}
+	}
+	// The worker may be running below a delegated systemd user scope while the
+	// cgroup mount root remains root-owned. Probe the process' actual cgroup
+	// parent first; checking only /sys/fs/cgroup would reject the safe local
+	// launcher and encourage an unsafe privileged fallback.
+	probePath := currentCgroupPath(root)
+	if delegatedControllers, readErr := os.ReadFile(filepath.Join(probePath, "cgroup.controllers")); readErr == nil {
+		for _, required := range []string{"cpu", "memory", "pids"} {
+			if !strings.Contains(" "+string(delegatedControllers)+" ", " "+required+" ") {
+				return "controllers_missing", true
+			}
+		}
+	}
+	if !isWritableDirectory(probePath) {
+		return "not_delegated", true
+	}
+	return "ready", true
+}
+
+func currentCgroupPath(root string) string {
+	contents, err := os.ReadFile("/proc/self/cgroup")
+	if err != nil {
+		return root
+	}
+	for _, line := range strings.Split(string(contents), "\n") {
+		parts := strings.SplitN(line, ":", 3)
+		if len(parts) != 3 || parts[0] != "0" {
+			continue
+		}
+		relative := strings.TrimPrefix(strings.TrimSpace(parts[2]), "/")
+		if relative == "" {
+			return root
+		}
+		candidate := filepath.Join(root, filepath.FromSlash(relative))
+		if info, statErr := os.Stat(candidate); statErr == nil && info.IsDir() {
+			return candidate
+		}
+		return root
+	}
+	return root
+}
+
+func isWritableDirectory(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	// Opening the controller without writing is enough to observe delegation;
+	// never create a probe file or mutate cgroup state from a readiness check.
+	test, err := os.OpenFile(filepath.Join(path, "cgroup.subtree_control"), os.O_WRONLY, 0)
+	if err != nil {
+		return false
+	}
+	_ = test.Close()
 	return true
 }
 
@@ -1641,10 +1551,9 @@ func DeliveryWorkspaceContext(delivery json.RawMessage, lookup func(string) stri
 			IncludedScope   []string `json:"included_scope"`
 		} `json:"work_item"`
 		ContextSources []struct {
-			Kind      string         `json:"kind"`
-			Reference string         `json:"reference"`
-			Revision  string         `json:"revision"`
-			Metadata  map[string]any `json:"metadata"`
+			Kind      string `json:"kind"`
+			Reference string `json:"reference"`
+			Revision  string `json:"revision"`
 		} `json:"context_sources"`
 	}
 	if err := json.Unmarshal(delivery, &value); err != nil {
@@ -1667,9 +1576,6 @@ func DeliveryWorkspaceContext(delivery json.RawMessage, lookup func(string) stri
 		state := ReadWorkspaceGitState(workspace)
 		if state.Available && state.HasLocalChanges {
 			return nil, fmt.Errorf("workspace %s has local changes; commit, stash, or register an immutable checkpoint before running Delivery", workspace.ID)
-		}
-		if err := verifyDeliveryWorkspaceBinding(workspace, state, source.Metadata); err != nil {
-			return nil, err
 		}
 		// The work item freezes the exact source revision before any provider
 		// call. A local workspace can move after that snapshot (or be registered
@@ -1694,90 +1600,6 @@ func DeliveryWorkspaceContext(delivery json.RawMessage, lookup func(string) stri
 		result = append(result, context)
 	}
 	return result, nil
-}
-
-// PrepareDeliveryWorkspaces synchronizes every operator-managed repository
-// checkout before a Delivery phase can read code, run tests, or create a
-// task worktree. It is deliberately separate from context rendering: summary
-// and ledger-only phases can still read a frozen snapshot through a read-only
-// lane, while plan, implementation, and QA must prove their local base is the
-// fetched remote branch at the exact frozen SHA.
-//
-// A workspace without repository_url/base_branch is retained only for legacy
-// local-only tasks. Every real GitHub onboarding is required to register both
-// values and repository:fetch, so it follows the managed path below.
-func PrepareDeliveryWorkspaces(ctx context.Context, delivery json.RawMessage, lookup func(string) string) error {
-	var value struct {
-		ContextSources []struct {
-			Kind      string         `json:"kind"`
-			Reference string         `json:"reference"`
-			Revision  string         `json:"revision"`
-			Metadata  map[string]any `json:"metadata"`
-		} `json:"context_sources"`
-	}
-	if err := json.Unmarshal(delivery, &value); err != nil {
-		return fmt.Errorf("delivery input must be a JSON object")
-	}
-	seen := make(map[string]struct{}, len(value.ContextSources))
-	for _, source := range value.ContextSources {
-		if source.Kind != "repository" || !strings.HasPrefix(strings.TrimSpace(source.Reference), "workspace://") {
-			continue
-		}
-		reference := strings.TrimSpace(source.Reference)
-		if _, duplicate := seen[reference]; duplicate {
-			continue
-		}
-		seen[reference] = struct{}{}
-		workspace, err := RegisteredWorkspace(reference, lookup)
-		if err != nil {
-			return err
-		}
-		remoteURL := strings.TrimSpace(workspace.Config.RepositoryURL)
-		baseBranch := strings.TrimSpace(workspace.Config.BaseBranch)
-		if remoteURL == "" && baseBranch == "" {
-			continue
-		}
-		if remoteURL == "" || baseBranch == "" {
-			return fmt.Errorf("workspace %s must configure both repository_url and base_branch for managed Delivery synchronization", workspace.ID)
-		}
-		expected := strings.ToLower(strings.TrimSpace(source.Revision))
-		if !projectvault.ValidRevision(expected) {
-			return fmt.Errorf("workspace %s managed Delivery source has no immutable frozen revision", workspace.ID)
-		}
-		state, err := SyncAuthorizedManagedWorkspace(ctx, workspace, lookup)
-		if err != nil {
-			return fmt.Errorf("workspace %s could not synchronize its managed base before Delivery: %w", workspace.ID, err)
-		}
-		if err := verifyDeliveryWorkspaceBinding(workspace, state, source.Metadata); err != nil {
-			return err
-		}
-		if !strings.EqualFold(state.HeadSHA, expected) {
-			return fmt.Errorf("workspace %s fetched origin has advanced beyond the frozen context revision; refresh the project checkpoint and replan", workspace.ID)
-		}
-	}
-	return nil
-}
-
-// verifyDeliveryWorkspaceBinding protects workspaces that were declared from
-// the control plane for a separately hosted runner. A task may name any
-// workspace:// identifier, so a runner must independently prove that its
-// checkout belongs to the GitHub repository frozen in the Delivery context.
-// Older local-only workspaces omit github_repository and retain their legacy
-// behavior; every remote-agent binding is fail-closed.
-func verifyDeliveryWorkspaceBinding(workspace Workspace, state WorkspaceGitState, metadata map[string]any) error {
-	rawExpected, declared := metadata["github_repository"].(string)
-	if !declared || strings.TrimSpace(rawExpected) == "" {
-		return nil
-	}
-	expected := strings.Trim(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(rawExpected)), "github://"), "/")
-	actual := strings.Trim(strings.ToLower(strings.TrimSpace(state.GitHubRepository)), "/")
-	if actual == "" {
-		return fmt.Errorf("workspace %s cannot verify the GitHub identity required by its frozen Delivery context", workspace.ID)
-	}
-	if actual != expected {
-		return fmt.Errorf("workspace %s GitHub identity does not match the frozen Delivery context", workspace.ID)
-	}
-	return nil
 }
 
 // DeliveryRemoteRepositoryContexts returns only the bounded GitHub metadata
@@ -1878,7 +1700,7 @@ func safeContextFile(relative string) bool {
 		return false
 	}
 	for _, sensitive := range []string{"credential", "secret", "private_key", "api_key", "apikey", "access_key", "token", "password", "service_account"} {
-		if strings.Contains(lowerPath, sensitive) && !securityWorkflowDescriptor(lowerPath) {
+		if strings.Contains(lowerPath, sensitive) {
 			return false
 		}
 	}
@@ -1887,38 +1709,6 @@ func safeContextFile(relative string) bool {
 		return false
 	}
 	return true
-}
-
-// securityWorkflowDescriptor permits the conventional names of secret-scanner
-// workflows, not secret-bearing files. A versioned contract can legitimately
-// contain .github/workflows/secret-scan.yml; treating that descriptor as a
-// credential makes an otherwise safe, operator-approved fixture impossible to
-// copy into an isolated worktree. The exception stays narrow: only YAML files
-// in GitHub's workflow directory, with both a sensitive topic and an explicit
-// scan/audit/check qualifier, may bypass the filename heuristic.
-func securityWorkflowDescriptor(relative string) bool {
-	parts := strings.Split(strings.Trim(strings.ToLower(filepath.ToSlash(relative)), "/"), "/")
-	if len(parts) < 3 || parts[len(parts)-3] != ".github" || parts[len(parts)-2] != "workflows" {
-		return false
-	}
-	base := parts[len(parts)-1]
-	extension := filepath.Ext(base)
-	if extension != ".yml" && extension != ".yaml" {
-		return false
-	}
-	words := strings.FieldsFunc(strings.TrimSuffix(base, extension), func(r rune) bool {
-		return r == '-' || r == '_'
-	})
-	hasSensitiveTopic, hasScannerQualifier := false, false
-	for _, word := range words {
-		switch word {
-		case "secret", "secrets", "credential", "credentials", "token", "tokens", "key", "keys":
-			hasSensitiveTopic = true
-		case "scan", "scanner", "audit", "check":
-			hasScannerQualifier = true
-		}
-	}
-	return hasSensitiveTopic && hasScannerQualifier
 }
 func preferredContextFile(relative string) bool {
 	switch strings.ToLower(filepath.Base(relative)) {

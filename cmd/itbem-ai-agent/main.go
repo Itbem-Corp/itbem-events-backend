@@ -10,25 +10,38 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
+	"events-stocks/internal/agentcallbackauth"
+	"events-stocks/internal/agentprotocol"
 	"events-stocks/internal/automationagent"
 	"github.com/gofrs/uuid"
 )
 
 func main() {
 	smoke := flag.Bool("provider-smoke", false, "make one explicit non-sensitive provider request")
-	authProbe := flag.Bool("provider-auth-probe", false, "verify provider authentication without creating a completion")
+	authProbe := flag.Bool("provider-auth-probe", false, "validate central inference gateway configuration without calling a provider")
 	runtimeAuthProbe := flag.Bool("runtime-auth-probe", false, "verify the configured runtime transport without consuming work")
 	githubAuthProbe := flag.Bool("github-auth-probe", false, "verify the role-specific GitHub App installation with bounded read-only access")
 	doctor := flag.Bool("doctor", false, "validate the local workspace registry without calling a provider")
 	syncWorkspaces := flag.Bool("sync-workspaces", false, "clone or fast-forward operator-managed workspace base checkouts")
+	showMachineIdentity := flag.Bool("show-machine-identity", false, "display the local machine ID and public key for administrator registration")
 	flag.Parse()
+	if *showMachineIdentity {
+		report, err := machineIdentityReport(os.Getenv)
+		if err != nil {
+			fail(err)
+		}
+		_ = json.NewEncoder(os.Stdout).Encode(report)
+		return
+	}
 	if *syncWorkspaces {
 		report, err := syncWorkspaceReport(context.Background(), os.Getenv)
 		if err != nil {
@@ -53,18 +66,11 @@ func main() {
 			_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"ready": true, "status": "not_required", "network_checks_made": false, "provider_billable": false})
 			return
 		}
-		config, err := automationagent.LoadProviderConfig(os.Getenv)
+		config, err := automationagent.LoadGatewayProviderConfig(os.Getenv)
 		if err != nil {
 			fail(err)
 		}
-		report, err := automationagent.ProbeProviderAuth(context.Background(), config, nil)
-		if err != nil {
-			fail(err)
-		}
-		_ = json.NewEncoder(os.Stdout).Encode(report)
-		if !report.Ready {
-			os.Exit(1)
-		}
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"ready": true, "status": "configured_unverified", "provider": config.Provider, "model": config.Model, "network_checks_made": false, "provider_billable": false})
 		return
 	}
 	if *runtimeAuthProbe {
@@ -115,18 +121,18 @@ func main() {
 		run()
 		return
 	}
-	config, err := automationagent.LoadProviderConfig(os.Getenv)
+	provider, err := loadExecutionProvider(os.Getenv)
 	if err != nil {
 		fail(err)
 	}
 	if os.Getenv("ITBEM_AI_ALLOW_PROVIDER_SMOKE") != "1" {
 		fail(fmt.Errorf("set ITBEM_AI_ALLOW_PROVIDER_SMOKE=1 before a billable provider smoke request"))
 	}
-	completion, err := automationagent.NewProviderClient(config, nil).Complete(context.Background(), []automationagent.Message{{Role: "system", Content: "You are a provider connectivity check. Reply with exactly ITBEM_PROVIDER_OK."}, {Role: "user", Content: "Connectivity check."}}, 256)
+	completion, err := provider.client.Complete(context.Background(), []automationagent.Message{{Role: "system", Content: "You are a provider connectivity check. Reply with exactly ITBEM_PROVIDER_OK."}, {Role: "user", Content: "Connectivity check."}}, 256)
 	if err != nil {
 		fail(err)
 	}
-	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"provider": completion.Provider, "configured_model": config.Model, "reported_model": completion.Model, "response_id": completion.ResponseID, "usage": completion.Usage})
+	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"provider": completion.Provider, "configured_model": provider.model, "reported_model": completion.Model, "response_id": completion.ResponseID, "usage": completion.Usage})
 }
 
 type githubInstallationVerifier func(context.Context, automationagent.GitHubAppConfig) error
@@ -187,6 +193,32 @@ func verifyGitHubAppInstallations(ctx context.Context, config automationagent.Gi
 	return verifiedInstallations, nil
 }
 
+type executionProvider struct {
+	client   automationagent.ProviderClient
+	provider automationagent.Provider
+	model    string
+}
+
+func loadExecutionProvider(lookup func(string) string) (executionProvider, error) {
+	config, err := automationagent.LoadGatewayProviderConfig(lookup)
+	if err != nil {
+		return executionProvider{}, fmt.Errorf("ITBEM_AI_GATEWAY_URL and valid gateway provider configuration are required; local workers never call provider APIs directly: %w", err)
+	}
+	return executionProvider{client: automationagent.NewGatewayProviderClient(config, nil), provider: config.Provider, model: config.Model}, nil
+}
+
+func machineIdentityReport(lookup func(string) string) (map[string]string, error) {
+	identity, err := automationagent.LoadLocalMachineIdentity(lookup("ITBEM_AI_MACHINE_ID"), lookup("ITBEM_AI_STATE_DIR"))
+	if err != nil {
+		return nil, err
+	}
+	publicKey, err := agentcallbackauth.EncodePublicKey(identity.PublicKey())
+	if err != nil {
+		return nil, fmt.Errorf("could not encode local machine public key")
+	}
+	return map[string]string{"machine_id": identity.MachineID(), "public_key": publicKey}, nil
+}
+
 // syncWorkspaceReport is a local, explicit maintenance command. It deliberately
 // runs before the queue worker starts, so no task can change a project checkout
 // or silently invalidate a frozen Delivery context.
@@ -226,7 +258,7 @@ func doctorReport(lookup func(string) string) (map[string]any, bool, error) {
 	}
 	provider := map[string]any{
 		"ready": false, "status": "not_configured",
-		"message": "Provider execution is disabled until a valid local provider configuration is present.",
+		"message": "Provider execution is disabled until the central inference gateway is configured.",
 	}
 	runtime := map[string]any{
 		"ready": false, "status": "not_configured",
@@ -243,9 +275,9 @@ func doctorReport(lookup func(string) string) (map[string]any, bool, error) {
 	if runtimeReady && providerNotRequired(runtimeConfig) {
 		providerReady = true
 		provider = map[string]any{"ready": true, "status": "not_required", "message": "This deterministic release worker has no model-provider credential."}
-	} else if config, providerErr := automationagent.LoadProviderConfig(lookup); providerErr == nil {
+	} else if config, providerErr := automationagent.LoadGatewayProviderConfig(lookup); providerErr == nil {
 		providerReady = true
-		provider = map[string]any{"ready": true, "status": "configured_unverified", "provider": config.Provider, "model": config.Model, "message": "Credential presence is valid, but authentication requires --provider-auth-probe before service activation."}
+		provider = map[string]any{"ready": true, "status": "configured_unverified", "provider": config.Provider, "model": config.Model, "message": "Gateway configuration is valid; use --provider-auth-probe for local validation or --provider-smoke for an explicitly billable gateway request."}
 	}
 	publication := map[string]any{"ready": true, "status": "configured"}
 	githubAppReady := true
@@ -278,6 +310,15 @@ func doctorReport(lookup func(string) string) (map[string]any, bool, error) {
 		"workspaces":           diagnostics,
 		"provider_billable":    false,
 		"network_checks_made":  false,
+	}
+	if attestation := automationagent.SandboxAttestationSnapshot(lookup); attestation != nil {
+		report["sandbox_attestation"] = map[string]any{
+			"ready": true, "status": "verified_evidence", "runtime": attestation.Runtime,
+			"runtime_version": attestation.RuntimeVersion, "transport": attestation.Transport,
+			"evidence_scope": attestation.EvidenceScope, "guest_command_verified": attestation.GuestCommandVerified,
+			"evidence_digest": attestation.EvidenceDigest,
+			"message":         "This is observational only; lifecycle ownership, worktree binding and task-level isolation are still verified separately.",
+		}
 	}
 	return report, ready, nil
 }
@@ -342,33 +383,31 @@ func providerNotRequired(config automationagent.RuntimeConfig) bool {
 	return config.Role == "release_manager" && config.Lane == "release"
 }
 
-func providerForRuntime(config automationagent.RuntimeConfig, lookup func(string) string) (automationagent.ProviderClient, string, string, error) {
-	if providerNotRequired(config) {
-		return deterministicOnlyProvider{}, "", "", nil
-	}
-	providerConfig, err := automationagent.LoadProviderConfig(lookup)
-	if err != nil {
-		return nil, "", "", err
-	}
-	return automationagent.NewProviderClient(providerConfig, nil), string(providerConfig.Provider), providerConfig.Model, nil
-}
-
 func run() {
 	runtimeConfig, err := automationagent.LoadRuntimeConfig(os.Getenv)
 	if err != nil {
 		fail(err)
 	}
-	provider, providerName, modelName, err := providerForRuntime(runtimeConfig, os.Getenv)
+	providerConfig := executionProvider{}
+	if providerNotRequired(runtimeConfig) {
+		providerConfig = executionProvider{client: deterministicOnlyProvider{}}
+	} else {
+		providerConfig, err = loadExecutionProvider(os.Getenv)
+		if err != nil {
+			fail(err)
+		}
+	}
+	callback, err := automationagent.NewHTTPCallback(runtimeConfig.APIBaseURL, runtimeConfig.CallbackIdentity, runtimeConfig.AgentInstanceID, nil)
 	if err != nil {
 		fail(err)
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
-	callback, err := automationagent.NewHTTPCallback(runtimeConfig.APIBaseURL, runtimeConfig.CallbackSecret, nil)
-	if err != nil {
-		fail(err)
-	}
-	callback.BindIdentity(runtimeConfig.Role, runtimeConfig.Lane)
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(signals)
+	workerID := uuid.Must(uuid.NewV4()).String()
+	runtimeConfig.WorkerConfig.WorkerID = workerID
 	var store automationagent.ObjectStore
 	var queue automationagent.Queue
 	if runtimeConfig.Transport == "gateway" {
@@ -382,75 +421,219 @@ func run() {
 		if runtimeErr != nil {
 			fail(runtimeErr)
 		}
-		awsQueue, queueErr := automationagent.NewAWSQueue(runtime.SQS, runtimeConfig.QueueURL)
-		if queueErr != nil {
-			fail(queueErr)
+		store = automationagent.NewAWSObjectStore(runtime.S3)
+		queue, err = automationagent.NewAWSQueue(runtime.SQS, runtimeConfig.QueueURL)
+		if err != nil {
+			fail(err)
 		}
-		store, queue = automationagent.NewAWSObjectStore(runtime.S3), awsQueue
 	}
-	worker, err := automationagent.NewWorker(runtimeConfig.WorkerConfig, store, callback, provider)
+	worker, err := automationagent.NewWorker(runtimeConfig.WorkerConfig, store, callback, providerConfig.client)
 	if err != nil {
 		fail(err)
 	}
-	slog.Info(
-		"ITBEM Go AI agent started",
-		"provider", providerName,
-		"model", modelName,
-		"concurrency", runtimeConfig.Concurrency,
-		"role", runtimeConfig.Role,
-		"lane", runtimeConfig.Lane,
-		"transport", runtimeConfig.Transport,
-	)
-	workerID := uuid.Must(uuid.NewV4()).String()
 	startedAt := time.Now().UTC()
-	go reportHeartbeats(ctx, callback, automationagent.AgentHeartbeat{WorkerID: workerID, Provider: providerName, Model: modelName, Role: string(runtimeConfig.Role), Lane: string(runtimeConfig.Lane), Concurrency: runtimeConfig.Concurrency, StartedAt: startedAt.Format(time.RFC3339)}, os.Getenv)
-	if err := automationagent.RunQueue(ctx, worker, queue, runtimeConfig.Concurrency, slog.Default()); err != nil {
+	heartbeat := automationagent.AgentHeartbeat{WorkerID: workerID, AgentKey: runtimeConfig.AgentKey, MachineID: runtimeConfig.MachineID, Provider: string(providerConfig.provider), Model: providerConfig.model, Concurrency: runtimeConfig.Concurrency, Capabilities: runtimeConfig.AllowedOperations, Protocols: supportedRuntimeProtocols(), StartedAt: startedAt.Format(time.RFC3339)}
+	if err := runQueueAfterEnrollment(ctx, callback, heartbeat, os.Getenv, func() error {
+		slog.Info(
+			"ITBEM Go AI agent started",
+			"provider", providerConfig.provider,
+			"model", providerConfig.model,
+			"concurrency", runtimeConfig.Concurrency,
+			"queue_url", runtimeConfig.QueueURL,
+			"sqs_endpoint", runtimeConfig.SQSEndpoint,
+		)
+		var draining atomic.Bool
+		drain := make(chan struct{})
+		beginDrain := func() bool {
+			if !draining.CompareAndSwap(false, true) {
+				return false
+			}
+			close(drain)
+			return true
+		}
+		startDrainTimeout := func() {
+			timer := time.NewTimer(workerDrainTimeout)
+			go func() {
+				defer timer.Stop()
+				select {
+				case <-ctx.Done():
+				case <-timer.C:
+					slog.Warn("ITBEM agent drain deadline reached; cancelling remaining work")
+					stop()
+				}
+			}()
+		}
+		go reportHeartbeats(ctx, callback, heartbeat, func() bool { return draining.Load() }, os.Getenv, func() {
+			if beginDrain() {
+				slog.Warn("ITBEM agent identity rejected; stopping new queue polls and draining active work")
+				startDrainTimeout()
+			}
+		})
+		go func() {
+			select {
+			case <-signals:
+				if beginDrain() {
+					slog.Info("ITBEM Go AI agent draining", "grace_seconds", int(workerDrainTimeout/time.Second))
+					if err := sendHeartbeat(context.Background(), callback, heartbeat, true, os.Getenv); err != nil {
+						slog.Warn("ITBEM draining heartbeat failed", "error", automationagent.RedactPublicError(err.Error()))
+					}
+					startDrainTimeout()
+				}
+			case <-ctx.Done():
+			}
+		}()
+		return automationagent.RunQueueWithDrain(ctx, worker, queue, runtimeConfig.Concurrency, slog.Default(), drain)
+	}); err != nil {
+		stop()
 		fail(err)
 	}
 }
 
-func reportHeartbeats(ctx context.Context, callback *automationagent.HTTPCallback, heartbeat automationagent.AgentHeartbeat, lookup func(string) string) {
-	report := func() {
-		current := heartbeat
-		readiness, readinessErr := automationagent.WorkspaceReadinessSnapshot(lookup)
-		if readinessErr != nil {
-			// A heartbeat must remain a liveness signal even if a developer moves
-			// or reconfigures a local workspace. Do not serialize the raw error: it
-			// may include a local path. The empty readiness snapshot instead makes
-			// the dashboard surface an explicit unknown/preflight-required state.
-			slog.Warn("ITBEM agent workspace readiness check failed", "error", readinessErr)
-		} else {
-			current.WorkspaceReadiness = readiness
+func credentialDeliveryMode(lookup func(string) string) string {
+	if automationagent.GatewayProviderEnabled(lookup) {
+		return "cloud_gateway"
+	}
+	return "legacy_local_environment"
+}
+
+const workerDrainTimeout = 45 * time.Second
+const maxEnrollmentHeartbeatRetries = 4
+
+func supportedRuntimeProtocols() []string {
+	return []string{agentprotocol.ProtocolDeliveryPlanStepsV1}
+}
+
+var enrollmentHeartbeatRetryDelays = [...]time.Duration{
+	time.Second,
+	2 * time.Second,
+	4 * time.Second,
+	8 * time.Second,
+}
+
+// runQueueAfterEnrollment performs the signed enrollment/profile check before
+// invoking the queue loop. An unknown, revoked or mismatched instance therefore
+// cannot claim work that would only fail when its first callback is submitted.
+func runQueueAfterEnrollment(ctx context.Context, callback *automationagent.HTTPCallback, heartbeat automationagent.AgentHeartbeat, lookup func(string) string, runQueue func() error) error {
+	return runQueueAfterEnrollmentWithWait(ctx, callback, heartbeat, lookup, runQueue, waitForEnrollmentRetry)
+}
+
+func runQueueAfterEnrollmentWithWait(ctx context.Context, callback *automationagent.HTTPCallback, heartbeat automationagent.AgentHeartbeat, lookup func(string) string, runQueue func() error, wait func(context.Context, time.Duration) error) error {
+	if runQueue == nil {
+		return fmt.Errorf("queue runner is unavailable")
+	}
+	if wait == nil {
+		wait = waitForEnrollmentRetry
+	}
+	for attempt := 0; ; attempt++ {
+		err := sendHeartbeat(ctx, callback, heartbeat, false, lookup)
+		if err == nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return runQueue()
 		}
-		requestCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		if err := callback.Heartbeat(requestCtx, current); err != nil && ctx.Err() == nil {
-			slog.Warn("ITBEM agent heartbeat failed", "error", err)
-			cancel()
-			return
+		if isTerminalHeartbeatRejection(err) {
+			return fmt.Errorf("registered machine identity or agent profile was rejected; refusing to poll the queue: %w", err)
 		}
-		cancel()
-		attestations, attestationErr := automationagent.WorkspaceAttestationSnapshot(lookup)
-		if attestationErr != nil {
-			slog.Warn("ITBEM agent workspace attestation check failed", "error", attestationErr)
-			return
+		if attempt >= maxEnrollmentHeartbeatRetries {
+			return fmt.Errorf("could not verify the registered machine after temporary heartbeat failures; refusing to poll the queue: %w", err)
 		}
-		attestationCtx, attestationCancel := context.WithTimeout(ctx, 10*time.Second)
-		defer attestationCancel()
-		if err := callback.WorkspaceAttestations(attestationCtx, automationagent.WorkspaceAttestationReport{WorkerID: heartbeat.WorkerID, Attestations: attestations}); err != nil && ctx.Err() == nil {
-			slog.Warn("ITBEM agent workspace attestation failed", "error", err)
+		if waitErr := wait(ctx, enrollmentHeartbeatRetryDelays[attempt]); waitErr != nil {
+			return fmt.Errorf("enrollment heartbeat retry was interrupted; refusing to poll the queue: %w", waitErr)
 		}
 	}
-	report()
-	ticker := time.NewTicker(30 * time.Second)
+}
+
+func waitForEnrollmentRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func isRetryableHeartbeatRejection(err error) bool {
+	var rejection *automationagent.HeartbeatRejectionError
+	if !errors.As(err, &rejection) {
+		// Network and timeout failures have no response status and are retried
+		// with a bounded backoff before startup is abandoned.
+		return true
+	}
+	switch rejection.StatusCode {
+	case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests:
+		return true
+	default:
+		return rejection.StatusCode >= http.StatusInternalServerError && rejection.StatusCode <= 599
+	}
+}
+
+func isTerminalHeartbeatRejection(err error) bool {
+	var rejection *automationagent.HeartbeatRejectionError
+	return errors.As(err, &rejection) && !isRetryableHeartbeatRejection(err)
+}
+
+func sendHeartbeat(ctx context.Context, callback *automationagent.HTTPCallback, heartbeat automationagent.AgentHeartbeat, draining bool, lookup func(string) string) error {
+	current := heartbeat
+	current.Draining = draining
+	readiness, readinessErr := automationagent.WorkspaceReadinessSnapshot(lookup)
+	if readinessErr != nil {
+		// A heartbeat must remain a liveness signal even if a developer moves
+		// or reconfigures a local workspace. Do not serialize the raw error: it
+		// may include a local path. The empty readiness snapshot instead makes
+		// the dashboard surface an explicit unknown/preflight-required state.
+		slog.Warn("ITBEM agent workspace readiness check failed; diagnostics withheld")
+	} else {
+		current.WorkspaceReadiness = readiness
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	return callback.Heartbeat(requestCtx, current)
+}
+
+func reportHeartbeats(ctx context.Context, callback *automationagent.HTTPCallback, heartbeat automationagent.AgentHeartbeat, draining func() bool, lookup func(string) string, onTerminalRejection func()) {
+	reportHeartbeatsAtInterval(ctx, callback, heartbeat, draining, lookup, 30*time.Second, onTerminalRejection)
+}
+
+func reportHeartbeatsAtInterval(ctx context.Context, callback *automationagent.HTTPCallback, heartbeat automationagent.AgentHeartbeat, draining func() bool, lookup func(string) string, interval time.Duration, onTerminalRejection func()) {
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			report()
+			err := sendHeartbeat(ctx, callback, heartbeat, draining != nil && draining(), lookup)
+			if err == nil || ctx.Err() != nil {
+				continue
+			}
+			if isTerminalHeartbeatRejection(err) {
+				slog.Error("ITBEM agent heartbeat rejected; stopping new queue polls and draining")
+				if onTerminalRejection != nil {
+					onTerminalRejection()
+				}
+				return
+			}
+			// Transport errors, 429s and 5xx responses are transient. Keep the
+			// worker alive and retry on the next heartbeat without exposing any
+			// response body or secret.
+			slog.Warn("ITBEM agent heartbeat temporarily unavailable; will retry", "error", automationagent.RedactPublicError(err.Error()))
 		}
 	}
 }
 
-func fail(err error) { fmt.Fprintln(os.Stderr, "itbem-ai-agent:", err); os.Exit(1) }
+func fail(err error) {
+	message := "startup failed; inspect private worker diagnostics"
+	if err != nil {
+		if safe := automationagent.RedactPublicError(err.Error()); safe != "" {
+			message = safe
+		}
+	}
+	fmt.Fprintln(os.Stderr, "itbem-ai-agent:", message)
+	os.Exit(1)
+}

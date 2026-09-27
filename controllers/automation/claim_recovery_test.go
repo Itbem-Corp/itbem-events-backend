@@ -2,8 +2,10 @@ package automation
 
 import (
 	"events-stocks/configuration"
+	"events-stocks/models"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +18,8 @@ import (
 )
 
 func TestClaimAutomationTaskDistinguishesBusyFromTerminal(t *testing.T) {
+	t.Setenv(attemptPolicySigningKeyEnv, strings.Repeat("b", 48))
+	t.Setenv(attemptPolicyPreviousSigningKeyEnv, "")
 	for _, scenario := range []struct {
 		name, status, owner string
 		lease               *time.Time
@@ -44,16 +48,38 @@ func TestClaimAutomationTaskDistinguishesBusyFromTerminal(t *testing.T) {
 			configuration.DB = db
 			t.Cleanup(func() { configuration.DB = original })
 			taskID := uuid.Must(uuid.NewV4())
+			identity := testClaimIdentity()
+			expectClaimWorkerIdentity(mock, taskID, "delivery.plan")
 			mock.ExpectBegin()
+			mock.ExpectQuery(`SELECT \* FROM "delivery_plan_step_assignments" WHERE child_automation_task_id = \$1 LIMIT \$2`).
+				WithArgs(taskID, 1).WillReturnRows(sqlmock.NewRows([]string{"id", "execution_id", "delivery_plan_step_id", "child_automation_task_id", "target_machine_id", "target_agent_key", "status"}))
 			mock.ExpectExec(`UPDATE "automation_tasks"`).WillReturnResult(sqlmock.NewResult(0, 0))
-			mock.ExpectQuery(`SELECT .* FROM "automation_tasks"`).WillReturnRows(sqlmock.NewRows([]string{"id", "status", "run_id", "lease_expires_at"}).AddRow(taskID, scenario.status, scenario.owner, scenario.lease))
+			mock.ExpectQuery(`SELECT .* FROM "automation_tasks"`).WillReturnRows(sqlmock.NewRows([]string{"id", "operation", "status", "run_id", "lease_expires_at", "max_completion_tokens", "delivery_work_item_id", "worker_id", "agent_key", "machine_id"}).AddRow(taskID.String(), "delivery.plan", scenario.status, scenario.owner, scenario.lease, 0, nil, identity.WorkerID, identity.AgentKey, identity.MachineID))
 			if scenario.renew {
-				mock.ExpectExec(`UPDATE "automation_tasks"`).WillReturnResult(sqlmock.NewResult(0, 1))
+				if scenario.owner == "new-run" {
+					snapshot := models.AutomationInferenceAttemptPolicy{
+						ID: uuid.Must(uuid.NewV4()), AutomationTaskID: taskID, RunID: "new-run", Operation: "delivery.plan",
+						RoutesJSON: "[]", RoutesHash: sha256Hex([]byte("[]")), MaxCompletionTokens: 0, MaxInferenceCalls: inferenceAttemptCallQuota("delivery.plan"), CreatedAt: time.Now().UTC(),
+					}
+					snapshot.SnapshotHash = inferenceAttemptSnapshotHash(snapshot)
+					if err := signAutomationInferenceAttemptPolicy(&snapshot); err != nil {
+						t.Fatal(err)
+					}
+					expectAttemptPolicyRow(mock, snapshot)
+					mock.ExpectExec(`UPDATE "automation_tasks"`).WillReturnResult(sqlmock.NewResult(0, 1))
+				} else {
+					mock.ExpectExec(`UPDATE "automation_tasks"`).WillReturnResult(sqlmock.NewResult(0, 1))
+					expectClaimedTask(mock, taskID, "delivery.plan", "new-run", 0, nil)
+					expectUnconfiguredAttemptPolicyCreation(mock, taskID, "new-run", "delivery.plan", 0)
+				}
+				mock.ExpectQuery(`SELECT .*parent_task_id.*delivery_plan_step_assignments.*`).
+					WillReturnRows(sqlmock.NewRows([]string{"parent_task_id"}))
 			}
 			mock.ExpectCommit()
 			recorder := httptest.NewRecorder()
 			ctx := echo.New().NewContext(httptest.NewRequest(http.MethodPost, "/claim", nil), recorder)
-			if err := claimAutomationTaskRun(ctx, taskID, "new-run"); err != nil {
+			ctx.Set(agentCallbackIdentityContextKey, authenticatedAgentCallback{InstanceID: uuid.Must(uuid.NewV4()), AgentKey: identity.AgentKey, MachineID: identity.MachineID})
+			if err := claimAutomationTaskRun(ctx, taskID, "new-run", identity); err != nil {
 				t.Fatal(err)
 			}
 			if got := recorder.Header().Get("X-ITBEM-Automation-Run-Busy"); (got == "1") != scenario.busy {
@@ -64,7 +90,7 @@ func TestClaimAutomationTaskDistinguishesBusyFromTerminal(t *testing.T) {
 				expected = http.StatusNoContent
 			}
 			if recorder.Code != expected {
-				t.Fatalf("status=%d, want %d: %s", recorder.Code, expected, recorder.Body.String())
+				t.Fatalf("status=%d, want %d: %s; unmet SQL expectations: %v", recorder.Code, expected, recorder.Body.String(), mock.ExpectationsWereMet())
 			}
 			if err := mock.ExpectationsWereMet(); err != nil {
 				t.Fatal(err)

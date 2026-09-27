@@ -25,6 +25,8 @@ func clearSecurityEnvironment(t *testing.T) {
 		"AUTOMATION_OUTPUT_BUCKET",
 		"AUTOMATION_CALLBACK_SECRET",
 		"AUTOMATION_CALLBACK_SECRET_PREVIOUS",
+		"AUTOMATION_ATTEMPT_POLICY_SIGNING_KEY",
+		"AUTOMATION_ATTEMPT_POLICY_SIGNING_KEY_PREVIOUS",
 		"COGNITO_CLIENT_ID",
 		"COGNITO_CLIENT_SECRET",
 		"S3_CLIENT_ID",
@@ -113,6 +115,8 @@ func TestValidateSecurityConfigurationRequiresAutomationCallbackSecret(t *testin
 	t.Setenv("AUTOMATION_OUTPUT_BUCKET", "itbem-ai-outputs-prod-123-us-east-1")
 	require.ErrorContains(t, ValidateSecurityConfiguration(), "AUTOMATION_CALLBACK_SECRET")
 	t.Setenv("AUTOMATION_CALLBACK_SECRET", strings.Repeat("c", 32))
+	require.ErrorContains(t, ValidateSecurityConfiguration(), "AUTOMATION_ATTEMPT_POLICY_SIGNING_KEY")
+	t.Setenv("AUTOMATION_ATTEMPT_POLICY_SIGNING_KEY", strings.Repeat("s", 32))
 	require.NoError(t, ValidateSecurityConfiguration())
 	t.Setenv("AUTOMATION_INPUT_BUCKET", "eventiapp-media")
 	require.ErrorContains(t, ValidateSecurityConfiguration(), "AUTOMATION_INPUT_BUCKET")

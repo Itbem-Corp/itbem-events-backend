@@ -21,16 +21,17 @@ const (
 var taskKey = regexp.MustCompile(`^[a-z][a-z0-9_-]{1,63}$`)
 
 type Task struct {
-	Key                string   `json:"key"`
-	Title              string   `json:"title"`
-	Description        string   `json:"description"`
-	ExpectedOutcome    string   `json:"expected_outcome"`
-	IncludedScope      []string `json:"included_scope"`
-	ExcludedScope      []string `json:"excluded_scope"`
-	AcceptanceCriteria []string `json:"acceptance_criteria"`
-	ContextReferences  []string `json:"context_references"`
-	DependsOn          []string `json:"depends_on"`
-	BudgetMicros       int64    `json:"budget_microusd"`
+	Key                  string   `json:"key"`
+	Title                string   `json:"title"`
+	Description          string   `json:"description"`
+	ExpectedOutcome      string   `json:"expected_outcome"`
+	IncludedScope        []string `json:"included_scope"`
+	ExcludedScope        []string `json:"excluded_scope"`
+	AcceptanceCriteria   []string `json:"acceptance_criteria"`
+	ContextReferences    []string `json:"context_references"`
+	PrimaryRepositoryRef string   `json:"primary_repository_ref,omitempty"`
+	DependsOn            []string `json:"depends_on"`
+	BudgetMicros         int64    `json:"budget_microusd"`
 }
 
 type Proposal struct {
@@ -84,6 +85,22 @@ func Parse(raw []byte) (Proposal, error) {
 		}
 		if task.ContextReferences, err = references(task.ContextReferences); err != nil {
 			return Proposal{}, fmt.Errorf("task %s context_references: %w", task.Key, err)
+		}
+		task.PrimaryRepositoryRef = strings.TrimSpace(task.PrimaryRepositoryRef)
+		if task.PrimaryRepositoryRef != "" {
+			if !strings.HasPrefix(task.PrimaryRepositoryRef, "workspace://") {
+				return Proposal{}, fmt.Errorf("task %s primary_repository_ref must be a workspace:// reference", task.Key)
+			}
+			found := false
+			for _, reference := range task.ContextReferences {
+				if reference == task.PrimaryRepositoryRef {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return Proposal{}, fmt.Errorf("task %s primary_repository_ref must be selected in context_references", task.Key)
+			}
 		}
 		if task.DependsOn, err = dependencies(task.DependsOn, task.Key); err != nil {
 			return Proposal{}, fmt.Errorf("task %s depends_on: %w", task.Key, err)
