@@ -119,3 +119,42 @@ func TestPublicKeyAndSignatureEncodingsAreCanonicalAndDisplaySafe(t *testing.T) 
 		t.Fatal("fingerprint unexpectedly contains key or signature material")
 	}
 }
+
+func TestAgentInstanceEnrollmentProofBindsProfileMachineAndPublicKey(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encodedKey, err := EncodePublicKey(publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machineID := uuid.Must(uuid.NewV4()).String()
+	message, err := AgentInstanceEnrollmentMessage("generalist", machineID, encodedKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := ed25519.Sign(privateKey, message)
+	if err := VerifyAgentInstanceEnrollment(publicKey, signature, "generalist", machineID, encodedKey); err != nil {
+		t.Fatalf("matching enrollment proof rejected: %v", err)
+	}
+	for _, changed := range []struct {
+		name      string
+		agentKey  string
+		machineID string
+		publicKey string
+	}{
+		{name: "profile", agentKey: "reviewer", machineID: machineID, publicKey: encodedKey},
+		{name: "machine", agentKey: "generalist", machineID: uuid.Must(uuid.NewV4()).String(), publicKey: encodedKey},
+		{name: "public key", agentKey: "generalist", machineID: machineID, publicKey: encodedKey + "a"},
+	} {
+		t.Run(changed.name, func(t *testing.T) {
+			if err := VerifyAgentInstanceEnrollment(publicKey, signature, changed.agentKey, changed.machineID, changed.publicKey); err == nil {
+				t.Fatal("enrollment proof was accepted after a signed field changed")
+			}
+		})
+	}
+	if _, err := AgentInstanceEnrollmentMessage("bad\nprofile", machineID, encodedKey); err == nil {
+		t.Fatal("newline-containing profile was accepted")
+	}
+}

@@ -1,6 +1,10 @@
 package automationagent
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/gofrs/uuid"
+)
 
 func runtimeTestEnvironment(t *testing.T, overrides map[string]string) func(string) string {
 	t.Helper()
@@ -89,5 +93,32 @@ func TestLoadRuntimeConfigSelectsHTTPSGatewayWithoutAWSIdentity(t *testing.T) {
 	}
 	if config.Transport != "gateway" || config.GatewayToken != "lane-bound-token" || config.QueueURL != "" || config.AWSRegion != "" {
 		t.Fatalf("unexpected gateway runtime: %#v", config)
+	}
+}
+
+func TestLoadRuntimeConfigUsesControlPlaneIssuedIDFromMachineState(t *testing.T) {
+	stateDirectory := t.TempDir()
+	identity, err := LoadLocalMachineIdentity("", stateDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantID := uuid.Must(uuid.NewV4()).String()
+	if err := identity.StoreRegisteredAgentInstanceID("generalist", wantID); err != nil {
+		t.Fatal(err)
+	}
+	values := map[string]string{
+		"ITBEM_AI_TRANSPORT":      "gateway",
+		"ITBEM_AI_GATEWAY_TOKEN":  "lane-bound-token",
+		"ITBEM_AI_ROLE":           "reviewer",
+		"ITBEM_AI_QUEUE_LANE":     "review",
+		"ITBEM_AI_STATE_DIR":      stateDirectory,
+		"ITBEM_API_BASE_URL":      "https://api.example.com",
+		"ITBEM_AI_INPUT_BUCKET":   "itbem-ai-inputs-test",
+		"ITBEM_AI_OUTPUT_BUCKET":  "itbem-ai-outputs-test",
+		"ITBEM_AGENT_INSTANCE_ID": "",
+	}
+	config, err := LoadRuntimeConfig(func(name string) string { return values[name] })
+	if err != nil || config.AgentInstanceID != wantID {
+		t.Fatalf("runtime instance ID = %q, err=%v; want %q", config.AgentInstanceID, err, wantID)
 	}
 }

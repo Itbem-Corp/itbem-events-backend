@@ -15,6 +15,7 @@ import (
 
 	"events-stocks/configuration"
 	"events-stocks/internal/agentcallbackauth"
+	"events-stocks/internal/agentwork"
 	"events-stocks/internal/authz"
 	"events-stocks/models"
 	"events-stocks/utils"
@@ -29,6 +30,13 @@ type agentInstanceRegistrationRequest struct {
 	AgentKey  string `json:"agent_key"`
 	MachineID string `json:"machine_id"`
 	PublicKey string `json:"public_key"`
+}
+
+type gatewayAgentInstanceEnrollmentRequest struct {
+	AgentKey  string `json:"agent_key"`
+	MachineID string `json:"machine_id"`
+	PublicKey string `json:"public_key"`
+	Signature string `json:"signature"`
 }
 
 type agentInstanceDTO struct {
@@ -111,7 +119,122 @@ func RegisterAgentInstance(c echo.Context) error {
 	return utils.Success(c, http.StatusOK, "Agent instance registered", map[string]any{"instance": projectAgentInstance(instance)})
 }
 
+// EnrollGatewayAgentInstance lets a worker register itself on first start.
+// The existing role/lane token authorizes the lane, while an Ed25519 proof
+// binds the request to the machine's protected local key. The callback root
+// secret remains server-only, and revocation cannot be undone by this route.
+func EnrollGatewayAgentInstance(c echo.Context) error {
+	identity, ok := gatewayIdentityFromRequest(c)
+	if !ok {
+		return utils.Error(c, http.StatusUnauthorized, "Agent enrollment unauthorized", "")
+	}
+	if configuration.DB == nil {
+		return utils.Error(c, http.StatusServiceUnavailable, "Agent registry unavailable", "")
+	}
+	var request gatewayAgentInstanceEnrollmentRequest
+	if err := decodeAgentInstanceRequest(c.Request().Body, &request); err != nil {
+		return utils.Error(c, http.StatusBadRequest, "Invalid agent enrollment", "")
+	}
+	request.AgentKey = strings.TrimSpace(request.AgentKey)
+	request.MachineID = strings.TrimSpace(request.MachineID)
+	request.PublicKey = strings.TrimSpace(request.PublicKey)
+	request.Signature = strings.TrimSpace(request.Signature)
+	if !agentProfileKeyPattern.MatchString(request.AgentKey) {
+		return utils.Error(c, http.StatusBadRequest, "Invalid agent enrollment", "")
+	}
+	machineID, err := uuid.FromString(request.MachineID)
+	if err != nil || machineID == uuid.Nil || machineID.String() != request.MachineID {
+		return utils.Error(c, http.StatusBadRequest, "Invalid agent enrollment", "")
+	}
+	publicKey, err := agentcallbackauth.DecodePublicKey(request.PublicKey)
+	if err != nil {
+		return utils.Error(c, http.StatusUnauthorized, "Agent enrollment unauthorized", "")
+	}
+	signature, err := agentcallbackauth.DecodeSignature(request.Signature)
+	if err != nil || agentcallbackauth.VerifyAgentInstanceEnrollment(publicKey, signature, request.AgentKey, request.MachineID, request.PublicKey) != nil {
+		return utils.Error(c, http.StatusUnauthorized, "Agent enrollment unauthorized", "")
+	}
+	publicKeyFingerprint, err := agentcallbackauth.PublicKeyFingerprint(publicKey)
+	if err != nil {
+		return utils.Error(c, http.StatusBadRequest, "Invalid agent enrollment", "")
+	}
+	profile, err := findActiveAgentProfile(configuration.DB, request.AgentKey)
+	if errors.Is(err, gorm.ErrRecordNotFound) || profile == nil {
+		return utils.Error(c, http.StatusForbidden, "Agent profile unavailable", "")
+	}
+	if err != nil {
+		return utils.Error(c, http.StatusInternalServerError, "Agent profile unavailable", "")
+	}
+	if !agentProfileSupportsGatewayLane(profile, identity) {
+		return utils.Error(c, http.StatusForbidden, "Agent profile is not assigned to this lane", "")
+	}
+
+	var instance models.AutomationAgentInstance
+	err = configuration.DB.Transaction(func(tx *gorm.DB) error {
+		var active models.AutomationAgentInstance
+		activeErr := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("agent_key = ? AND machine_id = ? AND status = ?", request.AgentKey, request.MachineID, "active").Order("created_at DESC, id DESC").First(&active).Error
+		if activeErr == nil {
+			if active.PublicKey != request.PublicKey {
+				return errAgentInstanceKeyConflict
+			}
+			instance = active
+			return nil
+		}
+		if !errors.Is(activeErr, gorm.ErrRecordNotFound) {
+			return activeErr
+		}
+		var historical models.AutomationAgentInstance
+		historyErr := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("agent_key = ? AND machine_id = ?", request.AgentKey, request.MachineID).Order("created_at DESC, id DESC").First(&historical).Error
+		if historyErr == nil {
+			return errAgentInstanceRevoked
+		}
+		if !errors.Is(historyErr, gorm.ErrRecordNotFound) {
+			return historyErr
+		}
+		instance = models.AutomationAgentInstance{AgentKey: request.AgentKey, MachineID: request.MachineID, PublicKey: request.PublicKey, PublicKeyFingerprint: publicKeyFingerprint, Status: "active"}
+		insert := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&instance)
+		if insert.Error != nil {
+			return insert.Error
+		}
+		if insert.RowsAffected > 0 {
+			return nil
+		}
+		var concurrent models.AutomationAgentInstance
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("agent_key = ? AND machine_id = ? AND status = ?", request.AgentKey, request.MachineID, "active").First(&concurrent).Error; err != nil {
+			return err
+		}
+		if concurrent.PublicKey != request.PublicKey {
+			return errAgentInstanceKeyConflict
+		}
+		instance = concurrent
+		return nil
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, errAgentInstanceKeyConflict):
+			return utils.Error(c, http.StatusConflict, "Agent instance already enrolled", "Revoke the old identity and register a new key through the primary-root control")
+		case errors.Is(err, errAgentInstanceRevoked):
+			return utils.Error(c, http.StatusConflict, "Agent instance revoked", "A primary-root operator must explicitly re-enroll this machine")
+		default:
+			return utils.Error(c, http.StatusInternalServerError, "Agent instance could not be enrolled", "")
+		}
+	}
+	c.Response().Header().Set(echo.HeaderCacheControl, "no-store")
+	return utils.Success(c, http.StatusOK, "Agent instance enrolled", map[string]any{"instance": projectAgentInstance(instance)})
+}
+
+func agentProfileSupportsGatewayLane(profile *models.AutomationAgentProfile, identity gatewayIdentity) bool {
+	for operation := range profileOperations(profile) {
+		assignment, ok := agentwork.AssignmentForOperation(operation)
+		if ok && assignment.Role == identity.Role && assignment.Lane == identity.Lane {
+			return true
+		}
+	}
+	return false
+}
+
 var errAgentInstanceKeyConflict = errors.New("agent instance has a different enrolled key")
+var errAgentInstanceRevoked = errors.New("agent instance was revoked")
 
 // ListAgentInstances exposes only public identity metadata to the primary root.
 // Keyset pagination is stable even as workers heartbeat concurrently.

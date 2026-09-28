@@ -67,7 +67,7 @@ func TestRuntimeConfigRequiresRegisteredAgentInstanceID(t *testing.T) {
 		"ITBEM_AI_OUTPUT_BUCKET": "itbem-ai-outputs-local",
 		"ITBEM_AI_STATE_DIR":     t.TempDir(),
 	}
-	if _, err := LoadRuntimeConfig(func(name string) string { return values[name] }); err == nil || !strings.Contains(err.Error(), "ITBEM_AGENT_INSTANCE_ID") {
+	if _, err := LoadRuntimeConfig(func(name string) string { return values[name] }); err == nil || !strings.Contains(err.Error(), "--ensure-registered") {
 		t.Fatalf("runtime without registered instance ID must fail closed, got %v", err)
 	}
 }
