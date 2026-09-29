@@ -495,6 +495,44 @@ func TestProcessQueueMessageDeletesOnlyTerminalWork(t *testing.T) {
 	}
 }
 
+type leaseCheckingStore struct {
+	fakeStore
+	wantLease string
+}
+
+func (s *leaseCheckingStore) Get(ctx context.Context, bucket, key string) ([]byte, error) {
+	lease, err := gatewayLeaseFromContext(ctx)
+	if err != nil || lease != s.wantLease {
+		return nil, errors.New("queue message lease missing from worker context")
+	}
+	return s.fakeStore.Get(ctx, bucket, key)
+}
+
+type leaseBindingQueue struct{ fakeQueue }
+
+func (*leaseBindingQueue) BindMessageContext(ctx context.Context, message QueueMessage) context.Context {
+	return context.WithValue(ctx, gatewayLeaseContextKey{}, message.ReceiptHandle)
+}
+
+func TestProcessQueueMessageUsesTransportBoundContext(t *testing.T) {
+	input, _ := json.Marshal(TaskInput{Prompt: "hello"})
+	store := &leaseCheckingStore{fakeStore: fakeStore{input: input}, wantLease: "sealed-message-lease"}
+	worker, err := NewWorker(WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"}, store, &fakeCallback{}, fakeProvider{completion: Completion{Provider: ProviderMiniMax, Model: "MiniMax-M2.7", Content: "ok"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := validMessage()
+	message.Payload.Operation = "ai.chat"
+	encoded, _ := json.Marshal(message)
+	queue := &leaseBindingQueue{}
+	if err := ProcessQueueMessage(context.Background(), worker, queue, QueueMessage{Body: string(encoded), ReceiptHandle: "sealed-message-lease"}); err != nil {
+		t.Fatal(err)
+	}
+	if queue.deleted != 1 {
+		t.Fatalf("expected terminal work deletion, got %d", queue.deleted)
+	}
+}
+
 func TestProcessQueueMessageRetainsRetryableWork(t *testing.T) {
 	input, _ := json.Marshal(TaskInput{Prompt: "hello"})
 	worker, err := NewWorker(WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"}, &fakeStore{input: input}, &fakeCallback{}, fakeProvider{err: &RetryableError{Message: "retry"}})

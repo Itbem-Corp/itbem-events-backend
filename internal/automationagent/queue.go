@@ -73,6 +73,21 @@ type Queue interface {
 	Delete(context.Context, QueueMessage) error
 }
 
+// queueMessageContextBinder lets a transport bind opaque, message-scoped
+// authority to the exact execution context. The HTTPS gateway uses this for
+// its sealed lease token; keeping the hook on the queue avoids copying that
+// authority into the decoded task payload or worker configuration.
+type queueMessageContextBinder interface {
+	BindMessageContext(context.Context, QueueMessage) context.Context
+}
+
+func queueMessageExecutionContext(ctx context.Context, queue Queue, message QueueMessage) context.Context {
+	if binder, ok := queue.(queueMessageContextBinder); ok {
+		return binder.BindMessageContext(ctx, message)
+	}
+	return ctx
+}
+
 type scheduledQueueMessage struct {
 	raw       QueueMessage
 	review    bool
@@ -254,6 +269,7 @@ func ProcessQueueMessage(ctx context.Context, worker *Worker, queue Queue, raw Q
 	if err != nil {
 		return err
 	}
+	ctx = queueMessageExecutionContext(ctx, queue, raw)
 	if err := worker.Process(ctx, message); err != nil {
 		return err
 	}
@@ -606,10 +622,10 @@ func processQueueMessageWithVisibilityHeartbeat(ctx context.Context, worker *Wor
 				return
 			case <-ticker.C:
 				heartbeatContext, heartbeatCancel := context.WithTimeout(leaseContext, 15*time.Second)
-					err := extender.ExtendVisibility(heartbeatContext, raw, queueVisibilityTimeoutSeconds)
-					heartbeatCancel()
-					if err != nil && leaseContext.Err() == nil {
-						logger.Warn("automation visibility heartbeat failed; SQS may redeliver after the current lease", "error", safePublicErrorMessage(err.Error()))
+				err := extender.ExtendVisibility(heartbeatContext, raw, queueVisibilityTimeoutSeconds)
+				heartbeatCancel()
+				if err != nil && leaseContext.Err() == nil {
+					logger.Warn("automation visibility heartbeat failed; SQS may redeliver after the current lease", "error", safePublicErrorMessage(err.Error()))
 				}
 			}
 		}
