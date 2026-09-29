@@ -131,6 +131,18 @@ func TestHTTPGatewayMapsOnlyMissingOptionalObjectToNotFound(t *testing.T) {
 	}
 }
 
+func TestHTTPGatewayBindsSealedLeaseToQueueMessageExecution(t *testing.T) {
+	gateway, err := NewHTTPGateway("https://api.example.invalid", "test-token", agentwork.RoleReviewer, agentwork.LaneReview, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := queueMessageExecutionContext(context.Background(), gateway, QueueMessage{ReceiptHandle: "sealed-message-lease"})
+	lease, err := gatewayLeaseFromContext(ctx)
+	if err != nil || lease != "sealed-message-lease" {
+		t.Fatalf("bound lease = (%q, %v), want exact sealed message lease", lease, err)
+	}
+}
+
 func TestHTTPGatewayPreservesForbiddenStatusWithoutMakingItRetryable(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.WriteHeader(http.StatusForbidden)

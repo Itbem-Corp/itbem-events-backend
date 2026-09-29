@@ -241,6 +241,13 @@ func (g *HTTPGateway) Receive(ctx context.Context, limit int) ([]QueueMessage, e
 	return messages, nil
 }
 
+// BindMessageContext keeps the sealed receipt opaque while making it
+// available to object reads and writes performed for this exact delivery.
+// The token never enters the task JSON, logs, or long-lived worker config.
+func (g *HTTPGateway) BindMessageContext(ctx context.Context, message QueueMessage) context.Context {
+	return context.WithValue(ctx, gatewayLeaseContextKey{}, strings.TrimSpace(message.ReceiptHandle))
+}
+
 func (g *HTTPGateway) Delete(ctx context.Context, message QueueMessage) error {
 	return g.request(ctx, http.MethodDelete, "/api/internal/automation/gateway/leases", map[string]any{"lease_token": message.ReceiptHandle}, nil)
 }
