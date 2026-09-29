@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"regexp"
@@ -231,7 +232,11 @@ func (callback identityTaskCallback) Update(ctx context.Context, taskID string, 
 			update.ExecutionIdentity = &identity
 		}
 	}
-	return callback.inner.Update(ctx, taskID, update)
+	accepted, err := callback.inner.Update(ctx, taskID, update)
+	if err == nil && accepted && update.Status == "failed" {
+		slog.WarnContext(ctx, "automation task failed", "event", "automation_task_failed", "task_id", taskID, "error", safePublicErrorMessage(update.ErrorMessage))
+	}
+	return accepted, err
 }
 
 func NewWorker(config WorkerConfig, store ObjectStore, callback TaskCallback, provider ProviderClient) (*Worker, error) {
