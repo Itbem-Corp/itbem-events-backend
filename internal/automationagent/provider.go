@@ -33,6 +33,20 @@ const (
 	providerRetryMaxDelay     = 15 * time.Minute
 )
 
+const (
+	// InferenceConflictHeader carries only a bounded conflict class from the
+	// authenticated gateway. It never contains database, provider or lease data.
+	InferenceConflictHeader = "X-ITBEM-Inference-Conflict"
+
+	InferenceConflictCallReused       = "call_reused"
+	InferenceConflictIdentityStale    = "identity_stale"
+	InferenceConflictLeaseInactive    = "lease_inactive"
+	InferenceConflictPolicyInvalid    = "attempt_policy_invalid"
+	InferenceConflictProjectInvalid   = "project_scope_invalid"
+	InferenceConflictQuotaExhausted   = "quota_exhausted"
+	InferenceConflictStateUnavailable = "state_unavailable"
+)
+
 type inferenceLeaseContextKey struct{}
 type inferenceCapabilityContextKey struct{}
 
@@ -526,6 +540,15 @@ func (p *gatewayProviderClient) Complete(ctx context.Context, messages []Message
 			return Completion{}, fmt.Errorf("AI gateway returned an invalid billable rejection")
 		}
 		return completion, &ProviderResponseError{Completion: completion, Message: "AI provider response was rejected by the gateway contract"}
+	}
+	if response.StatusCode == http.StatusConflict {
+		reason := strings.TrimSpace(response.Header.Get(InferenceConflictHeader))
+		switch reason {
+		case InferenceConflictCallReused, InferenceConflictIdentityStale, InferenceConflictLeaseInactive,
+			InferenceConflictPolicyInvalid, InferenceConflictProjectInvalid, InferenceConflictQuotaExhausted,
+			InferenceConflictStateUnavailable:
+			return Completion{}, fmt.Errorf("AI gateway request rejected (409: %s)", reason)
+		}
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return Completion{}, fmt.Errorf("AI gateway request rejected (%d)", response.StatusCode)
