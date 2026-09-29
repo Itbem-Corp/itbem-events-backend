@@ -12,6 +12,7 @@ WorkingDirectory=/var/lib/itbem-ai-agent/%i
 StateDirectory=itbem-ai-agent/%i
 StateDirectoryMode=0700
 Environment=ITBEM_AI_CONCURRENCY=1
+Environment=ITBEM_AI_STATE_DIR=/var/lib/itbem-ai-agent/%i
 Environment=GIT_OPTIONAL_LOCKS=0
 EnvironmentFile=/etc/itbem-ai-agent/common.env
 EnvironmentFile=/etc/itbem-ai-agent/roles/%i.env
