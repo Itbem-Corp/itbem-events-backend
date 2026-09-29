@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"events-stocks/internal/automationagent"
 	"events-stocks/models"
 	"github.com/gofrs/uuid"
 	"gorm.io/gorm"
@@ -21,14 +22,18 @@ import (
 const (
 	attemptPolicySigningKeyEnv         = "AUTOMATION_ATTEMPT_POLICY_SIGNING_KEY"
 	attemptPolicyPreviousSigningKeyEnv = "AUTOMATION_ATTEMPT_POLICY_SIGNING_KEY_PREVIOUS"
-	maxAutomationInferenceCallsPerRun  = 6
+	maxAutomationInferenceCallsPerRun  = automationagent.CodeReviewMaxInferenceCalls
 )
 
-// inferenceAttemptCallQuota mirrors deliveryRunBudgetReservationForRoutes:
-// implementation admission holds six calls, QA holds one primary plus one
-// Stagehand call, ordinary operations hold one, and publish is deterministic.
+// inferenceAttemptCallQuota keeps every operation within a signed, durable
+// call ceiling. Segmented reviews may consume one call per complete segment
+// plus their review-wide repair allowance; implementation admission holds six
+// calls, QA holds one primary plus one Stagehand call, ordinary operations
+// hold one, and publish is deterministic.
 func inferenceAttemptCallQuota(operation string) int {
 	switch strings.TrimSpace(operation) {
+	case "code.review":
+		return automationagent.CodeReviewMaxInferenceCalls
 	case "delivery.implementation":
 		return 6
 	case "delivery.qa":

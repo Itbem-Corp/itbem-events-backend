@@ -19,6 +19,11 @@ const codeReviewSegmentCompletionLimit = 8192
 const codeReviewSegmentCompletionFloor = 2048
 const codeReviewRepairCompletionLimit = 8192
 const maxCodeReviewRepairs = 2
+
+// CodeReviewMaxInferenceCalls bounds one review attempt to every possible
+// segment plus the small, review-wide repair allowance.
+const CodeReviewMaxInferenceCalls = maxCodeReviewSegments + maxCodeReviewRepairs
+
 const codeReviewSupportingTestPatchBytes = 24 << 10
 
 var codeReviewSupportIdentifier = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]{4,}`)
