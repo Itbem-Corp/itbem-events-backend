@@ -172,6 +172,16 @@ func inferenceConflictCode(err error) string {
 	switch {
 	case strings.Contains(message, "worker identity"), strings.Contains(message, "capability scope"):
 		return automationagent.InferenceConflictIdentityStale
+	case strings.Contains(message, "attempt policy is unavailable"):
+		return automationagent.InferenceConflictPolicyUnavailable
+	case strings.Contains(message, "attempt policy scope"):
+		return automationagent.InferenceConflictPolicyScopeInvalid
+	case strings.Contains(message, "attempt policy signature"):
+		return automationagent.InferenceConflictPolicySignatureInvalid
+	case strings.Contains(message, "attempt policy has no routes"):
+		return automationagent.InferenceConflictPolicyRoutesMissing
+	case strings.Contains(message, "attempt policy routes"):
+		return automationagent.InferenceConflictPolicyRoutesInvalid
 	case strings.Contains(message, "attempt policy"):
 		return automationagent.InferenceConflictPolicyInvalid
 	case strings.Contains(message, "project scope"):
@@ -368,8 +378,17 @@ func gatewayInferenceScopeForRequest(request inferenceRequest, authenticated ...
 			return errors.New("automation inference attempt policy scope is invalid")
 		}
 		routes, hash, valid := validateAutomationInferenceAttemptPolicy(snapshot)
-		if !valid || !verifyAutomationInferenceAttemptPolicySignature(snapshot) || len(routes) == 0 || len(routes) > models.MaxAutomationAIActionRoutes {
+		if !valid {
 			return errors.New("automation inference attempt policy is invalid")
+		}
+		if !verifyAutomationInferenceAttemptPolicySignature(snapshot) {
+			return errors.New("automation inference attempt policy signature is invalid")
+		}
+		if len(routes) == 0 {
+			return errors.New("automation inference attempt policy has no routes")
+		}
+		if len(routes) > models.MaxAutomationAIActionRoutes {
+			return errors.New("automation inference attempt policy routes are invalid")
 		}
 		_, canonicalHash, err := canonicalInferenceRoutes(routes)
 		if err != nil || !strings.EqualFold(canonicalHash, hash) {

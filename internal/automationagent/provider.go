@@ -38,13 +38,18 @@ const (
 	// authenticated gateway. It never contains database, provider or lease data.
 	InferenceConflictHeader = "X-ITBEM-Inference-Conflict"
 
-	InferenceConflictCallReused       = "call_reused"
-	InferenceConflictIdentityStale    = "identity_stale"
-	InferenceConflictLeaseInactive    = "lease_inactive"
-	InferenceConflictPolicyInvalid    = "attempt_policy_invalid"
-	InferenceConflictProjectInvalid   = "project_scope_invalid"
-	InferenceConflictQuotaExhausted   = "quota_exhausted"
-	InferenceConflictStateUnavailable = "state_unavailable"
+	InferenceConflictCallReused             = "call_reused"
+	InferenceConflictIdentityStale          = "identity_stale"
+	InferenceConflictLeaseInactive          = "lease_inactive"
+	InferenceConflictPolicyUnavailable      = "attempt_policy_unavailable"
+	InferenceConflictPolicyScopeInvalid     = "attempt_policy_scope_invalid"
+	InferenceConflictPolicyInvalid          = "attempt_policy_invalid"
+	InferenceConflictPolicySignatureInvalid = "attempt_policy_signature_invalid"
+	InferenceConflictPolicyRoutesMissing    = "attempt_policy_routes_missing"
+	InferenceConflictPolicyRoutesInvalid    = "attempt_policy_routes_invalid"
+	InferenceConflictProjectInvalid         = "project_scope_invalid"
+	InferenceConflictQuotaExhausted         = "quota_exhausted"
+	InferenceConflictStateUnavailable       = "state_unavailable"
 )
 
 type inferenceLeaseContextKey struct{}
@@ -545,7 +550,9 @@ func (p *gatewayProviderClient) Complete(ctx context.Context, messages []Message
 		reason := strings.TrimSpace(response.Header.Get(InferenceConflictHeader))
 		switch reason {
 		case InferenceConflictCallReused, InferenceConflictIdentityStale, InferenceConflictLeaseInactive,
-			InferenceConflictPolicyInvalid, InferenceConflictProjectInvalid, InferenceConflictQuotaExhausted,
+			InferenceConflictPolicyUnavailable, InferenceConflictPolicyScopeInvalid, InferenceConflictPolicyInvalid,
+			InferenceConflictPolicySignatureInvalid, InferenceConflictPolicyRoutesMissing, InferenceConflictPolicyRoutesInvalid,
+			InferenceConflictProjectInvalid, InferenceConflictQuotaExhausted,
 			InferenceConflictStateUnavailable:
 			return Completion{}, fmt.Errorf("AI gateway request rejected (409: %s)", reason)
 		}
