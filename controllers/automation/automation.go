@@ -2968,7 +2968,7 @@ func Complete(c echo.Context) error {
 		if _, err := uuid.FromString(request.RunID); err != nil || request.RunID == "" {
 			return utils.Error(c, http.StatusBadRequest, "Invalid automation result", "running tasks require a valid run lease ID")
 		}
-		return claimAutomationTaskRun(c, id, request.RunID)
+		return claimAutomationTaskRun(c, id, request.RunID, request)
 	}
 	request.RequestRef = strings.TrimSpace(request.RequestRef)
 	ledgerRunID := request.RunID
