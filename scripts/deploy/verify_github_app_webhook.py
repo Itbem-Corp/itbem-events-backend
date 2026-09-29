@@ -21,6 +21,7 @@ from typing import Any
 
 GITHUB_API = "https://api.github.com"
 API_VERSION = "2022-11-28"
+REVIEW_ACTIONS = {"opened", "reopened", "ready_for_review", "synchronize"}
 
 
 def _base64url(value: bytes) -> str:
@@ -106,14 +107,17 @@ class GitHubWebhookVerifier:
             raise RuntimeError("GitHub App deliveries response is invalid")
         source = self._source_delivery(deliveries)
         if source is None:
-            raise RuntimeError("GitHub App has no successful delivery to redeliver")
+            raise RuntimeError(
+                "GitHub App has no successful review-eligible pull_request delivery "
+                "to redeliver"
+            )
 
         cutoff = self.clock() - timedelta(seconds=2)
         self.request_json("POST", f"/app/hook/deliveries/{source['id']}/attempts", None)
         for _ in range(attempts):
             current = self.request_json("GET", "/app/hook/deliveries?per_page=20", None)
             candidate = self._new_delivery(
-                current, source["id"], source["event"], cutoff
+                current, source["id"], source["event"], source["action"], cutoff
             )
             if candidate is not None and candidate.get("status_code") is not None:
                 status_code = candidate.get("status_code")
@@ -125,6 +129,7 @@ class GitHubWebhookVerifier:
                 return {
                     "delivery_id": candidate["id"],
                     "event": source["event"],
+                    "action": source["action"],
                     "status_code": status_code,
                 }
             self.sleep(delay_seconds)
@@ -134,23 +139,16 @@ class GitHubWebhookVerifier:
     def _source_delivery(deliveries: Any) -> dict[str, Any] | None:
         if not isinstance(deliveries, list):
             raise RuntimeError("GitHub App deliveries response is invalid")
-        # A ping is side-effect free and therefore preferred. Some GitHub Apps,
-        # including Apps created through the current settings UI, may have no
-        # historical ping at all. In that case redeliver the newest previously
-        # accepted event. The webhook ingestion boundary is idempotent and this
-        # exercises the real App secret instead of a synthetic local signature.
-        for item in deliveries:
-            if (
-                isinstance(item, dict)
-                and isinstance(item.get("id"), int)
-                and item.get("event") == "ping"
-            ):
-                return item
+        # This release gate must exercise the same event class that creates a
+        # review task. A ping or an unrelated accepted event (for example
+        # check_suite) proves only that the webhook URL responds; it does not
+        # prove that pull-request ingestion can enqueue Bema Review work.
         for item in deliveries:
             if (
                 not isinstance(item, dict)
                 or not isinstance(item.get("id"), int)
-                or not isinstance(item.get("event"), str)
+                or item.get("event") != "pull_request"
+                or item.get("action") not in REVIEW_ACTIONS
             ):
                 continue
             status_code = item.get("status_code")
@@ -160,7 +158,11 @@ class GitHubWebhookVerifier:
 
     @staticmethod
     def _new_delivery(
-        deliveries: Any, source_id: int, source_event: str, cutoff: datetime
+        deliveries: Any,
+        source_id: int,
+        source_event: str,
+        source_action: str,
+        cutoff: datetime,
     ) -> dict[str, Any] | None:
         if not isinstance(deliveries, list):
             raise RuntimeError("GitHub App deliveries response is invalid")
@@ -168,6 +170,7 @@ class GitHubWebhookVerifier:
             if (
                 not isinstance(item, dict)
                 or item.get("event") != source_event
+                or item.get("action") != source_action
                 or item.get("id") == source_id
                 or item.get("redelivery") is not True
             ):
@@ -230,7 +233,8 @@ def main() -> int:
         return 1
     print(
         "github_review_webhook=ready "
-        f"event={evidence['event']} status_code={evidence['status_code']} "
+        f"event={evidence['event']} action={evidence['action']} "
+        f"status_code={evidence['status_code']} "
         f"delivery_id={evidence['delivery_id']}"
     )
     return 0

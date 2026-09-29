@@ -31,16 +31,25 @@ class GitHubAppWebhookTests(unittest.TestCase):
         )
         self.assertEqual(signature, "c2lnbmF0dXJl")
 
-    def test_redelivers_latest_ping_and_requires_http_200(self) -> None:
+    def test_redelivers_review_eligible_pull_request_and_requires_http_2xx(self) -> None:
         calls: list[tuple[str, str]] = []
         responses = iter(
             [
-                [{"id": 10, "event": "ping"}],
+                [
+                    {"id": 12, "event": "check_suite", "status_code": 202},
+                    {
+                        "id": 10,
+                        "event": "pull_request",
+                        "action": "synchronize",
+                        "status_code": 202,
+                    },
+                ],
                 [],
                 [
                     {
                         "id": 11,
-                        "event": "ping",
+                        "event": "pull_request",
+                        "action": "synchronize",
                         "redelivery": True,
                         "delivered_at": "2027-01-15T12:00:01Z",
                         "status_code": 200,
@@ -62,18 +71,31 @@ class GitHubAppWebhookTests(unittest.TestCase):
         )
         self.assertEqual(
             verifier.verify(attempts=2, delay_seconds=0),
-            {"delivery_id": 11, "event": "ping", "status_code": 200},
+            {
+                "delivery_id": 11,
+                "event": "pull_request",
+                "action": "synchronize",
+                "status_code": 200,
+            },
         )
         self.assertEqual(calls[1], ("POST", "/app/hook/deliveries/10/attempts"))
 
-    def test_non_200_ping_fails_closed_without_response_payload(self) -> None:
+    def test_non_2xx_pull_request_fails_closed_without_response_payload(self) -> None:
         responses = iter(
             [
-                [{"id": 10, "event": "ping"}],
+                [
+                    {
+                        "id": 10,
+                        "event": "pull_request",
+                        "action": "opened",
+                        "status_code": 202,
+                    }
+                ],
                 [
                     {
                         "id": 12,
-                        "event": "ping",
+                        "event": "pull_request",
+                        "action": "opened",
                         "redelivery": True,
                         "delivered_at": "2027-01-15T12:00:01Z",
                         "status_code": 401,
@@ -98,13 +120,24 @@ class GitHubAppWebhookTests(unittest.TestCase):
         responses = iter(
             [
                 [
-                    {"id": 20, "event": "pull_request", "status_code": 202},
-                    {"id": 19, "event": "pull_request", "status_code": 400},
+                    {
+                        "id": 20,
+                        "event": "pull_request",
+                        "action": "ready_for_review",
+                        "status_code": 202,
+                    },
+                    {
+                        "id": 19,
+                        "event": "pull_request",
+                        "action": "opened",
+                        "status_code": 400,
+                    },
                 ],
                 [
                     {
                         "id": 21,
                         "event": "pull_request",
+                        "action": "ready_for_review",
                         "redelivery": True,
                         "delivered_at": "2027-01-15T12:00:01Z",
                         "status_code": 202,
@@ -124,16 +157,35 @@ class GitHubAppWebhookTests(unittest.TestCase):
         )
         self.assertEqual(
             verifier.verify(attempts=1, delay_seconds=0),
-            {"delivery_id": 21, "event": "pull_request", "status_code": 202},
+            {
+                "delivery_id": 21,
+                "event": "pull_request",
+                "action": "ready_for_review",
+                "status_code": 202,
+            },
         )
         self.assertEqual(calls[1], ("POST", "/app/hook/deliveries/20/attempts"))
 
     def test_missing_successful_delivery_and_untrusted_api_endpoint_fail_closed(self) -> None:
         verifier = GitHubWebhookVerifier(lambda method, path, body: [])
-        with self.assertRaisesRegex(RuntimeError, "no successful delivery"):
+        with self.assertRaisesRegex(RuntimeError, "no successful review-eligible"):
             verifier.verify(attempts=1, delay_seconds=0)
         with self.assertRaisesRegex(ValueError, "api.github.com"):
             github_requester("token", "https://example.invalid")
+
+    def test_rejects_unrelated_or_non_ingesting_successful_deliveries(self) -> None:
+        verifier = GitHubWebhookVerifier(lambda method, path, body: [
+            {"id": 30, "event": "check_suite", "status_code": 202},
+            {"id": 29, "event": "ping", "status_code": 200},
+            {
+                "id": 28,
+                "event": "pull_request",
+                "action": "closed",
+                "status_code": 202,
+            },
+        ])
+        with self.assertRaisesRegex(RuntimeError, "no successful review-eligible"):
+            verifier.verify(attempts=1, delay_seconds=0)
 
     def test_private_key_accepts_one_inline_or_absolute_file_source(self) -> None:
         self.assertEqual(load_private_key(" inline-key ", ""), "inline-key")
