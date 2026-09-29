@@ -96,6 +96,34 @@ type fakeProvider struct {
 	err        error
 }
 
+type transientReadError struct{}
+
+func (transientReadError) Error() string             { return "temporary gateway storage failure" }
+func (transientReadError) RetryDelay() time.Duration { return time.Nanosecond }
+
+type transientReadStore struct{ calls int }
+
+func (s *transientReadStore) Get(context.Context, string, string) ([]byte, error) {
+	s.calls++
+	if s.calls < 3 {
+		return nil, transientReadError{}
+	}
+	return nil, ErrObjectNotFound
+}
+
+func (*transientReadStore) PutEncryptedJSON(context.Context, string, string, []byte) error {
+	return nil
+}
+
+func TestPrivatePreInferenceReadRetriesOnlyTransportClassifiedOutage(t *testing.T) {
+	store := &transientReadStore{}
+	worker := &Worker{store: store}
+	_, err := worker.readPrivateObjectBeforeInference(context.Background(), "itbem-ai-outputs-test", "automation/task/result.json")
+	if !errors.Is(err, ErrObjectNotFound) || store.calls != 3 {
+		t.Fatalf("read = (%v, %d calls), want missing after two transient retries", err, store.calls)
+	}
+}
+
 // capabilityProvider models an adapter that advertises a bounded contract but
 // must never be called when admission rejects the requested operation.
 type capabilityProvider struct {

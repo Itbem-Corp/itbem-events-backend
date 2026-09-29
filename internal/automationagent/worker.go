@@ -22,6 +22,8 @@ const (
 	maxInputBytes                     = 10 << 20
 	maxErrorMessageLen                = 1024
 	deliveryPlanRepairCompletionLimit = 4096
+	preInferenceReadAttempts          = 4
+	preInferenceReadRetryMaximumDelay = 2 * time.Second
 )
 
 // ErrObjectNotFound is returned only for an absent optional immutable artifact.
@@ -439,9 +441,9 @@ func (w *Worker) Process(ctx context.Context, message TaskMessage) error {
 	}
 	inputRef := message.Payload.InputRef
 	bucket, key, _ := ParsePrivateReference(inputRef)
-	raw, err := w.store.Get(ctx, bucket, key)
+	raw, err := w.readPrivateObjectBeforeInference(ctx, bucket, key)
 	if err != nil {
-		return err
+		return &RetryableError{Message: "private input storage unavailable; inference deferred", RetryAfter: time.Minute}
 	}
 	if len(raw) > maxInputBytes {
 		return w.fail(ctx, message.Payload.TaskID, runID, fmt.Errorf("automation input exceeds 10 MiB"))
@@ -708,6 +710,46 @@ func (w *Worker) Process(ctx context.Context, message TaskMessage) error {
 	update = sanitizeTaskUpdateForCallback(update)
 	_, err = w.callback.Update(ctx, message.Payload.TaskID, update)
 	return err
+}
+
+// readPrivateObjectBeforeInference retries only errors that the transport has
+// explicitly classified as transient. A cold gateway credential or regional
+// lookup may fail once even though the same sealed read succeeds moments
+// later; returning immediately after the task claim would strand its durable
+// execution lease for twenty minutes. Missing objects and permanent gateway
+// rejections are never retried or reclassified, and no provider call occurs
+// until this bounded read finishes successfully.
+func (w *Worker) readPrivateObjectBeforeInference(ctx context.Context, bucket, key string) ([]byte, error) {
+	for attempt := 1; attempt <= preInferenceReadAttempts; attempt++ {
+		raw, err := w.store.Get(ctx, bucket, key)
+		if err == nil || errors.Is(err, ErrObjectNotFound) {
+			return raw, err
+		}
+		var retryable interface{ RetryDelay() time.Duration }
+		if attempt == preInferenceReadAttempts || !errors.As(err, &retryable) {
+			return nil, err
+		}
+		delay := retryable.RetryDelay()
+		if delay <= 0 {
+			return nil, err
+		}
+		if delay > preInferenceReadRetryMaximumDelay {
+			delay = preInferenceReadRetryMaximumDelay
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil, fmt.Errorf("private object read retries exhausted")
 }
 
 func (w *Worker) processOnboardingProbe(ctx context.Context, taskID, runID string, input TaskInput) error {
@@ -982,9 +1024,9 @@ func (w *Worker) storeStepRequest(ctx context.Context, taskID, runID, step, oper
 
 func (w *Worker) completeFromExistingResult(ctx context.Context, taskID, runID string) (bool, error) {
 	key := "automation/" + taskID + "/result.json"
-	raw, err := w.store.Get(ctx, w.config.OutputBucket, key)
+	raw, err := w.readPrivateObjectBeforeInference(ctx, w.config.OutputBucket, key)
 	if errors.Is(err, ErrObjectNotFound) {
-		intentRaw, intentErr := w.store.Get(ctx, w.config.OutputBucket, providerIntentKey(taskID))
+		intentRaw, intentErr := w.readPrivateObjectBeforeInference(ctx, w.config.OutputBucket, providerIntentKey(taskID))
 		if errors.Is(intentErr, ErrObjectNotFound) {
 			return false, nil
 		}
