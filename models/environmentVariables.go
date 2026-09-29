@@ -131,7 +131,9 @@ type Config struct {
 	// AutomationBudgetProvider and AutomationBudgetModel declare the non-secret
 	// provider/model pair used for conservative admission reservations. They
 	// must mirror the local worker deployment; an enforced budget fails closed
-	// when that pair is absent from the server-owned pricing catalog.
+	// when that pair is absent from the server-owned pricing catalog. When both
+	// are explicitly set, startup also uses the pair to create only a missing
+	// initial code.review action policy; existing operator policy is preserved.
 	AutomationBudgetProvider string `required:"false"`
 	AutomationBudgetModel    string `required:"false"`
 	// AutomationQASemanticInputTokenReserve and

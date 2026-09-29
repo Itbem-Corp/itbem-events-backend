@@ -112,7 +112,7 @@ func Run() error {
 	// Performance-only indexes are built asynchronously and fail open. Their
 	// absence may slow a fallback plan but must not delay API readiness.
 	go configuration.MigratePerformanceIndexes()
-	configuration.SeedBaseData()
+	configuration.SeedBaseData(cfg)
 	// SeedBaseData publishes versioned, stable design templates and palettes.
 	// Valkey survives API restarts, so an empty catalog cached before the seed
 	// would otherwise hide newly published templates until the TTL expires.
