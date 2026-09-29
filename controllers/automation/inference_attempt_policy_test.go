@@ -5,12 +5,14 @@ import (
 	"testing"
 	"time"
 
+	"events-stocks/internal/automationagent"
 	"events-stocks/models"
 	"github.com/gofrs/uuid"
 )
 
 func TestInferenceAttemptCallQuotaFollowsAdmissionBudgets(t *testing.T) {
 	for operation, want := range map[string]int{
+		"code.review":             automationagent.CodeReviewMaxInferenceCalls,
 		"delivery.implementation": 6,
 		"delivery.qa":             2,
 		"delivery.plan":           1,
