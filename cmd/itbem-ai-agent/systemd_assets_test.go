@@ -66,6 +66,7 @@ func TestSystemdDoctorIsReadOnlyAndCannotConsumeQueueWork(t *testing.T) {
 	for _, required := range []string{
 		"Type=oneshot", "User=itbem-agent-%i", "EnvironmentFile=/etc/itbem-ai-agent/roles/%i.env",
 		"StateDirectory=itbem-ai-agent/%i", "StateDirectoryMode=0700",
+		"Environment=ITBEM_AI_STATE_DIR=/var/lib/itbem-ai-agent/%i",
 		"ExecStart=/opt/itbem-ai-agent/current/itbem-ai-agent --doctor",
 		"ReadOnlyPaths=/srv/itbem-agent-workspaces/%i", "RestrictAddressFamilies=AF_UNIX", "NoNewPrivileges=yes", "ProtectSystem=strict",
 		"ProtectHostname=yes", "RestrictNamespaces=yes", "RemoveIPC=yes",
@@ -90,6 +91,7 @@ func TestSystemdWorkspaceSyncIsBoundedAndCannotConsumeOrPublish(t *testing.T) {
 	unit := systemdAsset(t, "itbem-ai-agent-sync@.service")
 	for _, required := range []string{
 		"Type=oneshot", "User=itbem-agent-%i", "EnvironmentFile=/etc/itbem-ai-agent/roles/%i.env",
+		"Environment=ITBEM_AI_STATE_DIR=/var/lib/itbem-ai-agent/%i",
 		"ExecCondition=/usr/bin/test ! -e /etc/itbem-ai-agent/disabled/all",
 		"ExecCondition=/usr/bin/test ! -e /etc/itbem-ai-agent/disabled/%i",
 		"ExecStartPre=/opt/itbem-ai-agent/current/itbem-ai-agent --doctor",
