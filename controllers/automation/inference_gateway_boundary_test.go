@@ -63,13 +63,13 @@ func TestInferenceRequestRejectsCredentialFieldsWithoutEchoingTheirValue(t *test
 }
 
 func TestInferenceGatewayMessagesAreBoundedBeforeProviderCalls(t *testing.T) {
-	if !validInferenceMessages([]automationagent.Message{{Role: "user", Content: strings.Repeat("x", 128<<10)}}) {
+	if !validInferenceMessages([]automationagent.Message{{Role: "user", Content: strings.Repeat("x", maxInferenceGatewayMessageBytes)}}) {
 		t.Fatal("message exactly at per-message byte ceiling was rejected")
 	}
 	for _, messages := range [][]automationagent.Message{
-		{{Role: "user", Content: strings.Repeat("x", (128<<10)+1)}},
+		{{Role: "user", Content: strings.Repeat("x", maxInferenceGatewayMessageBytes+1)}},
 		{{Role: "tool", Content: "not an accepted role"}},
-		{{Role: "user", Content: strings.Repeat("x", 128<<10)}, {Role: "assistant", Content: strings.Repeat("y", 128<<10)}, {Role: "user", Content: strings.Repeat("z", 128<<10)}, {Role: "assistant", Content: strings.Repeat("w", 128<<10+1)}},
+		{{Role: "user", Content: strings.Repeat("x", maxInferenceGatewayMessageBytes)}, {Role: "assistant", Content: strings.Repeat("y", maxInferenceGatewayRequestBytes-maxInferenceGatewayMessageBytes+1)}},
 	} {
 		if validInferenceMessages(messages) {
 			t.Fatalf("oversized or invalid messages were accepted (messages=%d)", len(messages))

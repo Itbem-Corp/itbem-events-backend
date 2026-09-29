@@ -24,7 +24,14 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-const maxInferenceGatewayRequestBytes = 512 << 10
+const (
+	// Exact-SHA code reviews preserve complete file diffs. A single changed
+	// file may approach the 512 KiB segment boundary before the worker adds its
+	// annotated evidence and bounded source context. Keep the gateway large
+	// enough for that sealed request while retaining a strict body ceiling.
+	maxInferenceGatewayRequestBytes = 1 << 20
+	maxInferenceGatewayMessageBytes = 768 << 10
+)
 
 // The adapter below avoids making the controller depend on AWS. It is assigned
 // once from the composition root and stays nil when this environment has not
@@ -447,7 +454,7 @@ func validInferenceMessages(messages []automationagent.Message) bool {
 		if message.Role != "system" && message.Role != "user" && message.Role != "assistant" {
 			return false
 		}
-		if content := strings.TrimSpace(message.Content); content == "" || len(content) > 128<<10 {
+		if content := strings.TrimSpace(message.Content); content == "" || len(content) > maxInferenceGatewayMessageBytes {
 			return false
 		} else {
 			total += len(content)
