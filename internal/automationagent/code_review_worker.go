@@ -113,6 +113,13 @@ func (w *Worker) processSegmentedCodeReview(ctx context.Context, message TaskMes
 	for index := range calls {
 		calls[index].MaxTokens = allocations[index]
 	}
+	// Admission is evaluated against the largest possible call, including the
+	// bounded repair path, before any durable review request is persisted.
+	// The capability limit is per provider call rather than the aggregate review
+	// budget shared by every segment.
+	if err := validateProviderContract(w.provider, message.Payload.Operation, codeReviewRepairCompletionLimit, w.config.RequireProviderCapabilities); err != nil {
+		return w.fail(ctx, message.Payload.TaskID, runID, err)
+	}
 	progress, exists, err := w.loadCodeReviewProgress(ctx, message.Payload.TaskID, calls, boundary)
 	if err != nil {
 		var invalidProgress *codeReviewProgressInvalidError
@@ -162,8 +169,15 @@ func (w *Worker) processSegmentedCodeReview(ctx context.Context, message TaskMes
 			parseErr = errors.New(pending.ValidationError)
 			repairRef = pending.RequestRef
 		} else {
+			accepted, renewErr := w.renewInferenceCapability(ctx, message.Payload.TaskID, runID, "thinking", 0)
+			if renewErr != nil {
+				return renewErr
+			}
+			if !accepted {
+				return nil
+			}
 			var callErr error
-			completion, callErr = w.provider.Complete(ctx, call.Messages, call.MaxTokens)
+			completion, callErr = w.provider.Complete(WithInferenceLease(ctx, message.Payload.TaskID, runID, message.Payload.Operation, ""), call.Messages, call.MaxTokens)
 			if callErr != nil {
 				var retryable *RetryableError
 				if errors.As(callErr, &retryable) {
@@ -190,6 +204,7 @@ func (w *Worker) processSegmentedCodeReview(ctx context.Context, message TaskMes
 			review, validationErr := ParseCodeReview(completion.Content)
 			if validationErr == nil {
 				repairCodeReviewEvidenceQuotes(review, call.Boundary)
+				NormalizeCodeReviewCoverage(review, call.Boundary)
 				validationErr = ValidateCodeReviewBoundary(review, call.Boundary)
 			}
 			if validationErr == nil {
@@ -238,7 +253,14 @@ func (w *Worker) processSegmentedCodeReview(ctx context.Context, message TaskMes
 		}
 
 		repairMessages := codeReviewRepairMessages(call.Messages, completion.Content, parseErr, call.Boundary)
-		repair, repairErr := w.provider.Complete(ctx, repairMessages, codeReviewRepairCompletionLimit)
+		accepted, renewErr := w.renewInferenceCapability(ctx, message.Payload.TaskID, runID, "repairing", 0)
+		if renewErr != nil {
+			return renewErr
+		}
+		if !accepted {
+			return nil
+		}
+		repair, repairErr := w.provider.Complete(WithInferenceLease(ctx, message.Payload.TaskID, runID, message.Payload.Operation, ""), repairMessages, codeReviewRepairCompletionLimit)
 		segmentCalls := []Completion{completion}
 		if repairErr != nil {
 			var retryable *RetryableError
@@ -260,6 +282,7 @@ func (w *Worker) processSegmentedCodeReview(ctx context.Context, message TaskMes
 		repairedReview, repairValidationErr := ParseCodeReview(repair.Content)
 		if repairValidationErr == nil {
 			repairCodeReviewEvidenceQuotes(repairedReview, call.Boundary)
+			NormalizeCodeReviewCoverage(repairedReview, call.Boundary)
 			repairValidationErr = ValidateCodeReviewBoundary(repairedReview, call.Boundary)
 			if repairValidationErr != nil {
 				if sanitized, dropped, sanitizeErr := discardUngroundedCodeReviewFindings(repairedReview, call.Boundary); sanitizeErr == nil && dropped {

@@ -59,9 +59,10 @@ func (s *checkpointStore) PutEncryptedObject(_ context.Context, bucket, key stri
 }
 
 type sequenceProvider struct {
-	responses []string
-	calls     int
-	leases    []InferenceLease
+	responses             []string
+	calls                 int
+	leases                []InferenceLease
+	inferenceCapabilities int
 }
 
 func (p *sequenceProvider) Complete(ctx context.Context, _ []Message, _ int) (Completion, error) {
@@ -69,6 +70,9 @@ func (p *sequenceProvider) Complete(ctx context.Context, _ []Message, _ int) (Co
 	lease, ok := InferenceLeaseFromContext(ctx)
 	if ok {
 		p.leases = append(p.leases, lease)
+	}
+	if _, ok := InferenceCapabilityFromContext(ctx); ok {
+		p.inferenceCapabilities++
 	}
 	if p.calls > len(p.responses) {
 		return Completion{}, errors.New("unexpected provider call")

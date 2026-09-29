@@ -453,15 +453,15 @@ func (w *Worker) Process(ctx context.Context, message TaskMessage) error {
 	if message.Payload.Operation == agentwork.OperationDeliveryOnboardingProbe {
 		return w.processOnboardingProbe(ctx, message.Payload.TaskID, runID, input)
 	}
-	var codeReviewBoundary CodeReviewInput
 	if input.AgentExecution && message.Payload.Operation == "delivery.implementation" {
 		return w.processImplementationAgent(ctx, message, input, runID)
 	}
 	if message.Payload.Operation == "code.review" {
-		codeReviewBoundary, err = ParseCodeReviewInput(input.Delivery)
+		codeReviewBoundary, err := ParseCodeReviewInput(input.Delivery)
 		if err != nil {
 			return w.fail(ctx, message.Payload.TaskID, runID, err)
 		}
+		return w.processSegmentedCodeReview(ctx, message, runID, input, codeReviewBoundary)
 	}
 	var qaResult map[string]any
 	var qaArtifacts []LocalArtifact
@@ -619,19 +619,6 @@ func (w *Worker) Process(ctx context.Context, message TaskMessage) error {
 	if message.Payload.Operation == "product.ideate" {
 		structuredResult, err = ParseProductIdeation(completion.Content)
 		if err != nil {
-			return w.failWithProviderResult(ctx, message.Payload.TaskID, runID, requestRef, message.Payload.Operation, completion, err)
-		}
-	}
-	if message.Payload.Operation == "code.review" {
-		structuredResult, err = ParseCodeReview(completion.Content)
-		if err != nil {
-			// A review without verifiable locations and recommendations must never
-			// look like an approval. Preserve the private provider response for
-			// diagnosis, but keep the task failed and the queue terminal.
-			return w.failWithProviderResult(ctx, message.Payload.TaskID, runID, requestRef, message.Payload.Operation, completion, err)
-		}
-		NormalizeCodeReviewCoverage(structuredResult, codeReviewBoundary)
-		if err := ValidateCodeReviewBoundary(structuredResult, codeReviewBoundary); err != nil {
 			return w.failWithProviderResult(ctx, message.Payload.TaskID, runID, requestRef, message.Payload.Operation, completion, err)
 		}
 	}

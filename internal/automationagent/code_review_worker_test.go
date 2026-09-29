@@ -4,12 +4,71 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gofrs/uuid"
 )
+
+func TestWorkerRoutesLargeCodeReviewThroughLeasedSegments(t *testing.T) {
+	var patch strings.Builder
+	for index := 0; index < codeReviewSegmentMaxFiles+1; index++ {
+		file := fmt.Sprintf("internal/review/file_%02d.go", index)
+		fmt.Fprintf(&patch, "diff --git a/%s b/%s\nindex 1111111..2222222 100644\n--- a/%s\n+++ b/%s\n@@ -1 +1 @@\n-oldValue%d\n+newValue%d\n", file, file, file, file, index, index)
+	}
+	boundary, err := NewCodeReviewInput("github://itbem/example", strings.Repeat("a", 40), strings.Repeat("b", 40), patch.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	encodedBoundary, err := json.Marshal(boundary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err := json.Marshal(TaskInput{Prompt: "Review every frozen file.", Delivery: encodedBoundary})
+	if err != nil {
+		t.Fatal(err)
+	}
+	review := `{"summary":"The frozen segment is internally consistent.","verdict":"comment","review_scope":["frozen segment"],"findings":[],"test_plan":["Run the exact-SHA repository checks."],"coverage_gaps":[]}`
+	provider := &sequenceProvider{responses: []string{review, review}}
+	store, callback := &fakeStore{input: input}, &fakeCallback{operation: "code.review"}
+	worker, err := NewWorker(
+		WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"},
+		store,
+		callback,
+		provider,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := validMessage()
+	message.Payload.Operation = "code.review"
+	if err := worker.Process(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	if provider.calls != 2 || len(provider.leases) != 2 || provider.inferenceCapabilities != 2 {
+		t.Fatalf("large review used %d provider calls, %d leases, and %d capabilities; want two fully authorized segments", provider.calls, len(provider.leases), provider.inferenceCapabilities)
+	}
+	runID := callback.updates[0].RunID
+	for index, lease := range provider.leases {
+		if lease.TaskID != message.Payload.TaskID || lease.RunID != runID || lease.Operation != "code.review" || lease.StepID != "" {
+			t.Fatalf("segment %d used the wrong inference lease: %#v", index+1, lease)
+		}
+	}
+	thinkingRenewals := 0
+	for _, update := range callback.updates {
+		if update.Status == "running" && update.ProgressStep == "thinking" {
+			thinkingRenewals++
+			if update.RunID != runID || update.ProgressCall != 0 {
+				t.Fatalf("segment renewal escaped its active run: %#v", update)
+			}
+		}
+	}
+	if thinkingRenewals != 2 || callback.updates[len(callback.updates)-1].Status != "completed" {
+		t.Fatalf("review did not renew each segment and complete: %#v", callback.updates)
+	}
+}
 
 func TestCodeReviewProgressRoundTripsOnlyItsExactValidatedSegment(t *testing.T) {
 	boundary, err := ParseCodeReviewInput(validCodeReviewInput())
