@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -33,7 +32,7 @@ func (s *fakeStore) Get(_ context.Context, bucket, key string) ([]byte, error) {
 		return value, nil
 	}
 	if strings.HasPrefix(bucket, "itbem-ai-outputs-") || bucket == s.outputBucket {
-		return nil, os.ErrNotExist
+		return nil, ErrObjectNotFound
 	}
 	return s.input, nil
 }
@@ -117,7 +116,7 @@ type failingResultStore struct{ input []byte }
 
 func (s failingResultStore) Get(_ context.Context, bucket string, _ string) ([]byte, error) {
 	if strings.HasPrefix(bucket, "itbem-ai-outputs-") {
-		return nil, os.ErrNotExist
+		return nil, ErrObjectNotFound
 	}
 	return s.input, nil
 }
@@ -584,7 +583,7 @@ func (s *redeliveryStore) Get(_ context.Context, bucket, key string) ([]byte, er
 		return value, nil
 	}
 	if strings.HasPrefix(bucket, "itbem-ai-outputs-") {
-		return nil, os.ErrNotExist
+		return nil, ErrObjectNotFound
 	}
 	return s.input, nil
 }
@@ -664,6 +663,27 @@ func TestWorkerRecoveryReusesOriginalInferenceRunWithoutCreatingNewCostIdentity(
 	update := callback.updates[0]
 	if update.RunID != recoveryLeaseID || update.RecoveryRunID != originalRunID || !strings.Contains(update.RequestRef, "/runs/"+originalRunID+"/request.json") || !strings.Contains(update.OutputRef, "/runs/"+originalRunID+"/result.json") {
 		t.Fatalf("recovery must retain original billable evidence while using the new lease: %#v", update)
+	}
+}
+
+func TestWorkerRecoveryAllowsFreshInferenceWhenGatewayArtifactsAreAbsent(t *testing.T) {
+	store := &fakeStore{}
+	worker, err := NewWorker(
+		WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"},
+		store,
+		&fakeCallback{},
+		fakeProvider{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reused, err := worker.completeFromExistingResult(context.Background(), "task", uuid.Must(uuid.NewV4()).String())
+	if err != nil {
+		t.Fatalf("gateway not-found response must not be treated as a storage outage: %v", err)
+	}
+	if reused {
+		t.Fatal("absent result and provider intent were incorrectly treated as recovered output")
 	}
 }
 

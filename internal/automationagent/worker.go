@@ -996,9 +996,9 @@ func (w *Worker) storeStepRequest(ctx context.Context, taskID, runID, step, oper
 func (w *Worker) completeFromExistingResult(ctx context.Context, taskID, runID string) (bool, error) {
 	key := "automation/" + taskID + "/result.json"
 	raw, err := w.store.Get(ctx, w.config.OutputBucket, key)
-	if errors.Is(err, os.ErrNotExist) {
+	if errors.Is(err, ErrObjectNotFound) {
 		intentRaw, intentErr := w.store.Get(ctx, w.config.OutputBucket, providerIntentKey(taskID))
-		if errors.Is(intentErr, os.ErrNotExist) {
+		if errors.Is(intentErr, ErrObjectNotFound) {
 			return false, nil
 		}
 		if intentErr != nil {
