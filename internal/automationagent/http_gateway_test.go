@@ -143,6 +143,16 @@ func TestHTTPGatewayBindsSealedLeaseToQueueMessageExecution(t *testing.T) {
 	}
 }
 
+func TestHTTPGatewayDefaultTimeoutCoversBoundedObjectWrites(t *testing.T) {
+	gateway, err := NewHTTPGateway("https://api.example.invalid", "test-token", agentwork.RoleReviewer, agentwork.LaneReview, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gateway.client.Timeout != gatewayHTTPClientTimeout || gateway.client.Timeout < time.Minute {
+		t.Fatalf("gateway timeout = %s, want bounded object-write allowance %s", gateway.client.Timeout, gatewayHTTPClientTimeout)
+	}
+}
+
 func TestHTTPGatewayPreservesForbiddenStatusWithoutMakingItRetryable(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.WriteHeader(http.StatusForbidden)

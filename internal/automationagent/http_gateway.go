@@ -24,6 +24,11 @@ const (
 	gatewayRetryMinimumDelay = time.Second
 	gatewayRetryDefaultDelay = 5 * time.Second
 	gatewayRetryMaximumDelay = time.Minute
+	// Object writes may carry an encrypted execution manifest for every bounded
+	// review segment. The gateway accepts up to 10 MiB and completes the S3 PUT
+	// before replying, so the queue-oriented 30 second timeout was too small for
+	// a valid multi-megabyte manifest over a residential worker connection.
+	gatewayHTTPClientTimeout = 2 * time.Minute
 )
 
 // gatewayRequestError preserves the status boundary between the local worker
@@ -132,7 +137,7 @@ func NewHTTPGateway(baseURL, token string, role agentwork.Role, lane agentwork.L
 		return nil, fmt.Errorf("agent gateway requires a token and exact role-lane identity")
 	}
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
+		client = &http.Client{Timeout: gatewayHTTPClientTimeout, CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		}}
 	}
