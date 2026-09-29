@@ -169,6 +169,22 @@ func TestGatewayProviderDoesNotExposeProviderErrorBodyToWorker(t *testing.T) {
 	}
 }
 
+func TestGatewayProviderExposesOnlyKnownConflictClass(t *testing.T) {
+	installGatewayTestCapability(t, "task-conflict", "run-conflict", "code.review")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(InferenceConflictHeader, InferenceConflictPolicyInvalid)
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"private database detail"}`))
+	}))
+	defer server.Close()
+	client := newGatewayProviderTestClient(GatewayProviderConfig{Provider: ProviderMiniMax, Model: "MiniMax-M3", Endpoint: server.URL}, server.Client())
+	ctx := WithInferenceLease(context.Background(), "task-conflict", "run-conflict", "code.review", "")
+	_, err := client.Complete(ctx, []Message{{Role: "user", Content: "hello"}}, 32)
+	if err == nil || err.Error() != "AI gateway request rejected (409: attempt_policy_invalid)" || strings.Contains(err.Error(), "database") {
+		t.Fatalf("gateway conflict diagnostic was not safely bounded: %v", err)
+	}
+}
+
 func TestGatewayProviderRejectsModelContextAndOutputOveragesBeforeGatewayRequest(t *testing.T) {
 	installGatewayTestCapability(t, "task-model-limits", "run-model-limits", "delivery.plan")
 	var gatewayCalls atomic.Int64

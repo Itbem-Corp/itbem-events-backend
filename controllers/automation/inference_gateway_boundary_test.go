@@ -2,12 +2,32 @@ package automation
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
 	"events-stocks/internal/automationagent"
 	"events-stocks/models"
 )
+
+func TestInferenceConflictCodeExposesOnlyBoundedClasses(t *testing.T) {
+	for _, test := range []struct {
+		err  error
+		want string
+	}{
+		{errInferenceCallAlreadyReserved, automationagent.InferenceConflictCallReused},
+		{errInferenceRunQuotaExceeded, automationagent.InferenceConflictQuotaExhausted},
+		{errors.New("automation inference worker identity is no longer current"), automationagent.InferenceConflictIdentityStale},
+		{errors.New("automation inference attempt policy is invalid"), automationagent.InferenceConflictPolicyInvalid},
+		{errors.New("automation inference project scope is invalid"), automationagent.InferenceConflictProjectInvalid},
+		{errors.New("automation inference lease is invalid"), automationagent.InferenceConflictLeaseInactive},
+		{errors.New("private database detail that must not cross the gateway"), automationagent.InferenceConflictStateUnavailable},
+	} {
+		if got := inferenceConflictCode(test.err); got != test.want {
+			t.Fatalf("conflict code = %q, want %q", got, test.want)
+		}
+	}
+}
 
 func TestInferenceGatewayRequestEnforcesProviderAndOutputBounds(t *testing.T) {
 	valid := inferenceRequest{

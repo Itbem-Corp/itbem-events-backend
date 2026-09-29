@@ -111,6 +111,7 @@ func Infer(c echo.Context) error {
 	}
 	inferenceScope, policyConfigured, scopeErr := gatewayInferenceScopeForRequest(request, capabilityScope)
 	if scopeErr != nil {
+		c.Response().Header().Set(automationagent.InferenceConflictHeader, inferenceConflictCode(scopeErr))
 		return utils.Error(c, http.StatusConflict, "Inference lease is no longer active", "")
 	}
 	if !policyConfigured {
@@ -155,6 +156,31 @@ func Infer(c echo.Context) error {
 	completion.CallID = request.CallID
 	completion.ReceiptID = receipt.ID.String()
 	return c.JSON(http.StatusOK, completion)
+}
+
+func inferenceConflictCode(err error) string {
+	if errors.Is(err, errInferenceCallAlreadyReserved) {
+		return automationagent.InferenceConflictCallReused
+	}
+	if errors.Is(err, errInferenceRunQuotaExceeded) {
+		return automationagent.InferenceConflictQuotaExhausted
+	}
+	message := ""
+	if err != nil {
+		message = err.Error()
+	}
+	switch {
+	case strings.Contains(message, "worker identity"), strings.Contains(message, "capability scope"):
+		return automationagent.InferenceConflictIdentityStale
+	case strings.Contains(message, "attempt policy"):
+		return automationagent.InferenceConflictPolicyInvalid
+	case strings.Contains(message, "project scope"):
+		return automationagent.InferenceConflictProjectInvalid
+	case strings.Contains(message, "lease"):
+		return automationagent.InferenceConflictLeaseInactive
+	default:
+		return automationagent.InferenceConflictStateUnavailable
+	}
 }
 
 // authenticatedInferenceCapability accepts only a capability signed by the
