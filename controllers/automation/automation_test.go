@@ -628,6 +628,47 @@ func TestStrandedGitHubReviewRecoveryPreservesOnlyAnUnclaimedImmutableBoundary(t
 	}
 }
 
+func TestLatestGitHubReviewAttemptFollowsTheImmutableRecoveryBoundary(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqlDB.Close()
+	db, err := gorm.Open(postgres.New(postgres.Config{Conn: sqlDB, PreferSimpleProtocol: true}), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousDB := configuration.DB
+	configuration.DB = db
+	defer func() { configuration.DB = previousDB }()
+
+	now := time.Now().UTC()
+	digest := strings.Repeat("a", 64)
+	original := &models.AutomationTask{
+		ID: uuid.Must(uuid.NewV4()), JobID: uuid.Must(uuid.NewV4()), RequestedBy: "github-app-review",
+		CorrelationID: "github-pr:subject:head", Operation: "code.review", Status: "cancelled",
+		EvidenceSubjectDigest: digest, InputRef: "s3://itbem-ai-inputs-local/automation/inputs/original/input.json",
+		CreatedAt: now.Add(-time.Minute),
+	}
+	recoveryID, recoveryJobID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
+	rows := sqlmock.NewRows([]string{"id", "job_id", "requested_by", "correlation_id", "operation", "evidence_subject_digest", "input_ref", "status", "attempt_count", "created_at"}).
+		AddRow(recoveryID, recoveryJobID, original.RequestedBy, original.CorrelationID, original.Operation, digest, original.InputRef, "running", 1, now)
+	mock.ExpectQuery(`SELECT \* FROM "automation_tasks".*operation = \$1 AND requested_by = \$2 AND correlation_id = \$3 AND input_ref = \$4 AND evidence_subject_digest = \$5.*ORDER BY created_at DESC, id DESC`).
+		WithArgs(original.Operation, original.RequestedBy, original.CorrelationID, original.InputRef, original.EvidenceSubjectDigest, 1).
+		WillReturnRows(rows)
+
+	current, err := latestGitHubReviewAttempt(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.ID != recoveryID || current.JobID != recoveryJobID || current.Status != "running" || current.AttemptCount != 1 {
+		t.Fatalf("latest immutable recovery attempt was not selected: %#v", current)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestExpiredGitHubReviewLeaseRecoveryIsBoundedAndPreservesExactReviewSubject(t *testing.T) {
 	now := time.Now().UTC()
 	digest := strings.Repeat("a", 64)

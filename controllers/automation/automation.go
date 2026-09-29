@@ -198,14 +198,18 @@ func GitHubPullRequestReviewWebhook(c echo.Context) error {
 	}
 	var existing models.AutomationTask
 	if err := configuration.DB.First(&existing, taskID).Error; err == nil {
-		recovered, recoveryErr := recoverStrandedGitHubReview(c.Request().Context(), &existing, time.Now().UTC())
+		current, currentErr := latestGitHubReviewAttempt(&existing)
+		if currentErr != nil {
+			return utils.Error(c, http.StatusServiceUnavailable, "GitHub review unavailable", "")
+		}
+		recovered, recoveryErr := recoverStrandedGitHubReview(c.Request().Context(), &current, time.Now().UTC())
 		if recoveryErr != nil {
 			return utils.Error(c, http.StatusServiceUnavailable, "GitHub review unavailable", "")
 		}
 		if recovered != nil {
 			return utils.Success(c, http.StatusAccepted, "GitHub pull request review recovery queued", githubReviewTaskProjection(*recovered))
 		}
-		return utils.Success(c, http.StatusAccepted, "GitHub review already queued", githubReviewTaskProjection(existing))
+		return utils.Success(c, http.StatusAccepted, "GitHub review already queued", githubReviewTaskProjection(current))
 	} else if err != gorm.ErrRecordNotFound {
 		return utils.Error(c, http.StatusServiceUnavailable, "GitHub review unavailable", "")
 	}
@@ -281,7 +285,11 @@ func GitHubPullRequestReviewWebhook(c echo.Context) error {
 	}
 	if !created {
 		if err := configuration.DB.First(&existing, taskID).Error; err == nil {
-			return utils.Success(c, http.StatusAccepted, "GitHub review already queued", githubReviewTaskProjection(existing))
+			current, currentErr := latestGitHubReviewAttempt(&existing)
+			if currentErr != nil {
+				return utils.Error(c, http.StatusServiceUnavailable, "GitHub review unavailable", "")
+			}
+			return utils.Success(c, http.StatusAccepted, "GitHub review already queued", githubReviewTaskProjection(current))
 		}
 		return utils.Error(c, http.StatusConflict, "GitHub review already queued", "")
 	}
@@ -294,6 +302,26 @@ func githubReviewWebhookPing(eventName string, body []byte) bool {
 
 func githubReviewTaskProjection(task models.AutomationTask) githubReviewTaskView {
 	return githubReviewTaskView{ID: task.ID, Status: task.Status, AttemptCount: task.AttemptCount, CompletedAt: task.CompletedAt, CreatedAt: task.CreatedAt}
+}
+
+// latestGitHubReviewAttempt follows recovery and operator-retry tasks that
+// preserve the original immutable input. The deterministic webhook task can
+// become cancelled audit evidence after a lost queue handoff; treating that
+// historical row as the current attempt would prevent a later signed GitHub
+// redelivery from observing or recovering the replacement.
+func latestGitHubReviewAttempt(original *models.AutomationTask) (models.AutomationTask, error) {
+	if configuration.DB == nil || original == nil || original.ID == uuid.Nil || original.JobID == uuid.Nil || original.Operation != "code.review" || original.RequestedBy != "github-app-review" || strings.TrimSpace(original.CorrelationID) == "" || strings.TrimSpace(original.InputRef) == "" || !artifactDigestPattern.MatchString(strings.ToLower(strings.TrimSpace(original.EvidenceSubjectDigest))) {
+		return models.AutomationTask{}, fmt.Errorf("GitHub review attempt boundary is invalid")
+	}
+	var current models.AutomationTask
+	err := configuration.DB.
+		Where("operation = ? AND requested_by = ? AND correlation_id = ? AND input_ref = ? AND evidence_subject_digest = ?", original.Operation, original.RequestedBy, original.CorrelationID, original.InputRef, original.EvidenceSubjectDigest).
+		Order("created_at DESC, id DESC").
+		First(&current).Error
+	if err != nil {
+		return models.AutomationTask{}, err
+	}
+	return current, nil
 }
 
 func supersedeQueuedGitHubReviews(tx *gorm.DB, repository string, pullRequest int, replacementID uuid.UUID, now time.Time) error {
