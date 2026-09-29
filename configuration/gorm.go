@@ -854,7 +854,7 @@ func migrateModels(db *gorm.DB) error {
 	})
 }
 
-func SeedBaseData() {
+func SeedBaseData(cfg *models.Config) {
 	for _, item := range modelSeedList {
 		if item.SeedFunc != nil && isModelEmpty(DB, item.Model) {
 			item.SeedFunc(DB)
@@ -880,6 +880,15 @@ func SeedBaseData() {
 	profile := models.DefaultGeneralistAgentProfile()
 	if err := DB.Where("agent_key = ?", profile.AgentKey).FirstOrCreate(&profile).Error; err != nil {
 		slog.Error("default automation agent profile seed failed", "error", err)
+	}
+	// The deployed budget pair is server-owned routing metadata. When explicitly
+	// configured, use it only to create the missing initial GitHub review policy;
+	// established operator policy and revision history remain untouched.
+	if cfg != nil {
+		if err := seeds.SeedCodeReviewAIActionPolicy(DB, cfg.AutomationBudgetProvider, cfg.AutomationBudgetModel); err != nil {
+			slog.Error("code review AI action policy bootstrap failed", "error", err)
+			os.Exit(1)
+		}
 	}
 	// Phrase publication is additive and must run even when production already
 	// contains rows. Gating it behind isModelEmpty would leave a partially
