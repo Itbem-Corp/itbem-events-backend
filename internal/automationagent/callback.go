@@ -65,6 +65,28 @@ func safeCallbackRejectionReason(reader io.Reader) string {
 		return "worker identity or profile is invalid"
 	case "progress label is invalid":
 		return "progress label is invalid"
+	case "recovery_run_id must identify a prior immutable run":
+		return "recovery run ID is invalid"
+	case "a recovery run may only complete a stored result":
+		return "recovery cannot report a running status"
+	case "recovery evidence must match the original private run":
+		return "recovery evidence does not match the original run"
+	case "worker identity is invalid for this run":
+		return "worker identity is invalid for this run"
+	case "output_ref must be an ITBEM private object reference":
+		return "output reference is invalid"
+	case "request_ref must be this execution's private request object":
+		return "request reference does not match this run"
+	case "status must be completed or failed":
+		return "terminal callback status is invalid"
+	case "deterministic tasks cannot report an inference receipt":
+		return "deterministic callback includes an inference receipt"
+	case "only onboarding probes, delivery publication, or release Gatekeeper may be deterministic":
+		return "deterministic callback is not allowed for this operation"
+	case "remote code review completion requires exact GitHub publication evidence":
+		return "code review publication evidence is missing"
+	case "only a bounded completed review or delivery execution may register execution metadata":
+		return "execution metadata is invalid for this status"
 	}
 	switch strings.TrimSpace(response.Message) {
 	case "Invalid automation claim":

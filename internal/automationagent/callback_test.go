@@ -64,6 +64,7 @@ func TestHTTPCallbackReportsOnlyAllowlistedClaimRejectionReasons(t *testing.T) {
 		expected string
 	}{
 		{name: "known reason", body: `{"error":"worker identity or profile is invalid"}`, expected: "worker identity or profile is invalid"},
+		{name: "recovery run mismatch", body: `{"message":"Invalid automation result","error":"recovery evidence must match the original private run"}`, expected: "recovery evidence does not match the original run"},
 		{name: "known category", body: `{"message":"Invalid automation result","error":"private diagnostic"}`, expected: "automation result payload is invalid"},
 		{name: "unknown reason", body: `{"error":"secret database diagnostic"}`},
 		{name: "invalid JSON", body: `not-json`},
