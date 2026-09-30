@@ -90,6 +90,15 @@ gateway, so start it only after its non-mutating doctor and auth probes pass.
 
 ## Security and limits
 
+For a narrowly approved retry or isolated evaluation, set `ITBEM_AI_TASK_IDS`
+to a comma-separated list of up to 60 unique canonical task UUIDs in the
+operator-managed service environment. The worker defers every other queue
+message before claiming it or accessing private input/provider state. This
+selection only narrows processing; normal role, server claim, lease, signed
+policy, quotas and budgets still apply. Omit it for ordinary continuous work.
+Use a temporary service override and remove that override after the scoped
+work ends. Deferring messages does not cancel them or acknowledge them.
+
 - The workflow grants only `contents: read`; checkout does not persist its
   token. It has no provider, cloud, signing, or publication credentials and
   does not print runtime configuration.

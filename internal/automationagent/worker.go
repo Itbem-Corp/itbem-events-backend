@@ -197,6 +197,9 @@ type WorkerConfig struct {
 	// list is the backwards-compatible generalist profile; a non-empty list is
 	// fail-closed and prevents a worker from claiming work outside its role.
 	AllowedOperations []string
+	// AllowedTaskIDs only narrows queue processing. It grants no server access.
+	// Empty preserves the normal continuous worker profile.
+	AllowedTaskIDs []string
 	// Role and Lane bind a production worker to a known queue assignment.
 	// They are routing constraints, never tenant/project authorization.
 	Role agentwork.Role
@@ -252,6 +255,10 @@ func NewWorker(config WorkerConfig, store ObjectStore, callback TaskCallback, pr
 	if err := validateWorkerCapabilities(config.AllowedOperations); err != nil {
 		return nil, err
 	}
+	if err := validateSelectedTaskIDs(config.AllowedTaskIDs); err != nil {
+		return nil, err
+	}
+	config.AllowedTaskIDs = append([]string(nil), config.AllowedTaskIDs...)
 	if strings.TrimSpace(config.WorkerID) == "" {
 		workerID, err := uuid.NewV4()
 		if err != nil {
@@ -420,6 +427,18 @@ func ParsePrivateReference(reference string) (bucket, key string, err error) {
 func (w *Worker) Process(ctx context.Context, message TaskMessage) error {
 	if err := ValidateMessage(message, w.config.InputBucket); err != nil {
 		return err
+	}
+	if len(w.config.AllowedTaskIDs) != 0 {
+		selected := false
+		for _, taskID := range w.config.AllowedTaskIDs {
+			if taskID == message.Payload.TaskID {
+				selected = true
+				break
+			}
+		}
+		if !selected {
+			return &RetryableError{Message: "task is outside the worker selected task set", RetryAfter: time.Minute}
+		}
 	}
 	// Check the role contract before claiming the task. Returning a retryable
 	// error keeps the queue message available for another capable worker and
