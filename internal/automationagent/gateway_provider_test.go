@@ -18,6 +18,22 @@ import (
 
 const testGatewayCapabilitySigningKey = "gateway-provider-unit-test-server-signing-key-48-bytes"
 
+func TestGatewayDeadlineAllowsProviderAndAccountingToSettle(t *testing.T) {
+	provider := NewProviderClient(ProviderConfig{}, nil).(*httpProviderClient)
+	gateway := NewGatewayProviderClient(GatewayProviderConfig{}, nil).(*gatewayProviderClient)
+	if provider.client.Timeout != 2*time.Minute {
+		t.Fatal("provider execution deadline changed")
+	}
+	if gateway.client.Timeout-provider.client.Timeout < time.Minute || gateway.client.Timeout > 5*time.Minute {
+		t.Fatalf("gateway must allow bounded validation/accounting margin: provider=%s gateway=%s", provider.client.Timeout, gateway.client.Timeout)
+	}
+	custom := &http.Client{Timeout: 45 * time.Second}
+	configured := NewGatewayProviderClient(GatewayProviderConfig{}, custom).(*gatewayProviderClient)
+	if configured.client == custom || configured.client.Timeout != custom.Timeout {
+		t.Fatal("explicit caller deadline must be preserved on a private client copy")
+	}
+}
+
 func TestGatewayLostResponseDoesNotAuthorizeAnotherBillableAttempt(t *testing.T) {
 	for _, mode := range []string{"timeout", "connection_reset"} {
 		t.Run(mode, func(t *testing.T) {
