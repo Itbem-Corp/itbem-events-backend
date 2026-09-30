@@ -32,7 +32,7 @@ func TestInferenceFailureCodesNeverExposeArbitraryProviderText(t *testing.T) {
 	}
 }
 
-func TestGatewayFailureDiagnosticsRemainBoundedWithAccountingRetryBlocked(t *testing.T) {
+func TestGatewayFailureDiagnosticsRemainBoundedWithUnresolvedRetryBlocked(t *testing.T) {
 	const taskID, runID = "diagnostic-task", "diagnostic-run"
 	installGatewayTestCapability(t, taskID, runID, "ai.chat")
 	for _, code := range []string{"provider_model_limits_unavailable", "provider_http_402", "accounting_db_23514", "accounting_canceled", "accounting_usage_unverified", "private-key-marker"} {
@@ -46,7 +46,7 @@ func TestGatewayFailureDiagnosticsRemainBoundedWithAccountingRetryBlocked(t *tes
 			client := newGatewayProviderTestClient(GatewayProviderConfig{Provider: ProviderMiniMax, Model: "MiniMax-M3", Endpoint: server.URL}, server.Client())
 			_, err := client.Complete(WithInferenceLease(context.Background(), taskID, runID, "ai.chat", ""), []Message{{Role: "user", Content: "synthetic"}}, 32)
 			var retryable *RetryableError
-			wantRetryable := !strings.HasPrefix(SafeInferenceFailureCode(code), "accounting_")
+			wantRetryable := code == "provider_model_limits_unavailable"
 			if err == nil || errors.As(err, &retryable) != wantRetryable || (wantRetryable && retryable.StatusCode != 502) {
 				t.Fatalf("incorrect retry classification: %v", err)
 			}

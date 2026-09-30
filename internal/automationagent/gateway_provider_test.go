@@ -18,8 +18,45 @@ import (
 
 const testGatewayCapabilitySigningKey = "gateway-provider-unit-test-server-signing-key-48-bytes"
 
-func TestGatewayAccountingFailuresDoNotAuthorizeAutomaticRetry(t *testing.T) {
-	for _, code := range []string{"accounting_db_22001", "accounting_deadline", "accounting_usage_unverified", "provider_http_502", "accounting_db_22001 private"} {
+func TestGatewayLostResponseDoesNotAuthorizeAnotherBillableAttempt(t *testing.T) {
+	for _, mode := range []string{"timeout", "connection_reset"} {
+		t.Run(mode, func(t *testing.T) {
+			installGatewayTestCapability(t, "task-unknown", "run-unknown", "code.review")
+			var admitted atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.ReadAll(r.Body)
+				admitted.Add(1) // The gateway may already have invoked a provider.
+				if mode == "timeout" {
+					<-r.Context().Done()
+					return
+				}
+				conn, _, err := w.(http.Hijacker).Hijack()
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				_ = conn.Close()
+			}))
+			defer server.Close()
+			httpClient := server.Client()
+			httpClient.Timeout = 100 * time.Millisecond
+			client := newGatewayProviderTestClient(GatewayProviderConfig{Provider: ProviderMiniMax, Model: "MiniMax-M3", Endpoint: server.URL + "/private-marker"}, httpClient)
+			_, err := client.Complete(WithInferenceLease(context.Background(), "task-unknown", "run-unknown", "code.review", ""), []Message{{Role: "user", Content: "fixture"}}, 32)
+			if err == nil || strings.Contains(err.Error(), "private-marker") {
+				t.Fatalf("unsafe or absent error: %v", err)
+			}
+			var retryable *RetryableError
+			if errors.As(err, &retryable) {
+				t.Fatalf("lost response authorized a new paid attempt: %v", err)
+			}
+			if admitted.Load() != 1 {
+				t.Fatalf("expected one potentially billed request, got %d", admitted.Load())
+			}
+		})
+	}
+}
+func TestGatewayUnresolvedFailuresDoNotAuthorizeAutomaticRetry(t *testing.T) {
+	for _, code := range []string{"accounting_db_22001", "accounting_deadline", "accounting_usage_unverified", "provider_http_502", "accounting_db_22001 private", "provider_unclassified", "provider_model_limits_unavailable", "credentials_unavailable", "routing_invalid", ""} {
 		t.Run(code, func(t *testing.T) {
 			installGatewayTestCapability(t, "task-accounting", "run-accounting", "code.review")
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -34,7 +71,7 @@ func TestGatewayAccountingFailuresDoNotAuthorizeAutomaticRetry(t *testing.T) {
 				t.Fatalf("missing or unsafe error: %v", err)
 			}
 			var retryable *RetryableError
-			wantRetryable := !strings.HasPrefix(SafeInferenceFailureCode(code), "accounting_")
+			wantRetryable := code == "provider_model_limits_unavailable" || code == "credentials_unavailable" || code == "routing_invalid"
 			if errors.As(err, &retryable) != wantRetryable {
 				t.Fatalf("retry classification incorrect for %q: %v", code, err)
 			}
