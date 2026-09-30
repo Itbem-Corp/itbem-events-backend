@@ -178,6 +178,25 @@ func TestMiniMaxThinkingFollowsM3PolicyWithoutChangingM2(t *testing.T) {
 	}
 }
 
+func TestMiniMaxM3EnabledReasoningReachesTheHTTPAdapter(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		if _, disabled := payload["thinking"]; disabled || payload["reasoning_split"] != true || payload["reasoning_effort"] != nil {
+			t.Fatal("enabled M3 must retain native thinking without a fabricated effort level")
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"model": "MiniMax-M3", "base_resp": map[string]any{"status_code": 0}, "choices": []any{map[string]any{"finish_reason": "stop", "message": map[string]any{"content": "ok"}}}})
+	}))
+	defer server.Close()
+	config := ProviderConfig{Provider: ProviderMiniMax, Model: "MiniMax-M3", Endpoint: server.URL, ReasoningEnabled: true, secret: "test-key"}
+	completion, err := newProviderTestClient(config, nil).Complete(context.Background(), []Message{{Role: "user", Content: "synthetic test"}}, 100)
+	if err != nil || completion.Content != "ok" {
+		t.Fatalf("enabled M3 adapter completion failed: %v", err)
+	}
+}
+
 func TestProviderClientsKeepTheSameContractAcrossOpenAICompatibleAndAnthropicAdapters(t *testing.T) {
 	for _, sample := range []struct {
 		name       string
