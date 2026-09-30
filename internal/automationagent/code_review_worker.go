@@ -151,6 +151,46 @@ func (w *Worker) processSegmentedCodeReview(ctx context.Context, message TaskMes
 		if storeErr := w.storeCodeReviewProgress(ctx, progress); storeErr != nil {
 			return storeErr
 		}
+	} else {
+		previousRunID, validRef := w.codeReviewProgressRunID(progress.RequestRef, message.Payload.TaskID)
+		if !validRef {
+			return w.fail(ctx, message.Payload.TaskID, runID, fmt.Errorf("code review checkpoint request reference is invalid"))
+		}
+		if previousRunID != runID {
+			requestRef, storeErr := w.storeCodeReviewExecutionRequest(ctx, message.Payload.TaskID, runID, calls, boundary)
+			if storeErr != nil {
+				return storeErr
+			}
+			progress.RequestRef = requestRef
+			for index := range progress.Segments {
+				segment := &progress.Segments[index]
+				if segment.PendingRepair == nil {
+					continue
+				}
+				call := calls[index]
+				validationErr := errors.New(segment.PendingRepair.ValidationError)
+				repairMessages := codeReviewRepairMessages(call.Messages, segment.Completion.Content, validationErr, call.Boundary)
+				repairRef, repairStoreErr := w.storeCodeReviewRepairRequest(ctx, message.Payload.TaskID, runID, call.Index, repairMessages, codeReviewRepairCompletionLimit, validationErr)
+				if repairStoreErr != nil {
+					return repairStoreErr
+				}
+				segment.PendingRepair.RequestRef = repairRef
+			}
+			// A terminal callback needs an inference receipt bound to this run.
+			// If every segment was already complete before the lease expired, rerun
+			// only the final segment to provide that current-run receipt; earlier
+			// validated segment results remain reusable.
+			allSegmentsComplete := len(progress.Segments) == len(calls)
+			for _, segment := range progress.Segments {
+				allSegmentsComplete = allSegmentsComplete && segment.PendingRepair == nil
+			}
+			if allSegmentsComplete {
+				progress.Segments = progress.Segments[:len(progress.Segments)-1]
+			}
+			if storeErr := w.storeCodeReviewProgress(ctx, progress); storeErr != nil {
+				return storeErr
+			}
+		}
 	}
 	requestRef := progress.RequestRef
 	completions := make([]Completion, 0, len(calls))
