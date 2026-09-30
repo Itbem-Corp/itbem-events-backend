@@ -530,21 +530,24 @@ func (p *gatewayProviderClient) Complete(ctx context.Context, messages []Message
 	request.Header.Set(inferencecapability.HeaderName, capability)
 	response, err := p.client.Do(request)
 	if err != nil {
-		if isNetworkError(err) {
-			return Completion{}, &RetryableError{Message: "AI gateway network request failed", RetryAfter: providerRetryDefaultDelay}
-		}
-		return Completion{}, fmt.Errorf("AI gateway request failed")
+		// A lost gateway response cannot prove that the provider was not billed.
+		// Retrying with a fresh call ID requires an explicit operator decision.
+		// Never expose the transport error, which may contain private URLs.
+		return Completion{}, errors.New("AI gateway transport outcome is unknown; explicit retry required")
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusRequestTimeout || response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500 {
 		message := fmt.Sprintf("AI gateway temporarily unavailable (%d)", response.StatusCode)
 		if reason := SafeInferenceFailureCode(response.Header.Get(InferenceFailureHeader)); reason != "" {
 			message += ": " + reason
-			// Accounting failures happen after a provider request may have been
+			// Unresolved provider/accounting failures may follow a request already
 			// billed. A new call ID must require an explicit retry decision.
-			if strings.HasPrefix(reason, "accounting_") {
+			if reason != "provider_model_limits_unavailable" && reason != "credentials_unavailable" && reason != "routing_invalid" {
 				return Completion{}, fmt.Errorf("%s", message)
 			}
+		}
+		if SafeInferenceFailureCode(response.Header.Get(InferenceFailureHeader)) == "" && response.StatusCode != http.StatusTooManyRequests {
+			return Completion{}, errors.New(message)
 		}
 		return Completion{}, &RetryableError{Message: message, RetryAfter: providerRetryAfter(response.Header, time.Now().UTC()), StatusCode: response.StatusCode}
 	}
