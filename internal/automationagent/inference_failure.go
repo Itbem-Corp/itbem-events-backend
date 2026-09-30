@@ -24,7 +24,7 @@ func SafeInferenceFailureCode(value string) string {
 	}
 	if suffix, ok := strings.CutPrefix(value, "accounting_db_"); ok && len(suffix) == 5 {
 		for _, char := range suffix {
-			if !(char >= '0' && char <= '9' || char >= 'A' && char <= 'Z') {
+			if (char < '0' || char > '9') && (char < 'A' || char > 'Z') {
 				return ""
 			}
 		}
