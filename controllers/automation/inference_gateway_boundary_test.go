@@ -37,7 +37,7 @@ func TestInferenceConflictCodeExposesOnlyBoundedClasses(t *testing.T) {
 func TestInferenceGatewayRequestEnforcesProviderAndOutputBounds(t *testing.T) {
 	valid := inferenceRequest{
 		CallID: "6a07c5a1-4025-4e2e-bf0e-0560bcfb3ec7", Provider: "minimax", Model: "MiniMax-M3",
-		Messages: []automationagent.Message{{Role: "user", Content: "hello"}}, MaxCompletionTokens: 8192,
+		Messages: []automationagent.Message{{Role: "user", Content: "hello"}}, MaxCompletionTokens: 8192, Operation: "delivery.implementation",
 	}
 	if !validInferenceGatewayRequest(valid, automationagent.ProviderMiniMax) {
 		t.Fatal("request at the gateway output ceiling should remain valid")
@@ -73,6 +73,30 @@ func TestInferenceGatewayRequestEnforcesProviderAndOutputBounds(t *testing.T) {
 	stepBound.Operation = "delivery.plan"
 	if validInferenceGatewayRequest(stepBound, automationagent.ProviderMiniMax) {
 		t.Fatal("task-level planning request must not claim a delivery plan step")
+	}
+}
+
+func TestInferenceGatewayOutputCeilingMatchesEachOperation(t *testing.T) {
+	for _, operation := range []string{"ai.chat", "document.analyze", "code.review", "product.ideate", "delivery.chat", "delivery.plan", "delivery.implementation", "delivery.qa", "delivery.summary", "delivery.publish"} {
+		t.Run(operation, func(t *testing.T) {
+			limit := automationagent.CompletionTokensForOperation(operation)
+			request := inferenceRequest{
+				CallID: "6a07c5a1-4025-4e2e-bf0e-0560bcfb3ec7", Provider: "minimax", Model: "MiniMax-M3",
+				Messages:  []automationagent.Message{{Role: "user", Content: "synthetic boundary check"}},
+				Operation: operation, MaxCompletionTokens: limit,
+			}
+			if got := validInferenceGatewayRequest(request, automationagent.ProviderMiniMax); got != (limit > 0) {
+				t.Fatalf("operation %s gateway acceptance at worker ceiling %d=%t", operation, limit, got)
+			}
+			request.MaxCompletionTokens = limit + 1
+			if validInferenceGatewayRequest(request, automationagent.ProviderMiniMax) {
+				t.Fatalf("operation %s accepted more than its bounded worker ceiling", operation)
+			}
+			request.MaxCompletionTokens = 0
+			if validInferenceGatewayRequest(request, automationagent.ProviderMiniMax) {
+				t.Fatal("zero output ceiling must be rejected")
+			}
+		})
 	}
 }
 

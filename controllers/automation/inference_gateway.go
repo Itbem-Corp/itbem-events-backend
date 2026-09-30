@@ -285,6 +285,11 @@ func validInferenceGatewayRequest(request inferenceRequest, provider automationa
 	callID, callErr := uuid.FromString(strings.TrimSpace(request.CallID))
 	_, supportedProvider := automationagent.DefaultProviderEndpoint(provider)
 	model := strings.TrimSpace(request.Model)
+	// Use the same per-operation ceiling as task creation and the worker.
+	// A stale blanket 8192 limit rejected every full-output exact-SHA review
+	// before its lease or provider could be checked. The signed attempt and
+	// task limits below still independently enforce any tighter allowance.
+	maxOutput := automationagent.CompletionTokensForOperation(request.Operation)
 	if request.PlanStepID != "" && strings.TrimSpace(request.PlanStepID) == "" {
 		return false
 	}
@@ -295,7 +300,7 @@ func validInferenceGatewayRequest(request inferenceRequest, provider automationa
 		}
 	}
 	return callErr == nil && callID != uuid.Nil && supportedProvider && model != "" && len(model) <= 200 &&
-		len(request.Messages) > 0 && len(request.Messages) <= 32 && request.MaxCompletionTokens >= 1 && request.MaxCompletionTokens <= 8192 &&
+		len(request.Messages) > 0 && len(request.Messages) <= 32 && request.MaxCompletionTokens >= 1 && request.MaxCompletionTokens <= maxOutput &&
 		validInferenceMessages(request.Messages)
 }
 
