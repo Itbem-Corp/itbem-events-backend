@@ -384,11 +384,24 @@ func validatedActionRoutes(c echo.Context, request aiActionPolicyRequest) ([]mod
 		if variant != "" && !providerModelHasVariant(*selected, variant) {
 			return nil, errors.New("la variante del modelo ya no está disponible; recarga el catálogo")
 		}
-		if route.ReasoningEnabled && !containsReasoningEffort(selected.ReasoningEfforts, route.ReasoningEffort) {
+		if route.ReasoningEnabled && !modelSupportsReasoningSelection(provider, *selected, route.ReasoningEffort) {
 			return nil, errors.New("ese modelo no admite el nivel de razonamiento seleccionado")
 		}
 	}
 	return routes, nil
+}
+
+// MiniMax M3 has a binary thinking control, not named effort levels. Keep the
+// exception scoped to the adapter that actually honors ReasoningEnabled;
+// reasoning capability alone does not imply a configurable wire parameter.
+func modelSupportsReasoningSelection(provider automationagent.Provider, model automationagent.ProviderModel, effort string) bool {
+	if !model.SupportsReasoning {
+		return false
+	}
+	if len(model.ReasoningEfforts) == 0 {
+		return provider == automationagent.ProviderMiniMax && strings.EqualFold(model.ID, "MiniMax-M3") && effort == ""
+	}
+	return containsReasoningEffort(model.ReasoningEfforts, effort)
 }
 
 func providerModelSelector(models []automationagent.ProviderModel, provider automationagent.Provider, selector string) (*automationagent.ProviderModel, string) {
