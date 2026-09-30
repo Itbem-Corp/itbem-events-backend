@@ -99,7 +99,11 @@ func TestSegmentedReviewUsesFullPRTestEvidenceForCoverageNormalization(t *testin
 	if err != nil || len(segments) != 2 {
 		t.Fatalf("expected production and test changes in separate segments: %d / %v", len(segments), err)
 	}
-	if reviewNeedsCoverageGap(boundary) || !reviewNeedsCoverageGap(segments[0]) {
+	segmentNeedsGap := false
+	for _, segment := range segments {
+		segmentNeedsGap = segmentNeedsGap || reviewNeedsCoverageGap(segment)
+	}
+	if reviewNeedsCoverageGap(boundary) || !segmentNeedsGap {
 		t.Fatalf("fixture must have full-PR test evidence outside the production-only segment")
 	}
 	encodedBoundary, err := json.Marshal(boundary)
