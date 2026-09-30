@@ -65,8 +65,27 @@ func TestWorkerRoutesLargeCodeReviewThroughLeasedSegments(t *testing.T) {
 			}
 		}
 	}
-	if thinkingRenewals != 2 || callback.updates[len(callback.updates)-1].Status != "completed" {
+	terminal := callback.updates[len(callback.updates)-1]
+	if thinkingRenewals != 2 || terminal.Status != "completed" {
 		t.Fatalf("review did not renew each segment and complete: %#v", callback.updates)
+	}
+	if !validReceiptUUID(terminal.CallID) || !validReceiptUUID(terminal.ReceiptID) {
+		t.Fatalf("segmented review discarded its gateway receipt: %#v", terminal)
+	}
+}
+
+func TestAggregateCodeReviewCompletionsRetainsFinalGatewayReceipt(t *testing.T) {
+	firstCall, firstReceipt := stepCallbackUUID(), stepCallbackUUID()
+	finalCall, finalReceipt := stepCallbackUUID(), stepCallbackUUID()
+	completion, err := aggregateCodeReviewCompletions([]Completion{
+		{Provider: ProviderMiniMax, Model: "MiniMax-M3", ResponseID: "response-1", CallID: firstCall, ReceiptID: firstReceipt, Usage: map[string]any{"total_tokens": 3}, Content: "first"},
+		{Provider: ProviderMiniMax, Model: "MiniMax-M3", ResponseID: "response-2", CallID: finalCall, ReceiptID: finalReceipt, Usage: map[string]any{"total_tokens": 5}, Content: "final"},
+	}, map[string]any{"verdict": "comment"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completion.CallID != finalCall || completion.ReceiptID != finalReceipt || completion.ResponseID != "response-2" {
+		t.Fatalf("aggregate receipt = call %q receipt %q response %q, want final gateway call", completion.CallID, completion.ReceiptID, completion.ResponseID)
 	}
 }
 
