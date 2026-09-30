@@ -34,6 +34,54 @@ import (
 // This test uses a disposable PostgreSQL database and the real gateway/provider
 // adapters. Its transport returns synthetic completions and cannot reach a
 // provider or read any production credentials.
+func TestExpiredReviewRecoveryPreservesUnresolvedReceiptsAcrossRuns(t *testing.T) {
+	ctx := context.Background()
+	container, err := postgrescontainer.Run(ctx, "postgres:16-alpine", postgrescontainer.WithDatabase("testdb"), postgrescontainer.WithUsername("test"), postgrescontainer.WithPassword("test"), postgrescontainer.BasicWaitStrategies())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, container.Terminate(context.Background())) })
+	dsn, err := container.ConnectionString(ctx, "sslmode=disable")
+	require.NoError(t, err)
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	require.NoError(t, err)
+	raw, err := db.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, raw.Close()) })
+	require.NoError(t, db.Exec(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`).Error)
+	require.NoError(t, configuration.MigrateModelsForTest(db))
+	previousDB := configuration.DB
+	configuration.DB = db
+	t.Cleanup(func() { configuration.DB = previousDB })
+	now := time.Now().UTC()
+	expired := now.Add(-time.Minute)
+	for _, status := range []string{"reserved", "ambiguous"} {
+		t.Run(status, func(t *testing.T) {
+			task := models.AutomationTask{ID: uuid.Must(uuid.NewV4()), JobID: uuid.Must(uuid.NewV4()), Operation: "code.review", RequestedBy: "github-app-review", Status: "running", AttemptCount: 1, RunID: "current-run", InputRef: "s3://fixture/input.json", EvidenceSubjectDigest: strings.Repeat("a", 64), LeaseExpiresAt: &expired}
+			require.NoError(t, db.Create(&task).Error)
+			receipt := models.AutomationInferenceReceipt{ID: uuid.Must(uuid.NewV4()), AutomationTaskID: task.ID, CallID: uuid.Must(uuid.NewV4()), RunID: "previous-run", Operation: task.Operation, PolicySnapshotHash: strings.Repeat("b", 64), QuotaLimit: 1, Status: status}
+			require.NoError(t, db.Create(&receipt).Error)
+			blocked, err := unresolvedReviewInference(db, task.ID)
+			require.NoError(t, err)
+			require.True(t, blocked)
+			var before int64
+			require.NoError(t, db.Model(&models.AutomationTask{}).Count(&before).Error)
+			next, err := recoverStrandedGitHubReview(ctx, &task, now)
+			require.NoError(t, err)
+			require.Nil(t, next)
+			var saved models.AutomationTask
+			require.NoError(t, db.First(&saved, task.ID).Error)
+			require.Equal(t, "running", saved.Status)
+			require.Equal(t, 1, saved.AttemptCount)
+			var savedReceipt models.AutomationInferenceReceipt
+			require.NoError(t, db.First(&savedReceipt, receipt.ID).Error)
+			require.Equal(t, status, savedReceipt.Status)
+			require.Equal(t, "previous-run", savedReceipt.RunID)
+			var retries int64
+			require.NoError(t, db.Model(&models.AutomationTask{}).Count(&retries).Error)
+			require.Equal(t, before, retries)
+		})
+	}
+}
+
 func TestEvaluationRealGatewaySerializesAndAccounts(t *testing.T) {
 	ctx := context.Background()
 	container, err := postgrescontainer.Run(ctx, "postgres:16-alpine", postgrescontainer.WithDatabase("testdb"), postgrescontainer.WithUsername("test"), postgrescontainer.WithPassword("test"), postgrescontainer.BasicWaitStrategies())

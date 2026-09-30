@@ -3,6 +3,7 @@ package automationagent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,30 @@ import (
 )
 
 const testGatewayCapabilitySigningKey = "gateway-provider-unit-test-server-signing-key-48-bytes"
+
+func TestGatewayAccountingFailuresDoNotAuthorizeAutomaticRetry(t *testing.T) {
+	for _, code := range []string{"accounting_db_22001", "accounting_deadline", "accounting_usage_unverified", "provider_http_502", "accounting_db_22001 private"} {
+		t.Run(code, func(t *testing.T) {
+			installGatewayTestCapability(t, "task-accounting", "run-accounting", "code.review")
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set(InferenceFailureHeader, code)
+				w.WriteHeader(http.StatusBadGateway)
+				_, _ = w.Write([]byte("private provider body"))
+			}))
+			defer server.Close()
+			client := newGatewayProviderTestClient(GatewayProviderConfig{Provider: ProviderMiniMax, Model: "MiniMax-M3", Endpoint: server.URL}, server.Client())
+			_, err := client.Complete(WithInferenceLease(context.Background(), "task-accounting", "run-accounting", "code.review", ""), []Message{{Role: "user", Content: "fixture"}}, 32)
+			if err == nil || strings.Contains(err.Error(), "private") {
+				t.Fatalf("missing or unsafe error: %v", err)
+			}
+			var retryable *RetryableError
+			wantRetryable := !strings.HasPrefix(SafeInferenceFailureCode(code), "accounting_")
+			if errors.As(err, &retryable) != wantRetryable {
+				t.Fatalf("retry classification incorrect for %q: %v", code, err)
+			}
+		})
+	}
+}
 
 func newGatewayProviderTestClient(config GatewayProviderConfig, client *http.Client) *gatewayProviderClient {
 	provider := NewGatewayProviderClient(config, client).(*gatewayProviderClient)

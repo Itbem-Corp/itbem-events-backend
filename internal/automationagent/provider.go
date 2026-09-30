@@ -540,6 +540,11 @@ func (p *gatewayProviderClient) Complete(ctx context.Context, messages []Message
 		message := fmt.Sprintf("AI gateway temporarily unavailable (%d)", response.StatusCode)
 		if reason := SafeInferenceFailureCode(response.Header.Get(InferenceFailureHeader)); reason != "" {
 			message += ": " + reason
+			// Accounting failures happen after a provider request may have been
+			// billed. A new call ID must require an explicit retry decision.
+			if strings.HasPrefix(reason, "accounting_") {
+				return Completion{}, fmt.Errorf("%s", message)
+			}
 		}
 		return Completion{}, &RetryableError{Message: message, RetryAfter: providerRetryAfter(response.Header, time.Now().UTC()), StatusCode: response.StatusCode}
 	}

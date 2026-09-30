@@ -5107,6 +5107,13 @@ func cancelObsoleteExpiredGitHubReviewLease(original *models.AutomationTask, now
 // observable. It never retries or publishes: after the one permitted repair
 // path has itself expired, the only safe action is to release the stale lease
 // and preserve the failure for an operator.
+func unresolvedReviewInference(tx *gorm.DB, taskID uuid.UUID) (bool, error) {
+	var count int64
+	err := tx.Model(&models.AutomationInferenceReceipt{}).
+		Where("automation_task_id = ? AND status IN ?", taskID, []string{"reserved", "ambiguous"}).Count(&count).Error
+	return count != 0, err
+}
+
 func failExhaustedExpiredGitHubReviewLease(original *models.AutomationTask, now time.Time) error {
 	if configuration.DB == nil || original == nil || original.ID == uuid.Nil {
 		return fmt.Errorf("GitHub review recovery is unavailable")
@@ -5166,6 +5173,15 @@ func reconcileOneExpiredGitHubReviewLease(ctx context.Context, cfg *models.Confi
 			return false, err
 		}
 		return true, nil
+	}
+	// Check every run of this task before reading input or contacting GitHub.
+	// A potentially billed request must never authorize automatic recovery.
+	blocked, err := unresolvedReviewInference(configuration.DB, candidate.ID)
+	if err != nil {
+		return false, err
+	}
+	if blocked {
+		return false, nil
 	}
 	subject, err := loadGitHubReviewRecoverySubject(ctx, candidate, cfg, now)
 	if err != nil {
@@ -5276,6 +5292,15 @@ func recoverStrandedGitHubReview(ctx context.Context, original *models.Automatio
 			message = automationqueue.Message{SchemaVersion: 1, JobID: next.JobID.String(), TenantCode: "itbem", CorrelationID: next.CorrelationID, Type: "ai.local.process"}
 			message.Payload.TaskID, message.Payload.Operation, message.Payload.MaxCompletionTokens, message.Payload.InputRef, message.Payload.Attempt = next.ID.String(), next.Operation, next.MaxCompletionTokens, next.InputRef, 1
 		case recoverableExpiredGitHubReviewLease(&current, now):
+			// Recheck under the task lock shared with gateway admission. This
+			// also protects GitHub redelivery, which uses this recovery path.
+			blocked, err := unresolvedReviewInference(tx, current.ID)
+			if err != nil {
+				return err
+			}
+			if blocked {
+				return nil
+			}
 			// A published reviewer result is terminal even if a late callback
 			// failed to update its task row. Never publish or infer a duplicate.
 			var publications int64
