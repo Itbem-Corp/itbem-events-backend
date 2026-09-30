@@ -30,7 +30,7 @@ func TestSegmentedCodeReviewPromptReplacesLegacyPatchWithAnnotatedBoundary(t *te
 	if strings.Contains(combined, "\n\nFrozen patch:\n") {
 		t.Fatal("segmented prompt retained the duplicate legacy patch")
 	}
-	for _, required := range []string{"Frozen patch annotated for evidence selection", "+ [HEAD L1] new", "Location contract:", "copied exactly from changed_line_ranges"} {
+	for _, required := range []string{"Frozen patch annotated for evidence selection", "+ [HEAD L1] new", "Location contract:", "copied exactly from changed_line_ranges", "each at most 1000 UTF-8 bytes", "Critical confidence must be >=0.90", "Low findings use comment, not request_changes", "Never inflate confidence"} {
 		if !strings.Contains(combined, required) {
 			t.Fatalf("segmented prompt lost %q", required)
 		}

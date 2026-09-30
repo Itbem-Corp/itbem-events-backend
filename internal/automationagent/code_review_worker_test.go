@@ -149,6 +149,9 @@ func TestCodeReviewRepairPromptRestatesStrictOutputTypes(t *testing.T) {
 		t.Fatalf("repair must preserve the review context and append focused feedback, got %#v", messages)
 	}
 	feedback := messages[len(messages)-1].Content
+	if !strings.Contains(feedback, "Low findings use comment, not request_changes") {
+		t.Fatal("repair must retain the verdict/severity contract")
+	}
 	for _, required := range []string{
 		"review_scope, test_plan, and coverage_gaps are arrays of plain JSON strings",
 		"findings is an array of finding objects",
