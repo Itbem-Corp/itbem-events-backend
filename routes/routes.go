@@ -367,6 +367,8 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	protected.GET("/automation/agents/:agentKey/history", automation.GetAgentHistory)
 	protected.GET("/automation/dispatch/queue", automation.GetDispatchQueue)
 	protected.GET("/automation/traces", automation.GetAutomationTraces)
+	protected.GET("/automation/tasks/:id/inference-diagnostics", automation.GetInferenceDiagnostics)
+	protected.POST("/automation/tasks/:id/inference-receipts/:receipt/inspect-content", automation.InspectInferenceTaskContent)
 	protected.GET("/automation/agent-instances", automation.ListAgentInstances)
 	protected.POST("/automation/agent-instances", automation.RegisterAgentInstance)
 	protected.DELETE("/automation/agent-instances/:id", automation.RevokeAgentInstance)
