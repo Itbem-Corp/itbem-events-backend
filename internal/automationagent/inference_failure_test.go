@@ -11,7 +11,7 @@ import (
 )
 
 func TestInferenceFailureCodesNeverExposeArbitraryProviderText(t *testing.T) {
-	for _, raw := range []string{"private-key-marker", "provider_http_400?token=private", "provider_http_200", "provider_http_0400", "credentials_unavailable private"} {
+	for _, raw := range []string{"private-key-marker", "provider_http_400?token=private", "provider_http_200", "provider_http_0400", "credentials_unavailable private", "accounting_db_23514 private", "accounting_db_23x14", "accounting_db_235140"} {
 		if SafeInferenceFailureCode(raw) != "" {
 			t.Fatalf("unsafe code accepted: %q", raw)
 		}
@@ -35,7 +35,7 @@ func TestInferenceFailureCodesNeverExposeArbitraryProviderText(t *testing.T) {
 func TestGatewayFailureDiagnosticsRemainBoundedAndKeepRetrySemantics(t *testing.T) {
 	const taskID, runID = "diagnostic-task", "diagnostic-run"
 	installGatewayTestCapability(t, taskID, runID, "ai.chat")
-	for _, code := range []string{"provider_model_limits_unavailable", "provider_http_402", "private-key-marker"} {
+	for _, code := range []string{"provider_model_limits_unavailable", "provider_http_402", "accounting_db_23514", "accounting_canceled", "accounting_usage_unverified", "private-key-marker"} {
 		t.Run(code, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set(InferenceFailureHeader, code)

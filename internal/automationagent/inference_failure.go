@@ -19,7 +19,15 @@ func (e *ProviderHTTPError) Error() string {
 
 func SafeInferenceFailureCode(value string) string {
 	switch value {
-	case "provider_model_limits_unavailable", "credentials_unavailable", "routing_invalid", "accounting_unavailable", "provider_unclassified":
+	case "provider_model_limits_unavailable", "credentials_unavailable", "routing_invalid", "accounting_unavailable", "accounting_identity_missing", "accounting_usage_unverified", "accounting_usage_encoding", "accounting_receipt_binding", "accounting_receipt_resolved", "accounting_canceled", "accounting_deadline", "provider_unclassified":
+		return value
+	}
+	if suffix, ok := strings.CutPrefix(value, "accounting_db_"); ok && len(suffix) == 5 {
+		for _, char := range suffix {
+			if !(char >= '0' && char <= '9' || char >= 'A' && char <= 'Z') {
+				return ""
+			}
+		}
 		return value
 	}
 	if suffix, ok := strings.CutPrefix(value, "provider_http_"); ok && len(suffix) == 3 {
