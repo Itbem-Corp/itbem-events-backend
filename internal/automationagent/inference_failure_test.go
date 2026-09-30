@@ -32,7 +32,7 @@ func TestInferenceFailureCodesNeverExposeArbitraryProviderText(t *testing.T) {
 	}
 }
 
-func TestGatewayFailureDiagnosticsRemainBoundedAndKeepRetrySemantics(t *testing.T) {
+func TestGatewayFailureDiagnosticsRemainBoundedWithAccountingRetryBlocked(t *testing.T) {
 	const taskID, runID = "diagnostic-task", "diagnostic-run"
 	installGatewayTestCapability(t, taskID, runID, "ai.chat")
 	for _, code := range []string{"provider_model_limits_unavailable", "provider_http_402", "accounting_db_23514", "accounting_canceled", "accounting_usage_unverified", "private-key-marker"} {
@@ -46,8 +46,9 @@ func TestGatewayFailureDiagnosticsRemainBoundedAndKeepRetrySemantics(t *testing.
 			client := newGatewayProviderTestClient(GatewayProviderConfig{Provider: ProviderMiniMax, Model: "MiniMax-M3", Endpoint: server.URL}, server.Client())
 			_, err := client.Complete(WithInferenceLease(context.Background(), taskID, runID, "ai.chat", ""), []Message{{Role: "user", Content: "synthetic"}}, 32)
 			var retryable *RetryableError
-			if !errors.As(err, &retryable) || retryable.StatusCode != 502 {
-				t.Fatalf("retry semantics changed: %v", err)
+			wantRetryable := !strings.HasPrefix(SafeInferenceFailureCode(code), "accounting_")
+			if err == nil || errors.As(err, &retryable) != wantRetryable || (wantRetryable && retryable.StatusCode != 502) {
+				t.Fatalf("incorrect retry classification: %v", err)
 			}
 			if strings.Contains(err.Error(), "private") {
 				t.Fatal("diagnostic leaked arbitrary content")

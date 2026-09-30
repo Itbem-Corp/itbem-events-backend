@@ -729,6 +729,41 @@ func TestExpiredGitHubReviewLeaseRecoveryIsBoundedAndPreservesExactReviewSubject
 	}
 }
 
+func TestExpiredReviewRecoveryStopsBeforeInputAndRechecksReceiptUnderLock(t *testing.T) {
+	for _, path := range []string{"poll", "redelivery"} {
+		t.Run(path, func(t *testing.T) {
+			db, mock := automationCostLedgerTestDB(t)
+			previousDB := configuration.DB
+			configuration.DB = db
+			defer func() { configuration.DB = previousDB }()
+			now := time.Now().UTC()
+			expired := now.Add(-time.Minute)
+			task := models.AutomationTask{ID: uuid.Must(uuid.NewV4()), JobID: uuid.Must(uuid.NewV4()), Operation: "code.review", RequestedBy: "github-app-review", Status: "running", AttemptCount: 1, InputRef: "s3://fixture/input.json", EvidenceSubjectDigest: strings.Repeat("a", 64), LeaseExpiresAt: &expired}
+			rows := sqlmock.NewRows([]string{"id", "job_id", "operation", "requested_by", "status", "attempt_count", "input_ref", "evidence_subject_digest", "lease_expires_at"}).AddRow(task.ID, task.JobID, task.Operation, task.RequestedBy, task.Status, task.AttemptCount, task.InputRef, task.EvidenceSubjectDigest, expired)
+			if path == "redelivery" {
+				mock.ExpectBegin()
+			}
+			mock.ExpectQuery(`SELECT \* FROM "automation_tasks"`).WillReturnRows(rows)
+			mock.ExpectQuery(`SELECT count\(\*\) FROM "automation_inference_receipts" WHERE automation_task_id = \$1 AND status IN \(\$2,\$3\)`).WithArgs(task.ID, "reserved", "ambiguous").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+			if path == "redelivery" {
+				mock.ExpectCommit()
+				next, err := recoverStrandedGitHubReview(context.Background(), &task, now)
+				if err != nil || next != nil {
+					t.Fatalf("ambiguous redelivery created work: next=%v err=%v", next, err)
+				}
+			} else {
+				recovered, err := reconcileOneExpiredGitHubReviewLease(context.Background(), &models.Config{GitHubReviewWebhookSecret: "fixture", GitHubReviewRepositories: "itbem/dashboard"}, now)
+				if err != nil || recovered {
+					t.Fatalf("ambiguous poll created work: recovered=%t err=%v", recovered, err)
+				}
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestReconcileExpiredGitHubReviewLeaseFinalizesExhaustedTaskBeforeReadingInput(t *testing.T) {
 	sqlDB, mock, err := sqlmock.New()
 	if err != nil {
