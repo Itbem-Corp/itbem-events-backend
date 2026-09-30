@@ -537,7 +537,11 @@ func (p *gatewayProviderClient) Complete(ctx context.Context, messages []Message
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusRequestTimeout || response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500 {
-		return Completion{}, &RetryableError{Message: fmt.Sprintf("AI gateway temporarily unavailable (%d)", response.StatusCode), RetryAfter: providerRetryAfter(response.Header, time.Now().UTC()), StatusCode: response.StatusCode}
+		message := fmt.Sprintf("AI gateway temporarily unavailable (%d)", response.StatusCode)
+		if reason := SafeInferenceFailureCode(response.Header.Get(InferenceFailureHeader)); reason != "" {
+			message += ": " + reason
+		}
+		return Completion{}, &RetryableError{Message: message, RetryAfter: providerRetryAfter(response.Header, time.Now().UTC()), StatusCode: response.StatusCode}
 	}
 	if response.StatusCode == http.StatusUnprocessableEntity {
 		var completion Completion
@@ -793,7 +797,7 @@ func (p *httpProviderClient) Complete(ctx context.Context, messages []Message, m
 		return Completion{}, &RetryableError{Message: fmt.Sprintf("provider temporarily unavailable (%d)", response.StatusCode), RetryAfter: providerRetryAfter(response.Header, time.Now().UTC()), StatusCode: response.StatusCode}
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return Completion{}, fmt.Errorf("provider request rejected (%d)", response.StatusCode)
+		return Completion{}, &ProviderHTTPError{StatusCode: response.StatusCode}
 	}
 	var body map[string]any
 	if err := json.NewDecoder(io.LimitReader(response.Body, maxProviderResponseSize)).Decode(&body); err != nil {

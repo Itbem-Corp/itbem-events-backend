@@ -135,6 +135,7 @@ func Infer(c echo.Context) error {
 			}
 		}
 		_ = markInferenceReceiptAmbiguous(c.Request().Context(), inferenceScope.ReceiptID)
+		c.Response().Header().Set(automationagent.InferenceFailureHeader, automationagent.InferenceFailureCode(err))
 		var retryable *automationagent.RetryableError
 		if errors.As(err, &retryable) {
 			return utils.Error(c, http.StatusServiceUnavailable, "AI provider temporarily unavailable", "")
@@ -144,6 +145,7 @@ func Infer(c echo.Context) error {
 	receipt, err := acceptInferenceReceipt(c.Request().Context(), cfg, inferenceScope, completion, "accepted")
 	if err != nil {
 		_ = markInferenceReceiptAmbiguous(c.Request().Context(), inferenceScope.ReceiptID)
+		c.Response().Header().Set(automationagent.InferenceFailureHeader, "accounting_unavailable")
 		return utils.Error(c, http.StatusBadGateway, "AI provider accounting unavailable", "")
 	}
 	if completion.Usage == nil {
