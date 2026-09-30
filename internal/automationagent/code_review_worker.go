@@ -351,7 +351,8 @@ func (w *Worker) processSegmentedCodeReview(ctx context.Context, message TaskMes
 	output := map[string]any{
 		"schema_version": 1, "task_id": message.Payload.TaskID, "run_id": runID, "operation": message.Payload.Operation,
 		"request_ref": requestRef, "provider": completion.Provider, "model": completion.Model,
-		"response_id": completion.ResponseID, "usage": completion.Usage, "content": completion.Content,
+		"response_id": completion.ResponseID, "call_id": completion.CallID, "receipt_id": completion.ReceiptID,
+		"usage": completion.Usage, "content": completion.Content,
 		"structured_result": aggregate, "artifacts": map[string]any{"artifacts": []any{}}, "execution": execution,
 		"review_segments": codeReviewCompletionAudit(completions, segments), "created_at": w.now().UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
 	}
@@ -364,7 +365,7 @@ func (w *Worker) processSegmentedCodeReview(ctx context.Context, message TaskMes
 		_, callbackErr := w.callback.Update(ctx, message.Payload.TaskID, TaskUpdate{Status: "failed", RunID: runID, ErrorMessage: "provider response storage unavailable; response cannot be inspected", RequestRef: requestRef, Provider: completion.Provider, Model: completion.Model, Usage: completion.Usage, ResponseID: completion.ResponseID})
 		return callbackErr
 	}
-	_, err = w.callback.Update(ctx, message.Payload.TaskID, TaskUpdate{Status: "completed", RunID: runID, RequestRef: requestRef, OutputRef: outputRef, Provider: completion.Provider, Model: completion.Model, Usage: completion.Usage, ResponseID: completion.ResponseID, Execution: execution})
+	_, err = w.callback.Update(ctx, message.Payload.TaskID, TaskUpdate{Status: "completed", RunID: runID, RequestRef: requestRef, OutputRef: outputRef, Provider: completion.Provider, Model: completion.Model, CallID: completion.CallID, ReceiptID: completion.ReceiptID, Usage: completion.Usage, ResponseID: completion.ResponseID, Execution: execution})
 	return err
 }
 
@@ -785,7 +786,19 @@ func aggregateCodeReviewCompletions(completions []Completion, aggregate map[stri
 	if err != nil {
 		return Completion{}, fmt.Errorf("code review completion audit could not be encoded")
 	}
-	return Completion{Provider: provider, Model: model, ResponseID: completions[len(completions)-1].ResponseID, Usage: usage, Content: string(content)}, nil
+	// The callback ledger validates provider accounting against an immutable
+	// gateway receipt. A segmented review may summarize several calls, but its
+	// terminal callback still needs one accepted call/receipt pair to prove that
+	// the reported provider outcome belongs to this exact task, run and worker.
+	// Use the final call because it is the one whose response closes the review
+	// (including a bounded repair, when present). The gateway retains the other
+	// per-call receipts independently.
+	primary := completions[len(completions)-1]
+	return Completion{
+		Provider: provider, Model: model, ResponseID: primary.ResponseID,
+		CallID: primary.CallID, ReceiptID: primary.ReceiptID,
+		Usage: usage, Content: string(content),
+	}, nil
 }
 
 func numericReviewUsage(value any) (float64, bool) {
