@@ -50,7 +50,7 @@ type AutomationToolExecution struct {
 	CacheWriteCostMicros int64  `gorm:"not null;default:0" json:"cache_write_cost_microusd"`
 	TotalCostMicros      int64  `gorm:"not null;default:0;index" json:"total_cost_microusd"`
 	Currency             string `gorm:"type:char(3);not null;default:'USD'" json:"currency"`
-	PricingBasis         string `gorm:"type:varchar(32);not null;default:'unpriced'" json:"pricing_basis"`
+	PricingBasis         string `gorm:"type:text;not null;default:'unpriced'" json:"pricing_basis"`
 	PricingSnapshotJSON  string `gorm:"type:jsonb;not null;default:'{}'" json:"pricing_snapshot,omitempty"`
 	// The task trace exposes only an allow-listed provider outcome derived from
 	// this JSON. Raw provider metadata remains server-side with the ledger.
