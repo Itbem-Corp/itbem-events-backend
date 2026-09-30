@@ -55,6 +55,43 @@ func TestHTTPCallbackDoesNotRetryOrdinaryConflict(t *testing.T) {
 	}
 }
 
+func TestHTTPCallbackReportsOnlyAllowlistedClaimRejectionReasons(t *testing.T) {
+	t.Parallel()
+
+	for _, scenario := range []struct {
+		name     string
+		body     string
+		expected string
+	}{
+		{name: "known reason", body: `{"error":"worker identity or profile is invalid"}`, expected: "worker identity or profile is invalid"},
+		{name: "known category", body: `{"message":"Invalid automation result","error":"private diagnostic"}`, expected: "automation result payload is invalid"},
+		{name: "unknown reason", body: `{"error":"secret database diagnostic"}`},
+		{name: "invalid JSON", body: `not-json`},
+	} {
+		scenario := scenario
+		t.Run(scenario.name, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				writer.Header().Set("Content-Type", "application/json")
+				writer.WriteHeader(http.StatusBadRequest)
+				_, _ = writer.Write([]byte(scenario.body))
+			}))
+			defer server.Close()
+			callback := newTestHTTPCallback(t, server)
+			_, err := callback.Update(context.Background(), "task", TaskUpdate{Status: "running", RunID: "run"})
+			if err == nil {
+				t.Fatal("rejected callback must return an error")
+			}
+			if scenario.expected != "" && !strings.Contains(err.Error(), scenario.expected) {
+				t.Fatalf("error %q does not contain allowlisted reason %q", err, scenario.expected)
+			}
+			if scenario.expected == "" && err.Error() != "automation callback rejected (400)" {
+				t.Fatalf("unknown response detail leaked into error: %q", err)
+			}
+		})
+	}
+}
+
 func TestMachineCallbackSignatureBindsExactPathAndBody(t *testing.T) {
 	identity, instanceID := newTestMachineIdentity(t)
 	callback, err := NewHTTPCallback("http://127.0.0.1:18080", identity, instanceID, nil)
@@ -92,6 +129,7 @@ func TestHTTPCallbackRetainsBusyRunClaim(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("X-ITBEM-Automation-Run-Busy", "1")
+		writer.Header().Set(retryLeaseHeader, "37")
 		writer.WriteHeader(http.StatusConflict)
 	}))
 	defer server.Close()
@@ -101,14 +139,36 @@ func TestHTTPCallbackRetainsBusyRunClaim(t *testing.T) {
 	if accepted || !errors.As(err, &retryable) {
 		t.Fatalf("busy claim must retain its delivery, got accepted=%v error=%v", accepted, err)
 	}
-	if retryable.RetryAfter <= 0 {
-		t.Fatal("busy lease must use a bounded deferral, not a hot retry loop")
+	if retryable.RetryAfter != 37*time.Second {
+		t.Fatalf("busy lease retry = %s, want the server-provided remaining lease", retryable.RetryAfter)
 	}
 	// A stale terminal callback must never become a fresh provider run merely
 	// because a proxy accidentally retained the claim-only response header.
 	accepted, err = callback.Update(context.Background(), "task", TaskUpdate{Status: "completed", RunID: "old-run"})
 	if accepted || err != nil {
 		t.Fatalf("stale terminal callback must remain ignored: accepted=%v error=%v", accepted, err)
+	}
+}
+
+func TestHTTPCallbackBusyRunRejectsUntrustedRetryLeaseValues(t *testing.T) {
+	t.Parallel()
+	for _, value := range []string{"", "0", "-1", "not-a-number", "999999999"} {
+		value := value
+		t.Run(value, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				writer.Header().Set(runBusyHeader, "1")
+				writer.Header().Set(retryLeaseHeader, value)
+				writer.WriteHeader(http.StatusConflict)
+			}))
+			defer server.Close()
+			callback := newTestHTTPCallback(t, server)
+			_, err := callback.Update(context.Background(), "task", TaskUpdate{Status: "running", RunID: "new-run"})
+			var retryable *RetryableError
+			if !errors.As(err, &retryable) || retryable.RetryAfter != providerRetryMaxDelay {
+				t.Fatalf("retry value %q produced %#v, want safe maximum", value, err)
+			}
+		})
 	}
 }
 

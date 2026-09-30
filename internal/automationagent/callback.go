@@ -6,7 +6,9 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,11 +19,62 @@ import (
 )
 
 const retryReservationHeader = "X-ITBEM-Automation-Retry-Reservation"
+const retryLeaseHeader = "X-ITBEM-Automation-Retry-Lease"
 
 // Only a rejected claim for a currently owned execution carries this signal.
 // It must retain the queue message: the owner may still fail before producing
 // a durable result. Terminal/cancelled task conflicts remain safe to ACK.
 const runBusyHeader = "X-ITBEM-Automation-Run-Busy"
+
+const maxCallbackRejectionBodyBytes = 4096
+
+func callbackBusyRetryAfter(header http.Header) time.Duration {
+	seconds, err := strconv.ParseInt(strings.TrimSpace(header.Get(retryLeaseHeader)), 10, 64)
+	maximumSeconds := int64(providerRetryMaxDelay / time.Second)
+	if err != nil || seconds < 1 || seconds > maximumSeconds {
+		return providerRetryMaxDelay
+	}
+	delay := time.Duration(seconds) * time.Second
+	if delay < providerRetryMinDelay {
+		return providerRetryMinDelay
+	}
+	return delay
+}
+
+func safeCallbackRejectionReason(reader io.Reader) string {
+	if reader == nil {
+		return ""
+	}
+	body, err := io.ReadAll(io.LimitReader(reader, maxCallbackRejectionBodyBytes+1))
+	if err != nil || len(body) == 0 || len(body) > maxCallbackRejectionBodyBytes {
+		return ""
+	}
+	var response struct {
+		Message string `json:"message"`
+		Error   string `json:"error"`
+	}
+	if json.Unmarshal(body, &response) != nil {
+		return ""
+	}
+	switch strings.TrimSpace(response.Error) {
+	case "running tasks require a valid run lease ID":
+		return "run lease ID is invalid"
+	case "a worker identity is required":
+		return "worker identity is missing"
+	case "worker identity or profile is invalid":
+		return "worker identity or profile is invalid"
+	case "progress label is invalid":
+		return "progress label is invalid"
+	}
+	switch strings.TrimSpace(response.Message) {
+	case "Invalid automation claim":
+		return "automation claim is invalid"
+	case "Invalid automation result":
+		return "automation result payload is invalid"
+	default:
+		return ""
+	}
+}
 
 type inferenceCapabilityKey struct {
 	taskID, runID string
@@ -193,11 +246,14 @@ func (c *HTTPCallback) Update(ctx context.Context, taskID string, update TaskUpd
 			return false, &RetryableError{Message: "automation budget reservation expired; awaiting a renewed lease"}
 		}
 		if update.Status == "running" && response.Header.Get(runBusyHeader) == "1" {
-			return false, &RetryableError{Message: "automation run is owned by another worker; retaining delivery for recovery", RetryAfter: providerRetryMaxDelay}
+			return false, &RetryableError{Message: "automation run is owned by another worker; retaining delivery for recovery", RetryAfter: callbackBusyRetryAfter(response.Header)}
 		}
 		return false, nil
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		if reason := safeCallbackRejectionReason(response.Body); reason != "" {
+			return false, fmt.Errorf("automation callback rejected (%d: %s)", response.StatusCode, reason)
+		}
 		return false, fmt.Errorf("automation callback rejected (%d)", response.StatusCode)
 	}
 	if update.Status == "running" {
