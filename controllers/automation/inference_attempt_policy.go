@@ -78,7 +78,17 @@ func freezeAutomationInferenceAttemptPolicy(tx *gorm.DB, task models.AutomationT
 	routesJSON := "[]"
 	routesHash := sha256Hex([]byte(routesJSON))
 	var revision int64
-	if policy, configured := actionPolicyForOperation(tx, task.Operation); configured {
+	if task.ModelEvaluationID != nil {
+		_, route, routeErr := evaluationCallForTask(tx, task)
+		if routeErr != nil {
+			return empty, routeErr
+		}
+		routesJSON, routesHash, err = canonicalInferenceRoutes([]models.AutomationAIActionRoute{route})
+		if err != nil {
+			return empty, err
+		}
+		revision = 1
+	} else if policy, configured := actionPolicyForOperation(tx, task.Operation); configured {
 		routes, routesErr := policy.Routes()
 		if routesErr != nil {
 			return empty, fmt.Errorf("automation inference action policy is invalid: %w", routesErr)
