@@ -461,7 +461,25 @@ func migrateModels(db *gorm.DB) error {
 			   IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
 			     RAISE EXCEPTION 'automation inference receipts are durable';
 			   END IF;
+			   -- Diagnostics have two bounded writes independent of accounting:
+			   -- reservation metadata, then the observed terminal outcome. Every
+			   -- other column must remain byte-for-byte equivalent as JSONB.
+			   IF (to_jsonb(NEW) - 'diagnostics_json') = (to_jsonb(OLD) - 'diagnostics_json')
+			      AND NEW.diagnostics_json->>'schema_version' = '1'
+			      AND (
+			        (OLD.status = 'reserved' AND OLD.diagnostics_json = '{}'::jsonb
+			         AND NEW.diagnostics_json->>'stage' = 'reserved')
+			        OR (OLD.diagnostics_json->>'stage' = 'reserved'
+			            AND (NEW.diagnostics_json - ARRAY['stage','duration_ms','gateway_status','failure_code','response_capture','attempts'])
+			              = (OLD.diagnostics_json - ARRAY['stage','duration_ms','gateway_status','failure_code','response_capture','attempts'])
+			            AND NEW.diagnostics_json->>'stage' IN
+			              ('credential_lookup', 'provider', 'provider_response_decode',
+			               'provider_response_rejected', 'accounting', 'completed'))
+			      ) THEN
+			     RETURN NEW;
+			   END IF;
 			   IF OLD.status <> 'reserved'
+			      OR NEW.diagnostics_json IS DISTINCT FROM OLD.diagnostics_json
 			      OR NEW.id IS DISTINCT FROM OLD.id
 			      OR NEW.automation_task_id IS DISTINCT FROM OLD.automation_task_id
 			      OR NEW.run_id IS DISTINCT FROM OLD.run_id
