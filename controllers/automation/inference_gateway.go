@@ -67,18 +67,21 @@ type inferenceRequest struct {
 }
 
 type gatewayInferenceScope struct {
-	ProjectID      string
-	PlanStepID     *uuid.UUID
-	Routes         []models.AutomationAIActionRoute
-	PolicyRevision int64
-	RoutesHash     string
-	PolicyHash     string
-	MaxCalls       int
-	CallID         uuid.UUID
-	ReceiptID      uuid.UUID
-	WorkerID       string
-	AgentKey       string
-	MachineID      string
+	EvaluationID                *uuid.UUID
+	EvaluationPricingJSON       string
+	EvaluationReservationMicros int64
+	ProjectID                   string
+	PlanStepID                  *uuid.UUID
+	Routes                      []models.AutomationAIActionRoute
+	PolicyRevision              int64
+	RoutesHash                  string
+	PolicyHash                  string
+	MaxCalls                    int
+	CallID                      uuid.UUID
+	ReceiptID                   uuid.UUID
+	WorkerID                    string
+	AgentKey                    string
+	MachineID                   string
 }
 
 // Infer is an internal worker-only proxy. It accepts model input over the
@@ -347,7 +350,7 @@ func gatewayInferenceScopeForRequest(request inferenceRequest, authenticated ...
 	}
 	err = configuration.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select(
-			"id", "operation", "status", "run_id", "lease_expires_at", "max_completion_tokens", "delivery_work_item_id", "worker_id", "agent_key", "machine_id",
+			"id", "operation", "status", "run_id", "lease_expires_at", "max_completion_tokens", "delivery_work_item_id", "worker_id", "agent_key", "machine_id", "model_evaluation_id", "delivery_onboarding_id", "budget_reservation_expires_at",
 		).First(&task, taskID).Error; err != nil {
 			return err
 		}
@@ -406,6 +409,11 @@ func gatewayInferenceScopeForRequest(request inferenceRequest, authenticated ...
 			callID, parseErr := uuid.FromString(strings.TrimSpace(request.CallID))
 			if parseErr != nil || callID == uuid.Nil {
 				return errors.New("automation inference call id is invalid")
+			}
+			if task.ModelEvaluationID != nil {
+				if err := validateEvaluationInference(tx, task, request, snapshot, &scope); err != nil {
+					return err
+				}
 			}
 			receipt, reserveErr := reserveAutomationInferenceReceipt(tx, request, task, snapshot, callID, scope.PlanStepID)
 			if reserveErr != nil {

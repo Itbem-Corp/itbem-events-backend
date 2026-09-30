@@ -1345,6 +1345,12 @@ func (w *Worker) failWithQAResult(ctx context.Context, taskID, runID string, qaR
 	return err
 }
 
+// SyntheticChatMessages lets server admission hash exactly the normal worker
+// envelope. It accepts only a prompt and performs no environment or source reads.
+func SyntheticChatMessages(prompt string) ([]Message, error) {
+	return buildTaskMessages("ai.chat", TaskInput{Prompt: prompt}, func(string) string { return "" })
+}
+
 func buildTaskMessages(operation string, input TaskInput, lookup func(string) string) ([]Message, error) {
 	prompt := strings.TrimSpace(input.Prompt)
 	if prompt == "" || len(prompt) > 500000 {
