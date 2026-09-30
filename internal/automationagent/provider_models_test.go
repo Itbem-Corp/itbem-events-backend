@@ -177,7 +177,7 @@ func TestModelsDevMetadataEnrichesLiveAvailabilityAndKeepsPriceTiers(t *testing.
 }
 
 func TestResolveProviderModelLimitsForOpenAIDeepSeekOpenRouterAndMiniMax(t *testing.T) {
-	const publicMetadata = `{"openai":{"models":{"gpt-4.1-mini":{"id":"gpt-4.1-mini","modalities":{"input":["text"],"output":["text"]},"limit":{"context":4096,"output":2048}}}},"deepseek":{"models":{"deepseek-flash":{"id":"deepseek-flash","modalities":{"input":["text"],"output":["text"]},"limit":{"context":2048,"output":1024}}}},"openrouter":{"models":{"vendor/model-limits":{"id":"vendor/model-limits","modalities":{"input":["text"],"output":["text"]},"limit":{"context":1000,"output":400}}}},"minimax":{"models":{"MiniMax-M3":{"id":"MiniMax-M3","modalities":{"input":["text"],"output":["text"]},"limit":{"context":1000000,"output":16000}}}}}`
+	const publicMetadata = `{"openai":{"models":{"gpt-4.1-mini":{"id":"gpt-4.1-mini","modalities":{"input":["text"],"output":["text"]},"limit":{"context":4096,"output":2048}}}},"deepseek":{"models":{"deepseek-flash":{"id":"deepseek-flash","modalities":{"input":["text"],"output":["text"]},"limit":{"context":2048,"output":1024}}}},"openrouter":{"models":{"vendor/model-limits":{"id":"vendor/model-limits","modalities":{"input":["text"],"output":["text"]},"limit":{"context":1000,"output":400}}}},"minimax":{"models":{"MiniMax-M3":{"id":"MiniMax-M3","modalities":{"input":["text"],"output":["text"]},"limit":{"context":1000000,"output":131072}}}}}`
 	var requests atomic.Int64
 	client := &http.Client{Transport: providerModelsRoundTripper(func(request *http.Request) (*http.Response, error) {
 		requests.Add(1)

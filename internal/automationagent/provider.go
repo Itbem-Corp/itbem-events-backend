@@ -26,7 +26,7 @@ const (
 	MinCompletionTokens       = 1
 	MaxCompletionTokens       = 131072
 	miniMaxM2CompletionLimit  = 2048
-	miniMaxM3CompletionLimit  = 8192
+	miniMaxM3CompletionLimit  = 32768
 	maxProviderResponseSize   = 8 << 20
 	providerRetryMinDelay     = 30 * time.Second
 	providerRetryDefaultDelay = 2 * time.Minute
@@ -942,6 +942,9 @@ func (p *httpProviderClient) payload(messages []Message, maxTokens int) (map[str
 	}
 	if p.config.Provider == ProviderMiniMax {
 		payload["reasoning_split"] = true
+		if strings.EqualFold(strings.TrimSpace(p.config.Model), "MiniMax-M3") && !p.config.ReasoningEnabled {
+			payload["thinking"] = map[string]string{"type": "disabled"}
+		}
 	}
 	if p.config.Provider == ProviderDeepSeek && p.config.ReasoningEnabled {
 		payload["thinking"] = map[string]string{"type": "enabled"}

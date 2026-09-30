@@ -12,6 +12,14 @@ import (
 	"github.com/gofrs/uuid"
 )
 
+func TestSingleSegmentReviewReceivesM3CompletionBudget(t *testing.T) {
+	calls := []codeReviewProviderCall{{Messages: []Message{{Role: "user", Content: "Review the frozen patch."}}}}
+	allocations, err := allocateCodeReviewCompletionTokens(calls, CompletionTokensForOperation("code.review"))
+	if err != nil || len(allocations) != 1 || allocations[0] != 32768 {
+		t.Fatalf("single review segment allocation = %v / %v, want 32768", allocations, err)
+	}
+}
+
 func TestWorkerRoutesLargeCodeReviewThroughLeasedSegments(t *testing.T) {
 	var patch strings.Builder
 	for index := 0; index < codeReviewSegmentMaxFiles+1; index++ {
