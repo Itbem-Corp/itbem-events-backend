@@ -136,6 +136,7 @@ func (e *ProviderResponseError) Error() string { return e.Message }
 // RetryableError tells the SQS loop to retain a message for another lease.
 // It never contains provider response bodies, prompts or credentials.
 type RetryableError struct {
+	Cause      error `json:"-"`
 	Message    string
 	RetryAfter time.Duration
 	// StatusCode is present only for an explicit provider HTTP response. A
@@ -145,6 +146,21 @@ type RetryableError struct {
 }
 
 func (e *RetryableError) Error() string { return e.Message }
+func (e *RetryableError) Unwrap() error { return e.Cause }
+
+// Preserve the error class without exposing provider payloads or URLs. A
+// partial successful HTTP response may already be billable and stays terminal.
+type ProviderResponseReadError struct{ Cause error }
+
+func (e *ProviderResponseReadError) Error() string { return "provider returned invalid JSON" }
+func (e *ProviderResponseReadError) Unwrap() error { return e.Cause }
+
+func ProviderHTTPTimeout(client ProviderClient) time.Duration {
+	if p, ok := client.(*httpProviderClient); ok {
+		return p.client.Timeout
+	}
+	return 0
+}
 
 type ProviderConfig struct {
 	Provider Provider
@@ -803,7 +819,7 @@ func (p *httpProviderClient) Complete(ctx context.Context, messages []Message, m
 	response, err := p.client.Do(req)
 	if err != nil {
 		if isNetworkError(err) {
-			return Completion{}, &RetryableError{Message: "provider network request failed", RetryAfter: providerRetryDefaultDelay}
+			return Completion{}, &RetryableError{Message: "provider network request failed", RetryAfter: providerRetryDefaultDelay, Cause: err}
 		}
 		return Completion{}, fmt.Errorf("provider request failed")
 	}
@@ -816,7 +832,7 @@ func (p *httpProviderClient) Complete(ctx context.Context, messages []Message, m
 	}
 	var body map[string]any
 	if err := json.NewDecoder(io.LimitReader(response.Body, maxProviderResponseSize)).Decode(&body); err != nil {
-		return Completion{}, fmt.Errorf("provider returned invalid JSON")
+		return Completion{}, &ProviderResponseReadError{Cause: err}
 	}
 	completion, err := parseCompletion(p.config, body)
 	if err != nil {

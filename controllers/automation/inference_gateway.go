@@ -88,6 +88,7 @@ type gatewayInferenceScope struct {
 // existing TLS callback channel, obtains the provider key in cloud memory, and
 // returns only the normalized completion. It never returns a credential.
 func Infer(c echo.Context) error {
+	receivedAt := time.Now()
 	c.Response().Header().Set("Cache-Control", "no-store")
 	resolver := inferenceCredentials
 	cfg, _ := c.Get("config").(*models.Config)
@@ -123,11 +124,36 @@ func Infer(c echo.Context) error {
 	// The worker's provider/model are only a capability bootstrap for the
 	// transport. The task's persisted route snapshot is the sole authorization
 	// for every inference call, including calls delegated to approved tools.
-	completion, err := completeWithFallbackForProject(c.Request().Context(), resolver, request, inferenceScope.Routes, inferenceScope.ProjectID)
+	diagnostic := startInferenceDiagnostics(request, inferenceScope)
+	diagnostic.Stage = "reserved"
+	diagnostic.ValidationMillis = time.Since(receivedAt).Milliseconds()
+	taskID, _ := uuid.FromString(request.TaskID)
+	diagnostic.RequestCapture = captureInferenceContent(cfg, taskID, inferenceScope.ReceiptID, "request", privateInferenceContent{Messages: request.Messages})
+	persistInferenceDiagnostics(inferenceScope.ReceiptID, diagnostic)
+	defer func() {
+		diagnostic.DurationMillis = time.Since(receivedAt).Milliseconds()
+		diagnostic.GatewayStatus = c.Response().Status
+		persistInferenceDiagnostics(inferenceScope.ReceiptID, diagnostic)
+	}()
+	completion, err := completeWithFallbackObserved(c.Request().Context(), resolver, request, inferenceScope.Routes, inferenceScope.ProjectID, diagnostic)
+	if completion.Content != "" {
+		diagnostic.ResponseCapture = captureInferenceContent(cfg, taskID, inferenceScope.ReceiptID, "response", privateInferenceContent{FinalAnswer: completion.Content})
+	} else {
+		diagnostic.ResponseCapture = "not_observed"
+	}
 	if err != nil {
+		diagnostic.FailureCode = safeProviderDiagnostic(err)
+		var readFailure *automationagent.ProviderResponseReadError
+		if errors.As(err, &readFailure) {
+			diagnostic.Stage = "provider_response_decode"
+		}
 		var billable *automationagent.ProviderResponseError
 		if errors.As(err, &billable) {
+			diagnostic.Stage = "provider_response_rejected"
 			completion = billable.Completion
+			if completion.Content != "" && diagnostic.ResponseCapture == "not_observed" {
+				diagnostic.ResponseCapture = captureInferenceContent(cfg, taskID, inferenceScope.ReceiptID, "response", privateInferenceContent{FinalAnswer: completion.Content})
+			}
 			receipt, receiptErr := acceptInferenceReceipt(c.Request().Context(), cfg, inferenceScope, completion, "rejected")
 			if receiptErr == nil {
 				completion.CallID, completion.ReceiptID = request.CallID, receipt.ID.String()
@@ -142,8 +168,10 @@ func Infer(c echo.Context) error {
 		}
 		return utils.Error(c, http.StatusBadGateway, "AI provider rejected the request", "")
 	}
+	diagnostic.Stage = "accounting"
 	receipt, err := acceptInferenceReceipt(c.Request().Context(), cfg, inferenceScope, completion, "accepted")
 	if err != nil {
+		diagnostic.FailureCode = inferenceAccountingFailureCode(err)
 		_ = markInferenceReceiptAmbiguous(c.Request().Context(), inferenceScope.ReceiptID)
 		c.Response().Header().Set(automationagent.InferenceFailureHeader, inferenceAccountingFailureCode(err))
 		return utils.Error(c, http.StatusBadGateway, "AI provider accounting unavailable", "")
@@ -160,6 +188,7 @@ func Infer(c echo.Context) error {
 	routing["policy_routes_hash"] = inferenceScope.RoutesHash
 	completion.CallID = request.CallID
 	completion.ReceiptID = receipt.ID.String()
+	diagnostic.Stage = "completed"
 	return c.JSON(http.StatusOK, completion)
 }
 
@@ -226,8 +255,15 @@ func completeWithFallback(ctx context.Context, resolver credentialResolver, requ
 }
 
 func completeWithFallbackForProject(ctx context.Context, resolver credentialResolver, request inferenceRequest, routes []models.AutomationAIActionRoute, projectID string) (automationagent.Completion, error) {
+	return completeWithFallbackObserved(ctx, resolver, request, routes, projectID, nil)
+}
+
+func completeWithFallbackObserved(ctx context.Context, resolver credentialResolver, request inferenceRequest, routes []models.AutomationAIActionRoute, projectID string, diagnostic *inferenceDiagnostics) (automationagent.Completion, error) {
 	var lastRetryable error
 	for index, route := range routes {
+		if diagnostic != nil {
+			diagnostic.Stage = "credential_lookup"
+		}
 		provider := automationagent.Provider(route.Provider)
 		endpoint, ok := automationagent.DefaultProviderEndpoint(provider)
 		if !ok {
@@ -249,7 +285,15 @@ func completeWithFallbackForProject(ctx context.Context, resolver credentialReso
 		}
 		providerConfig.ReasoningEnabled = route.ReasoningEnabled
 		providerConfig.ReasoningEffort = route.ReasoningEffort
-		completion, completionErr := automationagent.NewProviderClient(providerConfig, inferenceProviderHTTPClient).Complete(ctx, request.Messages, request.MaxCompletionTokens)
+		started := time.Now()
+		if diagnostic != nil {
+			diagnostic.Stage = "provider"
+		}
+		providerClient := automationagent.NewProviderClient(providerConfig, inferenceProviderHTTPClient)
+		completion, completionErr := providerClient.Complete(ctx, request.Messages, request.MaxCompletionTokens)
+		if diagnostic != nil {
+			diagnostic.Attempts = append(diagnostic.Attempts, inferenceRouteDiagnostic{Index: index, Provider: route.Provider, Model: route.Model, ReasoningEnabled: route.ReasoningEnabled, ReasoningEffort: route.ReasoningEffort, DurationMillis: time.Since(started).Milliseconds(), TimeoutMillis: automationagent.ProviderHTTPTimeout(providerClient).Milliseconds(), FailureCode: safeProviderDiagnostic(completionErr), FinishReason: diagnosticFinishReason(completion)})
+		}
 		if completionErr == nil {
 			if completion.Usage == nil {
 				completion.Usage = map[string]any{}

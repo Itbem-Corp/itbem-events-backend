@@ -1,8 +1,11 @@
 package automationagent
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"strconv"
 	"strings"
 )
@@ -19,7 +22,7 @@ func (e *ProviderHTTPError) Error() string {
 
 func SafeInferenceFailureCode(value string) string {
 	switch value {
-	case "provider_model_limits_unavailable", "credentials_unavailable", "routing_invalid", "accounting_unavailable", "accounting_identity_missing", "accounting_usage_unverified", "accounting_usage_encoding", "accounting_receipt_binding", "accounting_receipt_resolved", "accounting_canceled", "accounting_deadline", "provider_unclassified":
+	case "provider_response_invalid", "provider_response_incomplete", "provider_timeout", "request_canceled", "provider_transport", "provider_model_limits_unavailable", "credentials_unavailable", "routing_invalid", "accounting_unavailable", "accounting_identity_missing", "accounting_usage_unverified", "accounting_usage_encoding", "accounting_receipt_binding", "accounting_receipt_resolved", "accounting_canceled", "accounting_deadline", "provider_unclassified":
 		return value
 	}
 	if suffix, ok := strings.CutPrefix(value, "accounting_db_"); ok && len(suffix) == 5 {
@@ -40,6 +43,23 @@ func SafeInferenceFailureCode(value string) string {
 }
 
 func InferenceFailureCode(err error) string {
+	var transport net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &transport) && transport.Timeout()) {
+		return "provider_timeout"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "request_canceled"
+	}
+	if errors.As(err, &transport) {
+		return "provider_transport"
+	}
+	var readFailure *ProviderResponseReadError
+	if errors.As(err, &readFailure) {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return "provider_response_incomplete"
+		}
+		return "provider_response_invalid"
+	}
 	var rejected *ProviderHTTPError
 	if errors.As(err, &rejected) {
 		return SafeInferenceFailureCode(fmt.Sprintf("provider_http_%d", rejected.StatusCode))

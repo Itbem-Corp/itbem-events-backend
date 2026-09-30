@@ -45,7 +45,8 @@ type AutomationInferenceReceipt struct {
 	PricingSnapshotJSON  string     `gorm:"type:jsonb;not null;default:'{}'" json:"pricing_snapshot,omitempty"`
 	// UsageJSON is provider accounting metadata only; prompts and answers are
 	// never copied into this ledger.
-	UsageJSON  string     `gorm:"type:jsonb;not null;default:'{}'" json:"-"`
-	CreatedAt  time.Time  `gorm:"not null;index" json:"created_at"`
-	ResolvedAt *time.Time `gorm:"index" json:"resolved_at,omitempty"`
+	UsageJSON       string     `gorm:"type:jsonb;not null;default:'{}'" json:"-"`
+	DiagnosticsJSON string     `gorm:"type:jsonb;not null;default:'{}'" json:"-"`
+	CreatedAt       time.Time  `gorm:"not null;index" json:"created_at"`
+	ResolvedAt      *time.Time `gorm:"index" json:"resolved_at,omitempty"`
 }
