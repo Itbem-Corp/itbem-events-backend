@@ -446,9 +446,16 @@ type httpProviderClient struct {
 	resolveLimits inferenceModelLimitsResolver
 }
 
+const providerHTTPTimeout = 120 * time.Second
+
+// The gateway also validates identity, fetches sealed input, and records the
+// receipt. Its caller must outlive the provider deadline so cancellation does
+// not hide the server's terminal response and accounting outcome.
+const gatewayHTTPTimeout = providerHTTPTimeout + time.Minute
+
 func NewProviderClient(config ProviderConfig, client *http.Client) ProviderClient {
 	if client == nil {
-		client = &http.Client{Timeout: 120 * time.Second}
+		client = &http.Client{Timeout: providerHTTPTimeout}
 	} else {
 		// Do not mutate a shared caller client. Provider credentials are attached
 		// to every inference request, so an upstream redirect must never be
@@ -468,7 +475,7 @@ type gatewayProviderClient struct {
 
 func NewGatewayProviderClient(config GatewayProviderConfig, client *http.Client) ProviderClient {
 	if client == nil {
-		client = &http.Client{Timeout: 120 * time.Second}
+		client = &http.Client{Timeout: gatewayHTTPTimeout}
 	} else {
 		// Do not mutate the caller's shared HTTP client, but enforce the
 		// gateway-auth boundary even when a caller supplies a client with its
