@@ -18,6 +18,7 @@ import (
 	"github.com/gofrs/uuid"
 	"github.com/labstack/echo/v4"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -95,7 +96,12 @@ func persistInferenceDiagnostics(id uuid.UUID, diagnostic *inferenceDiagnostics)
 		return
 	}
 	// Only a known, server-reserved receipt can receive diagnostic metadata.
-	configuration.DB.WithContext(ctx).Model(&models.AutomationInferenceReceipt{}).Where("id = ?", id).Update("diagnostics_json", string(body))
+	// UpdateColumn deliberately avoids GORM's updated_at mutation: diagnostic
+	// writes may not modify any accounting or receipt lifecycle column.
+	result := configuration.DB.WithContext(ctx).Model(&models.AutomationInferenceReceipt{}).Where("id = ?", id).UpdateColumn("diagnostics_json", string(body))
+	if result.Error != nil || result.RowsAffected != 1 {
+		slog.Warn("inference diagnostic persistence failed", "receipt_id", id.String(), "stage", diagnostic.Stage)
+	}
 }
 
 type privateInferenceContent struct {

@@ -15,6 +15,20 @@ import (
 	"testing"
 )
 
+func TestDiagnosticPersistenceDoesNotMutateReceiptLifecycle(t *testing.T) {
+	_, mock, cleanup := attemptPolicyClaimDB(t)
+	defer cleanup()
+	receiptID := uuid.Must(uuid.NewV4())
+	mock.ExpectBegin()
+	// Exact SET projection guards against an implicit updated_at mutation.
+	mock.ExpectExec(`UPDATE "automation_inference_receipts" SET "diagnostics_json"=\$1 WHERE id = \$2`).WithArgs(sqlmock.AnyArg(), receiptID).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	persistInferenceDiagnostics(receiptID, &inferenceDiagnostics{SchemaVersion: 1, Stage: "reserved"})
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestInferenceInspectionRequiresPrimaryRootBeforeStorage(t *testing.T) {
 	configureAIActionPolicyTestRoot(t, 2)
 	for _, handler := range []func(echo.Context) error{GetInferenceDiagnostics, InspectInferenceTaskContent} {
