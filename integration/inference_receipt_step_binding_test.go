@@ -85,7 +85,14 @@ func TestInferenceReceiptMigrationAddsNullablePlanStepID(t *testing.T) {
 			return err
 		}
 		found := false
+		basisFound := false
 		for _, column := range columnTypes {
+			if column.Name() == "pricing_basis" {
+				basisFound = true
+				if !strings.EqualFold(column.DatabaseTypeName(), "text") {
+					return fmt.Errorf("pricing_basis must migrate to text, got %s", column.DatabaseTypeName())
+				}
+			}
 			if column.Name() != "plan_step_id" {
 				continue
 			}
@@ -94,6 +101,9 @@ func TestInferenceReceiptMigrationAddsNullablePlanStepID(t *testing.T) {
 			if !nullableKnown || !nullable || !strings.EqualFold(column.DatabaseTypeName(), "uuid") {
 				return fmt.Errorf("plan_step_id must be a nullable UUID column (nullable=%v known=%v type=%s)", nullable, nullableKnown, column.DatabaseTypeName())
 			}
+		}
+		if !basisFound {
+			return fmt.Errorf("pricing_basis column missing")
 		}
 		if !found {
 			return fmt.Errorf("AutoMigrate did not add plan_step_id")
@@ -107,6 +117,19 @@ func TestInferenceReceiptMigrationAddsNullablePlanStepID(t *testing.T) {
 		}
 		if preserved.ID != legacyReceiptID || preserved.PlanStepID != nil {
 			return fmt.Errorf("legacy receipt was changed or back-attributed: %#v", preserved)
+		}
+		// Reproduce the production receipt update with a legitimate basis longer
+		// than the legacy 32-character column, preserving the exact ledger value.
+		longBasis := "synthetic_catalog_basis_longer_than_32_chars"
+		if err := tx.Table("automation_inference_receipts").Where("id = ?", legacyReceiptID).Update("pricing_basis", longBasis).Error; err != nil {
+			return err
+		}
+		var storedBasis string
+		if err := tx.Table("automation_inference_receipts").Select("pricing_basis").Where("id = ?", legacyReceiptID).Scan(&storedBasis).Error; err != nil {
+			return err
+		}
+		if storedBasis != longBasis {
+			return fmt.Errorf("pricing basis was truncated or changed")
 		}
 		return nil
 	})
