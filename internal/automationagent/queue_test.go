@@ -53,11 +53,11 @@ func TestCompletionTokensForOperationKeepsPlansBoundedAndExpandsImplementation(t
 	if got := CompletionTokensForOperation("delivery.chat"); got != DefaultCompletionTokens {
 		t.Fatalf("delivery chat budget = %d, want %d", got, DefaultCompletionTokens)
 	}
-	if got := CompletionTokensForOperation("delivery.implementation"); got != miniMaxM3CompletionLimit {
-		t.Fatalf("delivery implementation budget = %d, want %d", got, miniMaxM3CompletionLimit)
+	if got := CompletionTokensForOperation("delivery.implementation"); got != 8192 {
+		t.Fatalf("delivery implementation budget = %d, want %d", got, 8192)
 	}
-	if got := CompletionTokensForOperation("product.ideate"); got != miniMaxM3CompletionLimit {
-		t.Fatalf("product ideation budget = %d, want %d", got, miniMaxM3CompletionLimit)
+	if got := CompletionTokensForOperation("product.ideate"); got != 8192 {
+		t.Fatalf("product ideation budget = %d, want %d", got, 8192)
 	}
 	if got := CompletionTokensForOperation("code.review"); got != miniMaxM3CompletionLimit {
 		t.Fatalf("segmented code review budget = %d, want %d", got, miniMaxM3CompletionLimit)

@@ -141,7 +141,8 @@ func TestProviderClientUsesMiniMaxContractWithoutLeakingSecrets(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Fatal(err)
 		}
-		if payload["model"] != "MiniMax-M3" || payload["reasoning_split"] != true || payload["thinking"] != nil || payload["max_completion_tokens"] != float64(1) {
+		thinking, _ := payload["thinking"].(map[string]any)
+		if payload["model"] != "MiniMax-M3" || payload["reasoning_split"] != true || thinking["type"] != "disabled" || payload["max_completion_tokens"] != float64(1) {
 			t.Fatal("unexpected MiniMax payload")
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": "response", "model": "MiniMax-M3", "usage": map[string]any{"total_tokens": 2}, "input_sensitive": false, "output_sensitive": false, "base_resp": map[string]any{"status_code": 0}, "choices": []any{map[string]any{"finish_reason": "stop", "message": map[string]any{"content": "ok"}}}})
@@ -155,6 +156,25 @@ func TestProviderClientUsesMiniMaxContractWithoutLeakingSecrets(t *testing.T) {
 	metadata, _ := completion.Usage["_itbem_provider"].(map[string]any)
 	if metadata["finish_reason"] != "stop" || metadata["input_sensitive"] != false || metadata["output_sensitive"] != false || metadata["status_code"] != int64(0) {
 		t.Fatalf("provider outcome metadata was not retained safely: %#v", completion.Usage)
+	}
+}
+
+func TestMiniMaxThinkingFollowsM3PolicyWithoutChangingM2(t *testing.T) {
+	for _, sample := range []struct {
+		model            string
+		reasoningEnabled bool
+		wantDisabled     bool
+	}{
+		{model: "MiniMax-M3", reasoningEnabled: false, wantDisabled: true},
+		{model: "MiniMax-M3", reasoningEnabled: true, wantDisabled: false},
+		{model: "MiniMax-M2.7", reasoningEnabled: false, wantDisabled: false},
+	} {
+		config := ProviderConfig{Provider: ProviderMiniMax, Model: sample.model, ReasoningEnabled: sample.reasoningEnabled, secret: "test-key"}
+		payload, _ := (&httpProviderClient{config: config}).payload([]Message{{Role: "user", Content: "Review."}}, 100)
+		thinking, exists := payload["thinking"].(map[string]string)
+		if exists != sample.wantDisabled || (exists && thinking["type"] != "disabled") {
+			t.Fatalf("thinking for %s enabled=%t: %#v", sample.model, sample.reasoningEnabled, payload["thinking"])
+		}
 	}
 }
 
@@ -453,7 +473,7 @@ func TestCompletionTokensRespectModelAndGlobalOutputLimitsWithoutTruncatingExpli
 		{name: "openai one over model limit", provider: ProviderOpenAI, model: "gpt-test", limit: 64, request: 65, wantErr: true},
 		{name: "deepseek one over model limit", provider: ProviderDeepSeek, model: "deepseek-flash", limit: 32, request: 33, wantErr: true},
 		{name: "openrouter exact model limit", provider: ProviderOpenRouter, model: "vendor/model", limit: 96, request: 96, want: 96},
-		{name: "minimax m3 adapter is stricter", provider: ProviderMiniMax, model: "MiniMax-M3", limit: 16_384, request: miniMaxM3CompletionLimit + 1, wantErr: true},
+		{name: "minimax m3 adapter is stricter", provider: ProviderMiniMax, model: "MiniMax-M3", limit: 65_536, request: miniMaxM3CompletionLimit + 1, wantErr: true},
 		{name: "minimax m2 adapter is stricter", provider: ProviderMiniMax, model: "MiniMax-M2.7", limit: 4_096, request: miniMaxM2CompletionLimit + 1, wantErr: true},
 		{name: "global cap is stricter than model metadata", provider: ProviderOpenAI, model: "gpt-large", limit: 200_000, request: MaxCompletionTokens + 1, wantErr: true},
 		{name: "implicit default resolves to smaller model output", provider: ProviderOpenAI, model: "gpt-small", limit: 128, request: 0, want: 128},

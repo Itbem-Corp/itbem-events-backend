@@ -15,7 +15,7 @@ import (
 	"github.com/gofrs/uuid"
 )
 
-const codeReviewSegmentCompletionLimit = 8192
+const codeReviewSegmentCompletionLimit = miniMaxM3CompletionLimit
 const codeReviewSegmentCompletionFloor = 2048
 const codeReviewRepairCompletionLimit = 8192
 const maxCodeReviewRepairs = 2
