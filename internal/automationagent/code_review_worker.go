@@ -18,10 +18,10 @@ import (
 const codeReviewSegmentCompletionLimit = miniMaxM3CompletionLimit
 const codeReviewSegmentCompletionFloor = 2048
 const codeReviewRepairCompletionLimit = 8192
-const maxCodeReviewRepairs = 2
+const maxCodeReviewRepairs = maxCodeReviewSegments
 
 // CodeReviewMaxInferenceCalls bounds one review attempt to every possible
-// segment plus the small, review-wide repair allowance.
+// segment plus one bounded format repair for each possible segment.
 const CodeReviewMaxInferenceCalls = maxCodeReviewSegments + maxCodeReviewRepairs
 
 const codeReviewSupportingTestPatchBytes = 24 << 10

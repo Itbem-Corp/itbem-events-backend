@@ -82,6 +82,49 @@ func TestWorkerRoutesLargeCodeReviewThroughLeasedSegments(t *testing.T) {
 	}
 }
 
+func TestWorkerCanRepairEveryInvalidReviewSegmentOnce(t *testing.T) {
+	var patch strings.Builder
+	for index := 0; index < 2*codeReviewSegmentMaxFiles+1; index++ {
+		file := fmt.Sprintf("internal/review/file_%02d.go", index)
+		fmt.Fprintf(&patch, "diff --git a/%s b/%s\nindex 1111111..2222222 100644\n--- a/%s\n+++ b/%s\n@@ -1 +1 @@\n-oldValue%d\n+newValue%d\n", file, file, file, file, index, index)
+	}
+	boundary, err := NewCodeReviewInput("github://itbem/example", strings.Repeat("a", 40), strings.Repeat("b", 40), patch.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	segments, err := SegmentCodeReviewInput(boundary)
+	if err != nil || len(segments) != 3 {
+		t.Fatalf("expected three review segments: %d / %v", len(segments), err)
+	}
+	encodedBoundary, err := json.Marshal(boundary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err := json.Marshal(TaskInput{Prompt: "Review every frozen file.", Delivery: encodedBoundary})
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalid := `{"summary":"Review complete.","verdict":"comment","review_scope":"wrong shape","findings":[],"test_plan":["Run checks."],"coverage_gaps":[]}`
+	valid := `{"summary":"The frozen segment is internally consistent.","verdict":"comment","review_scope":["frozen segment"],"findings":[],"test_plan":["Run the exact-SHA repository checks."],"coverage_gaps":[]}`
+	provider := &sequenceProvider{responses: []string{invalid, valid, invalid, valid, invalid, valid}}
+	callback := &fakeCallback{operation: "code.review"}
+	worker, err := NewWorker(WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"}, &fakeStore{input: input}, callback, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := validMessage()
+	message.Payload.Operation = "code.review"
+	if err := worker.Process(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	if provider.calls != 6 || len(provider.leases) != 6 || provider.inferenceCapabilities != 6 {
+		t.Fatalf("three segments and their bounded repairs used %d calls, %d leases, %d capabilities", provider.calls, len(provider.leases), provider.inferenceCapabilities)
+	}
+	if terminal := callback.updates[len(callback.updates)-1]; terminal.Status != "completed" {
+		t.Fatalf("repaired review did not complete: %#v", terminal)
+	}
+}
+
 func TestAggregateCodeReviewCompletionsRetainsFinalGatewayReceipt(t *testing.T) {
 	firstCall, firstReceipt := stepCallbackUUID(), stepCallbackUUID()
 	finalCall, finalReceipt := stepCallbackUUID(), stepCallbackUUID()
