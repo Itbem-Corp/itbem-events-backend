@@ -307,6 +307,39 @@ func TestMiniMaxTokenPlanVerificationUsesRemainsEndpointAndHidesPayAsYouGoPrices
 	}
 }
 
+func TestMiniMaxPolicyValidationCatalogueWithoutMetadataPreservesM3BinaryReasoning(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet {
+			t.Errorf("catalogue verification must not perform inference: %s", request.Method)
+			writer.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		_, _ = io.WriteString(writer, `{"model_remains":[{"model_name":"MiniMax-M3"}],"base_resp":{"status_code":0}}`)
+	}))
+	defer server.Close()
+	models, err := listMiniMaxTokenPlanModels(context.Background(), "test-key", server.Client(), nil, server.URL)
+	if err != nil || len(models) == 0 {
+		t.Fatalf("verified catalogue unavailable: %v", err)
+	}
+	foundM3 := false
+	for _, model := range models {
+		if model.ID == "MiniMax-M3" {
+			foundM3 = true
+			if !model.SupportsReasoning || len(model.ReasoningEfforts) != 0 || !model.Supported || model.Availability != "account_verified" {
+				t.Fatalf("M3 binary reasoning missing from policy-save catalogue: %#v", model)
+			}
+		} else if model.SupportsReasoning {
+			t.Fatalf("binary reasoning was extended to another model: %s", model.ID)
+		}
+		if model.PricingKnown || model.PricingSource != "subscription_quota" {
+			t.Fatalf("subscription quota misrepresented as token pricing: %#v", model)
+		}
+	}
+	if !foundM3 {
+		t.Fatal("M3 absent from verified catalogue")
+	}
+}
+
 func TestMiniMaxTokenPlanVerificationFailsClosedWithoutLeakingSecrets(t *testing.T) {
 	const apiKey = "test-minimax-secret-key"
 	const sensitiveBody = `{"error":"provider echoed test-minimax-secret-key"}`

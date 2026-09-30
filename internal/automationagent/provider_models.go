@@ -585,7 +585,7 @@ func miniMaxModels(metadata *ProviderModelMetadata) []ProviderModel {
 		return models
 	}
 	models = []ProviderModel{
-		{ID: "MiniMax-M3", Name: "MiniMax M3", Description: "Modelo principal de MiniMax para texto y código; el plan del proveedor anuncia comprensión multimodal.", InputModalities: []string{"text", "image", "video"}, OutputModalities: []string{"text"}, ContextWindowTokens: 1000000, Supported: true, Source: "official_catalog"},
+		{ID: "MiniMax-M3", Name: "MiniMax M3", Description: "Modelo principal de MiniMax para texto y código; el plan del proveedor anuncia comprensión multimodal.", InputModalities: []string{"text", "image", "video"}, OutputModalities: []string{"text"}, ContextWindowTokens: 1000000, SupportsReasoning: true, Supported: true, Source: "official_catalog"},
 		{ID: "MiniMax-M2.7", Name: "MiniMax M2.7", Description: "Modelo de MiniMax para entrada multimodal, disponible según el Token Plan.", InputModalities: []string{"text", "image"}, OutputModalities: []string{"text"}, Supported: true, Source: "official_catalog"},
 		{ID: "MiniMax-M2.7-highspeed", Name: "MiniMax M2.7 Highspeed", Description: "Variante de menor latencia de MiniMax M2.7, disponible según el Token Plan.", InputModalities: []string{"text", "image"}, OutputModalities: []string{"text"}, Supported: true, Source: "official_catalog"},
 	}
