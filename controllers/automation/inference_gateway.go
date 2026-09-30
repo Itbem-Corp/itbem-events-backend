@@ -145,7 +145,7 @@ func Infer(c echo.Context) error {
 	receipt, err := acceptInferenceReceipt(c.Request().Context(), cfg, inferenceScope, completion, "accepted")
 	if err != nil {
 		_ = markInferenceReceiptAmbiguous(c.Request().Context(), inferenceScope.ReceiptID)
-		c.Response().Header().Set(automationagent.InferenceFailureHeader, "accounting_unavailable")
+		c.Response().Header().Set(automationagent.InferenceFailureHeader, inferenceAccountingFailureCode(err))
 		return utils.Error(c, http.StatusBadGateway, "AI provider accounting unavailable", "")
 	}
 	if completion.Usage == nil {
