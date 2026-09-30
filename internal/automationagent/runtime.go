@@ -35,6 +35,13 @@ type RuntimeConfig struct {
 
 func LoadRuntimeConfig(lookup func(string) string) (RuntimeConfig, error) {
 	value := func(name string) string { return strings.TrimSpace(lookup(name)) }
+	var selectedTaskIDs []string
+	if raw := value("ITBEM_AI_TASK_IDS"); raw != "" {
+		selectedTaskIDs = strings.Split(raw, ",")
+		if err := validateSelectedTaskIDs(selectedTaskIDs); err != nil {
+			return RuntimeConfig{}, err
+		}
+	}
 	concurrency := defaultAgentConcurrency
 	if raw := value("ITBEM_AI_CONCURRENCY"); raw != "" {
 		parsed, err := strconv.Atoi(raw)
@@ -82,6 +89,7 @@ func LoadRuntimeConfig(lookup func(string) string) (RuntimeConfig, error) {
 		SQSEndpoint:      value("ITBEM_AI_SQS_ENDPOINT"),
 		S3Endpoint:       value("ITBEM_AI_S3_ENDPOINT"),
 	}
+	config.AllowedTaskIDs = selectedTaskIDs
 	if config.Transport == "" {
 		if config.QueueURL != "" {
 			config.Transport = "aws"
@@ -134,6 +142,21 @@ func LoadRuntimeConfig(lookup func(string) string) (RuntimeConfig, error) {
 		return RuntimeConfig{}, fmt.Errorf("ITBEM_AI_S3_ENDPOINT: %w", err)
 	}
 	return config, nil
+}
+
+func validateSelectedTaskIDs(taskIDs []string) error {
+	if len(taskIDs) > 60 {
+		return fmt.Errorf("ITBEM_AI_TASK_IDS must contain at most 60 unique canonical UUIDs")
+	}
+	seen := make(map[string]bool, len(taskIDs))
+	for _, taskID := range taskIDs {
+		parsed, err := uuid.FromString(taskID)
+		if err != nil || parsed == uuid.Nil || parsed.String() != taskID || seen[taskID] {
+			return fmt.Errorf("ITBEM_AI_TASK_IDS must contain unique canonical nonzero UUIDs")
+		}
+		seen[taskID] = true
+	}
+	return nil
 }
 
 // EnsureGatewayAgentInstance registers a new machine on first start by using
