@@ -18,6 +18,8 @@ type AutomationTask struct {
 	RequestedBy          string     `gorm:"type:varchar(128);not null;index" json:"requested_by"`
 	DeliveryWorkItemID   *uuid.UUID `gorm:"type:uuid;index" json:"delivery_work_item_id,omitempty"`
 	DeliveryOnboardingID *uuid.UUID `gorm:"type:uuid;index" json:"delivery_onboarding_id,omitempty"`
+	// Only the primary-root evaluation admission endpoint sets this binding.
+	ModelEvaluationID *uuid.UUID `gorm:"type:uuid;index" json:"model_evaluation_id,omitempty"`
 	// These identify the currently leased worker process. They stay out of the
 	// generic task API; the root-only agent directory projects opaque IDs.
 	WorkerID  string `gorm:"type:varchar(64);not null;default:'';index" json:"-"`

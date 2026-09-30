@@ -59,6 +59,8 @@ var modelsWithoutSeed = []interface{}{
 	&models.OutboxEvent{},
 	&models.OutboxDispatchCursor{},
 	&models.AutomationTask{},
+	&models.AutomationModelEvaluation{},
+	&models.AutomationModelEvaluationCall{},
 	&models.AutomationTaskEvent{},
 	&models.AutomationExecution{},
 	&models.AutomationCodeReviewPublication{},
@@ -638,6 +640,9 @@ func migrateModels(db *gorm.DB) error {
 			if err := tx.Exec(statement).Error; err != nil {
 				return fmt.Errorf("protect automation inference attempt policies: %w", err)
 			}
+		}
+		if err := protectModelEvaluationSnapshots(tx); err != nil {
+			return err
 		}
 		// A plan execution may advance through its lifecycle, but its approved
 		// plan, approval, concurrency ceiling, and parent-task idempotency binding

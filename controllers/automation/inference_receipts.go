@@ -75,7 +75,11 @@ func acceptInferenceReceipt(ctx context.Context, cfg *models.Config, scope gatew
 		return receipt, errors.New("accepted inference response is missing accounting identity")
 	}
 	usage := sanitizeProviderUsage(completion.Usage)
-	ledger, err := automationcost.Build(string(completion.Provider), completion.Model, usage, pricingCatalog(cfg))
+	prices := pricingCatalog(cfg)
+	if scope.EvaluationID != nil {
+		prices = scope.EvaluationPricingJSON
+	}
+	ledger, err := automationcost.Build(string(completion.Provider), completion.Model, usage, prices)
 	if err != nil || ledger.InputTokens+ledger.OutputTokens == 0 {
 		return receipt, errors.New("provider usage could not be verified")
 	}
@@ -110,6 +114,11 @@ func acceptInferenceReceipt(ctx context.Context, cfg *models.Config, scope gatew
 		}
 		if result.RowsAffected != 1 {
 			return errors.New("inference receipt was already resolved")
+		}
+		if scope.EvaluationID != nil && (status != "accepted" || ledger.TotalCostMicros > scope.EvaluationReservationMicros || ledger.PricingBasis == "unpriced" || len(scope.Routes) != 1 || !strings.EqualFold(scope.Routes[0].Provider, string(completion.Provider)) || !strings.EqualFold(scope.Routes[0].Model, completion.Model)) {
+			if err := tx.Model(&models.AutomationModelEvaluation{}).Where("id = ?", *scope.EvaluationID).Update("status", "halted").Error; err != nil {
+				return err
+			}
 		}
 		return tx.First(&receipt, "id = ?", reserved.ID).Error
 	})
