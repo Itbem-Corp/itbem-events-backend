@@ -82,6 +82,81 @@ func TestWorkerRoutesLargeCodeReviewThroughLeasedSegments(t *testing.T) {
 	}
 }
 
+func TestSegmentedReviewUsesFullPRTestEvidenceForCoverageNormalization(t *testing.T) {
+	var patch strings.Builder
+	for index := 0; index < codeReviewSegmentMaxFiles; index++ {
+		file := fmt.Sprintf("internal/review/file_%02d.go", index)
+		fmt.Fprintf(&patch, "diff --git a/%s b/%s\nindex 1111111..2222222 100644\n--- a/%s\n+++ b/%s\n@@ -1 +1 @@\n-oldValue%d\n+newValue%d\n", file, file, file, file, index, index)
+	}
+	testFile := "tests/review.test.ts"
+	fmt.Fprintf(&patch, "diff --git a/%s b/%s\nindex 1111111..2222222 100644\n--- a/%s\n+++ b/%s\n@@ -1 +1 @@\n-oldTest\n+newTest\n", testFile, testFile, testFile, testFile)
+
+	boundary, err := NewCodeReviewInput("github://itbem/example", strings.Repeat("a", 40), strings.Repeat("b", 40), patch.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	segments, err := SegmentCodeReviewInput(boundary)
+	if err != nil || len(segments) != 2 {
+		t.Fatalf("expected production and test changes in separate segments: %d / %v", len(segments), err)
+	}
+	if reviewNeedsCoverageGap(boundary) || !reviewNeedsCoverageGap(segments[0]) {
+		t.Fatalf("fixture must have full-PR test evidence outside the production-only segment")
+	}
+	encodedBoundary, err := json.Marshal(boundary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err := json.Marshal(TaskInput{Prompt: "Review every frozen file.", Delivery: encodedBoundary})
+	if err != nil {
+		t.Fatal(err)
+	}
+	review := `{"summary":"The frozen changes are internally consistent.","verdict":"approve","review_scope":["frozen segment"],"findings":[],"test_plan":["Run the exact-SHA repository checks."],"coverage_gaps":[]}`
+	provider := &sequenceProvider{responses: []string{review, review}}
+	store, callback := &fakeStore{input: input}, &fakeCallback{operation: "code.review"}
+	worker, err := NewWorker(WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"}, store, callback, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := validMessage()
+	message.Payload.Operation = "code.review"
+	if err := worker.Process(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	terminal := callback.updates[len(callback.updates)-1]
+	if terminal.Status != "completed" {
+		t.Fatalf("segmented review did not complete: %#v", terminal)
+	}
+	resultRaw := store.writes["itbem-ai-outputs-local/automation/task/runs/"+terminal.RunID+"/result.json"]
+	var result struct {
+		StructuredResult map[string]any `json:"structured_result"`
+	}
+	if err := json.Unmarshal(resultRaw, &result); err != nil {
+		t.Fatal(err)
+	}
+	gaps, ok := result.StructuredResult["coverage_gaps"].([]any)
+	if result.StructuredResult["verdict"] != "approve" || !ok || len(gaps) != 0 {
+		t.Fatalf("a test diff in another segment must prevent a false full-PR coverage gap: %#v", result.StructuredResult)
+	}
+}
+
+func TestCodeReviewRepairPromptRestatesStrictOutputTypes(t *testing.T) {
+	messages := codeReviewRepairMessages([]Message{{Role: "user", Content: "Review the frozen diff."}}, `{}`, errors.New("code review coverage_gaps must be a bounded list of strings"), CodeReviewInput{})
+	if len(messages) != 2 {
+		t.Fatalf("repair must preserve the review context and append focused feedback, got %#v", messages)
+	}
+	feedback := messages[len(messages)-1].Content
+	for _, required := range []string{
+		"review_scope, test_plan, and coverage_gaps are arrays of plain JSON strings",
+		"findings is an array of finding objects",
+		"never null or a scalar string",
+		"An approval is invalid whenever findings or coverage_gaps is non-empty",
+	} {
+		if !strings.Contains(feedback, required) {
+			t.Errorf("repair feedback does not restate %q", required)
+		}
+	}
+}
+
 func TestWorkerCanRepairEveryInvalidReviewSegmentOnce(t *testing.T) {
 	var patch strings.Builder
 	for index := 0; index < 2*codeReviewSegmentMaxFiles+1; index++ {
