@@ -147,6 +147,34 @@ func TestCodeReviewSegmentPromptRestrictsFindingsToTheSegmentFiles(t *testing.T)
 	}
 }
 
+func TestReviewSegmentsSharePrefixWithoutSharingFindingAuthority(t *testing.T) {
+	boundary := segmentedReviewFixture(t)
+	first := boundary
+	first.ChangedFiles = []string{"src/a.go"}
+	second := boundary
+	second.ChangedFiles = []string{"src/b_test.go"}
+	a := codeReviewSegmentPrompt("Review this frozen PR.", 1, 2, first, boundary)
+	b := codeReviewSegmentPrompt("Review this frozen PR.", 2, 2, second, boundary)
+	marker := "\n\nReview segment "
+	prefixA, _, okA := strings.Cut(a, marker)
+	prefixB, _, okB := strings.Cut(b, marker)
+	if !okA || !okB || prefixA != prefixB || !strings.Contains(prefixA, supportingCodeReviewTestPatch(boundary)) {
+		t.Fatal("shared instructions and frozen test evidence must precede segment-specific data")
+	}
+	for _, pair := range [][2]string{{a, "src/a.go"}, {b, "src/b_test.go"}} {
+		if !strings.Contains(pair[0], "The only permitted values of findings[].file in this segment are exactly: "+pair[1]+".") {
+			t.Fatal("cache optimization weakened segment finding authority")
+		}
+	}
+	changed := boundary
+	changed.Patch = strings.Replace(boundary.Patch, "newB", "differentTest", 1)
+	changedPrompt := codeReviewSegmentPrompt("Review this frozen PR.", 1, 2, first, changed)
+	changedPrefix, _, _ := strings.Cut(changedPrompt, marker)
+	if changedPrefix == prefixA {
+		t.Fatal("changed frozen test evidence reused the old prefix")
+	}
+}
+
 func TestCodeReviewSegmentPromptKeepsAMultiFileNonTestBoundaryDeterministic(t *testing.T) {
 	patch := "diff --git a/src/a.go b/src/a.go\n--- a/src/a.go\n+++ b/src/a.go\n@@ -1 +1 @@\n-oldA\n+newA\n" +
 		"diff --git a/src/b.go b/src/b.go\n--- a/src/b.go\n+++ b/src/b.go\n@@ -1 +1 @@\n-oldB\n+newB\n"

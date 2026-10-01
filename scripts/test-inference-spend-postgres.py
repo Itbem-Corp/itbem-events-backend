@@ -24,6 +24,7 @@ CREATE TABLE automation_inference_receipts (
  cache_write_cost_micros bigint DEFAULT 0, output_cost_micros bigint DEFAULT 88,
  total_cost_micros bigint DEFAULT 100);
 ALTER TABLE automation_inference_receipts ADD COLUMN usage_json jsonb DEFAULT '{"prompt_tokens_details":{"cached_tokens":80}}';
+ALTER TABLE automation_inference_receipts ADD COLUMN automation_task_id text DEFAULT 'task-a';
 CREATE TABLE automation_executions (
  inference_receipt_id text, total_cost_micros bigint, currency text DEFAULT 'USD',
  completed_at timestamptz DEFAULT now());
@@ -63,6 +64,18 @@ try:
     assert 'USD,2,200' in output, 'initial and older receipts must remain visible without double-counting bound rows'
     assert 'legacy_agent,USD,1,50' in output and 'legacy_tool,USD,1,25' in output
     assert 'READ ONLY' in report and 'REPEATABLE READ' in report
+    # Execute the endpoint's actual SQL, not a rewritten approximation.
+    source = (Path(__file__).parent.parent / 'controllers/automation/inference_spend.go').read_text()
+    task_sql = source.split('const taskInferenceSpendSQL = `', 1)[1].split('`', 1)[0].replace('?', "'task-a'")
+    task_output = run('docker', 'exec', '-i', name, 'psql', '-h', '127.0.0.1', '-U', 'postgres', '-v', 'ON_ERROR_STOP=1', '--csv', '-q', input=task_sql).stdout
+    task_rows = list(csv.DictReader(io.StringIO(task_output)))
+    assert len(task_rows) == 1 and task_rows[0]['calls'] == '6'
+    assert task_rows[0]['observed_calls'] == '4' and task_rows[0]['unknown_cost_calls'] == '2'
+    assert task_rows[0]['verified_cost_micros'] == '400' and task_rows[0]['complete_cost_micros'] == ''
+    # A different task must not leak into the first task's totals.
+    run('docker', 'exec', '-i', name, 'psql', '-h', '127.0.0.1', '-U', 'postgres', '-v', 'ON_ERROR_STOP=1', input="INSERT INTO automation_inference_receipts(id,automation_task_id) VALUES ('other-task','task-b');")
+    again = run('docker', 'exec', '-i', name, 'psql', '-h', '127.0.0.1', '-U', 'postgres', '-v', 'ON_ERROR_STOP=1', '--csv', '-q', input=task_sql).stdout
+    assert again == task_output
     print('PASS: PostgreSQL spend report; input/output split, per-call coverage, billable rejection, ambiguous/pending unknowns, time ranges, explicit bindings and separate legacy costs')
 finally:
     subprocess.run(['docker', 'rm', '--force', name], check=False, capture_output=True)

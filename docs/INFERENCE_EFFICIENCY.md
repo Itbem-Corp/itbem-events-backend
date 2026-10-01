@@ -97,3 +97,45 @@ Primary provider references:
 - https://platform.minimax.io/docs/api-reference/text-prompt-caching
 - https://platform.claude.com/docs/en/build-with-claude/prompt-caching
 - https://openrouter.ai/docs/guides/best-practices/reasoning-tokens
+
+## Operation optimization rollout
+
+Segmented reviews now place the common instructions and bounded frozen test
+patches before the segment index, permitted file list and segment-specific
+support. This increases the reusable identical prefix without admitting a
+finding outside the segment's annotated changed lines. Concise review wording
+must preserve every distinct grounded defect; it is not a finding-count cap.
+The existing single bounded repair and ambiguous-call replay protection remain.
+
+`GET /automation/tasks/:id/inference-spend` uses normal primary-root authorization
+and numeric-only, no-store responses. It aggregates **every receipt across all
+task runs**, rather than the final execution projection. Accepted and resolved
+billable rejections contribute verified input/output and stored historical costs.
+Groups preserve provider, model, currency and pricing basis. Reserved, ambiguous
+or unpriced calls leave the complete cost null while the verified subtotal remains
+available. Unbound legacy execution costs are explicitly excluded; do not add
+this report to the portfolio or present it as a provider invoice.
+
+Candidate tuning must be qualified before changing production policy:
+
+| Operation | Candidate to compare | Current ceiling retained until qualification |
+| --- | --- | --- |
+| Informational chat, extraction, summary | Reasoning off where supported; smaller output budget | 4096 |
+| Assessment, QA | Lower supported effort; retain high for difficult cases | 4096 |
+| Planning, ideation, implementation | Concise complete artifacts with operation-specific budgets | 4096 / 8192 |
+| Exact-SHA review | Shared prefix and concise output first; lower effort only after defect retention passes | 32768, model-clamped |
+
+M3 has binary reasoning, not low/medium/high effort. Providers that require
+reasoning cannot be qualified with an unsupported off setting. All comparisons
+must use server-owned sealed routes and normal admission. Do not mutate frozen
+tasks or reuse a benchmark's budget to admit an additional comparison batch.
+
+Use `scripts/compare_inference_efficiency.py --baseline baseline.json --proposed
+proposed.json --output comparison.json` on scored reports from the same frozen
+corpus. It rejects incomplete/different corpora and incomplete costs, requires all
+twenty proposed cases to pass, and blocks lost successful cases, extra false
+positives, invalid clean reviews, truncations, errors or route changes. It reports
+cost reduction, output and p95 latency; it never automatically promotes a policy.
+Twenty synthetic cases are still a screening, not production review certification.
+Do not claim savings from local fixtures: provider calls, repair rate and realized
+cache hits require a separately admitted live measurement through the gateway.
