@@ -259,6 +259,13 @@ func completeWithFallbackForProject(ctx context.Context, resolver credentialReso
 }
 
 func completeWithFallbackObserved(ctx context.Context, resolver credentialResolver, request inferenceRequest, routes []models.AutomationAIActionRoute, projectID string, diagnostic *inferenceDiagnostics) (automationagent.Completion, error) {
+	if request.Operation == "code.review" {
+		// Bound the entire review route sequence, including model discovery and
+		// any explicitly permitted fallback, below the worker caller deadline.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, automationagent.InferenceProviderTimeout(request.Operation))
+		defer cancel()
+	}
 	var lastRetryable error
 	for index, route := range routes {
 		if diagnostic != nil {
@@ -289,7 +296,11 @@ func completeWithFallbackObserved(ctx context.Context, resolver credentialResolv
 		if diagnostic != nil {
 			diagnostic.Stage = "provider"
 		}
-		providerClient := automationagent.NewProviderClient(providerConfig, inferenceProviderHTTPClient)
+		httpClient := inferenceProviderHTTPClient
+		if httpClient == nil {
+			httpClient = &http.Client{Timeout: automationagent.InferenceProviderTimeout(request.Operation)}
+		}
+		providerClient := automationagent.NewProviderClient(providerConfig, httpClient)
 		completion, completionErr := providerClient.Complete(ctx, request.Messages, request.MaxCompletionTokens)
 		if diagnostic != nil {
 			diagnostic.Attempts = append(diagnostic.Attempts, inferenceRouteDiagnostic{Index: index, Provider: route.Provider, Model: route.Model, ReasoningEnabled: route.ReasoningEnabled, ReasoningEffort: route.ReasoningEffort, DurationMillis: time.Since(started).Milliseconds(), TimeoutMillis: automationagent.ProviderHTTPTimeout(providerClient).Milliseconds(), FailureCode: safeProviderDiagnostic(completionErr), FinishReason: diagnosticFinishReason(completion)})

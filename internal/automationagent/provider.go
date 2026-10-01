@@ -469,6 +469,21 @@ const providerHTTPTimeout = 120 * time.Second
 // not hide the server's terminal response and accounting outcome.
 const gatewayHTTPTimeout = providerHTTPTimeout + time.Minute
 
+// A reasoning-heavy code review can consume its full transport deadline while
+// returning a partial HTTP 200 body. Keep one bounded attempt, with enough
+// caller margin to receive the terminal receipt. Screening ai.chat retains its
+// existing deadline; this changes no routes, output quotas or retry rules.
+func InferenceProviderTimeout(operation string) time.Duration {
+	if operation == "code.review" {
+		return 4 * time.Minute
+	}
+	return providerHTTPTimeout
+}
+
+func InferenceGatewayTimeout(operation string) time.Duration {
+	return InferenceProviderTimeout(operation) + time.Minute
+}
+
 func NewProviderClient(config ProviderConfig, client *http.Client) ProviderClient {
 	if client == nil {
 		client = &http.Client{Timeout: providerHTTPTimeout}
@@ -484,12 +499,14 @@ func NewProviderClient(config ProviderConfig, client *http.Client) ProviderClien
 }
 
 type gatewayProviderClient struct {
-	config        GatewayProviderConfig
-	client        *http.Client
-	resolveLimits inferenceModelLimitsResolver
+	config         GatewayProviderConfig
+	client         *http.Client
+	resolveLimits  inferenceModelLimitsResolver
+	defaultTimeout bool
 }
 
 func NewGatewayProviderClient(config GatewayProviderConfig, client *http.Client) ProviderClient {
+	defaultTimeout := client == nil
 	if client == nil {
 		client = &http.Client{Timeout: gatewayHTTPTimeout}
 	} else {
@@ -501,7 +518,16 @@ func NewGatewayProviderClient(config GatewayProviderConfig, client *http.Client)
 		client = &clientCopy
 	}
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &gatewayProviderClient{config: config, client: client, resolveLimits: resolvePublicProviderModelLimits}
+	return &gatewayProviderClient{config: config, client: client, resolveLimits: resolvePublicProviderModelLimits, defaultTimeout: defaultTimeout}
+}
+
+func (p *gatewayProviderClient) clientForOperation(operation string) *http.Client {
+	if !p.defaultTimeout {
+		return p.client
+	}
+	client := *p.client
+	client.Timeout = InferenceGatewayTimeout(operation)
+	return &client
 }
 
 func (p *gatewayProviderClient) Complete(ctx context.Context, messages []Message, maxTokens int) (Completion, error) {
@@ -551,7 +577,7 @@ func (p *gatewayProviderClient) Complete(ctx context.Context, messages []Message
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set(inferencecapability.HeaderName, capability)
-	response, err := p.client.Do(request)
+	response, err := p.clientForOperation(lease.Operation).Do(request)
 	if err != nil {
 		// A lost gateway response cannot prove that the provider was not billed.
 		// Retrying with a fresh call ID requires an explicit operator decision.

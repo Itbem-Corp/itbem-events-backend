@@ -81,6 +81,39 @@ func TestInferenceProjectScopeNeverFallsBackToGlobalCredential(t *testing.T) {
 
 type failingCredentialResolver struct{ message string }
 
+type deadlineCredentialResolver struct {
+	deadline time.Time
+	bounded  bool
+}
+
+func (r *deadlineCredentialResolver) APIKey(ctx context.Context, _ string) (string, error) {
+	r.deadline, r.bounded = ctx.Deadline()
+	return "", errors.New("synthetic credential boundary stops before any provider request")
+}
+
+func (*deadlineCredentialResolver) ReplaceAPIKey(context.Context, string, string) error { return nil }
+
+func TestReviewBoundsWholeRouteSequenceAndPreservesParentDeadline(t *testing.T) {
+	for _, operation := range []string{"code.review", "ai.chat"} {
+		resolver := &deadlineCredentialResolver{}
+		_, err := completeWithFallbackForProject(context.Background(), resolver, inferenceRequest{Operation: operation}, []models.AutomationAIActionRoute{{Provider: "deepseek", Model: "deepseek-flash"}}, "")
+		if err == nil || resolver.bounded != (operation == "code.review") {
+			t.Fatalf("unexpected credential-boundary deadline for %s", operation)
+		}
+		if resolver.bounded && (time.Until(resolver.deadline) < 3*time.Minute || time.Until(resolver.deadline) > 4*time.Minute) {
+			t.Fatal("review deadline escaped its four-minute route bound")
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	parentDeadline, _ := ctx.Deadline()
+	resolver := &deadlineCredentialResolver{}
+	_, _ = completeWithFallbackForProject(ctx, resolver, inferenceRequest{Operation: "code.review"}, []models.AutomationAIActionRoute{{Provider: "deepseek", Model: "deepseek-flash"}}, "")
+	if !resolver.bounded || !resolver.deadline.Equal(parentDeadline) {
+		t.Fatal("review extended the parent cancellation deadline")
+	}
+}
+
 func (r failingCredentialResolver) APIKey(context.Context, string) (string, error) {
 	return "", errors.New(r.message)
 }

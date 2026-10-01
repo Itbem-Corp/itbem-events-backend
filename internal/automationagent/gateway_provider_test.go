@@ -18,6 +18,31 @@ import (
 
 const testGatewayCapabilitySigningKey = "gateway-provider-unit-test-server-signing-key-48-bytes"
 
+func TestReviewDeadlineIsBoundedAndDoesNotMutateSharedOrCustomClients(t *testing.T) {
+	client := NewGatewayProviderClient(GatewayProviderConfig{}, nil).(*gatewayProviderClient)
+	for _, operation := range []string{"ai.chat", "delivery.plan", "code.review", "unknown"} {
+		providerTimeout := InferenceProviderTimeout(operation)
+		requestClient := client.clientForOperation(operation)
+		if requestClient.Timeout != providerTimeout+time.Minute || requestClient.Timeout > 5*time.Minute {
+			t.Fatalf("operation %s lacks bounded accounting margin", operation)
+		}
+		if (operation == "code.review") != (providerTimeout == 4*time.Minute) {
+			t.Fatalf("extended provider timeout escaped review scope: %s", operation)
+		}
+		if requestClient.CheckRedirect == nil {
+			t.Fatal("operation client dropped gateway redirect protection")
+		}
+	}
+	if client.client.Timeout != gatewayHTTPTimeout {
+		t.Fatal("per-operation timeout mutated the shared client")
+	}
+	custom := &http.Client{Timeout: 17 * time.Millisecond}
+	configured := NewGatewayProviderClient(GatewayProviderConfig{}, custom).(*gatewayProviderClient)
+	if configured.clientForOperation("code.review").Timeout != custom.Timeout {
+		t.Fatal("custom test/operator deadline was extended")
+	}
+}
+
 func TestGatewayDeadlineAllowsProviderAndAccountingToSettle(t *testing.T) {
 	provider := NewProviderClient(ProviderConfig{}, nil).(*httpProviderClient)
 	gateway := NewGatewayProviderClient(GatewayProviderConfig{}, nil).(*gatewayProviderClient)
