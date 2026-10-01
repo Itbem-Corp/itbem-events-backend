@@ -139,3 +139,14 @@ cost reduction, output and p95 latency; it never automatically promotes a policy
 Twenty synthetic cases are still a screening, not production review certification.
 Do not claim savings from local fixtures: provider calls, repair rate and realized
 cache hits require a separately admitted live measurement through the gateway.
+
+Output ceilings must also reach the provider in its native request field.
+DeepSeek requires `max_tokens`, not OpenAI's `max_completion_tokens`
+([official integration contract](https://api-docs.deepseek.com/quick_start/agent_integrations/oh_my_pi/)).
+The shared adapter translates the existing bounded limit without changing the
+sealed route, effort, quota or model catalogue checks. OpenAI Chat and OpenRouter
+retain `max_completion_tokens`; Responses and Anthropic retain their existing
+API-specific fields. HTTP contract tests cover DeepSeek thinking on/off at both
+the 4096 screening and 32768 review limits and reject the unsupported alias.
+One pre-fix review reported 35780 output tokens against a requested 32768 limit;
+this is evidence of an ineffective request ceiling, not proof of future savings.

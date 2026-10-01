@@ -20,6 +20,44 @@ func newProviderTestClient(config ProviderConfig, client *http.Client) *httpProv
 	return provider
 }
 
+func TestDeepSeekNativeOutputLimitReachesHTTPWithAndWithoutThinking(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		for _, limit := range []int{4096, 32768} {
+			t.Run(fmt.Sprintf("thinking=%t/limit=%d", enabled, limit), func(t *testing.T) {
+				var calls atomic.Int64
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					calls.Add(1)
+					var body map[string]any
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Error(err)
+						http.Error(w, "invalid JSON", http.StatusBadRequest)
+						return
+					}
+					// Emulate the documented API rather than accepting the OpenAI alias.
+					if body["max_tokens"] != float64(limit) || body["max_completion_tokens"] != nil || body["max_output_tokens"] != nil {
+						http.Error(w, "native output limit required", http.StatusBadRequest)
+						return
+					}
+					thinking := "disabled"
+					if enabled {
+						thinking = "enabled"
+					}
+					if mapValue(body["thinking"])["type"] != thinking {
+						t.Error("output limit must preserve the frozen thinking setting")
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"id": "bounded-response", "model": "deepseek-flash", "usage": map[string]any{"completion_tokens": limit}, "choices": []any{map[string]any{"finish_reason": "stop", "message": map[string]any{"content": "synthetic answer"}}}})
+				}))
+				defer server.Close()
+				client := newProviderTestClient(ProviderConfig{Provider: ProviderDeepSeek, Model: "deepseek-flash", Endpoint: server.URL, ReasoningEnabled: enabled, ReasoningEffort: "high", secret: "test-key"}, server.Client())
+				completion, err := client.Complete(context.Background(), []Message{{Role: "user", Content: "synthetic case"}}, limit)
+				if err != nil || completion.Content != "synthetic answer" || calls.Load() != 1 {
+					t.Fatalf("native bounded request failed: completion=%q calls=%d error=%v", completion.Content, calls.Load(), err)
+				}
+			})
+		}
+	}
+}
+
 func TestProviderConfigDefaultsToMiniMaxM3AndRejectsUnsafeEndpoints(t *testing.T) {
 	config, err := LoadProviderConfig(func(name string) string {
 		if name == "MINIMAX_API_KEY" {
@@ -223,7 +261,7 @@ func TestProviderClientsKeepTheSameContractAcrossOpenAICompatibleAndAnthropicAda
 			provider: ProviderDeepSeek,
 			model:    "deepseek-flash",
 			assertBody: func(t *testing.T, body map[string]any) {
-				if body["model"] != "deepseek-flash" || body["max_completion_tokens"] != float64(32) || body["reasoning_split"] != nil {
+				if body["model"] != "deepseek-flash" || body["max_tokens"] != float64(32) || body["max_completion_tokens"] != nil || body["reasoning_split"] != nil {
 					t.Fatalf("unexpected DeepSeek-compatible payload: %#v", body)
 				}
 			},
