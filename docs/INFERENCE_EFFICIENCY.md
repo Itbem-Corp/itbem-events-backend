@@ -3,6 +3,8 @@
 Every supported gateway route uses the same `services/automationcost` token
 validation, normalization, immutable receipt and numeric diagnostic profile.
 The model identifier does not select a separate accounting implementation.
+Reported Stagehand inference usage uses the same input/output verification and
+numeric allowlist before costing; its private report remains the audit artifact.
 Unknown models remain unpriced unless the server-owned catalog supplies an
 explicit model or provider rate; admission still requires a verified price.
 
