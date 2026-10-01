@@ -11,11 +11,11 @@ ROOT = Path(__file__).resolve().parents[2]
 CORPUS = json.loads((ROOT / 'scripts/model-evaluation-screening-corpus.json').read_text(encoding='utf-8-sig'))
 
 
-def fixture():
+def fixture(corpus=CORPUS):
     calls = []
     for candidate, (provider, model) in CANDIDATES.items():
-        for case in CORPUS['cases']:
-            prompt = CORPUS['system'].strip() + '\n\n' + case['prompt'].strip()
+        for case in corpus['cases']:
+            prompt = corpus['system'].strip() + '\n\n' + case['prompt'].strip()
             calls.append({
                 'case_id': case['id'], 'candidate': candidate,
                 'task_id': 'synthetic-' + candidate + '-' + case['id'],
@@ -33,7 +33,7 @@ def fixture():
                 'cache_write_tokens': 0, 'reasoning_tokens': 0,
             })
     return {'batch': {'status': 'completed', 'budget_microusd': 1000000,
-                      'reservation_microusd': 600}, 'calls': calls}
+                      'reservation_microusd': 600, 'corpus_version': corpus.get('corpus_version')}, 'calls': calls}
 
 
 class ScoringTests(unittest.TestCase):

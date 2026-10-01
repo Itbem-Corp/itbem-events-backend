@@ -24,8 +24,12 @@ def score(corpus, evidence):
         raise ValueError('Missing or invalid normal USD 1 batch reservation.')
     if len(cases) != 20 or len(calls) != 60:
         raise ValueError('Expected exactly 20 cases and 60 recorded outcomes, including failures.')
-    if sum(case.get('category') == 'review_clean' for case in cases.values()) != 5:
-        raise ValueError('Expected five clean review cases.')
+    cache_profile = corpus.get('corpus_version') == 'synthetic-prefix-cache-20-2026-10-01-v1'
+    clean_denominator = 10 if cache_profile else 5
+    if cache_profile and batch.get('corpus_version') != corpus['corpus_version']:
+        raise ValueError('Cache evidence does not match the versioned corpus.')
+    if sum(case.get('category') == 'review_clean' for case in cases.values()) != clean_denominator:
+        raise ValueError('Unexpected number of clean review cases.')
     seen = set()
     task_ids = set()
     for call in calls:
@@ -113,8 +117,8 @@ def score(corpus, evidence):
         summary[candidate] = {
             'successes': success, 'denominator': 20, 'success_rate': success / 20,
             'valid_json_count': valid_json, 'valid_json_rate': valid_json / 20,
-            'clean_false_positives': false_positive, 'clean_denominator': 5,
-            'clean_false_positive_rate': false_positive / 5, 'clean_missing_or_invalid': invalid_clean,
+            'clean_false_positives': false_positive, 'clean_denominator': clean_denominator,
+            'clean_false_positive_rate': false_positive / clean_denominator, 'clean_missing_or_invalid': invalid_clean,
             'errors_or_incomplete': errors, 'truncations': truncations,
             'unexpected_routes_or_fallbacks': attribution_errors,
             'gateway_latency_samples': len(latencies),
