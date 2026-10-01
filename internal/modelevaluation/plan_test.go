@@ -18,7 +18,13 @@ func corpus() []Case {
 }
 
 func TestPublishedCorpusFitsFullWorkerEnvelopeBudget(t *testing.T) {
-	cases, instruction, hash, err := Corpus()
+	for _, version := range []string{CorpusVersion, CacheCorpusVersion} {
+		t.Run(version, func(t *testing.T) { testPublishedCorpusBudget(t, version) })
+	}
+}
+
+func testPublishedCorpusBudget(t *testing.T, version string) {
+	cases, instruction, hash, err := CorpusForVersion(version)
 	if err != nil || len(cases) != MaxCases || len(hash) != 64 {
 		t.Fatalf("invalid published corpus: %v", err)
 	}
@@ -48,6 +54,58 @@ func TestPublishedCorpusFitsFullWorkerEnvelopeBudget(t *testing.T) {
 		}
 	}
 	t.Logf("published corpus reserves %d micro-USD across %d calls", plan.ReservationMicros, len(plan.Calls))
+}
+
+func TestCacheCorpusPairsAreEquivalentWithBalancedOrder(t *testing.T) {
+	cases, instruction, _, err := CorpusForVersion(CacheCorpusVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, oldInstruction, _, err := Corpus()
+	if err != nil || instruction != oldInstruction {
+		t.Fatal("screening instruction changed")
+	}
+	var sharedPrefix string
+	controlPrefixes := map[string]bool{}
+	for pair := 0; pair < 10; pair++ {
+		for offset := 0; offset < 2; offset++ {
+			current := cases[pair*2+offset]
+			condition := "control"
+			if (pair+offset)%2 == 1 {
+				condition = "shared"
+			}
+			if current.ID != original[pair].ID+"-"+condition || !strings.HasSuffix(current.Prompt, original[pair].Prompt) {
+				t.Fatal("pair order or semantic evidence differs")
+			}
+			prefix := strings.TrimSuffix(current.Prompt, original[pair].Prompt)
+			if condition == "shared" {
+				if sharedPrefix != "" && sharedPrefix != prefix {
+					t.Fatal("shared prefix varies")
+				}
+				sharedPrefix = prefix
+			} else {
+				if controlPrefixes[prefix] {
+					t.Fatal("control prefix repeated")
+				}
+				controlPrefixes[prefix] = true
+			}
+		}
+		// Opaque partition is the only semantic difference before case evidence.
+		a := strings.SplitN(cases[pair*2].Prompt, "\n", 2)[1]
+		b := strings.SplitN(cases[pair*2+1].Prompt, "\n", 2)[1]
+		if a != b {
+			t.Fatal("experimental pair has different evidence or protocol")
+		}
+	}
+	if _, _, _, err := CorpusForVersion("client-supplied-prompts"); err == nil {
+		t.Fatal("unknown corpus accepted")
+	}
+	// Decode again: callers cannot mutate the embedded source or history.
+	cases[0].Prompt = "mutated"
+	reloaded, _, _, _ := CorpusForVersion(CacheCorpusVersion)
+	if reloaded[0].Prompt == "mutated" {
+		t.Fatal("corpus mutation persisted")
+	}
 }
 
 func TestPlanPreservesPromptAndSingleCandidateRoutes(t *testing.T) {

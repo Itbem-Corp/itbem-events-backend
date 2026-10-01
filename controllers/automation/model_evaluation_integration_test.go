@@ -222,10 +222,12 @@ func TestEvaluationRealGatewaySerializesAndAccounts(t *testing.T) {
 	require.NotContains(t, recorder.Body.String(), "Return synthetic")
 	require.NotContains(t, recorder.Body.String(), "must-not-be-read")
 	require.NoError(t, db.Model(&batch).Update("status", "halted").Error)
-	t.Run("normal admission and concurrent dispatch", func(t *testing.T) { testEvaluationAdmissionAndDispatch(t, db) })
+	for _, version := range []string{modelevaluation.CorpusVersion, modelevaluation.CacheCorpusVersion} {
+		t.Run("normal admission and concurrent dispatch/"+version, func(t *testing.T) { testEvaluationAdmissionAndDispatch(t, db, version) })
+	}
 }
 
-func testEvaluationAdmissionAndDispatch(t *testing.T, db *gorm.DB) {
+func testEvaluationAdmissionAndDispatch(t *testing.T, db *gorm.DB, version string) {
 	var uploaded atomic.Int32
 	storage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPut || r.Header.Get("X-Amz-Server-Side-Encryption") != "AES256" {
@@ -260,7 +262,8 @@ func testEvaluationAdmissionAndDispatch(t *testing.T, db *gorm.DB) {
 		require.NoError(t, handler(c))
 		return recorder
 	}
-	request := `{"id":"` + batchID.String() + `","corpus_version":"` + modelevaluation.CorpusVersion + `"}`
+	request := `{"id":"` + batchID.String() + `","corpus_version":"` + version + `"}`
+	require.Equal(t, http.StatusBadRequest, invoke(CreateModelEvaluation, strings.Replace(request, version, "arbitrary-client-corpus", 1)).Code)
 	require.Equal(t, http.StatusBadRequest, invoke(CreateModelEvaluation, strings.TrimSuffix(request, "}")+`,"routes":[]}`).Code)
 	created := invoke(CreateModelEvaluation, request)
 	require.Equal(t, http.StatusCreated, created.Code, created.Body.String())
@@ -299,6 +302,10 @@ func testEvaluationAdmissionAndDispatch(t *testing.T, db *gorm.DB) {
 	require.NoError(t, db.First(&batch, "id = ?", batchID).Error)
 	require.Equal(t, "halted", batch.Status)
 	require.Equal(t, http.StatusConflict, invoke(DispatchNextModelEvaluation, "").Code)
+	require.Equal(t, int32(60), uploaded.Load())
+	// Completed or halted history cannot be retried under a fresh ID.
+	repeated := strings.Replace(request, batchID.String(), uuid.Must(uuid.NewV4()).String(), 1)
+	require.Equal(t, http.StatusConflict, invoke(CreateModelEvaluation, repeated).Code)
 	require.Equal(t, int32(60), uploaded.Load())
 }
 

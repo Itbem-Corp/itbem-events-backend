@@ -41,7 +41,7 @@ func CreateModelEvaluation(c echo.Context) error {
 	}
 	decoder := json.NewDecoder(io.LimitReader(c.Request().Body, 2049))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&request); err != nil || decoder.Decode(&struct{}{}) != io.EOF || request.CorpusVersion != modelevaluation.CorpusVersion {
+	if err := decoder.Decode(&request); err != nil || decoder.Decode(&struct{}{}) != io.EOF || !modelevaluation.SupportedCorpus(request.CorpusVersion) {
 		return utils.Error(c, http.StatusBadRequest, "Invalid evaluation request", "Only the published synthetic corpus is allowed")
 	}
 	id, err := uuid.FromString(request.ID)
@@ -57,7 +57,7 @@ func CreateModelEvaluation(c echo.Context) error {
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return utils.Error(c, http.StatusServiceUnavailable, "Evaluation unavailable", "")
 	}
-	cases, instruction, corpusHash, err := modelevaluation.Corpus()
+	cases, instruction, corpusHash, err := modelevaluation.CorpusForVersion(request.CorpusVersion)
 	if err != nil {
 		return utils.Error(c, http.StatusServiceUnavailable, "Evaluation corpus unavailable", "")
 	}
