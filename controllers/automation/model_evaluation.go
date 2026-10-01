@@ -15,6 +15,7 @@ import (
 	"events-stocks/models"
 	automationqueue "events-stocks/repositories/automationqueuerepository"
 	"events-stocks/repositories/awsrepository"
+	"events-stocks/services/automationcost"
 	outboxService "events-stocks/services/outbox"
 	"events-stocks/utils"
 	"github.com/gofrs/uuid"
@@ -253,9 +254,10 @@ func GetModelEvaluation(c echo.Context) error {
 		ActualModel         string     `json:"actual_model"`
 		InputTokens         int64      `json:"input_tokens"`
 		OutputTokens        int64      `json:"output_tokens"`
-		CachedInputTokens   int64      `json:"cached_input_tokens"`
-		CacheWriteTokens    int64      `json:"cache_write_tokens"`
-		ReasoningTokens     int64      `json:"reasoning_tokens"`
+		CachedInputTokens   *int64     `json:"cached_input_tokens"`
+		CacheWriteTokens    *int64     `json:"cache_write_tokens"`
+		ReasoningTokens     *int64     `json:"reasoning_tokens"`
+		UsageJSON           string     `json:"-"`
 		TotalCostMicros     int64      `json:"total_cost_microusd"`
 		PricingBasis        string     `json:"pricing_basis"`
 		PricingSnapshotJSON string     `json:"pricing_snapshot_json"`
@@ -272,8 +274,8 @@ func GetModelEvaluation(c echo.Context) error {
 		COALESCE(receipt.usage_json::jsonb #>> '{_itbem_provider,finish_reason}', '') AS finish_reason,
 		COALESCE(receipt.provider, '') AS actual_provider, COALESCE(receipt.model, '') AS actual_model,
 		COALESCE(receipt.input_tokens, 0) AS input_tokens, COALESCE(receipt.output_tokens, 0) AS output_tokens,
-		COALESCE(receipt.cached_input_tokens, 0) AS cached_input_tokens, COALESCE(receipt.cache_write_tokens, 0) AS cache_write_tokens,
-		COALESCE(receipt.reasoning_tokens, 0) AS reasoning_tokens, COALESCE(receipt.total_cost_micros, 0) AS total_cost_micros,
+		COALESCE(receipt.usage_json::text, '{}') AS usage_json,
+		COALESCE(receipt.total_cost_micros, 0) AS total_cost_micros,
 		COALESCE(receipt.pricing_basis, '') AS pricing_basis, COALESCE(receipt.pricing_snapshot_json::text, '{}') AS pricing_snapshot_json,
 		COALESCE((EXTRACT(EPOCH FROM (receipt.resolved_at - receipt.created_at))*1000)::bigint, 0) AS latency_ms,
 		(task.output_ref <> '') AS result_available`).
@@ -284,5 +286,22 @@ func GetModelEvaluation(c echo.Context) error {
 	if err != nil {
 		return utils.Error(c, http.StatusServiceUnavailable, "Evaluation provenance unavailable", "")
 	}
+	for i := range calls {
+		calls[i].CachedInputTokens, calls[i].ReasoningTokens, calls[i].CacheWriteTokens = evaluationOptionalUsage(calls[i].ActualProvider, calls[i].ActualModel, calls[i].UsageJSON)
+	}
 	return utils.Success(c, http.StatusOK, "Evaluation provenance", map[string]any{"batch": batch, "calls": calls})
+}
+
+// Optional counters are evidence only when the provider actually reported them.
+// Receipt columns default to zero, which cannot distinguish absence from zero.
+func evaluationOptionalUsage(provider, model, raw string) (*int64, *int64, *int64) {
+	var usage map[string]any
+	if json.Unmarshal([]byte(raw), &usage) != nil {
+		return nil, nil, nil
+	}
+	profile, err := automationcost.Profile(provider, model, usage, 0)
+	if err != nil {
+		return nil, nil, nil
+	}
+	return profile.CachedInputTokens, profile.ReasoningTokens, profile.CacheWriteTokens
 }
