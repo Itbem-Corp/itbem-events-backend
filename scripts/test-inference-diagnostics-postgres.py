@@ -69,8 +69,10 @@ END $$;
 """
 try:
     run('docker','run','--detach','--name',name,'--env','POSTGRES_HOST_AUTH_METHOD=trust','postgres:16-alpine')
-    run('docker','exec',name,'sh','-c','for attempt in $(seq 1 100); do pg_isready -U postgres >/dev/null 2>&1 && exit 0; sleep 0.2; done; exit 1')
-    run('docker','exec','-i',name,'psql','-U','postgres','-v','ON_ERROR_STOP=1',input=ddl+match.group(1)+';'+tests)
+    # The image first starts a temporary Unix-socket-only initialization server.
+    # TCP readiness identifies the final server and avoids its shutdown race.
+    run('docker','exec',name,'sh','-c','for attempt in $(seq 1 100); do pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && exit 0; sleep 0.2; done; exit 1')
+    run('docker','exec','-i',name,'psql','-h','127.0.0.1','-U','postgres','-v','ON_ERROR_STOP=1',input=ddl+match.group(1)+';'+tests)
     print('PASS: PostgreSQL 16 diagnostic lifecycle, frozen accounting, binding, terminal immutability, ambiguous outcome and legacy guards')
 finally:
     subprocess.run(['docker','rm','--force',name],check=False,capture_output=True)
