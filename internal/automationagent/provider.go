@@ -1008,6 +1008,10 @@ func (p *httpProviderClient) payload(messages []Message, maxTokens int) (map[str
 		}
 	}
 	if p.config.Provider == ProviderDeepSeek {
+		// DeepSeek's OpenAI-compatible API requires max_tokens. The OpenAI
+		// alias can be ignored, leaving the provider's larger default in force.
+		delete(payload, "max_completion_tokens")
+		payload["max_tokens"] = maxTokens
 		// Current DeepSeek models default to high-effort thinking. Omission is
 		// not an off switch: transmit the frozen policy in both directions.
 		payload["thinking"] = map[string]string{"type": "disabled"}
