@@ -1173,7 +1173,7 @@ func TestToolExecutionLedgerCostsOnlyUploadedStagehandReport(t *testing.T) {
 	task := &models.AutomationTask{ID: taskID, DeliveryWorkItemID: &workItemID, Operation: "delivery.qa", WorkerID: workerID, AgentKey: "qa_specialist", MachineID: machineID}
 	reference := "s3://itbem-ai-outputs-local/automation/" + taskID.String() + "/artifacts/01-dashboard-semantic-qa.json"
 	artifacts := []callbackArtifact{{Name: "01-dashboard-semantic-qa.json", Reference: reference, ContentType: "application/json", SizeBytes: 120, SHA256: strings.Repeat("a", 64)}}
-	usage := json.RawMessage(`{"input_tokens":120,"output_tokens":40,"cached_input_tokens":10,"total_tokens":160}`)
+	usage := json.RawMessage(`{"input_tokens":120,"output_tokens":40,"cached_input_tokens":10,"total_tokens":160,"prompt":"private-provider-prompt"}`)
 	rows, err := buildToolExecutionLedger(nil, task, uuid.Must(uuid.NewV4()).String(), "completed", []callbackToolExecution{{Tool: "stagehand", CallKey: "semantic-assessment", StepKey: "qa.semantic_browser", Provider: "minimax", Model: "MiniMax-M3", Usage: usage, RequestRef: reference, ResponseRef: reference}}, artifacts, time.Now().UTC())
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("expected one costed Stagehand row: %#v / %v", rows, err)
@@ -1183,6 +1183,15 @@ func TestToolExecutionLedgerCostsOnlyUploadedStagehandReport(t *testing.T) {
 	}
 	if rows[0].WorkerID != workerID || rows[0].AgentKey != "qa_specialist" || rows[0].MachineID != machineID {
 		t.Fatalf("tool ledger row must inherit the persisted parent task attribution: got worker=%q agent=%q machine=%q", rows[0].WorkerID, rows[0].AgentKey, rows[0].MachineID)
+	}
+	if strings.Contains(rows[0].UsageJSON, "private-provider-prompt") {
+		t.Fatal("private tool prompt reached accounting")
+	}
+	for _, incomplete := range []json.RawMessage{json.RawMessage(`{"input_tokens":120}`), json.RawMessage(`{"output_tokens":40}`), json.RawMessage(`{"total_tokens":160}`)} {
+		_, err := buildToolExecutionLedger(nil, task, uuid.Must(uuid.NewV4()).String(), "completed", []callbackToolExecution{{Tool: "stagehand", CallKey: "semantic-assessment", StepKey: "qa.semantic_browser", Provider: "minimax", Model: "MiniMax-M3", Usage: incomplete, RequestRef: reference, ResponseRef: reference}}, artifacts, time.Now().UTC())
+		if err == nil {
+			t.Fatal("incomplete tool accounting was accepted")
+		}
 	}
 	_, err = buildToolExecutionLedger(nil, task, uuid.Must(uuid.NewV4()).String(), "completed", []callbackToolExecution{{Tool: "stagehand", StepKey: "qa.semantic_browser", Provider: "minimax", Model: "MiniMax-M3", Usage: usage, RequestRef: reference, ResponseRef: "s3://arbitrary/report.json"}}, artifacts, time.Now().UTC())
 	if err == nil {

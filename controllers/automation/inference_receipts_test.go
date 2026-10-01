@@ -1,6 +1,7 @@
 package automation
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -57,6 +58,25 @@ func TestInferenceReceiptCallbackBindingRejectsForeignRunOrIdentity(t *testing.T
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestBadUsageCannotSealReceipt(t *testing.T) {
+	for _, usage := range []map[string]any{
+		{"prompt_tokens": 10},
+		{"prompt_tokens": 10, "completion_tokens": 2, "prompt_cache_hit_tokens": 8, "prompt_tokens_details": map[string]any{"cached_tokens": 7}},
+		{"prompt_tokens": 10, "completion_tokens": 2, "completion_tokens_details": map[string]any{"reasoning_tokens": 3}},
+	} {
+		mock := setupGatewayAttemptPolicyDB(t)
+		scope := gatewayInferenceScope{ReceiptID: uuid.Must(uuid.NewV4()), CallID: uuid.Must(uuid.NewV4())}
+		completion := automationagent.Completion{Provider: automationagent.ProviderMiniMax, Model: "MiniMax-M3", Usage: usage}
+		if _, err := acceptInferenceReceipt(context.Background(), &models.Config{}, scope, completion, "accepted"); err == nil {
+			t.Fatal("invalid accounting sealed a receipt")
+		}
+		// No transaction or accounting write is permitted for these responses.
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -124,7 +144,9 @@ func TestReceiptUsageAllowlistDropsArbitraryProviderText(t *testing.T) {
 	private := "private prompt / completion / provider extension"
 	usage := sanitizeProviderUsage(map[string]any{
 		"input_tokens": float64(12), "output_tokens": float64(7), "total_tokens": float64(19),
-		"prompt": private, "response": private, "api_key": private, "extension": map[string]any{"content": private},
+		"prompt_cache_hit_tokens": float64(3), "prompt_cache_miss_tokens": float64(9),
+		"output_tokens_details": map[string]any{"reasoning_tokens": float64(5), "content": private},
+		"prompt":                private, "response": private, "api_key": private, "extension": map[string]any{"content": private},
 		"prompt_tokens_details": map[string]any{"cached_tokens": float64(3), "secret": private},
 		"_itbem_provider":       map[string]any{"finish_reason": "stop", "input_sensitive": true, "arbitrary_text": private},
 	})
@@ -137,5 +159,8 @@ func TestReceiptUsageAllowlistDropsArbitraryProviderText(t *testing.T) {
 	}
 	if usage["input_tokens"] != float64(12) || usage["output_tokens"] != float64(7) || usage["total_tokens"] != float64(19) {
 		t.Fatalf("known accounting fields were lost: %#v", usage)
+	}
+	if usage["prompt_cache_hit_tokens"] != float64(3) || usage["output_tokens_details"].(map[string]any)["reasoning_tokens"] != float64(5) {
+		t.Fatal("known provider cache or reasoning dimensions were lost")
 	}
 }

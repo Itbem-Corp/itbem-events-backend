@@ -11,6 +11,7 @@ import (
 	"events-stocks/internal/authz"
 	"events-stocks/internal/automationagent"
 	"events-stocks/models"
+	"events-stocks/services/automationcost"
 	"events-stocks/utils"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -27,31 +28,34 @@ import (
 
 // Explicit projection: no headers, capability, provider body or private reasoning.
 type inferenceDiagnostics struct {
-	SchemaVersion       int                        `json:"schema_version"`
-	Stage               string                     `json:"stage"`
-	RequestHash         string                     `json:"request_hash"`
-	RequestBytes        int                        `json:"request_bytes"`
-	MessageCount        int                        `json:"message_count"`
-	MaxCompletionTokens int                        `json:"max_completion_tokens"`
-	PolicyHash          string                     `json:"policy_hash"`
-	DurationMillis      int64                      `json:"duration_ms"`
-	ValidationMillis    int64                      `json:"validation_ms"`
-	GatewayStatus       int                        `json:"gateway_status"`
-	FailureCode         string                     `json:"failure_code,omitempty"`
-	RequestCapture      string                     `json:"request_capture"`
-	ResponseCapture     string                     `json:"response_capture"`
-	Attempts            []inferenceRouteDiagnostic `json:"attempts"`
+	SchemaVersion       int                          `json:"schema_version"`
+	Stage               string                       `json:"stage"`
+	RequestHash         string                       `json:"request_hash"`
+	RequestBytes        int                          `json:"request_bytes"`
+	MessageCount        int                          `json:"message_count"`
+	MaxCompletionTokens int                          `json:"max_completion_tokens"`
+	PolicyHash          string                       `json:"policy_hash"`
+	DurationMillis      int64                        `json:"duration_ms"`
+	ValidationMillis    int64                        `json:"validation_ms"`
+	GatewayStatus       int                          `json:"gateway_status"`
+	FailureCode         string                       `json:"failure_code,omitempty"`
+	RequestCapture      string                       `json:"request_capture"`
+	ResponseCapture     string                       `json:"response_capture"`
+	Attempts            []inferenceRouteDiagnostic   `json:"attempts"`
+	Usage               *automationcost.UsageProfile `json:"usage,omitempty"`
 }
 type inferenceRouteDiagnostic struct {
-	Index            int    `json:"index"`
-	Provider         string `json:"provider"`
-	Model            string `json:"model"`
-	ReasoningEnabled bool   `json:"reasoning_enabled"`
-	ReasoningEffort  string `json:"reasoning_effort"`
-	DurationMillis   int64  `json:"duration_ms"`
-	TimeoutMillis    int64  `json:"timeout_ms"`
-	FailureCode      string `json:"failure_code,omitempty"`
-	FinishReason     string `json:"finish_reason,omitempty"`
+	Index               int    `json:"index"`
+	Provider            string `json:"provider"`
+	Model               string `json:"model"`
+	ReasoningEnabled    bool   `json:"reasoning_enabled"`
+	ReasoningEffort     string `json:"reasoning_effort"`
+	ReasoningWireMode   string `json:"reasoning_wire_mode,omitempty"`
+	ReasoningWireEffort string `json:"reasoning_wire_effort,omitempty"`
+	DurationMillis      int64  `json:"duration_ms"`
+	TimeoutMillis       int64  `json:"timeout_ms"`
+	FailureCode         string `json:"failure_code,omitempty"`
+	FinishReason        string `json:"finish_reason,omitempty"`
 }
 
 func diagnosticFinishReason(completion automationagent.Completion) string {

@@ -50,6 +50,9 @@ func Build(provider, model string, usage map[string]any, configured string) (Led
 	if provider == "" || model == "" {
 		return Ledger{}, fmt.Errorf("provider and model are required for cost accounting")
 	}
+	if err := ValidateTokenUsage(usage); err != nil {
+		return Ledger{}, err
+	}
 	catalog, err := catalogFor(configured)
 	if err != nil {
 		return Ledger{}, err
@@ -57,7 +60,7 @@ func Build(provider, model string, usage map[string]any, configured string) (Led
 	ledger := Ledger{
 		InputTokens:       usageNumber(usage, "input_tokens", "prompt_tokens", "prompt_token_count"),
 		OutputTokens:      usageNumber(usage, "output_tokens", "completion_tokens", "completion_token_count"),
-		CachedInputTokens: usageNumber(usage, "cache_read_input_tokens", "cached_input_tokens", "cache_read_tokens"),
+		CachedInputTokens: usageNumber(usage, "cache_read_input_tokens", "cached_input_tokens", "cache_read_tokens", "prompt_cache_hit_tokens"),
 		CacheWriteTokens:  usageNumber(usage, "cache_creation_input_tokens", "cache_write_tokens"),
 		ReasoningTokens:   usageNumber(usage, "reasoning_tokens", "thinking_tokens"),
 		TotalTokens:       usageNumber(usage, "total_tokens"),
@@ -81,6 +84,30 @@ func Build(provider, model string, usage map[string]any, configured string) (Led
 	// deliberation without changing the financial total.
 	if nested := mapValue(usage["completion_tokens_details"]); ledger.ReasoningTokens == 0 {
 		ledger.ReasoningTokens = usageNumber(nested, "reasoning_tokens", "thinking_tokens")
+	}
+	if nested := mapValue(usage["output_tokens_details"]); ledger.ReasoningTokens == 0 {
+		ledger.ReasoningTokens = usageNumber(nested, "reasoning_tokens", "thinking_tokens")
+	}
+	// Native Messages usage excludes cache reads/writes from input_tokens.
+	// OpenAI-compatible input/prompt totals already include those dimensions.
+	if (provider == "anthropic" || provider == "opencode-go") && usage["cached_input_tokens"] == nil && usage["prompt_tokens"] == nil && usage["input_tokens_details"] == nil && (usage["cache_creation_input_tokens"] != nil || usage["cache_read_input_tokens"] != nil) {
+		ledger.InputTokens, err = sumNonNegative(ledger.InputTokens, ledger.CachedInputTokens, ledger.CacheWriteTokens)
+		if err != nil {
+			return Ledger{}, err
+		}
+	}
+	if ledger.ReasoningTokens > ledger.OutputTokens {
+		return Ledger{}, fmt.Errorf("provider reasoning tokens exceed output tokens")
+	}
+	if hit, hitReported := usage["prompt_cache_hit_tokens"]; hitReported {
+		if miss, missReported := usage["prompt_cache_miss_tokens"]; missReported {
+			hitCount, _ := tokenCount(hit)
+			missCount, _ := tokenCount(miss)
+			input, err := sumNonNegative(hitCount, missCount)
+			if err != nil || input != ledger.InputTokens {
+				return Ledger{}, fmt.Errorf("provider cache hits and misses do not reconcile with input")
+			}
+		}
 	}
 	minimumTotal, err := sumNonNegative(ledger.InputTokens, ledger.OutputTokens)
 	if err != nil {

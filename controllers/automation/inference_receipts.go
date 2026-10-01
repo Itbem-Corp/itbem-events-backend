@@ -74,6 +74,9 @@ func acceptInferenceReceipt(ctx context.Context, cfg *models.Config, scope gatew
 		!providerAllowed(strings.ToLower(strings.TrimSpace(string(completion.Provider)))) || strings.TrimSpace(completion.Model) == "" {
 		return receipt, errors.New("accepted inference response is missing accounting identity")
 	}
+	if err := automationcost.VerifyTokenUsage(completion.Usage); err != nil {
+		return receipt, errors.New("provider usage could not be verified")
+	}
 	usage := sanitizeProviderUsage(completion.Usage)
 	prices := pricingCatalog(cfg)
 	if scope.EvaluationID != nil {
@@ -136,36 +139,7 @@ func sameInferenceReceiptStepID(left, right *uuid.UUID) bool {
 // dimensions. Provider extensions, arbitrary strings and nested response data
 // cannot smuggle prompt/answer content into the accounting ledger.
 func sanitizeProviderUsage(raw map[string]any) map[string]any {
-	topLevel := []string{
-		"input_tokens", "prompt_tokens", "prompt_token_count", "output_tokens", "completion_tokens", "completion_token_count", "total_tokens",
-		"cache_read_input_tokens", "cached_input_tokens", "cache_read_tokens", "cache_creation_input_tokens", "cache_write_tokens", "reasoning_tokens", "thinking_tokens",
-	}
-	nestedKeys := map[string][]string{
-		"prompt_tokens_details":     {"cached_tokens", "cache_read_input_tokens", "cache_write_tokens", "cache_creation_input_tokens", "cache_creation_tokens"},
-		"input_tokens_details":      {"cached_tokens", "cache_read_input_tokens", "cache_write_tokens", "cache_creation_input_tokens", "cache_creation_tokens"},
-		"completion_tokens_details": {"reasoning_tokens", "thinking_tokens"},
-	}
-	clean := make(map[string]any, len(topLevel)+len(nestedKeys))
-	for _, key := range topLevel {
-		if value, ok := raw[key]; ok && isNonNegativeUsageNumber(value) {
-			clean[key] = value
-		}
-	}
-	for parent, allowed := range nestedKeys {
-		child, ok := raw[parent].(map[string]any)
-		if !ok {
-			continue
-		}
-		filtered := make(map[string]any, len(allowed))
-		for _, key := range allowed {
-			if value, ok := child[key]; ok && isNonNegativeUsageNumber(value) {
-				filtered[key] = value
-			}
-		}
-		if len(filtered) > 0 {
-			clean[parent] = filtered
-		}
-	}
+	clean := automationcost.TokenUsage(raw)
 	if metadata, ok := raw["_itbem_provider"].(map[string]any); ok {
 		filtered := make(map[string]any, 3)
 		if reason, ok := metadata["finish_reason"].(string); ok && len(reason) <= 64 && safeProviderFinishReason(reason) {

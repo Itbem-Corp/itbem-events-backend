@@ -4214,6 +4214,14 @@ func buildToolExecutionLedger(cfg *models.Config, task *models.AutomationTask, r
 		if err := json.Unmarshal(reportedExecution.Usage, &usage); err != nil || usage == nil {
 			return nil, fmt.Errorf("tool usage is invalid")
 		}
+		if err := automationcost.VerifyTokenUsage(usage); err != nil {
+			return nil, fmt.Errorf("tool usage requires verified input and output counts")
+		}
+		usage = sanitizeProviderUsage(usage)
+		usageJSON, err := json.Marshal(usage)
+		if err != nil {
+			return nil, fmt.Errorf("tool accounting could not be encoded")
+		}
 		ledger, err := automationcost.Build(provider, model, usage, pricingCatalog(cfg))
 		if err != nil {
 			return nil, fmt.Errorf("tool usage could not be costed: %w", err)
@@ -4225,7 +4233,7 @@ func buildToolExecutionLedger(cfg *models.Config, task *models.AutomationTask, r
 			CacheWriteTokens: ledger.CacheWriteTokens, ReasoningTokens: ledger.ReasoningTokens, TotalTokens: ledger.TotalTokens,
 			InputCostMicros: ledger.InputCostMicros, OutputCostMicros: ledger.OutputCostMicros, CachedCostMicros: ledger.CachedCostMicros,
 			CacheWriteCostMicros: ledger.CacheWriteCostMicros, TotalCostMicros: ledger.TotalCostMicros, Currency: "USD", PricingBasis: ledger.PricingBasis,
-			PricingSnapshotJSON: ledger.PricingSnapshot, UsageJSON: string(reportedExecution.Usage), RequestRef: requestRef, ResponseRef: responseRef, CompletedAt: completedAt,
+			PricingSnapshotJSON: ledger.PricingSnapshot, UsageJSON: string(usageJSON), RequestRef: requestRef, ResponseRef: responseRef, CompletedAt: completedAt,
 		})
 	}
 	return rows, nil
