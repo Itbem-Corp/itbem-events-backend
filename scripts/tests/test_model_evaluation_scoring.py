@@ -28,6 +28,7 @@ def fixture():
                 'receipt_status': 'accepted', 'status': 'completed',
                 'final_answer': json.dumps(case['expected']), 'finish_reason': 'stop',
                 'total_cost_microusd': 10, 'gateway_latency_ms': 100,
+                'pricing_basis': 'conservative_api_equivalent_not_invoice',
                 'input_tokens': 2, 'output_tokens': 3, 'cached_input_tokens': 0,
                 'cache_write_tokens': 0, 'reasoning_tokens': 0,
             })
@@ -96,6 +97,42 @@ class ScoringTests(unittest.TestCase):
         row = score(CORPUS, evidence)['results']['minimax-m3']
         self.assertEqual(row['gateway_latency_samples'], 1)
         self.assertEqual(row['gateway_latency_p95_ms'], 25)
+
+    def test_unpriced_cost(self):
+        for basis in (None, '', ' ', 'unpriced'):
+            with self.subTest(basis=basis):
+                evidence = fixture()
+                evidence['calls'][0]['pricing_basis'] = basis
+                row = score(CORPUS, evidence)['results']['minimax-m3']
+                self.assertEqual(row['unknown_cost_count'], 1)
+                self.assertIsNone(row['api_equivalent_cost_usd'])
+
+    def test_invalid_latency(self):
+        for latency in (True, float('nan'), float('inf'), -1, '10'):
+            with self.subTest(latency=latency):
+                evidence = fixture()
+                evidence['calls'][0]['gateway_latency_ms'] = latency
+                with self.assertRaises(ValueError):
+                    score(CORPUS, evidence)
+
+    def test_integer_reservation(self):
+        for reservation in (True, 600.0, '600'):
+            with self.subTest(reservation=reservation):
+                evidence = fixture()
+                evidence['batch']['reservation_microusd'] = reservation
+                with self.assertRaises(ValueError):
+                    score(CORPUS, evidence)
+
+    def test_exported_null_accounting(self):
+        evidence = fixture()
+        call = evidence['calls'][0]
+        call.update(receipt_status='ambiguous', status='failed')
+        for field in ('total_cost_microusd', 'input_tokens', 'output_tokens', 'cached_input_tokens', 'cache_write_tokens', 'reasoning_tokens'):
+            call[field] = None
+        row = score(CORPUS, evidence)['results']['minimax-m3']
+        self.assertEqual(row['unknown_cost_count'], 1)
+        self.assertEqual(row['unknown_usage_count'], 1)
+        self.assertEqual(row['successes'], 19)
 
     def test_server_prompts(self):
         server = json.loads((ROOT / 'internal/modelevaluation/corpus.json').read_text())

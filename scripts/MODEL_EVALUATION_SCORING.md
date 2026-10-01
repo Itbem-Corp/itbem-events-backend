@@ -22,10 +22,13 @@ system instruction, two newlines, and trimmed case prompt.
 Ledger fields are total_cost_microusd, input_tokens, output_tokens,
 cached_input_tokens, cache_write_tokens and reasoning_tokens. Use null or omit
 unavailable measurements. Never infer zero from an ambiguous receipt.
-Only accepted/rejected receipt measurements enter verified subtotals. If any
+Only accepted/rejected receipt costs with a nonempty priced `pricing_basis`
+enter verified cost subtotals. A missing or `unpriced` basis remains unknown.
+Only accepted/rejected usage measurements enter verified token subtotals. If any
 cost or usage is unknown, corresponding full totals/averages are null and the
 unknown counts remain visible. Positive observed latencies alone enter median
-and nearest-rank p95; the sample count is reported.
+and nearest-rank p95; the sample count is reported. Boolean, negative, nonnumeric
+and nonfinite latencies are rejected rather than entering statistical results.
 
 Errors remain in the twenty-case denominator. Truncation and unexpected actual
 routes cannot count as successes. Accepted sealed routes must match the frozen

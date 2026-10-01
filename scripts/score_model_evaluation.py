@@ -18,7 +18,9 @@ def score(corpus, evidence):
     cases = {case['id']: case for case in corpus['cases']}
     calls = evidence['calls']
     batch = evidence['batch']
-    if batch.get('budget_microusd') != 1_000_000 or not 0 < batch.get('reservation_microusd', 0) <= 1_000_000:
+    budget = batch.get('budget_microusd')
+    reservation = batch.get('reservation_microusd')
+    if type(budget) is not int or budget != 1_000_000 or type(reservation) is not int or not 0 < reservation <= budget:
         raise ValueError('Missing or invalid normal USD 1 batch reservation.')
     if len(cases) != 20 or len(calls) != 60:
         raise ValueError('Expected exactly 20 cases and 60 recorded outcomes, including failures.')
@@ -80,15 +82,18 @@ def score(corpus, evidence):
                 false_positive += format_ok and answer.get('bug') is True
                 invalid_clean += not outcome_ok or not format_ok
             cost = call.get('total_cost_microusd')
-            cost_verified = call.get('receipt_status') in ('accepted', 'rejected') and cost is not None
+            basis = call.get('pricing_basis')
+            cost_verified = call.get('receipt_status') in ('accepted', 'rejected') and cost is not None and isinstance(basis, str) and bool(basis.strip()) and basis != 'unpriced'
             if cost_verified:
                 if type(cost) is not int or cost < 0:
                     raise ValueError('Invalid ledger cost.')
                 costs += cost
             else:
                 unknown_costs += 1
-            latency = call.get('gateway_latency_ms', 0)
-            if isinstance(latency, (int, float)) and latency > 0:
+            latency = call.get('gateway_latency_ms')
+            if latency is not None and (type(latency) not in (int, float) or not math.isfinite(latency) or latency < 0):
+                raise ValueError('Invalid latency measurement.')
+            if latency is not None and latency > 0:
                 latencies.append(latency)
             usage_verified = call.get('receipt_status') in ('accepted', 'rejected') and all(call.get(key) is not None for key in tokens)
             if usage_verified:
@@ -131,4 +136,4 @@ if __name__ == '__main__':
     parser.add_argument('--output', required=True, type=Path)
     args = parser.parse_args()
     report = score(json.loads(args.corpus.read_text(encoding='utf-8-sig')), json.loads(args.evidence.read_text(encoding='utf-8-sig')))
-    args.output.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding='utf-8')
+    args.output.write_text(json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False), encoding='utf-8')
