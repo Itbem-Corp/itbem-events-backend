@@ -61,7 +61,28 @@ class ScoringTests(unittest.TestCase):
         del evidence['calls'][0]['reasoning_tokens']
         row = score(CORPUS, evidence)['results']['minimax-m3']
         self.assertIsNone(row['api_equivalent_cost_usd'])
-        self.assertIsNone(row['tokens_per_case']['input_tokens'])
+        self.assertEqual(row['tokens_per_case']['input_tokens'], 2)
+        self.assertIsNone(row['tokens_per_case']['reasoning_tokens'])
+
+    def test_missing_cache_does_not_erase_known_input_and_output(self):
+        evidence = fixture()
+        evidence['calls'][0]['cached_input_tokens'] = None
+        row = score(CORPUS, evidence)['results']['minimax-m3']
+        self.assertEqual(row['total_tokens']['input_tokens'], 40)
+        self.assertEqual(row['total_tokens']['output_tokens'], 60)
+        self.assertIsNone(row['total_tokens']['cached_input_tokens'])
+        self.assertEqual(row['unknown_token_counts']['cached_input_tokens'], 1)
+        self.assertEqual(row['unknown_token_counts']['input_tokens'], 0)
+        self.assertEqual(row['tokens_per_case']['output_tokens'], 3)
+        self.assertEqual(row['tokens_per_success']['input_tokens'], 2)
+
+    def test_invalid_known_counter_is_rejected_despite_missing_cache(self):
+        for value in (True, -1, 1.5, '10', float('nan')):
+            with self.subTest(value=value):
+                evidence = fixture()
+                evidence['calls'][0].update(cached_input_tokens=None, input_tokens=value)
+                with self.assertRaises(ValueError):
+                    score(CORPUS, evidence)
 
     def test_invalid_bindings(self):
         for mutation in ('duplicate', 'missing', 'hash', 'effort', 'identity'):

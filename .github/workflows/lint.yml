@@ -33,6 +33,8 @@ jobs:
           cfn-lint infra/*.yml
       - name: Verify inference diagnostic persistence against PostgreSQL
         run: python3 scripts/test-inference-diagnostics-postgres.py
+      - name: Verify inference spend reconciliation against PostgreSQL
+        run: python3 scripts/test-inference-spend-postgres.py
       - name: Install libvips (required by bimg/image processor)
         run: |
           sudo apt-get update -y

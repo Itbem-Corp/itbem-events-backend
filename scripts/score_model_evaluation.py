@@ -53,6 +53,7 @@ def score(corpus, evidence):
         unknown_usage = 0
         latencies = []
         tokens = {key: 0 for key in ('input_tokens', 'output_tokens', 'cached_input_tokens', 'cache_write_tokens', 'reasoning_tokens')}
+        unknown_tokens = {key: 0 for key in tokens}
         scored = []
         for call in group:
             case = cases[call['case_id']]
@@ -95,14 +96,17 @@ def score(corpus, evidence):
                 raise ValueError('Invalid latency measurement.')
             if latency is not None and latency > 0:
                 latencies.append(latency)
-            usage_verified = call.get('receipt_status') in ('accepted', 'rejected') and all(call.get(key) is not None for key in tokens)
-            if usage_verified:
-                for key in tokens:
-                    value = call[key]
+            usage_verified = True
+            for key in tokens:
+                value = call.get(key)
+                if call.get('receipt_status') in ('accepted', 'rejected') and value is not None:
                     if type(value) is not int or value < 0:
                         raise ValueError('Invalid token accounting.')
                     tokens[key] += value
-            else:
+                else:
+                    unknown_tokens[key] += 1
+                    usage_verified = False
+            if not usage_verified:
                 unknown_usage += 1
             scored.append({'case_id': call['case_id'], 'task_id': call['task_id'], 'run_id': call.get('run_id'), 'receipt_id': call.get('receipt_id'), 'success': bool(matched), 'valid_json': format_ok, 'attributed': attributed, 'truncated': truncated, 'status': call.get('status')})
         ordered = sorted(latencies)
@@ -118,11 +122,13 @@ def score(corpus, evidence):
             'gateway_latency_p95_ms': ordered[math.ceil(.95 * len(ordered)) - 1] if ordered else None,
             'p95_method': 'nearest-rank over available positive receipt latencies',
             'verified_tokens': tokens, 'unknown_usage_count': unknown_usage,
+            'unknown_token_counts': unknown_tokens,
+            'total_tokens': {key: None if unknown_tokens[key] else value for key, value in tokens.items()},
             'verified_api_equivalent_cost_usd': costs / 1_000_000,
             'unknown_cost_count': unknown_costs,
             'api_equivalent_cost_usd': None if unknown_costs else costs / 1_000_000,
-            'tokens_per_case': {key: None if unknown_usage else value / 20 for key, value in tokens.items()},
-            'tokens_per_success': {key: value / success if success and not unknown_usage else None for key, value in tokens.items()},
+            'tokens_per_case': {key: None if unknown_tokens[key] else value / 20 for key, value in tokens.items()},
+            'tokens_per_success': {key: value / success if success and not unknown_tokens[key] else None for key, value in tokens.items()},
             'api_equivalent_cost_per_case_usd': None if unknown_costs else costs / 1_000_000 / 20,
             'api_equivalent_cost_per_success_usd': costs / 1_000_000 / success if success and not unknown_costs else None,
             'cases': scored,
