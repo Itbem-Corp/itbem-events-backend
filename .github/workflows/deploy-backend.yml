@@ -75,6 +75,9 @@ jobs:
       - name: Verify inference diagnostic persistence against PostgreSQL
         run: python3 scripts/test-inference-diagnostics-postgres.py
 
+      - name: Verify inference spend reconciliation against PostgreSQL
+        run: python3 scripts/test-inference-spend-postgres.py
+
       - name: Verify cache contract against Valkey
         run: |
           set -euo pipefail
