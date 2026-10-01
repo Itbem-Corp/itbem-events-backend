@@ -267,7 +267,7 @@ func sanitizeAgentStoredValue(value any, inUsage bool) any {
 				cleaned[key] = "<redacted>"
 				continue
 			}
-			if isPrivateReasoningField(key) && (!inUsage || !isTokenCountMetric(key, item)) {
+			if isPrivateReasoningField(key) && !isPublicReasoningSetting(key, item) && (!inUsage || !isTokenCountMetric(key, item)) {
 				continue
 			}
 			cleaned[key] = sanitizeAgentStoredValue(item, inUsage || strings.EqualFold(key, "usage") || strings.EqualFold(key, "completion_tokens_details") || strings.EqualFold(key, "prompt_tokens_details"))
@@ -291,6 +291,26 @@ func isPrivateReasoningField(key string) bool {
 	normalized := strings.ToLower(key)
 	normalized = strings.NewReplacer("_", "", "-", "", ".", "", " ", "").Replace(normalized)
 	return strings.Contains(normalized, "reasoning") || strings.Contains(normalized, "chainofthought") || strings.Contains(normalized, "scratchpad") || strings.Contains(normalized, "internalmonologue") || strings.HasPrefix(normalized, "analysis") || strings.HasPrefix(normalized, "thinking") || strings.HasPrefix(normalized, "thoughts") || normalized == "deliberation"
+}
+
+// Public switches are configuration metadata, never a channel for thought text.
+// Exact keys and closed value types keep malformed or nested values private.
+func isPublicReasoningSetting(key string, value any) bool {
+	switch key {
+	case "reasoning_enabled":
+		_, ok := value.(bool)
+		return ok
+	case "reasoning_effort":
+		effort, ok := value.(string)
+		if !ok {
+			return false
+		}
+		switch effort {
+		case "", "none", "minimal", "low", "medium", "high", "xhigh", "max":
+			return true
+		}
+	}
+	return false
 }
 
 func isTokenCountMetric(key string, value any) bool {
