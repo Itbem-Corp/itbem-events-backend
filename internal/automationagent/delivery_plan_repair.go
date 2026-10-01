@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"events-stocks/services/automationcost"
+
 	"github.com/gofrs/uuid"
 )
 
@@ -44,12 +46,16 @@ func (w *Worker) repairDeliveryPlan(ctx context.Context, taskID, runID string, c
 	if err != nil {
 		if responseErr := new(ProviderResponseError); errors.As(err, &responseErr) {
 			repair = responseErr.Completion
-			attachDeliveryPlanRepairAccounting(&repair, candidate, repairRef)
+			if accountingErr := attachDeliveryPlanRepairAccounting(&repair, candidate, repairRef); accountingErr != nil {
+				return repair, nil, accountingErr
+			}
 			return repair, nil, fmt.Errorf("delivery plan repair provider call failed: %w", err)
 		}
 		return candidate, nil, fmt.Errorf("delivery plan repair provider call failed: %w", err)
 	}
-	attachDeliveryPlanRepairAccounting(&repair, candidate, repairRef)
+	if accountingErr := attachDeliveryPlanRepairAccounting(&repair, candidate, repairRef); accountingErr != nil {
+		return repair, nil, accountingErr
+	}
 	plan, repairErr := validateDeliveryPlanCompletion(repair.Content, delivery)
 	if repairErr != nil {
 		return repair, nil, fmt.Errorf("delivery plan failed validation after its single repair attempt: %w", repairErr)
@@ -121,19 +127,22 @@ func (w *Worker) storeDeliveryPlanRepairRequest(ctx context.Context, taskID, run
 	return "s3://" + w.config.OutputBucket + "/" + key, nil
 }
 
-func attachDeliveryPlanRepairAccounting(repair *Completion, candidate Completion, repairRef string) {
-	usage := map[string]any{}
-	for _, completion := range []Completion{candidate, *repair} {
-		for key, raw := range completion.Usage {
-			if value, ok := numericReviewUsage(raw); ok {
-				current, _ := numericReviewUsage(usage[key])
-				usage[key] = current + value
-			}
-		}
+func attachDeliveryPlanRepairAccounting(repair *Completion, candidate Completion, repairRef string) error {
+	if candidate.Provider != repair.Provider || candidate.Model != repair.Model {
+		return fmt.Errorf("delivery plan repair changed provider identity")
+	}
+	usage, err := automationcost.AggregateUsage(string(repair.Provider), repair.Model, candidate.Usage, repair.Usage)
+	if err != nil {
+		return fmt.Errorf("delivery plan repair usage could not be aggregated: %w", err)
 	}
 	usage["_itbem_repair"] = map[string]any{
 		"attempted": true, "request_ref": repairRef, "provider_call_count": 2,
 		"initial_response_id": candidate.ResponseID,
 	}
-	*repair = Completion{Provider: repair.Provider, Model: repair.Model, Content: repair.Content, ResponseID: repair.ResponseID, Usage: usage}
+	// Preserve the final call identity, finish outcome and private response.
+	if metadata, ok := repair.Usage["_itbem_provider"].(map[string]any); ok {
+		usage["_itbem_provider"] = metadata
+	}
+	repair.Usage = usage
+	return nil
 }

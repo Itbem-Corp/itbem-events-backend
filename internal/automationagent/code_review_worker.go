@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"events-stocks/services/automationcost"
+
 	"github.com/gofrs/uuid"
 )
 
@@ -790,17 +792,16 @@ func aggregateCodeReviewCompletions(completions []Completion, aggregate map[stri
 		return Completion{}, fmt.Errorf("code review has no provider completions")
 	}
 	provider, model := completions[0].Provider, completions[0].Model
-	usage := map[string]any{}
+	usages := make([]map[string]any, 0, len(completions))
 	for _, completion := range completions {
 		if completion.Provider != provider || completion.Model != model {
 			return Completion{}, fmt.Errorf("code review segments changed provider identity")
 		}
-		for key, raw := range completion.Usage {
-			if value, ok := numericReviewUsage(raw); ok {
-				current, _ := numericReviewUsage(usage[key])
-				usage[key] = current + value
-			}
-		}
+		usages = append(usages, completion.Usage)
+	}
+	usage, err := automationcost.AggregateUsage(string(provider), model, usages...)
+	if err != nil {
+		return Completion{}, fmt.Errorf("code review usage could not be aggregated: %w", err)
 	}
 	inputSensitive, outputSensitive, statusCode := false, false, 0
 	for _, completion := range completions {

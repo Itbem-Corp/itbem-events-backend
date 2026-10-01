@@ -11,6 +11,7 @@ import (
 	"events-stocks/internal/aicredentials"
 	"events-stocks/internal/automationagent"
 	"events-stocks/models"
+	"events-stocks/services/automationcost"
 	"events-stocks/utils"
 	"io"
 	"net/http"
@@ -156,6 +157,7 @@ func Infer(c echo.Context) error {
 			}
 			receipt, receiptErr := acceptInferenceReceipt(c.Request().Context(), cfg, inferenceScope, completion, "rejected")
 			if receiptErr == nil {
+				diagnostic.Usage, _ = automationcost.Profile(string(completion.Provider), completion.Model, completion.Usage, request.MaxCompletionTokens)
 				completion.CallID, completion.ReceiptID = request.CallID, receipt.ID.String()
 				return c.JSON(http.StatusUnprocessableEntity, completion)
 			}
@@ -188,6 +190,7 @@ func Infer(c echo.Context) error {
 	routing["policy_routes_hash"] = inferenceScope.RoutesHash
 	completion.CallID = request.CallID
 	completion.ReceiptID = receipt.ID.String()
+	diagnostic.Usage, _ = automationcost.Profile(string(completion.Provider), completion.Model, completion.Usage, request.MaxCompletionTokens)
 	diagnostic.Stage = "completed"
 	return c.JSON(http.StatusOK, completion)
 }
@@ -303,7 +306,8 @@ func completeWithFallbackObserved(ctx context.Context, resolver credentialResolv
 		providerClient := automationagent.NewProviderClient(providerConfig, httpClient)
 		completion, completionErr := providerClient.Complete(ctx, request.Messages, request.MaxCompletionTokens)
 		if diagnostic != nil {
-			diagnostic.Attempts = append(diagnostic.Attempts, inferenceRouteDiagnostic{Index: index, Provider: route.Provider, Model: route.Model, ReasoningEnabled: route.ReasoningEnabled, ReasoningEffort: route.ReasoningEffort, DurationMillis: time.Since(started).Milliseconds(), TimeoutMillis: automationagent.ProviderHTTPTimeout(providerClient).Milliseconds(), FailureCode: safeProviderDiagnostic(completionErr), FinishReason: diagnosticFinishReason(completion)})
+			mode, effort := automationagent.ReasoningWireSettings(providerClient)
+			diagnostic.Attempts = append(diagnostic.Attempts, inferenceRouteDiagnostic{Index: index, Provider: route.Provider, Model: route.Model, ReasoningEnabled: route.ReasoningEnabled, ReasoningEffort: route.ReasoningEffort, ReasoningWireMode: mode, ReasoningWireEffort: effort, DurationMillis: time.Since(started).Milliseconds(), TimeoutMillis: automationagent.ProviderHTTPTimeout(providerClient).Milliseconds(), FailureCode: safeProviderDiagnostic(completionErr), FinishReason: diagnosticFinishReason(completion)})
 		}
 		if completionErr == nil {
 			if completion.Usage == nil {

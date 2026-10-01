@@ -1007,15 +1007,23 @@ func (p *httpProviderClient) payload(messages []Message, maxTokens int) (map[str
 			payload["thinking"] = map[string]string{"type": "disabled"}
 		}
 	}
-	if p.config.Provider == ProviderDeepSeek && p.config.ReasoningEnabled {
-		payload["thinking"] = map[string]string{"type": "enabled"}
-		if effort := normalizeDeepSeekReasoningEffort(p.config.ReasoningEffort); effort != "" {
-			payload["reasoning_effort"] = effort
+	if p.config.Provider == ProviderDeepSeek {
+		// Current DeepSeek models default to high-effort thinking. Omission is
+		// not an off switch: transmit the frozen policy in both directions.
+		payload["thinking"] = map[string]string{"type": "disabled"}
+		if p.config.ReasoningEnabled {
+			payload["thinking"] = map[string]string{"type": "enabled"}
+			if effort := normalizeDeepSeekReasoningEffort(p.config.ReasoningEffort); effort != "" {
+				payload["reasoning_effort"] = effort
+			}
 		}
 	}
-	if p.config.Provider == ProviderOpenRouter && p.config.ReasoningEnabled {
-		if effort := normalizeOpenRouterReasoningEffort(p.config.ReasoningEffort); effort != "" {
-			payload["reasoning"] = map[string]string{"effort": effort}
+	if p.config.Provider == ProviderOpenRouter {
+		payload["reasoning"] = map[string]any{"enabled": p.config.ReasoningEnabled}
+		if p.config.ReasoningEnabled {
+			if effort := normalizeOpenRouterReasoningEffort(p.config.ReasoningEffort); effort != "" {
+				payload["reasoning"].(map[string]any)["effort"] = effort
+			}
 		}
 	}
 	return payload, map[string]string{"Authorization": "Bearer " + p.config.secret, "Content-Type": "application/json"}
