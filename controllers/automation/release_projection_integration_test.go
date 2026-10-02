@@ -13,6 +13,7 @@ import (
 	"events-stocks/internal/deliveryledger"
 	"events-stocks/internal/deliverypolicy"
 	"events-stocks/internal/environmentevidence"
+	"events-stocks/internal/qaevidence"
 	"events-stocks/internal/releasegate"
 	"events-stocks/models"
 	"github.com/gofrs/uuid"
@@ -91,5 +92,41 @@ func TestReleaseProjectionRollsBackEvidenceWhenCurrentPolicyIsMissing(t *testing
 	require.NoError(t, db.Transaction(func(tx *gorm.DB) error { return persistReleaseGateEvaluation(tx, &task, handoff, now) }))
 	require.NoError(t, db.Model(&models.DeliveryEvent{}).Where("work_item_id = ?", itemID).Count(&count).Error)
 	require.Equal(t, int64(2), count, "projection replay must not duplicate events")
+
+	qaID := uuid.Must(uuid.NewV4())
+	require.NoError(t, db.Create(&models.DeliveryContextSnapshot{ID: uuid.Must(uuid.NewV4()), WorkItemID: itemID, SourceID: uuid.Must(uuid.NewV4()), Kind: "repository", Name: "synthetic", Reference: "workspace://repo", Revision: head, MetadataJSON: `{"depends_on_repositories":[]}`, CapturedAt: now}).Error)
+	qaTime := now.Add(time.Second)
+	qaTask := models.AutomationTask{ID: qaID, JobID: uuid.Must(uuid.NewV4()), Operation: "delivery.qa", DeliveryWorkItemID: &itemID, EvidenceSubjectDigest: digest, Status: "completed", CompletedAt: &qaTime}
+	require.NoError(t, db.Create(&qaTask).Error)
+	qaObservation := qaevidence.Observation{SchemaVersion: 2, TaskID: qaID.String(), MatrixDigest: digest, PreviewPassed: true, RepositoryExecutionOrder: []string{"workspace://repo"}, Repositories: []qaevidence.Repository{{Reference: "workspace://repo", Branch: branch, Commands: []qaevidence.Command{{Index: 0, Phase: "validation", Kind: "unit", Passed: true}, {Index: 1, Phase: "qa", Kind: "contract", Passed: true}, {Index: 2, Phase: "qa", Kind: "security:secrets", Passed: true}, {Index: 3, Phase: "qa", Kind: "security:high-critical", Passed: true}}}}}
+	qaRaw, err := json.Marshal(qaObservation)
+	require.NoError(t, err)
+	require.NoError(t, db.Transaction(func(tx *gorm.DB) error { return persistQAObservation(tx, &qaTask, qaRaw, qaTime) }))
+	nextTime := now.Add(2 * time.Second)
+	nextTask := task
+	nextTask.ID = uuid.Must(uuid.NewV4())
+	nextTask.JobID = uuid.Must(uuid.NewV4())
+	nextTask.CompletedAt = &nextTime
+	require.NoError(t, db.Create(&nextTask).Error)
+	environment.TaskID = nextTask.ID.String()
+	nextHandoff, err := json.Marshal(map[string]any{"schema_version": 2, "gatekeeper_input": candidate, "environment_observation": environment})
+	require.NoError(t, err)
+	require.NoError(t, db.Transaction(func(tx *gorm.DB) error { return persistReleaseGateEvaluation(tx, &nextTask, nextHandoff, nextTime) }))
+	var latest models.DeliveryEvent
+	require.NoError(t, db.Where("work_item_id = ? AND event_type = ?", itemID, deliveryledger.EventTypeReleaseGateEvaluated).Order("sequence DESC").First(&latest).Error)
+	var gatePayload struct {
+		Input releasegate.Input `json:"input"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(latest.PayloadJSON), &gatePayload))
+	require.Len(t, gatePayload.Input.Tests, 2)
+	for _, test := range gatePayload.Input.Tests {
+		require.Equal(t, releasegate.StatusPassed, test.Status)
+		require.Equal(t, digest, test.MatrixDigest)
+	}
+	require.Len(t, gatePayload.Input.Security, 1)
+	require.True(t, gatePayload.Input.Security[0].SecretScanPassed)
+	projected, err := deliveryledger.ProjectGateEvaluation(latest)
+	require.NoError(t, err)
+	require.Equal(t, "blocked", projected.State, "QA success must not replace absent Vault authority")
 
 }
