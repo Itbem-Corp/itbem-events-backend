@@ -3,6 +3,7 @@ package automationagent
 import (
 	"context"
 	"encoding/json"
+	"events-stocks/internal/inferencecapability"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,6 +18,61 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/gofrs/uuid"
 )
+
+func grantTransportFixtureCapability(t *testing.T, response http.ResponseWriter, request *http.Request, update TaskUpdate, operation string) {
+	t.Helper()
+	if update.Status != "running" {
+		return
+	}
+	taskID := request.URL.Path[strings.LastIndex(request.URL.Path, "/")+1:]
+	if err := issueTestInferenceCapability(taskID, update, operation); err != nil {
+		t.Errorf("issue fixture capability: %v", err)
+		response.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	token, ok := inferenceCapabilityForRun(taskID, update.RunID, time.Now().UTC())
+	if !ok {
+		t.Error("fixture capability was not persisted")
+		return
+	}
+	response.Header().Set(inferencecapability.HeaderName, token)
+}
+
+func prepareTransportFixtureBuckets(t *testing.T, client *s3.Client, config *RuntimeConfig) {
+	t.Helper()
+	suffix := strings.ReplaceAll(uuid.Must(uuid.NewV4()).String(), "-", "")
+	config.InputBucket = "itbem-e2e-input-" + suffix
+	config.OutputBucket = "itbem-e2e-output-" + suffix
+	for _, bucket := range []string{config.InputBucket, config.OutputBucket} {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)})
+		cancel()
+		if err != nil {
+			t.Fatalf("create isolated transport bucket: %v", err)
+		}
+		t.Cleanup(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			paginator := s3.NewListObjectsV2Paginator(client, &s3.ListObjectsV2Input{Bucket: aws.String(bucket)})
+			for paginator.HasMorePages() {
+				page, err := paginator.NextPage(ctx)
+				if err != nil {
+					t.Errorf("list fixture bucket during cleanup: %v", err)
+					return
+				}
+				for _, object := range page.Contents {
+					if _, err := client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: object.Key}); err != nil {
+						t.Errorf("remove fixture object: %v", err)
+						return
+					}
+				}
+			}
+			if _, err := client.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(bucket)}); err != nil {
+				t.Errorf("remove fixture bucket: %v", err)
+			}
+		})
+	}
+}
 
 func TestLocalStackTransportRoundTrip(t *testing.T) {
 	if testing.Short() || os.Getenv("ITBEM_LOCALSTACK_E2E") != "1" {
@@ -33,6 +89,7 @@ func TestLocalStackTransportRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	prepareTransportFixtureBuckets(t, runtime.S3, &config)
 	queueName := "itbem-ai-e2e-" + strings.ReplaceAll(uuid.Must(uuid.NewV4()).String(), "-", "")
 	queueURLResponse, err := runtime.SQS.CreateQueue(context.Background(), &sqs.CreateQueueInput{QueueName: aws.String(queueName)})
 	if err != nil || queueURLResponse.QueueUrl == nil {
@@ -61,11 +118,12 @@ func TestLocalStackTransportRoundTrip(t *testing.T) {
 		callbackMu.Lock()
 		callbacks = append(callbacks, update)
 		callbackMu.Unlock()
+		grantTransportFixtureCapability(t, response, request, update, "ai.chat")
 		response.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
 	callback := newTestHTTPCallback(t, server)
-	worker, err := NewWorker(config.WorkerConfig, NewAWSObjectStore(runtime.S3), callback, fakeProvider{completion: Completion{Provider: ProviderMiniMax, Model: "MiniMax-M2.7", Content: "LocalStack transport confirmed.", Usage: map[string]any{"total_tokens": 3}, ResponseID: "local-e2e"}})
+	worker, err := NewWorker(config.WorkerConfig, NewAWSObjectStore(runtime.S3), callback, fakeProvider{completion: Completion{Provider: ProviderMiniMax, Model: "MiniMax-M2.7", Content: "LocalStack transport confirmed.", Usage: map[string]any{"total_tokens": 3}, ResponseID: "local-e2e", CallID: uuid.Must(uuid.NewV4()).String(), ReceiptID: uuid.Must(uuid.NewV4()).String()}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,15 +160,21 @@ func TestLocalStackTransportRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	callbackMu.Lock()
-	if len(callbacks) != 2 || callbacks[0].Status != "running" || callbacks[1].Status != "completed" {
+	if len(callbacks) != 3 || callbacks[0].Status != "running" || callbacks[1].Status != "running" || callbacks[1].ProgressStep != "thinking" || callbacks[1].ProgressCall != 1 || callbacks[2].Status != "completed" {
 		callbackMu.Unlock()
 		t.Fatalf("unexpected callbacks: %#v", callbacks)
 	}
+	completed := callbacks[2]
 	callbackMu.Unlock()
-	output, err := runtime.S3.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(config.OutputBucket), Key: aws.String(outputKey)})
+	outputBucket, completedOutputKey, err := ParsePrivateReference(completed.OutputRef)
+	if err != nil || outputBucket != config.OutputBucket || completed.RunID == "" || completedOutputKey != "automation/"+taskID+"/runs/"+completed.RunID+"/result.json" {
+		t.Fatalf("completion did not bind the expected private run result: %v", err)
+	}
+	output, err := runtime.S3.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(outputBucket), Key: aws.String(completedOutputKey)})
 	if err != nil || output.ServerSideEncryption != s3types.ServerSideEncryptionAes256 {
 		t.Fatalf("expected encrypted output: %v / %#v", err, output)
 	}
+	defer output.Body.Close()
 	remaining, err := runtime.SQS.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{QueueUrl: aws.String(queueURL), MaxNumberOfMessages: 1, WaitTimeSeconds: 0})
 	if err != nil || len(remaining.Messages) != 0 {
 		t.Fatalf("message was not deleted: %#v / %v", remaining.Messages, err)
@@ -142,6 +206,7 @@ func TestLocalStackRedeliveryReusesDurableResultWithoutProviderRepeat(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	prepareTransportFixtureBuckets(t, runtime.S3, &config)
 	queueName := "itbem-ai-e2e-" + strings.ReplaceAll(uuid.Must(uuid.NewV4()).String(), "-", "")
 	queueURLResponse, err := runtime.SQS.CreateQueue(context.Background(), &sqs.CreateQueueInput{QueueName: aws.String(queueName)})
 	if err != nil || queueURLResponse.QueueUrl == nil {
@@ -163,7 +228,11 @@ func TestLocalStackRedeliveryReusesDurableResultWithoutProviderRepeat(t *testing
 			paginator := s3.NewListObjectsV2Paginator(runtime.S3, &s3.ListObjectsV2Input{Bucket: aws.String(bucket), Prefix: aws.String("automation/" + taskID + "/")})
 			for paginator.HasMorePages() {
 				page, listErr := paginator.NextPage(context.Background())
-				if listErr != nil || len(page.Contents) == 0 {
+				if listErr != nil {
+					t.Errorf("list redelivery fixture objects: %v", listErr)
+					break
+				}
+				if len(page.Contents) == 0 {
 					continue
 				}
 				identifiers := make([]s3types.ObjectIdentifier, 0, len(page.Contents))
@@ -211,11 +280,12 @@ func TestLocalStackRedeliveryReusesDurableResultWithoutProviderRepeat(t *testing
 			successfulTerminals++
 			callbackMu.Unlock()
 		}
+		grantTransportFixtureCapability(t, response, request, update, "delivery.chat")
 		response.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
 	callback := newTestHTTPCallback(t, server)
-	provider := &integrationCountingProvider{completion: Completion{Provider: ProviderMiniMax, Model: "MiniMax-M3", Content: `{"answer":"durable","next_steps":[],"questions":[]}`, Usage: map[string]any{"total_tokens": 3}, ResponseID: "local-redelivery"}}
+	provider := &integrationCountingProvider{completion: Completion{Provider: ProviderMiniMax, Model: "MiniMax-M3", Content: `{"answer":"durable","next_steps":[],"questions":[]}`, Usage: map[string]any{"total_tokens": 3}, ResponseID: "local-redelivery", CallID: uuid.Must(uuid.NewV4()).String(), ReceiptID: uuid.Must(uuid.NewV4()).String()}}
 	worker, err := NewWorker(config.WorkerConfig, NewAWSObjectStore(runtime.S3), callback, provider)
 	if err != nil {
 		t.Fatal(err)
