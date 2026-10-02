@@ -114,6 +114,10 @@ func runQAWithCapabilityRefresh(ctx context.Context, taskID, runID string, deliv
 	if err != nil {
 		return nil, nil, err
 	}
+	matrixDigest, err := qaPublishedMatrixDigest(ctx, delivery, targets)
+	if err != nil {
+		return nil, nil, err
+	}
 	result := map[string]any{"preview": checkPreview(ctx, previewURL), "repository_runs": []any{}, "repository_execution_order": []string{}}
 	artifacts := make([]LocalArtifact, 0)
 	// The preview is a single deployed surface, while commands and artifacts
@@ -261,6 +265,16 @@ func runQAWithCapabilityRefresh(ctx context.Context, taskID, runID string, deliv
 				return result, artifacts, &QAExecutionError{Result: result, Artifacts: artifacts, Cause: err}
 			}
 		}
+	}
+	if _, err := qaPublishedMatrixDigest(ctx, delivery, targets); err != nil {
+		return result, artifacts, &QAExecutionError{Result: result, Artifacts: artifacts, Cause: err}
+	}
+	observation, err := qaLedgerObservation(taskID, matrixDigest, result)
+	if err != nil {
+		return result, artifacts, &QAExecutionError{Result: result, Artifacts: artifacts, Cause: err}
+	}
+	if observation != nil {
+		result["ledger_observation"] = observation
 	}
 	return result, artifacts, nil
 }

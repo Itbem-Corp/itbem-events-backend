@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"events-stocks/internal/releasegate"
 )
 
 func TestPublishedQATargetRequiresExactCleanCommitAndRejectsUntrackedSource(t *testing.T) {
@@ -60,5 +62,44 @@ func TestPublishedQATargetRequiresExactCleanCommitAndRejectsUntrackedSource(t *t
 	}
 	if err := verifyQATargetRevision(context.Background(), targets[0]); err != nil {
 		t.Fatal("restored exact source rejected", err)
+	}
+	remote, err := runLocal(context.Background(), root, commandTimeout, "", "git", "remote", "add", "origin", "https://github.com/acme/synthetic-qa.git")
+	if err != nil || remote.ExitCode != 0 {
+		t.Fatal("fixture origin", err, remote)
+	}
+	revision := releasegate.Revision{Repository: "acme/synthetic-qa", Branch: "main", SHA: strings.TrimSpace(head.Output)}
+	matrixPayload := func(revisions []releasegate.Revision) json.RawMessage {
+		raw, err := json.Marshal(map[string]any{
+			"gatekeeper":  map[string]any{"revisions": revisions},
+			"change_sets": []any{map[string]any{"repository_ref": "workspace://repo", "branch": branch, "commit_sha": revision.SHA, "metadata": map[string]string{"remote_repository": revision.Repository, "target_branch": "main"}}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	want, err := releasegate.RevisionMatrixDigest([]releasegate.Revision{revision})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := qaPublishedMatrixDigest(context.Background(), matrixPayload([]releasegate.Revision{revision}), targets); err != nil || got != want {
+		t.Fatalf("published matrix binding: %s %v", got, err)
+	}
+	for _, field := range []string{"repository", "branch", "sha"} {
+		wrong := revision
+		switch field {
+		case "repository":
+			wrong.Repository = "acme/other"
+		case "branch":
+			wrong.Branch = "other"
+		case "sha":
+			wrong.SHA = strings.Repeat("b", 40)
+		}
+		if _, err := qaPublishedMatrixDigest(context.Background(), matrixPayload([]releasegate.Revision{wrong}), targets); err == nil {
+			t.Fatalf("wrong matrix %s accepted", field)
+		}
+	}
+	if _, err := qaPublishedMatrixDigest(context.Background(), matrixPayload([]releasegate.Revision{revision}), nil); err == nil {
+		t.Fatal("omitted repository accepted")
 	}
 }

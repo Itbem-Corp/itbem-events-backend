@@ -693,6 +693,9 @@ func (w *Worker) Process(ctx context.Context, message TaskMessage) error {
 			return w.failWithProviderResult(ctx, message.Payload.TaskID, runID, requestRef, message.Payload.Operation, completion, err)
 		}
 		toolExecutions = stagehandToolExecutions(qaResult, artifactReferences)
+		if observation, ok := qaResult["ledger_observation"].(map[string]any); ok {
+			execution = observation
+		}
 	}
 	output := map[string]any{
 		"schema_version":        1,
