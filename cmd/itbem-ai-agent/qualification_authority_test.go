@@ -3,7 +3,6 @@ package main
 import (
 	"events-stocks/internal/agentwork"
 	"events-stocks/internal/automationagent"
-	"fmt"
 	"testing"
 )
 
@@ -24,7 +23,7 @@ func TestDoctorPublicationReadinessRequiresRoleSpecificGitHubAppConfiguration(t 
 				workspaces, provider, runtime, app := mask&1 != 0, mask&2 != 0, mask&4 != 0, mask&8 != 0
 				want := workspaces && provider && runtime && (!role.publication || app)
 				if got := doctorExecutionReady(workspaces, provider, runtime, app, config); got != want {
-					t.Fatal(fmt.Sprintf("readiness mask %04b = %v, want %v; publication required=%v", mask, got, want, role.publication))
+					t.Fatalf("readiness mask %04b = %v, want %v; publication required=%v", mask, got, want, role.publication)
 				}
 			}
 		})
