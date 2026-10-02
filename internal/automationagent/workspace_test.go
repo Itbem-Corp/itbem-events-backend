@@ -603,6 +603,14 @@ func testSyncManagedWorkspaceBranch(t *testing.T, branch string) {
 	if _, err := SyncManagedWorkspace(context.Background(), workspace); err == nil || !strings.Contains(err.Error(), "local changes") {
 		t.Fatalf("dirty managed checkout must not be switched: %v", err)
 	}
+	local, err := os.ReadFile(filepath.Join(root, "local.txt"))
+	if err != nil || string(local) != "do not overwrite" {
+		t.Fatalf("refused synchronization changed local work: %v", err)
+	}
+	head, err := runLocal(context.Background(), root, commandTimeout, "", "git", "rev-parse", "HEAD")
+	if err != nil || head.ExitCode != 0 || strings.TrimSpace(head.Output) != state.HeadSHA {
+		t.Fatalf("refused synchronization changed the checkout revision: %#v / %v", head, err)
+	}
 }
 
 func TestSyncManagedWorkspaceRejectsOriginThatDiffersFromRegisteredRemote(t *testing.T) {
