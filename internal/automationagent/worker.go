@@ -207,11 +207,12 @@ type WorkerConfig struct {
 }
 
 type Worker struct {
-	config   WorkerConfig
-	store    ObjectStore
-	callback TaskCallback
-	provider ProviderClient
-	now      func() time.Time
+	config          WorkerConfig
+	store           ObjectStore
+	callback        TaskCallback
+	provider        ProviderClient
+	releaseObserver func(context.Context, string, string, json.RawMessage) (map[string]any, error)
+	now             func() time.Time
 }
 
 type identityTaskCallback struct {
@@ -267,7 +268,15 @@ func NewWorker(config WorkerConfig, store ObjectStore, callback TaskCallback, pr
 		config.WorkerID = workerID.String()
 	}
 	identity := AgentIdentity{WorkerID: strings.TrimSpace(config.WorkerID), AgentKey: strings.TrimSpace(config.AgentKey), MachineID: strings.TrimSpace(config.MachineID)}
-	return &Worker{config: config, store: store, callback: identityTaskCallback{inner: callback, identity: identity}, provider: provider, now: time.Now}, nil
+	worker := &Worker{config: config, store: store, callback: identityTaskCallback{inner: callback, identity: identity}, provider: provider, now: time.Now}
+	if signed, ok := callback.(*HTTPCallback); ok {
+		if gateway, ok := store.(*HTTPGateway); ok {
+			worker.releaseObserver = func(ctx context.Context, taskID, runID string, delivery json.RawMessage) (map[string]any, error) {
+				return signed.ObserveRelease(ctx, gateway, taskID, runID, delivery)
+			}
+		}
+	}
+	return worker, nil
 }
 
 var objectBucketPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`)
@@ -409,7 +418,7 @@ func validateTaskMessageEnvelope(message TaskMessage) error {
 
 func allowedOperation(operation string) bool {
 	switch operation {
-	case "ai.chat", "document.analyze", "code.review", "product.ideate", "delivery.chat", "delivery.plan", "delivery.implementation", "delivery.assessment", "delivery.onboarding_probe", "delivery.publish", "delivery.qa", "delivery.summary":
+	case "ai.chat", "document.analyze", "code.review", "product.ideate", "delivery.chat", "delivery.plan", "delivery.implementation", "delivery.assessment", "delivery.onboarding_probe", "delivery.publish", "delivery.release_gate", "delivery.qa", "delivery.summary":
 		return true
 	default:
 		return false
@@ -481,6 +490,9 @@ func (w *Worker) Process(ctx context.Context, message TaskMessage) error {
 	var input TaskInput
 	if err := json.Unmarshal(raw, &input); err != nil {
 		return w.fail(ctx, message.Payload.TaskID, runID, fmt.Errorf("automation input must be UTF-8 JSON"))
+	}
+	if message.Payload.Operation == "delivery.release_gate" {
+		return w.processReleaseObservation(ctx, message.Payload.TaskID, runID, input)
 	}
 	if message.Payload.Operation == agentwork.OperationDeliveryOnboardingProbe {
 		return w.processOnboardingProbe(ctx, message.Payload.TaskID, runID, input)
@@ -1189,7 +1201,7 @@ func CompletionTokensForOperation(operation string) int {
 		return miniMaxM3CompletionLimit
 	case "product.ideate", "delivery.implementation":
 		return 8192
-	case "delivery.publish":
+	case "delivery.publish", "delivery.release_gate":
 		return 0
 	}
 	return DefaultCompletionTokens
