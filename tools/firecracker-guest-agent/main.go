@@ -7,16 +7,22 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
 
 const listenPort = 52
+const maxRequestBytes = 32768
+const maxOutputBytes = 12000
 
 type request struct {
 	Command string   `json:"command"`
@@ -61,25 +67,65 @@ func main() {
 func serve(fd int) {
 	file := osFile(fd)
 	defer file.Close()
-	decoder := json.NewDecoder(bufio.NewReader(file))
+	decoder := json.NewDecoder(bufio.NewReader(io.LimitReader(file, maxRequestBytes)))
 	var input request
 	if err := decoder.Decode(&input); err != nil {
 		writeResponse(file, response{Error: "invalid request"})
 		return
 	}
+	writeResponse(file, execute(input, 15*time.Second))
+}
+
+func execute(input request, timeout time.Duration) response {
 	if !allowed(input.Command) || len(input.Args) > 8 {
-		writeResponse(file, response{Error: "command is not allowlisted"})
-		return
+		return response{Error: "command is not allowlisted"}
 	}
-	command := exec.Command(input.Command, input.Args...)
-	var stdout, stderr strings.Builder
+	for _, arg := range input.Args {
+		if len(arg) > 2048 || strings.ContainsRune(arg, 0) {
+			return response{Error: "command arguments exceed the guest contract"}
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	command := exec.CommandContext(ctx, input.Command, input.Args...)
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	command.Cancel = func() error {
+		return syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+	}
+	command.WaitDelay = time.Second
+	command.Env = []string{"PATH=/usr/bin:/bin", "HOME=/tmp", "TMPDIR=/tmp", "LANG=C"}
+	var stdout, stderr boundedOutput
 	command.Stdout, command.Stderr = &stdout, &stderr
 	err := command.Run()
-	result := response{OK: err == nil, Stdout: stdout.String(), Stderr: stderr.String()}
+	result := response{OK: err == nil && !stdout.truncated && !stderr.truncated, Stdout: stdout.String(), Stderr: stderr.String()}
 	if err != nil {
-		result.Error = err.Error()
+		result.Error = "guest command failed"
 	}
-	writeResponse(file, result)
+	if ctx.Err() != nil {
+		result.Error = "guest command timed out"
+	}
+	if stdout.truncated || stderr.truncated {
+		result.Error = "guest output exceeded limit"
+	}
+	return result
+}
+
+// Continue draining pipes after truncation so an excessive writer cannot
+// block the guest agent. Truncation never counts as successful evidence.
+type boundedOutput struct {
+	strings.Builder
+	truncated bool
+}
+
+func (output *boundedOutput) Write(data []byte) (int, error) {
+	remaining := maxOutputBytes - output.Len()
+	if len(data) > remaining {
+		output.truncated = true
+		_, _ = output.Builder.Write(data[:remaining])
+	} else {
+		_, _ = output.Builder.Write(data)
+	}
+	return len(data), nil
 }
 
 func allowed(command string) bool {
