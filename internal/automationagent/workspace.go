@@ -419,8 +419,8 @@ func validateWorkspaceSandbox(config *WorkspaceConfig) error {
 }
 
 func validateSandboxSupervisorCommand(command []string) error {
-	if len(command) == 0 || len(command) > 8 {
-		return fmt.Errorf("firecracker sandbox requires one supervisor command with at most eight arguments")
+	if len(command) == 0 || len(command) > 16 {
+		return fmt.Errorf("firecracker sandbox requires one supervisor command with at most sixteen elements")
 	}
 	for index, part := range command {
 		part = strings.TrimSpace(part)
