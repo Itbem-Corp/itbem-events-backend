@@ -225,12 +225,12 @@ def delegated_jailer_parent(relative: str) -> pathlib.Path:
     return parent
 
 
-def verify_jailer_constraints(pid_file: pathlib.Path, cgroup: pathlib.Path, uid: int, gid: int) -> None:
+def verify_jailer_constraints(pid_file: pathlib.Path, cgroup: pathlib.Path, uid: int, gid: int, memory_limit: int = 268435456) -> None:
     pid = int(pid_file.read_text().strip())
     expected = "0::/" + str(cgroup.relative_to("/sys/fs/cgroup"))
     if pathlib.Path(f"/proc/{pid}/cgroup").read_text().strip() != expected:
         raise RuntimeError("Jailer child is outside its lease cgroup")
-    for filename, value in (("memory.max", "268435456"), ("pids.max", "128"), ("cpu.max", "100000 100000")):
+    for filename, value in (("memory.max", str(memory_limit)), ("pids.max", "128"), ("cpu.max", "100000 100000")):
         if " ".join((cgroup / filename).read_text().split()) != value:
             raise RuntimeError("Jailer resource limit was not enforced: " + filename)
     status = pathlib.Path(f"/proc/{pid}/status").read_text().splitlines()
@@ -347,8 +347,7 @@ def main() -> None:
         if not artifact.is_file():
             emit_failure(f"missing Firecracker artifact: {artifact}", request)
     use_jailer = profile == PROFILE_PRODUCTION and (force_jailer or os.environ.get("ITBEM_FIRECRACKER_USE_JAILER", "0") == "1")
-    if go_mode and use_jailer:
-        emit_failure("Go toolchain requires a qualified jailer memory and scratch profile before production admission", request)
+    jail_memory_limit = 1073741824 if go_mode else 268435456
     if use_jailer:
         try:
             delegated_parent = delegated_jailer_parent(cgroup_parent or "")
@@ -496,7 +495,7 @@ def main() -> None:
                 "--cgroup-version", "2",
                 "--parent-cgroup", cgroup_parent,
                 "--cgroup", "cpu.max=100000 100000",
-                "--cgroup", "memory.max=268435456",
+                "--cgroup", f"memory.max={jail_memory_limit}",
                 "--cgroup", "pids.max=128",
                 "--resource-limit", "no-file=4096",
                 "--resource-limit", "fsize=536870912",
@@ -523,7 +522,11 @@ def main() -> None:
             shutil.copy2(rootfs, jail_root / "rootfs.ext4")
             if worktree_mode:
                 shutil.copy2(worktree_image, jail_root / "worktree.ext4")
-            for resource_path in (jail_root / "vmlinux", jail_root / "rootfs.ext4", jail_root / "worktree.ext4"):
+            if go_mode:
+                shutil.copyfile(sdk_image, jail_root / "sdk.ext4")
+                if hashlib.sha256((jail_root / "sdk.ext4").read_bytes()).hexdigest() != sdk_sha256:
+                    raise RuntimeError("jailed SDK image differs from operator pin")
+            for resource_path in (jail_root / "vmlinux", jail_root / "rootfs.ext4", jail_root / "worktree.ext4", jail_root / "sdk.ext4"):
                 if resource_path.exists():
                     os.chmod(resource_path, 0o644)
         for _ in range(100):
@@ -534,7 +537,7 @@ def main() -> None:
             raise RuntimeError("Firecracker API socket did not appear")
         if use_jailer:
             jailed_process = open_jailed_process(jail_root / (FIRECRACKER.name + ".pid"), jail_root / FIRECRACKER.name)
-            verify_jailer_constraints(jail_root / (FIRECRACKER.name + ".pid"), jail_cgroup, jailer_uid, jailer_gid)
+            verify_jailer_constraints(jail_root / (FIRECRACKER.name + ".pid"), jail_cgroup, jailer_uid, jailer_gid, jail_memory_limit)
         lifecycle["created"] = True
         kernel_path = "/vmlinux" if use_jailer else str(KERNEL)
         rootfs_path = "/rootfs.ext4" if use_jailer else str(rootfs)
@@ -544,7 +547,7 @@ def main() -> None:
         if worktree_mode:
             api_put(api_socket, "/drives/worktree", {"drive_id": "worktree", "path_on_host": worktree_path, "is_root_device": False, "is_read_only": True})
         if go_mode:
-            api_put(api_socket, "/drives/sdk", {"drive_id": "sdk", "path_on_host": str(sdk_image), "is_root_device": False, "is_read_only": True})
+            api_put(api_socket, "/drives/sdk", {"drive_id": "sdk", "path_on_host": "/sdk.ext4" if use_jailer else str(sdk_image), "is_root_device": False, "is_read_only": True})
         api_put(api_socket, "/machine-config", {"vcpu_count": 1, "mem_size_mib": 768 if go_mode else 128, "smt": False})
         vsock_api_path = "/run/v.sock" if use_jailer else str(vsock_socket)
         api_put(api_socket, "/vsock", {"guest_cid": 3, "uds_path": vsock_api_path})
