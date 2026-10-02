@@ -178,6 +178,34 @@ event/timeline projection, execution DAG, worker heartbeats, exact gate reason
 codes, Vault and policy diffs, environment reference names, and recovery state.
 The UI renders backend state; agent prose cannot synthesize a terminal status.
 
+## Live Docker execution qualification
+
+Run the opted-in integration test as the unprivileged worker account on a host
+with Docker available. The pinned toolchain image must be available; the first
+pull needs registry access, but repository commands have no network interface.
+
+```sh
+ITBEM_DOCKER_SANDBOX_E2E=1 go test -json -race -count=1 \
+  -run '^TestDockerSandbox' ./internal/automationagent > docker-sandbox.jsonl
+python3 scripts/verify_go_test_evidence.py docker-sandbox.jsonl \
+  TestDockerSandboxRoundTrip \
+  TestDockerSandboxUserPreservesUnprivilegedOwnership \
+  TestDockerSandboxConfigurationIsExplicitAndResourceBounded
+```
+
+The round-trip must actually execute a repository Go test, write its isolated
+worktree, and verify non-root identity, no effective capabilities,
+no-new-privileges, no external network interface, read-only root filesystem,
+no Docker socket, and no inherited host-only environment canary. An explicit
+qualification request fails if Docker is missing.
+
+On Unix, the container UID matches the unprivileged worker that owns the
+worktree; UID or GID zero is never selected. Root or unsupported host identities
+use the unprivileged numeric fallback and do not receive permission changes to
+the host checkout. `/tmp` remains noexec; Go test binaries execute only from
+the separate bounded, container-only `/sandbox-tmp` mount. This Docker check
+does not certify Firecracker isolation or the five-role delivery workflow.
+
 ## Live staging qualification
 
 Use one onboarded test project whose configuration is not embedded in platform
@@ -250,3 +278,16 @@ For the exact approved subject:
 Every item must be represented by immutable control-plane evidence and an
 ordered ledger event. Missing, stale, malformed or contradictory evidence is a
 block, never a warning that an agent may override.
+
+Sandbox source binding uses the versioned `itbem-sandbox-source-v1` manifest,
+not a hash of the host path. It binds each sorted relative filename, executable
+bit, byte length and SHA-256 content digest. Git metadata and installed
+dependencies (`node_modules`, `.next`, `.venv`, `venv`) are excluded; dependency
+qualification remains an independent gate. Credential filenames are rejected
+before reading, including reserved `.aws`, `.ssh`, `.local`, `.codex` and
+`.config` authority directories, apart from explicit `.env.example`, `.env.sample` and
+`.env.template` templates. Symlinks, non-regular files and oversized transfers
+fail closed. The guest supervisor verifies the content digest again over the
+actual staged snapshot before building its read-only worktree image. This
+manifest check does not prove a running VM or qualify an arbitrary guest
+toolchain; those require the live lifecycle and engineering workflow evidence.

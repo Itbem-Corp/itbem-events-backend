@@ -2,7 +2,6 @@ package automationagent
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -31,9 +30,12 @@ func sandboxTaskID(ctx context.Context) string {
 	return ""
 }
 
-func newSandboxLease(ctx context.Context, workspace Workspace, directory string) map[string]any {
+func newSandboxLease(ctx context.Context, workspace Workspace, directory string) (map[string]any, error) {
 	root, _ := filepath.Abs(directory)
-	digest := sandboxWorktreeDigest(root)
+	digest, err := sandboxWorktreeDigest(root)
+	if err != nil {
+		return nil, fmt.Errorf("bind sandbox worktree: %w", err)
+	}
 	runtime := strings.ToLower(strings.TrimSpace(workspace.Config.SandboxRuntime))
 	if runtime == "" {
 		runtime = WorkspaceSandboxProcess
@@ -64,11 +66,7 @@ func newSandboxLease(ctx context.Context, workspace Workspace, directory string)
 			}
 		}
 	}
-	return lease
-}
-
-func sandboxWorktreeDigest(root string) [32]byte {
-	return sha256.Sum256([]byte(strings.TrimSpace(root)))
+	return lease, nil
 }
 
 func finishSandboxLease(lease map[string]any, runErr error) {
@@ -120,7 +118,10 @@ func runWorkspaceCommand(parent context.Context, workspace Workspace, directory 
 }
 
 func runWorkspaceCommandUninstrumented(parent context.Context, workspace Workspace, directory string, timeout time.Duration, input string, environment map[string]string, command string, arguments ...string) (commandResult, error) {
-	lease := newSandboxLease(parent, workspace, directory)
+	lease, bindingErr := newSandboxLease(parent, workspace, directory)
+	if bindingErr != nil {
+		return commandResult{}, bindingErr
+	}
 	runtime := strings.ToLower(strings.TrimSpace(workspace.Config.SandboxRuntime))
 	if workspace.Config.RequireSandbox && runtime != WorkspaceSandboxDocker && runtime != WorkspaceSandboxFirecracker {
 		err := fmt.Errorf("workspace requires Docker sandbox execution or Firecracker sandbox execution")
@@ -131,7 +132,8 @@ func runWorkspaceCommandUninstrumented(parent context.Context, workspace Workspa
 	var runErr error
 	if runtime == WorkspaceSandboxFirecracker {
 		leaseID, _ := lease["lease_id"].(string)
-		result, runErr = runFirecrackerSandboxCommand(parent, workspace, directory, leaseID, timeout, input, environment, command, arguments...)
+		contentDigest, _ := lease["worktree_digest"].(string)
+		result, runErr = runFirecrackerSandboxCommand(parent, workspace, directory, leaseID, contentDigest, timeout, input, environment, command, arguments...)
 	} else if runtime != WorkspaceSandboxDocker {
 		result, runErr = runLocalWithEnv(parent, directory, timeout, input, environment, command, arguments...)
 	} else {
@@ -192,7 +194,7 @@ type firecrackerSupervisorLifecycle struct {
 	AttestationPersisted bool `json:"attestation_persisted"`
 }
 
-func runFirecrackerSandboxCommand(parent context.Context, workspace Workspace, directory, leaseID string, timeout time.Duration, input string, environment map[string]string, command string, arguments ...string) (commandResult, error) {
+func runFirecrackerSandboxCommand(parent context.Context, workspace Workspace, directory, leaseID, contentDigest string, timeout time.Duration, input string, environment map[string]string, command string, arguments ...string) (commandResult, error) {
 	taskID := sandboxTaskID(parent)
 	if taskID == "" || strings.TrimSpace(leaseID) == "" {
 		return commandResult{}, fmt.Errorf("firecracker sandbox requires a task-scoped context")
@@ -211,7 +213,13 @@ func runFirecrackerSandboxCommand(parent context.Context, workspace Workspace, d
 	if err != nil || !info.IsDir() {
 		return commandResult{}, fmt.Errorf("firecracker workspace directory is unavailable")
 	}
-	digest := sandboxWorktreeDigest(root)
+	digest, err := sandboxWorktreeDigest(root)
+	if err != nil {
+		return commandResult{}, fmt.Errorf("bind firecracker worktree: %w", err)
+	}
+	if contentDigest != "sha256:"+hex.EncodeToString(digest[:]) {
+		return commandResult{}, fmt.Errorf("firecracker source changed after the sandbox lease was created")
+	}
 	request := firecrackerSupervisorRequest{
 		ProtocolVersion: 1,
 		Operation:       "execute",
@@ -219,7 +227,7 @@ func runFirecrackerSandboxCommand(parent context.Context, workspace Workspace, d
 		TaskID:          taskID,
 		WorkspaceID:     workspace.ID,
 		WorkspacePath:   root,
-		WorktreeDigest:  "sha256:" + hex.EncodeToString(digest[:]),
+		WorktreeDigest:  contentDigest,
 		Command:         command,
 		Args:            append([]string(nil), arguments...),
 		Input:           input,
@@ -336,15 +344,19 @@ func dockerSandboxArguments(workspace Workspace, directory, containerName string
 	result := []string{
 		"run", "--rm", "--init", "--name", containerName,
 		"--cap-drop=ALL", "--security-opt=no-new-privileges",
-		// Repository-owned commands never need to run as root. A numeric UID is
-		// portable across the pinned images and avoids relying on an image's
-		// passwd database. The mounted worktree is the only writable project
-		// surface and the temporary caches are explicitly redirected below.
-		"--user", "65532:65532",
+		// Match the unprivileged worker that owns the bind-mounted worktree.
+		// A fixed unrelated UID cannot modify normal 0755/0644 Git checkouts.
+		// Root/unsupported host identities retain an unprivileged fallback;
+		// never chown the host checkout or grant world-write permissions.
+		"--user", dockerSandboxUser(os.Getuid(), os.Getgid()),
 		"--read-only", "--network", network,
 		"--cpus", cpus, "--memory", memory, "--pids-limit", fmt.Sprint(pids),
 		"--ulimit", "nofile=1024:1024",
 		"--tmpfs", "/tmp:rw,noexec,nosuid,size=512m",
+		// Go executes its compiled test binary from GOTMPDIR. Keep ordinary
+		// temporary files noexec and scope executable scratch to this bounded,
+		// container-only mount (never a host directory).
+		"--tmpfs", "/sandbox-tmp:rw,exec,nosuid,nodev,size=512m,mode=1777",
 		"--tmpfs", "/root:rw,nosuid,size=512m",
 		"--tmpfs", "/home:rw,noexec,nosuid,size=256m",
 		"--volume", filepath.Clean(directory) + ":/workspace:rw",
@@ -352,6 +364,7 @@ func dockerSandboxArguments(workspace Workspace, directory, containerName string
 		"--env", "HOME=/tmp",
 		"--env", "GOCACHE=/tmp/go-cache",
 		"--env", "GOMODCACHE=/tmp/go-mod-cache",
+		"--env", "GOTMPDIR=/sandbox-tmp",
 	}
 	keys := make([]string, 0, len(environment))
 	for key := range environment {
@@ -375,4 +388,14 @@ func dockerSandboxArguments(workspace Workspace, directory, containerName string
 	}
 	result = append(result, image, command)
 	return append(result, arguments...)
+}
+
+func dockerSandboxUser(uid, gid int) string {
+	if uid <= 0 || gid < 0 {
+		return "65532:65532"
+	}
+	if gid == 0 {
+		gid = 65532
+	}
+	return fmt.Sprintf("%d:%d", uid, gid)
 }

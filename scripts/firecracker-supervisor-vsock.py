@@ -18,11 +18,11 @@ import re
 import resource
 import shutil
 import socket
-import stat
 import subprocess
 import sys
 import tempfile
 import time
+from sandbox_worktree import snapshot_worktree
 
 ROOT = pathlib.Path("/tmp/itbem-firecracker")
 FIRECRACKER = ROOT / "release-v1.7.0-x86_64" / "firecracker-v1.7.0-x86_64"
@@ -86,41 +86,8 @@ def debugfs(rootfs: pathlib.Path, command: str) -> None:
 
 
 def stage_worktree(source: pathlib.Path, destination: pathlib.Path) -> tuple[int, int]:
-    """Copy a bounded, regular-file-only worktree into a disposable staging tree."""
-    source = source.resolve(strict=True)
-    if not source.is_dir():
-        raise RuntimeError("workspace_path must resolve to a directory")
-    files = 0
-    total = 0
-    destination.mkdir(parents=True, exist_ok=True)
-    for root, dirs, names in os.walk(source, topdown=True, followlinks=False):
-        root_path = pathlib.Path(root)
-        dirs.sort()
-        names.sort()
-        # A symlinked directory is never traversed; rejecting it keeps the
-        # source boundary explicit instead of silently following an escape.
-        for name in list(dirs):
-            candidate = root_path / name
-            if candidate.is_symlink():
-                raise RuntimeError(f"workspace contains a symlinked directory: {candidate}")
-        for name in names:
-            candidate = root_path / name
-            relative = candidate.relative_to(source)
-            if len(relative.parts) > 32 or any(part in ("", ".", "..") for part in relative.parts):
-                raise RuntimeError(f"workspace file path is invalid: {relative}")
-            info = candidate.lstat()
-            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-                raise RuntimeError(f"workspace contains a non-regular file: {relative}")
-            if info.st_size > MAX_WORKTREE_FILE_BYTES:
-                raise RuntimeError(f"workspace file exceeds the bounded transfer limit: {relative}")
-            files += 1
-            total += info.st_size
-            if files > MAX_WORKTREE_FILES or total > MAX_WORKTREE_BYTES:
-                raise RuntimeError("workspace exceeds the bounded transfer limit")
-            target = destination / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(candidate, target)
-            os.chmod(target, info.st_mode & 0o777)
+    """Compatibility wrapper over the credential-free content-bound snapshot."""
+    _, files, total = snapshot_worktree(source, destination)
     return files, total
 
 
@@ -198,9 +165,12 @@ def main() -> None:
     if any(not str(request.get(field, "")).strip() for field in required):
         emit_failure("supervisor request is missing task-scoped binding", request)
     workspace_path = pathlib.Path(str(request["workspace_path"])).absolute()
-    digest = "sha256:" + hashlib.sha256(str(workspace_path).strip().encode()).hexdigest()
+    try:
+        digest, _, _ = snapshot_worktree(workspace_path)
+    except (OSError, RuntimeError, UnicodeError) as exc:
+        emit_failure(f"worktree content binding failed: {exc}", request)
     if request["worktree_digest"] != digest:
-        emit_failure("worktree digest does not match the bound workspace path", request)
+        emit_failure("worktree digest does not match the bound source content", request)
     command = str(request.get("command", ""))
     args = request.get("args") or []
     # The guest agent has a narrow allow-list. The binding mode is retained for
@@ -254,7 +224,14 @@ def main() -> None:
     worktree_files = 0
     worktree_bytes = 0
     if worktree_mode:
-        worktree_files, worktree_bytes = stage_worktree(workspace_path, staging)
+        try:
+            staged_digest, worktree_files, worktree_bytes = snapshot_worktree(workspace_path, staging)
+        except (OSError, RuntimeError, UnicodeError) as exc:
+            shutil.rmtree(workdir)
+            emit_failure(f"worktree staging failed: {exc}", request)
+        if staged_digest != request["worktree_digest"]:
+            shutil.rmtree(workdir)
+            emit_failure("worktree source changed before guest staging", request)
         build_worktree_image(staging, worktree_image, worktree_bytes)
     binding.write_text(
         f"task_id={request['task_id']}\nworkspace_id={request['workspace_id']}\nworktree_digest={request['worktree_digest']}\n",
