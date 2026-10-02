@@ -227,6 +227,20 @@ func TestResolveProviderModelLimitsForOpenAIDeepSeekOpenRouterAndMiniMax(t *test
 		// MiniMax's adapter cap is stricter than the published output value.
 		{ProviderMiniMax, "MiniMax-M3", "unique-minimax-limit-key", inferenceModelLimits{ContextWindowTokens: 1000000, MaxOutputTokens: miniMaxM3CompletionLimit}},
 	}
+	// Each -count iteration needs cold fixture identities to prove both the
+	// first lookup and reuse. Remove only this test's keys, preserving unrelated
+	// account entries and the production TTL/identity behaviour.
+	resetFixtureEntries := func() {
+		inferenceModelLimitsCache.Lock()
+		defer inferenceModelLimitsCache.Unlock()
+		for _, test := range tests {
+			if key, available := inferenceModelLimitsCacheKey(test.provider, test.model, test.apiKey); available {
+				delete(inferenceModelLimitsCache.entries, key)
+			}
+		}
+	}
+	resetFixtureEntries()
+	t.Cleanup(resetFixtureEntries)
 	for _, test := range tests {
 		t.Run(string(test.provider), func(t *testing.T) {
 			limits, err := resolveProviderModelLimits(context.Background(), test.provider, test.model, test.apiKey, client)
