@@ -25,7 +25,11 @@ func TestRealFirecrackerVirtioVsockSupervisorLifecycle(t *testing.T) {
 		supervisorCommand = append(supervisorCommand, "--profile", profile)
 	}
 	if os.Getenv("ITBEM_FIRECRACKER_TEST_JAILER") == "1" {
-		supervisorCommand = append(supervisorCommand, "--jailer")
+		parent := strings.TrimSpace(os.Getenv("ITBEM_FIRECRACKER_TEST_CGROUP_PARENT"))
+		if parent == "" {
+			t.Fatal("jailer qualification requires the supervisor's delegated cgroup parent")
+		}
+		supervisorCommand = append(supervisorCommand, "--jailer", "--cgroup-parent", parent)
 	}
 	root := t.TempDir()
 	marker := "workspace-content-from-control-plane"

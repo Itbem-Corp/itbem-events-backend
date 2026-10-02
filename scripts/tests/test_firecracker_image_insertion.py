@@ -21,6 +21,9 @@ class ImageInsertionTest(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('fixture_supervisor', scripts / 'firecracker-supervisor-vsock.py')
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+        for invalid in ('', '/', '/system.slice/foreign.service', '../foreign', 'system.slice/../foreign', 'system.slice//foreign.service', 'system.slice/foreign.service'):
+            with self.assertRaises(RuntimeError):
+                module.delegated_jailer_parent(invalid)
         events = [{'Action': 'run', 'Package': 'fixture', 'Test': 'TestReal'},
                   {'Action': 'pass', 'Package': 'fixture', 'Test': 'TestReal'},
                   {'Action': 'pass', 'Package': 'fixture'}]
