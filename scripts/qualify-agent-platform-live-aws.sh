@@ -119,6 +119,11 @@ python3 scripts/verify_go_test_evidence.py "$report_file" \
   TestLocalStackTransportRoundTrip \
   TestLocalStackRedeliveryReusesDurableResultWithoutProviderRepeat \
   TestLocalStackRoleAdmissionKeepsCrossLaneDeliveriesUnclaimed \
+  TestLocalStackRoleAdmissionKeepsCrossLaneDeliveriesUnclaimed/orchestration \
+  TestLocalStackRoleAdmissionKeepsCrossLaneDeliveriesUnclaimed/engineering \
+  TestLocalStackRoleAdmissionKeepsCrossLaneDeliveriesUnclaimed/review \
+  TestLocalStackRoleAdmissionKeepsCrossLaneDeliveriesUnclaimed/qa \
+  TestLocalStackRoleAdmissionKeepsCrossLaneDeliveriesUnclaimed/release \
   TestLocalGatewayFiveLaneTransportRoundTrip \
   TestLocalGatewayFiveLaneTransportRoundTrip/orchestration \
   TestLocalGatewayFiveLaneTransportRoundTrip/engineering \
