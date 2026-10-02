@@ -7,6 +7,7 @@ compose_file="$repository_root/deploy/staging/aws-emulator.compose.yml"
 emulator_port=${ITBEM_AWS_EMULATOR_PORT:-14566}
 container_name="itbem-agent-qualification-$$"
 container_may_exist=0
+report_file=''
 emulator_image=$(awk '$1 == "image:" { print $2; exit }' "$compose_file" | tr -d '\r')
 
 case "$emulator_port" in
@@ -28,6 +29,7 @@ case "$emulator_image" in
 esac
 
 cleanup() {
+  [ -z "$report_file" ] || rm -f -- "$report_file"
   [ "$container_may_exist" -eq 1 ] || return 0
   docker rm -f "$container_name" >/dev/null 2>&1 || true
 }
@@ -91,11 +93,15 @@ if [ "$ready" -ne 1 ]; then
 fi
 
 cd "$repository_root"
+report_file=$(mktemp)
 AWS_ACCESS_KEY_ID=test \
 AWS_SECRET_ACCESS_KEY=test \
 AWS_REGION=us-east-1 \
-ITBEM_AWS_EMULATOR_E2E=1 \
-ITBEM_AWS_EMULATOR_ENDPOINT="http://127.0.0.1:$emulator_port" \
-go test ./internal/automationagent -run '^TestAWSEmulator' -count=1
+ITBEM_LOCALSTACK_E2E=1 \
+ITBEM_LOCALSTACK_ENDPOINT="http://127.0.0.1:$emulator_port" \
+go test ./internal/automationagent -run '^TestLocalStack(TransportRoundTrip|RedeliveryReusesDurableResultWithoutProviderRepeat)$' -count=1 -timeout 180s -json > "$report_file"
+python3 scripts/verify_go_test_evidence.py "$report_file" \
+  TestLocalStackTransportRoundTrip \
+  TestLocalStackRedeliveryReusesDurableResultWithoutProviderRepeat
 
-printf '\nLive AWS-emulator transport and isolated role-lane qualification passed.\n'
+printf '\nLive AWS-emulator transport and durable redelivery qualification passed.\n'
