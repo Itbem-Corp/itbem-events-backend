@@ -48,7 +48,12 @@ func TestDockerSandboxConfigurationIsExplicitAndResourceBounded(t *testing.T) {
 	}
 	args := dockerSandboxArguments(Workspace{Config: config}, t.TempDir(), "sandbox-test", map[string]string{"GIT_TERMINAL_PROMPT": "0"}, "go", "test", "./...")
 	joined := strings.Join(args, " ")
-	for _, required := range []string{"--network none", "--cpus 2", "--memory 2g", "--pids-limit 256", "--ulimit nofile=1024:1024", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--user 65532:65532", "--read-only", "--tmpfs /tmp:rw,noexec,nosuid,size=512m", "--env HOME=/tmp", "--env GOCACHE=/tmp/go-cache", "--env GOMODCACHE=/tmp/go-mod-cache", "--env GIT_TERMINAL_PROMPT=0", "golang:1.25-bookworm", "go test ./..."} {
+	for _, required := range []string{"--tmpfs /sandbox-tmp:rw,exec,nosuid,nodev,size=512m,mode=1777", "--env GOTMPDIR=/sandbox-tmp"} {
+		if !strings.Contains(joined, required) {
+			t.Fatalf("sandbox executable scratch must remain bounded and container-only: missing %q", required)
+		}
+	}
+	for _, required := range []string{"--network none", "--cpus 2", "--memory 2g", "--pids-limit 256", "--ulimit nofile=1024:1024", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--user " + dockerSandboxUser(os.Getuid(), os.Getgid()), "--read-only", "--tmpfs /tmp:rw,noexec,nosuid,size=512m", "--env HOME=/tmp", "--env GOCACHE=/tmp/go-cache", "--env GOMODCACHE=/tmp/go-mod-cache", "--env GIT_TERMINAL_PROMPT=0", "golang:1.25-bookworm", "go test ./..."} {
 		if !strings.Contains(joined, required) {
 			t.Fatalf("docker sandbox args missing %q: %v", required, args)
 		}

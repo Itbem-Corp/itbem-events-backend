@@ -336,15 +336,19 @@ func dockerSandboxArguments(workspace Workspace, directory, containerName string
 	result := []string{
 		"run", "--rm", "--init", "--name", containerName,
 		"--cap-drop=ALL", "--security-opt=no-new-privileges",
-		// Repository-owned commands never need to run as root. A numeric UID is
-		// portable across the pinned images and avoids relying on an image's
-		// passwd database. The mounted worktree is the only writable project
-		// surface and the temporary caches are explicitly redirected below.
-		"--user", "65532:65532",
+		// Match the unprivileged worker that owns the bind-mounted worktree.
+		// A fixed unrelated UID cannot modify normal 0755/0644 Git checkouts.
+		// Root/unsupported host identities retain an unprivileged fallback;
+		// never chown the host checkout or grant world-write permissions.
+		"--user", dockerSandboxUser(os.Getuid(), os.Getgid()),
 		"--read-only", "--network", network,
 		"--cpus", cpus, "--memory", memory, "--pids-limit", fmt.Sprint(pids),
 		"--ulimit", "nofile=1024:1024",
 		"--tmpfs", "/tmp:rw,noexec,nosuid,size=512m",
+		// Go executes its compiled test binary from GOTMPDIR. Keep ordinary
+		// temporary files noexec and scope executable scratch to this bounded,
+		// container-only mount (never a host directory).
+		"--tmpfs", "/sandbox-tmp:rw,exec,nosuid,nodev,size=512m,mode=1777",
 		"--tmpfs", "/root:rw,nosuid,size=512m",
 		"--tmpfs", "/home:rw,noexec,nosuid,size=256m",
 		"--volume", filepath.Clean(directory) + ":/workspace:rw",
@@ -352,6 +356,7 @@ func dockerSandboxArguments(workspace Workspace, directory, containerName string
 		"--env", "HOME=/tmp",
 		"--env", "GOCACHE=/tmp/go-cache",
 		"--env", "GOMODCACHE=/tmp/go-mod-cache",
+		"--env", "GOTMPDIR=/sandbox-tmp",
 	}
 	keys := make([]string, 0, len(environment))
 	for key := range environment {
@@ -375,4 +380,14 @@ func dockerSandboxArguments(workspace Workspace, directory, containerName string
 	}
 	result = append(result, image, command)
 	return append(result, arguments...)
+}
+
+func dockerSandboxUser(uid, gid int) string {
+	if uid <= 0 || gid < 0 {
+		return "65532:65532"
+	}
+	if gid == 0 {
+		gid = 65532
+	}
+	return fmt.Sprintf("%d:%d", uid, gid)
 }
