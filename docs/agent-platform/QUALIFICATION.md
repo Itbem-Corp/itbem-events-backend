@@ -93,8 +93,11 @@ unconsumed. Twenty attempts to use another role's token with forged identity
 headers, twenty cross-role input reads and twenty cross-role acknowledgements
 must return 401; same-role
 cross-task reads and input mutation must return 403. Execution clients have no
-AWS credentials. The runner validates JSON events for all three root tests and
-all five lane subtests, refusing missing execution, skips or failures.
+AWS credentials. The runner validates JSON events for all four root tests and
+all five lane subtests in both gateway transport and worker role admission,
+refusing missing execution, skips or failures. The worker admission fixture
+proves cross-role SQS deliveries remain unclaimed without callback or provider
+calls; it does not prove successful execution of engineering operations.
 
 Full five-role engineering qualification remains pending: execute the actual
 worker operations, reject wrong-role deliveries before a task callback or model

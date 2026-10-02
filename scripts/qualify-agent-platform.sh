@@ -10,7 +10,11 @@ set -eu
 run() {
   printf '\n==> %s\n' "$1"
   shift
-  "$@"
+  if [ "$1" = go ] && [ "${2:-}" = test ]; then
+    python3 scripts/run_required_go_tests.py "$@"
+  else
+    "$@"
+  fi
 }
 
 # A clean `git worktree` retains only each submodule's gitlink. Initialize the
@@ -32,6 +36,9 @@ run "generic onboarding, monorepo discovery and prompt-injection boundary" \
 
 run "single-repository worktree and exact reviewed diff" \
   go test ./internal/automationagent -run 'TestRunImplementationUsesIsolatedWorktree$' -count=1
+
+run "model-free QA worker with exact-revision evidence" \
+  go test ./internal/automationagent -run 'TestWorkerRunsOnboardingProbeDeterministicallyWithoutProvider$' -count=1
 
 run "heterogeneous discovery and coordinated multi-repository worktrees" \
   go test ./internal/automationagent -run 'Test(DescribeWorkspaceBuildsAnEvidenceBasedArchitectureMap|RunImplementationCreatesIndependentWorktreesForEveryChangedRepository|TopologicalRepositoryOrderRunsDependenciesBeforeConsumers)$' -count=1
