@@ -79,6 +79,9 @@ run "QA worker validates the complete frozen source matrix before acquisition" \
 run "QA worker imports independent source executes tests and recovers without a new fetch or inference" \
   go test ./internal/automationagent -run 'TestQAWorkerAcquiresIndependentSourceRunsTestsAndRecoversWithoutNewFetch$' -count=1
 
+run "QA pinned dependency discovery treats Gitmodule declarations as data and requires repository approval" \
+  go test ./internal/automationagent -run 'TestQASourceDependenciesRequireApprovedRepositoryAndOriginalGitlinkSHA$' -count=1
+
 run "QA ledger observations preserve failures independently of model summaries" \
   go test ./internal/automationagent -run 'TestQALedgerObservationPreservesObservedFailuresAndRejectsMalformedEvidence$' -count=1
 
