@@ -68,6 +68,20 @@ func TestQASourceBundlePublishesOnlyAfterPinnedChildVerification(t *testing.T) {
 				if err != nil || string(contents) != "stable source\n" {
 					t.Fatal("bundle lost unchanged pinned dependency source")
 				}
+				reused, err := materializePublishedQASourceBundle(context.Background(), workspace, branch, rootSHA, digest, rootPack, approved, []packedQASourceDependency{child})
+				if err != nil || reused != target {
+					t.Fatalf("exact bundle was not reused: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(childRoot, "untracked.txt"), []byte("unapproved source"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := materializePublishedQASourceBundle(context.Background(), workspace, branch, rootSHA, digest, rootPack, approved, []packedQASourceDependency{child}); err == nil {
+					t.Fatal("dirty dependency was accepted or repaired")
+				}
+				body, err := os.ReadFile(filepath.Join(childRoot, "untracked.txt"))
+				if err != nil || string(body) != "unapproved source" {
+					t.Fatal("rejected bundle reuse changed existing source")
+				}
 			} else {
 				if err == nil {
 					t.Fatal("invalid child published an incomplete bundle")

@@ -31,7 +31,7 @@ func materializePublishedQASourcePack(ctx context.Context, workspace Workspace, 
 	if !strings.HasPrefix(branch, "itbem-agent/") || !taskIDPattern.MatchString(strings.TrimPrefix(branch, "itbem-agent/")) || !gitCommitPattern.MatchString(commit) || !sha256DigestPattern.MatchString(packDigest) {
 		return "", fmt.Errorf("QA source identity invalid")
 	}
-	if len(pack) < 12 || len(pack) > maxQASourcePackBytes || string(pack[:4]) != "PACK" || binary.BigEndian.Uint32(pack[4:8]) != 2 || binary.BigEndian.Uint32(pack[8:12]) < 1 || binary.BigEndian.Uint32(pack[8:12]) > 3*maxQASourceTreeFiles || fmt.Sprintf("%x", sha256.Sum256(pack)) != packDigest {
+	if !validQASourcePackEnvelope(packDigest, pack) {
 		return "", fmt.Errorf("QA source pack integrity or bound invalid")
 	}
 	_, remote, required, err := gitHubSourceWorkspaceRemote(workspace)
@@ -117,6 +117,10 @@ func materializePublishedQASourcePack(ctx context.Context, workspace Workspace, 
 	return target, nil
 }
 
+func validQASourcePackEnvelope(digest string, pack []byte) bool {
+	return len(pack) >= 12 && len(pack) <= maxQASourcePackBytes && string(pack[:4]) == "PACK" && binary.BigEndian.Uint32(pack[4:8]) == 2 && binary.BigEndian.Uint32(pack[8:12]) >= 1 && binary.BigEndian.Uint32(pack[8:12]) <= 3*maxQASourceTreeFiles && sha256DigestPattern.MatchString(digest) && fmt.Sprintf("%x", sha256.Sum256(pack)) == digest
+}
+
 func verifyQASourceRevision(ctx context.Context, root, branch, commit string) error {
 	for _, check := range []struct {
 		args     []string
@@ -147,6 +151,27 @@ func verifyQASourceLocalConfig(ctx context.Context, root string) error {
 	info, err := os.Lstat(filepath.Join(root, ".git"))
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("QA source Git directory must be private and real")
+	}
+	entries := 0
+	if err := filepath.WalkDir(filepath.Join(root, ".git"), func(name string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		entries++
+		if entries > 100000 || entry.Type()&os.ModeSymlink != 0 || (!entry.IsDir() && !entry.Type().IsRegular()) {
+			return fmt.Errorf("QA source Git authority contains unsupported filesystem entries")
+		}
+		relative, err := filepath.Rel(filepath.Join(root, ".git"), name)
+		if err != nil {
+			return err
+		}
+		switch filepath.ToSlash(relative) {
+		case "objects/info/alternates", "objects/info/http-alternates":
+			return fmt.Errorf("QA source Git authority cannot reference external objects")
+		}
+		return ctx.Err()
+	}); err != nil {
+		return err
 	}
 	bounded, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()

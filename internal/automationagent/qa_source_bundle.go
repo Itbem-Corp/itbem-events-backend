@@ -25,12 +25,15 @@ type packedQASourceDependency struct {
 // every separately approved child has its original pinned commit and origin.
 // Transport must authenticate the full descriptor set before calling it.
 func materializePublishedQASourceBundle(ctx context.Context, workspace Workspace, branch, commit, digest string, pack []byte, approved map[string]string, children []packedQASourceDependency) (string, error) {
-	if len(children) > 16 {
+	if len(children) > 16 || len(approved) > 16 || !gitCommitPattern.MatchString(commit) || !validQASourcePackEnvelope(digest, pack) {
 		return "", fmt.Errorf("QA source dependency count exceeds its boundary")
 	}
 	expected := map[string]string{}
 	var total int64 = int64(len(pack))
 	for _, child := range children {
+		if !validQASourcePackEnvelope(child.PackSHA256, child.Pack) {
+			return "", fmt.Errorf("QA source child package integrity invalid")
+		}
 		if !safeQADependencyPath(child.Path) || expected[child.Path] != "" || !gitCommitPattern.MatchString(child.CommitSHA) || !githubRepositoryNamePattern.MatchString(child.Repository) || !strings.EqualFold(approved[child.Path], child.Repository) {
 			return "", fmt.Errorf("QA source dependency is not explicitly approved")
 		}
@@ -62,9 +65,13 @@ func materializePublishedQASourceBundle(ctx context.Context, workspace Workspace
 		return "", fmt.Errorf("QA source bundle is already locked")
 	}
 	defer func() { _ = lock.Close(); _ = os.Remove(lockPath) }()
+	ctx = context.WithValue(ctx, qaSourceBundleBudgetKey{}, &qaSourceBundleBudget{bytes: maxQASourceTreeBytes, files: maxQASourceTreeFiles})
 	// Existing bundles are never replaced or partially repaired.
 	if _, err := os.Lstat(target); err == nil {
-		return "", fmt.Errorf("QA source bundle already exists; verified reuse requires the complete dependency manifest")
+		if err := verifyQASourceBundleCheckout(ctx, workspace, target, branch, commit, approved, expected, children); err != nil {
+			return "", err
+		}
+		return target, nil
 	} else if !os.IsNotExist(err) {
 		return "", err
 	}
@@ -75,7 +82,6 @@ func materializePublishedQASourceBundle(ctx context.Context, workspace Workspace
 	defer os.RemoveAll(holder)
 	stagedWorkspace := workspace
 	stagedWorkspace.Root = holder
-	ctx = context.WithValue(ctx, qaSourceBundleBudgetKey{}, &qaSourceBundleBudget{bytes: maxQASourceTreeBytes, files: maxQASourceTreeFiles})
 	rootCtx := context.WithValue(ctx, qaSourceDependencyBoundaryKey{}, expected)
 	stage, err := materializePublishedQASourcePack(rootCtx, stagedWorkspace, branch, commit, digest, pack)
 	if err != nil {
@@ -133,4 +139,61 @@ func materializePublishedQASourceBundle(ctx context.Context, workspace Workspace
 		return "", err
 	}
 	return target, nil
+}
+
+func verifyQASourceBundleCheckout(ctx context.Context, workspace Workspace, root, branch, commit string, approved, expected map[string]string, children []packedQASourceDependency) error {
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil || filepath.Clean(resolved) != filepath.Clean(root) {
+		return fmt.Errorf("QA source bundle checkout must be real")
+	}
+	if err := verifyQASourceLocalConfig(ctx, root); err != nil {
+		return err
+	}
+	_, remote, required, err := gitHubSourceWorkspaceRemote(workspace)
+	if err != nil || !required {
+		return fmt.Errorf("QA source bundle requires its registered repository")
+	}
+	if err := verifyQASourceOrigin(ctx, root, remote); err != nil {
+		return err
+	}
+	if err := validateQASourceTreeWithDependencies(ctx, root, commit, expected); err != nil {
+		return err
+	}
+	discovered, err := readPinnedQASourceDependencies(ctx, root, commit, approved)
+	if err != nil || len(discovered) != len(children) {
+		return fmt.Errorf("QA source bundle dependency manifest differs")
+	}
+	for _, child := range children {
+		matched := false
+		for _, dependency := range discovered {
+			if dependency == child.pinnedQASourceDependency {
+				matched = true
+			}
+		}
+		if !matched {
+			return fmt.Errorf("QA source bundle child does not match the frozen gitlink")
+		}
+		childRoot := filepath.Join(root, filepath.FromSlash(child.Path))
+		resolved, err := filepath.EvalSymlinks(childRoot)
+		if err != nil || filepath.Clean(resolved) != filepath.Clean(childRoot) {
+			return fmt.Errorf("QA source dependency checkout must be real")
+		}
+		if err := verifyQASourceLocalConfig(ctx, childRoot); err != nil {
+			return err
+		}
+		if err := verifyQASourceOrigin(ctx, childRoot, "https://github.com/"+child.Repository+".git"); err != nil {
+			return err
+		}
+		if err := validateQASourceTreeWithDependencies(ctx, childRoot, child.CommitSHA, nil); err != nil {
+			return err
+		}
+		if err := verifyQASourceRevision(ctx, childRoot, branch, child.CommitSHA); err != nil {
+			return err
+		}
+	}
+	if err := verifyQASourceRevision(ctx, root, branch, commit); err != nil {
+		return err
+	}
+	_, err = sandboxWorktreeDigest(root)
+	return err
 }
