@@ -3,6 +3,7 @@ package automationagent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -20,6 +21,14 @@ func (w *Worker) processReleaseObservation(ctx context.Context, taskID, runID st
 	}
 	handoff, err := w.releaseObserver(ctx, taskID, runID, input.Delivery)
 	if err != nil {
+		var retryable *RetryableError
+		if errors.As(err, &retryable) {
+			return retryable
+		}
+		var gatewayError *gatewayRequestError
+		if errors.As(err, &gatewayError) && gatewayResponseIsTransient(gatewayError.statusCode) {
+			return &RetryableError{Message: "release observation temporarily unavailable", RetryAfter: time.Minute}
+		}
 		return w.fail(ctx, taskID, runID, err)
 	}
 	raw, err := json.Marshal(handoff)

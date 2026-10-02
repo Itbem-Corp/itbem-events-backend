@@ -3,9 +3,11 @@ package automationagent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"events-stocks/internal/agentwork"
 	"events-stocks/internal/environmentevidence"
 	"events-stocks/internal/releasegate"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -32,6 +34,46 @@ func TestReleaseWorkerRefusesMissingSignedObserverWithoutInference(t *testing.T)
 	}
 	if CompletionTokensForOperation("delivery.release_gate") != 0 {
 		t.Fatal("release gate received a model budget")
+	}
+}
+
+func TestReleaseWorkerRetriesTransientObservationWithoutSealingFailure(t *testing.T) {
+	for _, status := range []int{429, 503, 403} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			input, err := json.Marshal(TaskInput{Delivery: json.RawMessage(`{}`)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := &fakeStore{input: input, outputBucket: "itbem-ai-outputs-local"}
+			callback := &fakeCallback{operation: "delivery.release_gate"}
+			provider := &countingProvider{}
+			worker, err := NewWorker(WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local", Role: agentwork.RoleReleaseManager, Lane: agentwork.LaneRelease}, store, callback, provider)
+			if err != nil {
+				t.Fatal(err)
+			}
+			worker.releaseObserver = func(context.Context, string, string, json.RawMessage) (map[string]any, error) {
+				return nil, &gatewayRequestError{statusCode: status}
+			}
+			message := validMessage()
+			message.Payload.Operation = "delivery.release_gate"
+			err = worker.Process(context.Background(), message)
+			var retryable *RetryableError
+			if status != 403 {
+				if !errors.As(err, &retryable) {
+					t.Fatalf("transient failure became terminal: %v", err)
+				}
+				for _, update := range callback.updates {
+					if update.Status == "failed" || update.Status == "completed" {
+						t.Fatal("transient observation sealed a terminal callback")
+					}
+				}
+			} else if err != nil || callback.updates[len(callback.updates)-1].Status != "failed" {
+				t.Fatal("permanent denial was retried")
+			}
+			if provider.calls != 0 {
+				t.Fatal("observation retry reached provider")
+			}
+		})
 	}
 }
 

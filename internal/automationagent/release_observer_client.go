@@ -92,7 +92,7 @@ func (c *HTTPCallback) ObserveRelease(ctx context.Context, gateway *HTTPGateway,
 	client.Timeout = 90 * time.Second
 	response, err := client.Do(request)
 	if err != nil {
-		return nil, fmt.Errorf("release observation transport unavailable")
+		return nil, &RetryableError{Message: "release observation transport unavailable", RetryAfter: time.Minute}
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
