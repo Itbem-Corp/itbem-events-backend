@@ -161,7 +161,7 @@ func Run() error {
 	errCh := make(chan error, 1)
 	go func() {
 		slog.Info("server started", "port", port)
-		if err := e.Start(":" + port); err != nil && err != http.ErrServerClosed {
+		if err := e.Start(httpListenAddress(os.Getenv("ENV"), cfg.OIDCIssuerURL, port)); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 			return
 		}
