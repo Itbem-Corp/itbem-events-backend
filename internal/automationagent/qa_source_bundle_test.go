@@ -35,6 +35,33 @@ func TestQASourceBundlePublishesOnlyAfterPinnedChildVerification(t *testing.T) {
 	objects := git(nil, "rev-list", "--objects", "--no-object-names", "--no-walk", rootSHA)
 	rootPack := git(objects, "pack-objects", "--stdout")
 	digest := fmt.Sprintf("%x", sha256.Sum256(rootPack))
+	t.Run("producer-authority", func(t *testing.T) {
+		calls := 0
+		acquire := func(ctx context.Context, repository, commit string) ([]byte, string, error) {
+			calls++
+			if repository != "example/contract" || commit != childSHA {
+				t.Fatal("dependency acquisition substituted repository or original SHA")
+			}
+			if budget, ok := ctx.Value(qaSourceBundleBudgetKey{}).(*qaSourceBundleBudget); !ok || budget.bytes >= maxQASourceTreeBytes {
+				t.Fatal("dependency acquisition did not inherit the parent tree budget")
+			}
+			return childPack, fmt.Sprintf("%x", sha256.Sum256(childPack)), nil
+		}
+		if _, _, _, err := buildQASourceBundle(context.Background(), root, rootSHA, nil, acquire); err == nil || calls != 0 {
+			t.Fatal("unapproved dependency reached acquisition")
+		}
+		produced, hash, children, err := buildQASourceBundle(context.Background(), root, rootSHA, map[string]string{".contracts/contract": "example/contract"}, acquire)
+		if err != nil || calls != 1 || len(children) != 1 || !validQASourcePackEnvelope(hash, produced) {
+			t.Fatalf("approved bundle producer failed: %v", err)
+		}
+		workspace := Workspace{Root: t.TempDir(), Config: WorkspaceConfig{RepositoryURL: "https://github.com/example/service.git", BaseBranch: "main"}}
+		if _, err := materializePublishedQASourceBundle(context.Background(), workspace, "itbem-agent/11111111-1111-4111-8111-111111111111", rootSHA, hash, produced, map[string]string{".contracts/contract": "example/contract"}, children); err != nil {
+			t.Fatalf("independent importer rejected produced bundle: %v", err)
+		}
+		if _, _, _, err := buildQASourceBundle(context.Background(), root, rootSHA, map[string]string{".contracts/contract": "example/contract"}, nil); err == nil {
+			t.Fatal("missing dependency acquisition was accepted")
+		}
+	})
 	branch := "itbem-agent/11111111-1111-4111-8111-111111111111"
 	for _, scenario := range []string{"valid", "unapproved", "wrong-child", "corrupt-child"} {
 		t.Run(scenario, func(t *testing.T) {
