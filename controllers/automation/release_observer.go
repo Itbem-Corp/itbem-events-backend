@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -54,6 +55,13 @@ func GatewayReleaseObservation(c echo.Context) error {
 	defer cancel()
 	var task models.AutomationTask
 	load := func() error {
+		var registered models.AutomationAgentInstance
+		if err := configuration.DB.WithContext(ctx).Where("id = ? AND status = ?", actor.InstanceID, "active").First(&registered).Error; err != nil {
+			return err
+		}
+		if registered.AgentKey != actor.AgentKey || registered.MachineID != actor.MachineID {
+			return fmt.Errorf("release observer instance identity changed")
+		}
 		if err := configuration.DB.WithContext(ctx).First(&task, id).Error; err != nil {
 			return err
 		}
