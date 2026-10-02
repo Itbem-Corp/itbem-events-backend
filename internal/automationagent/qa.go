@@ -150,7 +150,7 @@ func runQAWithCapabilityRefresh(ctx context.Context, taskID, runID string, deliv
 	for _, target := range targets {
 		commands := make([]any, 0, len(target.workspace.Config.ValidationCommands)+len(target.workspace.Config.QACommands))
 		if target.reviewBinding != nil {
-			if err := verifyReviewedWorktree(ctx, target.root, target.reviewBinding); err != nil {
+			if err := verifyQATargetRevision(ctx, target); err != nil {
 				return qaRevisionFailure(result, artifacts, target, commands, err)
 			}
 		}
@@ -158,7 +158,7 @@ func runQAWithCapabilityRefresh(ctx context.Context, taskID, runID string, deliv
 		if target.execution.RunValidation {
 			for index, command := range target.workspace.Config.ValidationCommands {
 				if target.reviewBinding != nil {
-					if err := verifyReviewedWorktree(ctx, target.root, target.reviewBinding); err != nil {
+					if err := verifyQATargetRevision(ctx, target); err != nil {
 						return qaRevisionFailure(result, artifacts, target, commands, err)
 					}
 				}
@@ -173,7 +173,7 @@ func runQAWithCapabilityRefresh(ctx context.Context, taskID, runID string, deliv
 		if target.execution.RunQA {
 			for index, command := range target.workspace.Config.QACommands {
 				if target.reviewBinding != nil {
-					if err := verifyReviewedWorktree(ctx, target.root, target.reviewBinding); err != nil {
+					if err := verifyQATargetRevision(ctx, target); err != nil {
 						return qaRevisionFailure(result, artifacts, target, commands, err)
 					}
 				}
@@ -199,7 +199,7 @@ func runQAWithCapabilityRefresh(ctx context.Context, taskID, runID string, deliv
 			}
 		}
 		if target.reviewBinding != nil {
-			if err := verifyReviewedWorktree(ctx, target.root, target.reviewBinding); err != nil {
+			if err := verifyQATargetRevision(ctx, target); err != nil {
 				return qaRevisionFailure(result, artifacts, target, commands, err)
 			}
 		}
@@ -249,6 +249,13 @@ func runQAWithCapabilityRefresh(ctx context.Context, taskID, runID string, deliv
 			result["screenshots"] = captures
 		}
 	}
+	for _, target := range targets {
+		if target.reviewBinding != nil {
+			if err := verifyQATargetRevision(ctx, target); err != nil {
+				return result, artifacts, &QAExecutionError{Result: result, Artifacts: artifacts, Cause: err}
+			}
+		}
+	}
 	return result, artifacts, nil
 }
 
@@ -272,7 +279,26 @@ func qaReviewBindingEvidence(target qaTarget) map[string]string {
 	if target.reviewBinding == nil {
 		return nil
 	}
-	return map[string]string{"base_sha": target.reviewBinding.BaseSHA, "review_diff_sha256": target.reviewBinding.ReviewDiffSHA256, "branch": target.reviewBinding.Branch}
+	return map[string]string{"base_sha": target.reviewBinding.BaseSHA, "review_diff_sha256": target.reviewBinding.ReviewDiffSHA256, "review_source_sha256": target.reviewSourceSHA256, "branch": target.reviewBinding.Branch}
+}
+
+func verifyQATargetRevision(ctx context.Context, target qaTarget) error {
+	if err := verifyReviewedWorktree(ctx, target.root, target.reviewBinding); err != nil {
+		return err
+	}
+	// Historical sealed attempts have no source manifest. Never retrofit their
+	// metadata; newly emitted implementation handoffs include this binding.
+	if target.reviewSourceSHA256 == "" {
+		return nil
+	}
+	if !sha256DigestPattern.MatchString(target.reviewSourceSHA256) {
+		return fmt.Errorf("QA reviewed source manifest digest is invalid")
+	}
+	digest, err := sandboxWorktreeDigest(target.root)
+	if err != nil || fmt.Sprintf("%x", digest) != target.reviewSourceSHA256 {
+		return fmt.Errorf("QA source manifest changed after review")
+	}
+	return nil
 }
 
 func qaRevisionFailure(result map[string]any, artifacts []LocalArtifact, target qaTarget, commands []any, cause error) (map[string]any, []LocalArtifact, error) {
@@ -309,13 +335,14 @@ func qaSemanticArtifactSlots(command []string) int {
 }
 
 type qaTarget struct {
-	workspace       Workspace
-	reference       string
-	root            string
-	branch          string
-	testedDirectory string
-	execution       qaExecutionPolicy
-	reviewBinding   *publicationAuthorization
+	workspace          Workspace
+	reference          string
+	root               string
+	branch             string
+	testedDirectory    string
+	execution          qaExecutionPolicy
+	reviewBinding      *publicationAuthorization
+	reviewSourceSHA256 string
 }
 
 // qaExecutionPolicy is persisted inside the human-approved plan. The worker
@@ -400,8 +427,9 @@ func deliveryQATargetsWithContext(ctx context.Context, delivery json.RawMessage,
 			ReviewType    string `json:"review_type"`
 			CIStatus      string `json:"ci_status"`
 			Metadata      struct {
-				BaseSHA          string `json:"base_sha"`
-				ReviewDiffSHA256 string `json:"review_diff_sha256"`
+				BaseSHA            string `json:"base_sha"`
+				ReviewDiffSHA256   string `json:"review_diff_sha256"`
+				ReviewSourceSHA256 string `json:"review_source_sha256"`
 			} `json:"metadata"`
 		} `json:"change_sets"`
 		RepositoryTopology []repositoryTopologyEntry `json:"repository_topology"`
@@ -458,11 +486,12 @@ func deliveryQATargetsWithContext(ctx context.Context, delivery json.RawMessage,
 		if !gitCommitPattern.MatchString(binding.BaseSHA) || !sha256DigestPattern.MatchString(binding.ReviewDiffSHA256) {
 			return nil, fmt.Errorf("QA requires an immutable reviewed base and diff digest")
 		}
-		if err := verifyReviewedWorktree(ctx, root, binding); err != nil {
+		target := qaTarget{workspace: workspace, reference: reference, root: root, branch: branch, testedDirectory: "reviewed isolated worktree", execution: policy, reviewBinding: binding, reviewSourceSHA256: strings.ToLower(strings.TrimSpace(change.Metadata.ReviewSourceSHA256))}
+		if err := verifyQATargetRevision(ctx, target); err != nil {
 			return nil, fmt.Errorf("QA reviewed revision binding failed: %w", err)
 		}
 		seen[reference] = struct{}{}
-		targets = append(targets, qaTarget{workspace: workspace, reference: reference, root: root, branch: branch, testedDirectory: "reviewed isolated worktree", execution: policy, reviewBinding: binding})
+		targets = append(targets, target)
 	}
 	if len(targets) == 0 {
 		return nil, fmt.Errorf("QA requires at least one passed reviewed local worktree")

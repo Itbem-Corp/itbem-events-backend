@@ -648,6 +648,13 @@ func TestRunImplementationUsesIsolatedWorktree(t *testing.T) {
 		t.Fatalf("implementation must create its worktree at the frozen SHA, got %s want %s", baseSHA, frozenRevision)
 	}
 	worktree := filepath.Join(root, ".itbem-agent-worktrees", taskID)
+	sourceDigest, err := sandboxWorktreeDigest(worktree)
+	if err != nil || result["review_source_sha256"] != fmt.Sprintf("%x", sourceDigest) {
+		t.Fatalf("implementation must bind the exact source manifest: %#v / %v", result, err)
+	}
+	if implementationHandoff(result)["review_source_sha256"] != result["review_source_sha256"] {
+		t.Fatal("worker callback dropped the reviewed source manifest")
+	}
 	if result["github_repository"] != "Itbem-Corp/test-repo" {
 		t.Fatalf("implementation must bind the reviewed GitHub origin: %#v", result)
 	}

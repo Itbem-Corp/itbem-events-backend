@@ -4506,14 +4506,15 @@ func renewPlanExecutionParentReservationInTransaction(tx *gorm.DB, childTaskID u
 }
 
 type implementationExecutionHandoff struct {
-	Workspace        string `json:"workspace"`
-	Worktree         string `json:"worktree"`
-	Branch           string `json:"branch"`
-	BaseSHA          string `json:"base_sha"`
-	GitHubRepository string `json:"github_repository"`
-	ReviewDiffSHA256 string `json:"review_diff_sha256"`
-	DiffCheckPassed  bool   `json:"diff_check_passed"`
-	Validations      []struct {
+	Workspace          string `json:"workspace"`
+	Worktree           string `json:"worktree"`
+	Branch             string `json:"branch"`
+	BaseSHA            string `json:"base_sha"`
+	GitHubRepository   string `json:"github_repository"`
+	ReviewDiffSHA256   string `json:"review_diff_sha256"`
+	ReviewSourceSHA256 string `json:"review_source_sha256"`
+	DiffCheckPassed    bool   `json:"diff_check_passed"`
+	Validations        []struct {
 		Passed bool `json:"passed"`
 	} `json:"validations"`
 	ChangeSets []implementationExecutionHandoff `json:"change_sets"`
@@ -4606,6 +4607,10 @@ func implementationChangeSetFromHandoff(task *models.AutomationTask, handoff imp
 	handoff.BaseSHA = strings.ToLower(strings.TrimSpace(handoff.BaseSHA))
 	handoff.GitHubRepository = strings.ToLower(strings.TrimSpace(handoff.GitHubRepository))
 	handoff.ReviewDiffSHA256 = strings.ToLower(strings.TrimSpace(handoff.ReviewDiffSHA256))
+	handoff.ReviewSourceSHA256 = strings.ToLower(strings.TrimSpace(handoff.ReviewSourceSHA256))
+	if handoff.ReviewSourceSHA256 != "" && !artifactDigestPattern.MatchString(handoff.ReviewSourceSHA256) {
+		return models.DeliveryChangeSet{}, fmt.Errorf("implementation source manifest digest is invalid")
+	}
 	if !strings.HasPrefix(handoff.Workspace, "workspace://") || !strings.HasPrefix(handoff.Worktree, handoff.Workspace+"#") || !agentBranchPattern.MatchString(handoff.Branch) || !gitCommitSHA.MatchString(handoff.BaseSHA) || !artifactDigestPattern.MatchString(handoff.ReviewDiffSHA256) {
 		return models.DeliveryChangeSet{}, fmt.Errorf("implementation execution workspace or branch is invalid")
 	}
@@ -4631,6 +4636,7 @@ func implementationChangeSetFromHandoff(task *models.AutomationTask, handoff imp
 		"base_sha":                handoff.BaseSHA,
 		"github_repository":       handoff.GitHubRepository,
 		"review_diff_sha256":      handoff.ReviewDiffSHA256,
+		"review_source_sha256":    handoff.ReviewSourceSHA256,
 		"diff_check_passed":       handoff.DiffCheckPassed,
 		"validation_count":        len(handoff.Validations),
 		"validation_passed_count": passedValidations,

@@ -1928,14 +1928,15 @@ func TestImplementationHandoffCreatesAnAuditableLocalChangeSet(t *testing.T) {
 	taskID, workItemID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
 	branch := "itbem-agent/" + taskID.String()
 	raw, err := json.Marshal(map[string]any{
-		"workspace":          "workspace://events-backend",
-		"worktree":           "workspace://events-backend#" + branch,
-		"branch":             branch,
-		"base_sha":           "0123456789abcdef0123456789abcdef01234567",
-		"github_repository":  "itbem-corp/itbem-events-backend",
-		"review_diff_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		"diff_check_passed":  true,
-		"validations":        []map[string]bool{{"passed": true}, {"passed": true}},
+		"workspace":            "workspace://events-backend",
+		"worktree":             "workspace://events-backend#" + branch,
+		"branch":               branch,
+		"base_sha":             "0123456789abcdef0123456789abcdef01234567",
+		"github_repository":    "itbem-corp/itbem-events-backend",
+		"review_diff_sha256":   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"review_source_sha256": strings.Repeat("b", 64),
+		"diff_check_passed":    true,
+		"validations":          []map[string]bool{{"passed": true}, {"passed": true}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1950,6 +1951,21 @@ func TestImplementationHandoffCreatesAnAuditableLocalChangeSet(t *testing.T) {
 	var metadata map[string]any
 	if err := json.Unmarshal([]byte(change.MetadataJSON), &metadata); err != nil || metadata["verification_source"] != "itbem-local-agent" {
 		t.Fatalf("missing verification provenance: %s", change.MetadataJSON)
+	}
+	if metadata["review_source_sha256"] != strings.Repeat("b", 64) {
+		t.Fatal("reviewed source manifest was lost in the server handoff")
+	}
+	var malformed map[string]any
+	if err := json.Unmarshal(raw, &malformed); err != nil {
+		t.Fatal(err)
+	}
+	malformed["review_source_sha256"] = "invalid"
+	bad, err := json.Marshal(malformed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := implementationChangeSetForHandoff(&models.AutomationTask{ID: taskID, Operation: "delivery.implementation", DeliveryWorkItemID: &workItemID}, bad, time.Now().UTC()); err == nil {
+		t.Fatal("malformed source manifest accepted by server")
 	}
 }
 

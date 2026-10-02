@@ -108,7 +108,13 @@ if err == nil { connection.Close(); t.Fatal("guest network reached reserved test
 				if err != nil {
 					t.Fatal(err)
 				}
-				metadata, err := json.Marshal(reviewedQAMetadata(t, root, worktree, "HEAD^"))
+				reviewMetadata := reviewedQAMetadata(t, root, worktree, "HEAD^")
+				sourceDigest, err := sandboxWorktreeDigest(worktree)
+				if err != nil {
+					t.Fatal(err)
+				}
+				reviewMetadata["review_source_sha256"] = fmt.Sprintf("%x", sourceDigest)
+				metadata, err := json.Marshal(reviewMetadata)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -127,6 +133,10 @@ if err == nil { connection.Close(); t.Fatal("guest network reached reserved test
 					t.Fatalf("QA repository evidence missing: %#v", result)
 				}
 				commands, ok := runs[0].(map[string]any)["commands"].([]any)
+				binding, bound := runs[0].(map[string]any)["review_binding"].(map[string]string)
+				if !bound || binding["review_source_sha256"] != reviewMetadata["review_source_sha256"] {
+					t.Fatalf("QA source manifest evidence missing: %#v", result)
+				}
 				if !ok || len(commands) != 1 {
 					t.Fatalf("QA command evidence missing: %#v", result)
 				}
