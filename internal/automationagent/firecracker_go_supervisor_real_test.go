@@ -51,6 +51,10 @@ func TestRealFirecrackerGoToolchainLifecycle(t *testing.T) {
 			if !ok || lifecycle["destroyed"] != true || lifecycle["guest_command_executed"] != true || lifecycle["attestation_persisted"] != true {
 				t.Fatalf("incomplete lifecycle: %#v", result.SandboxLease)
 			}
+			attestation, ok := result.SandboxLease["sandbox_attestation"].(map[string]any)
+			if !ok || attestation["toolchain_image_sha256"] != digest || attestation["registered_command"] != "go.test.json.offline" {
+				t.Fatalf("toolchain pin missing: %#v", result.SandboxLease)
+			}
 		})
 	}
 }
