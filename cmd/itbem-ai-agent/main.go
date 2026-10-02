@@ -21,6 +21,7 @@ import (
 
 	"events-stocks/internal/agentcallbackauth"
 	"events-stocks/internal/agentprotocol"
+	"events-stocks/internal/agentwork"
 	"events-stocks/internal/automationagent"
 	"github.com/gofrs/uuid"
 )
@@ -355,6 +356,9 @@ func doctorSourceAccess(lookup func(string) string) (map[string]any, bool) {
 }
 
 func doctorExecutionReady(workspacesReady, providerReady, runtimeReady, githubAppReady bool, runtimeConfig automationagent.RuntimeConfig) bool {
+	if !agentwork.IsKnownRoleLane(runtimeConfig.Role, runtimeConfig.Lane) {
+		return false
+	}
 	publicationRequired := runtimeReady && githubPublicationRequired(runtimeConfig)
 	return workspacesReady && providerReady && runtimeReady && (!publicationRequired || githubAppReady)
 }
