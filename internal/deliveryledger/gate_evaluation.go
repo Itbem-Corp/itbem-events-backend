@@ -1,11 +1,13 @@
 package deliveryledger
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 	"sort"
 	"strings"
@@ -115,13 +117,19 @@ func ProjectGateEvaluation(event models.DeliveryEvent) (GateEvaluation, error) {
 		return GateEvaluation{}, fmt.Errorf("delivery gate event envelope is invalid")
 	}
 	payload := []byte(event.PayloadJSON)
-	digest := sha256.Sum256(payload)
+	var decoded gateEvaluationPayload
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil || decoder.Decode(&struct{}{}) != io.EOF || decoded.SchemaVersion != releasegate.SchemaVersion {
+		return GateEvaluation{}, fmt.Errorf("delivery gate event payload is invalid")
+	}
+	canonicalPayload, err := json.Marshal(decoded)
+	if err != nil {
+		return GateEvaluation{}, err
+	}
+	digest := sha256.Sum256(canonicalPayload)
 	if !strings.EqualFold(event.PayloadDigest, hex.EncodeToString(digest[:])) {
 		return GateEvaluation{}, fmt.Errorf("delivery gate event payload digest does not match")
-	}
-	var decoded gateEvaluationPayload
-	if err := json.Unmarshal(payload, &decoded); err != nil || decoded.SchemaVersion != releasegate.SchemaVersion {
-		return GateEvaluation{}, fmt.Errorf("delivery gate event payload is invalid")
 	}
 	if decoded.Decision.SchemaVersion != releasegate.SchemaVersion || decoded.Decision.SubjectDigest != event.SubjectDigest {
 		return GateEvaluation{}, fmt.Errorf("delivery gate event decision does not match its envelope")

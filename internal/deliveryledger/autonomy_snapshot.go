@@ -2,11 +2,13 @@
 package deliveryledger
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"sort"
 	"strings"
@@ -154,13 +156,19 @@ func ProjectAutonomySnapshot(event models.DeliveryEvent) (AutonomySnapshot, erro
 		return AutonomySnapshot{}, fmt.Errorf("delivery autonomy snapshot event envelope is invalid")
 	}
 	payload := []byte(event.PayloadJSON)
-	digest := sha256.Sum256(payload)
+	var decoded autonomySnapshotPayload
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil || decoder.Decode(&struct{}{}) != io.EOF || decoded.SchemaVersion != 1 {
+		return AutonomySnapshot{}, fmt.Errorf("delivery autonomy snapshot payload is invalid")
+	}
+	canonicalPayload, err := json.Marshal(decoded)
+	if err != nil {
+		return AutonomySnapshot{}, err
+	}
+	digest := sha256.Sum256(canonicalPayload)
 	if !strings.EqualFold(event.PayloadDigest, hex.EncodeToString(digest[:])) {
 		return AutonomySnapshot{}, fmt.Errorf("delivery autonomy snapshot payload digest does not match")
-	}
-	var decoded autonomySnapshotPayload
-	if err := json.Unmarshal(payload, &decoded); err != nil || decoded.SchemaVersion != 1 {
-		return AutonomySnapshot{}, fmt.Errorf("delivery autonomy snapshot payload is invalid")
 	}
 	canonical, err := canonicalAutonomySnapshotInput(decoded.Input)
 	if err != nil || !sameAutonomySnapshotInput(canonical, decoded.Input) || !strings.EqualFold(event.SubjectDigest, autonomySnapshotSubjectDigest(canonical)) {
