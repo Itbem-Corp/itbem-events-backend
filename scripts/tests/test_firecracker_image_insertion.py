@@ -20,6 +20,16 @@ class ImageInsertionTest(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('fixture_supervisor', scripts / 'firecracker-supervisor-vsock.py')
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+        for response, expected, valid in (
+            ({'ok': True, 'stdout': 'exact\n'}, b'exact\n', True),
+            ({'ok': True, 'stdout': ''}, b'', True),
+            ({'ok': True, 'stdout': 'unrelated'}, b'exact\n', False),
+            ({'ok': 'true', 'stdout': 'exact'}, b'exact', False),
+            ({'ok': True, 'stdout': 'exact', 'error': 'failed'}, b'exact', False),
+            ({'ok': True, 'stdout': 'x' * 12001}, b'x' * 12001, False),
+            ({'ok': True, 'stdout': '\ud800'}, b'exact', False),
+        ):
+            self.assertEqual(module.verified_guest_read(response, expected), valid)
         with tempfile.TemporaryDirectory(prefix='itbem-image-insertion-') as directory:
             root = Path(directory)
             image = root / 'image.ext4'

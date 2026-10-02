@@ -96,6 +96,17 @@ def stage_worktree(source: pathlib.Path, destination: pathlib.Path) -> tuple[int
     return files, total
 
 
+def verified_guest_read(response: dict, expected: bytes) -> bool:
+    output = response.get("stdout")
+    try:
+        observed = output.encode("utf-8") if isinstance(output, str) else None
+    except UnicodeError:
+        return False
+    return (response.get("ok") is True and isinstance(output, str)
+            and not response.get("error") and len(expected) <= MAX_OUTPUT
+            and observed == expected)
+
+
 def build_worktree_image(staging: pathlib.Path, image: pathlib.Path, total_bytes: int) -> None:
     """Create a read-only ext4 disk without mounting or executing workspace data."""
     # mke2fs -d populates an image from a directory and does not require a
@@ -242,6 +253,16 @@ def main() -> None:
         f"task_id={request['task_id']}\nworkspace_id={request['workspace_id']}\nworktree_digest={request['worktree_digest']}\n",
         encoding="utf-8",
     )
+    expected_file = binding if binding_mode else staging.joinpath(*pathlib.PurePosixPath(args[0]).parts[2:])
+    if not expected_file.is_file() or expected_file.stat().st_size > MAX_OUTPUT:
+        shutil.rmtree(workdir)
+        emit_failure("guest read proof requires a bounded regular text file", request)
+    expected_output = expected_file.read_bytes()
+    try:
+        expected_output.decode("utf-8")
+    except UnicodeError:
+        shutil.rmtree(workdir)
+        emit_failure("guest read proof requires UTF-8 content", request)
     init_lines = [
         "#!/bin/sh",
         "set -eu",
@@ -360,11 +381,10 @@ def main() -> None:
                 break
             time.sleep(0.1)
         response = vsock_command(vsock_socket, command, args)
-        guest_exit = 0 if response.get("ok") else 1
-        if binding_mode:
-            lifecycle["guest_command_executed"] = bool(response.get("ok")) and request["worktree_digest"] in str(response.get("stdout", ""))
-        else:
-            lifecycle["guest_command_executed"] = bool(response.get("ok")) and str(response.get("stdout", "")).strip() != ""
+        lifecycle["guest_command_executed"] = verified_guest_read(response, expected_output)
+        guest_exit = 0 if lifecycle["guest_command_executed"] else 1
+        if not lifecycle["guest_command_executed"]:
+            response["error"] = "guest output does not match the content-bound file"
     except Exception as exc:
         response["error"] = str(exc)
         if stdout_path.exists():
