@@ -30,10 +30,12 @@ type request struct {
 }
 
 type response struct {
-	OK     bool   `json:"ok"`
-	Stdout string `json:"stdout,omitempty"`
-	Stderr string `json:"stderr,omitempty"`
-	Error  string `json:"error,omitempty"`
+	OK       bool   `json:"ok"`
+	Executed bool   `json:"executed"`
+	ExitCode int    `json:"exit_code"`
+	Stdout   string `json:"stdout,omitempty"`
+	Stderr   string `json:"stderr,omitempty"`
+	Error    string `json:"error,omitempty"`
 }
 
 func main() {
@@ -73,7 +75,11 @@ func serve(fd int) {
 		writeResponse(file, response{Error: "invalid request"})
 		return
 	}
-	writeResponse(file, execute(input, 15*time.Second))
+	timeout := 15 * time.Second
+	if input.Command == "/sdk/bin/go" {
+		timeout = 60 * time.Second
+	}
+	writeResponse(file, execute(input, timeout))
 }
 
 func execute(input request, timeout time.Duration) response {
@@ -85,6 +91,9 @@ func execute(input request, timeout time.Duration) response {
 			return response{Error: "command arguments exceed the guest contract"}
 		}
 	}
+	if input.Command == "/sdk/bin/go" && !goTestArguments(input.Args) {
+		return response{Error: "Go command is not registered"}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	command := exec.CommandContext(ctx, input.Command, input.Args...)
@@ -94,10 +103,18 @@ func execute(input request, timeout time.Duration) response {
 	}
 	command.WaitDelay = time.Second
 	command.Env = []string{"PATH=/usr/bin:/bin", "HOME=/tmp", "TMPDIR=/tmp", "LANG=C"}
+	if input.Command == "/sdk/bin/go" {
+		command.Dir = "/workspace"
+		command.Env = append(command.Env, "GOROOT=/sdk", "GOCACHE=/tmp/cache", "GOPATH=/tmp/gopath", "GOTOOLCHAIN=local", "GOPROXY=off", "GOSUMDB=off", "CGO_ENABLED=0", "GOENV=off", "GOMAXPROCS=1")
+	}
 	var stdout, stderr boundedOutput
 	command.Stdout, command.Stderr = &stdout, &stderr
 	err := command.Run()
 	result := response{OK: err == nil && !stdout.truncated && !stderr.truncated, Stdout: stdout.String(), Stderr: stderr.String()}
+	if command.ProcessState != nil {
+		result.Executed = true
+		result.ExitCode = command.ProcessState.ExitCode()
+	}
 	if err != nil {
 		result.Error = "guest command failed"
 	}
@@ -129,7 +146,20 @@ func (output *boundedOutput) Write(data []byte) (int, error) {
 }
 
 func allowed(command string) bool {
-	return command == "/bin/sh" || command == "/bin/sha256sum" || command == "/bin/cat"
+	return command == "/bin/sh" || command == "/bin/sha256sum" || command == "/bin/cat" || command == "/sdk/bin/go"
+}
+
+func goTestArguments(args []string) bool {
+	want := []string{"test", "-json", "-count=1", "-timeout=30s", "./..."}
+	if len(args) != len(want) {
+		return false
+	}
+	for index := range want {
+		if args[index] != want[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func writeResponse(file *os.File, result response) {

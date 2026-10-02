@@ -1,5 +1,6 @@
 """Reject debugfs false success on merged-/usr rootfs layouts."""
 import importlib.util
+import json
 import os
 from pathlib import Path
 import shutil
@@ -20,6 +21,25 @@ class ImageInsertionTest(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('fixture_supervisor', scripts / 'firecracker-supervisor-vsock.py')
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+        events = [{'Action': 'run', 'Package': 'fixture', 'Test': 'TestReal'},
+                  {'Action': 'pass', 'Package': 'fixture', 'Test': 'TestReal'},
+                  {'Action': 'pass', 'Package': 'fixture'}]
+        valid = {'ok': True, 'executed': True, 'exit_code': 0,
+                 'stdout': '\n'.join(json.dumps(event) for event in events)}
+        self.assertTrue(module.verified_guest_execution(valid))
+        self.assertTrue(module.verified_guest_execution({'ok': False, 'executed': True, 'exit_code': 1, 'error': 'guest command failed'}))
+        for invalid in (
+            dict(valid, stdout=''),
+            dict(valid, stdout=json.dumps({'Action': 'skip', 'Test': 'TestReal'})),
+            dict(valid, stdout=json.dumps(events[-1])),
+            dict(valid, executed=False),
+            dict(valid, exit_code=True),
+            dict(valid, error='guest output exceeded limit'),
+            dict(valid, stdout='x' * 12001),
+            dict(valid, stdout='\ud800'),
+            dict(valid, stdout=json.dumps(events[1]) + '\n' + json.dumps(events[2])),
+        ):
+            self.assertFalse(module.verified_guest_execution(invalid))
         for response, expected, valid in (
             ({'ok': True, 'stdout': 'exact\n'}, b'exact\n', True),
             ({'ok': True, 'stdout': ''}, b'', True),
