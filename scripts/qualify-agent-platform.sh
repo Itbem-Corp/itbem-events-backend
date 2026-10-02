@@ -58,6 +58,9 @@ run "QA revocation cancels in-flight commands and their descendants" \
 run "published QA binds the exact clean commit and frozen release matrix" \
   go test ./internal/automationagent -run 'TestPublishedQATargetRequiresExactCleanCommitAndRejectsUntrackedSource$' -count=1
 
+run "private QA source import preserves commit identity and rejects substituted or unsafe checkouts" \
+  go test ./internal/automationagent -run 'Test(QASourcePackMaterializesOriginalPublishedCommitOnIndependentHost|QASourcePackRejectsExpandedOversizeBeforeCheckout|QASourcePackCannotReuseCheckoutThroughSymlink|QASourcePackRejectsReusedCheckoutWithSubstitutedOrigin|QASourcePackRejectsCorruptionWrongCommitAndSymlinkParent|QASourcePackRejectsSymlinkBeforePublishingCheckout|QASourcePackCancelledImportLeavesNoCheckoutOrLock)$' -count=1
+
 run "QA ledger observations preserve failures independently of model summaries" \
   go test ./internal/automationagent -run 'TestQALedgerObservationPreservesObservedFailuresAndRejectsMalformedEvidence$' -count=1
 
