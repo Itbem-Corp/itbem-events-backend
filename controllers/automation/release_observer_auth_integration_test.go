@@ -47,7 +47,7 @@ func TestReleaseObserverSignedAdmissionRejectsCancelledTaskAndReplayedNonce(t *t
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
 	require.NoError(t, db.Exec(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`).Error)
-	require.NoError(t, db.AutoMigrate(&models.AutomationTask{}, &models.AutomationAgentInstance{}, &models.AutomationAgentCallbackNonce{}))
+	require.NoError(t, db.AutoMigrate(&models.AutomationTask{}, &models.AutomationAgentInstance{}, &models.AutomationAgentCallbackNonce{}, &models.AutomationReleaseObservation{}))
 	previous := configuration.DB
 	configuration.DB = db
 	t.Cleanup(func() { configuration.DB = previous })
@@ -175,7 +175,7 @@ func TestReleaseObserverSignedAdmissionRejectsCancelledTaskAndReplayedNonce(t *t
 	defer storage.Close()
 	cfg = &models.Config{AutomationInputBucket: "synthetic", S3Endpoint: storage.URL, S3UsePathStyle: "true", AwsRegion: "us-east-1", S3ClientId: "test", S3ClientSecret: "test"}
 	ref := "s3://synthetic/automation/inputs/fixture/input.json"
-	require.NoError(t, db.Model(&models.AutomationTask{}).Where("id = ?", taskID).Updates(map[string]any{"status": "running", "input_ref": ref, "evidence_subject_digest": digest}).Error)
+	require.NoError(t, db.Model(&models.AutomationTask{}).Where("id = ?", taskID).Updates(map[string]any{"status": "running", "input_ref": ref, "evidence_subject_digest": digest, "requested_by": "synthetic-human"}).Error)
 	lease, err = sealGatewayLease(gatewayLease{Version: 1, Role: string(identity.Role), Lane: string(identity.Lane), TaskID: taskID.String(), InputRef: ref, ReceiptHandle: "synthetic", ExpiresAt: expires.Unix()})
 	require.NoError(t, err)
 	body, err = json.Marshal(map[string]string{"lease_token": lease, "run_id": run})

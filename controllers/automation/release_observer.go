@@ -115,5 +115,10 @@ func GatewayReleaseObservation(c echo.Context) error {
 	if err := load(); err != nil || task.EvidenceSubjectDigest != digest {
 		return utils.Error(c, http.StatusForbidden, "Observation authority expired", "")
 	}
-	return utils.Success(c, http.StatusOK, "Release observed", map[string]any{"schema_version": 2, "gatekeeper_input": observed, "environment_observation": environment})
+	handoff := map[string]any{"schema_version": 2, "gatekeeper_input": observed, "environment_observation": environment}
+	sealed, err := json.Marshal(handoff)
+	if err != nil || recordServerReleaseObservation(configuration.DB.WithContext(ctx), &task, request.RunID, actor.InstanceID, sealed, time.Now().UTC()) != nil {
+		return utils.Error(c, http.StatusConflict, "Observation could not be sealed", "")
+	}
+	return utils.Success(c, http.StatusOK, "Release observed", handoff)
 }

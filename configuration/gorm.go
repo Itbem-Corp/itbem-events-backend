@@ -68,6 +68,7 @@ var modelsWithoutSeed = []interface{}{
 	&models.AutomationAgentProfile{},
 	&models.AutomationAgentInstance{},
 	&models.AutomationAgentCallbackNonce{},
+	&models.AutomationReleaseObservation{},
 	&models.AutomationAgentHeartbeat{},
 	&models.AutomationAIActionPolicy{},
 	&models.AutomationAIActionPolicyRevision{},

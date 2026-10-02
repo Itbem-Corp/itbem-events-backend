@@ -191,6 +191,21 @@ func TestReleaseProjectionRollsBackEvidenceWhenCurrentPolicyIsMissing(t *testing
 	rejected := call()
 	require.Equal(t, http.StatusBadRequest, rejected.Code, rejected.Body.String())
 	callback.RequestRef = prefix + "/request.json"
+	unobserved := call()
+	require.Equal(t, http.StatusBadRequest, unobserved.Code, unobserved.Body.String())
+	require.Contains(t, unobserved.Body.String(), "Invalid release observation")
+	require.NoError(t, recordServerReleaseObservation(db, &recoveredTask, originalRun, instance, recoveredHandoff, time.Now().UTC()))
+	require.Error(t, verifyServerReleaseObservation(db, &recoveredTask, originalRun, uuid.Must(uuid.NewV4()), recoveredHandoff))
+	require.Error(t, verifyServerReleaseObservation(db, &recoveredTask, uuid.Must(uuid.NewV4()).String(), instance, recoveredHandoff))
+	environment.Repositories[0].EnvironmentExists = false
+	tampered, err := json.Marshal(map[string]any{"schema_version": 2, "gatekeeper_input": candidate, "environment_observation": environment})
+	require.NoError(t, err)
+	callback.Execution = tampered
+	mutated := call()
+	require.Equal(t, http.StatusBadRequest, mutated.Code, mutated.Body.String())
+	require.Contains(t, mutated.Body.String(), "Invalid release observation")
+	require.Error(t, recordServerReleaseObservation(db, &recoveredTask, originalRun, instance, tampered, time.Now().UTC()), "an existing observation cannot be replaced")
+	callback.Execution = recoveredHandoff
 	accepted := call()
 	require.Equal(t, http.StatusNoContent, accepted.Code, accepted.Body.String())
 	var completed models.AutomationTask
