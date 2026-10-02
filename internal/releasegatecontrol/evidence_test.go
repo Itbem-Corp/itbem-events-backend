@@ -106,7 +106,10 @@ func controlQAEvent(t *testing.T, workItemID uuid.UUID, sequence int64, observat
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload, err := json.Marshal(map[string]any{"schema_version": qaevidence.SchemaVersion, "observation": canonical})
+	payload, err := json.Marshal(struct {
+		SchemaVersion int                    `json:"schema_version"`
+		Observation   qaevidence.Observation `json:"observation"`
+	}{SchemaVersion: qaevidence.SchemaVersion, Observation: canonical})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +171,10 @@ func controlSecurityEvent(t *testing.T, workItemID uuid.UUID, sequence int64, ob
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload, err := json.Marshal(map[string]any{"schema_version": securityevidence.SchemaVersion, "observation": canonical})
+	payload, err := json.Marshal(struct {
+		SchemaVersion int                          `json:"schema_version"`
+		Observation   securityevidence.Observation `json:"observation"`
+	}{SchemaVersion: securityevidence.SchemaVersion, Observation: canonical})
 	if err != nil {
 		t.Fatal(err)
 	}
