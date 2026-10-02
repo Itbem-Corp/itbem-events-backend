@@ -67,6 +67,9 @@ run "QA source uses verified TLS, refuses redirects, and cancels pending Git tra
 run "QA source authorization requires the exact live instance and frozen revision matrix" \
   go test ./controllers/automation -run 'Test(QASourceAdmissionRequiresExactLiveTaskAndSignedInstance|QASourceSelectionBindsFrozenMatrixAndRejectsAmbiguity)$' -count=1
 
+run "QA source acquisition requires bounded private tmpfs and real process resource limits" \
+  go test ./internal/automationagent -run 'TestQASourceResourceBoundaryRejectsUnboundedScratchAndAppliesRealLimits$' -count=1
+
 run "QA ledger observations preserve failures independently of model summaries" \
   go test ./internal/automationagent -run 'TestQALedgerObservationPreservesObservedFailuresAndRejectsMalformedEvidence$' -count=1
 

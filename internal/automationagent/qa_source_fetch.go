@@ -19,11 +19,16 @@ func fetchGitHubQASourcePack(ctx context.Context, repository, commit string, con
 	if !githubRepositoryNamePattern.MatchString(repository) || !gitCommitPattern.MatchString(commit) {
 		return nil, "", fmt.Errorf("QA source acquisition identity is invalid")
 	}
+	scratch, err := qaSourceScratchRoot()
+	if err != nil {
+		return nil, "", err
+	}
+	ctx = withQASourceResourceBoundary(ctx)
 	token, err := MintGitHubRepositoryToken(ctx, config, client, time.Now().UTC(), repository)
 	if err != nil {
 		return nil, "", fmt.Errorf("QA source repository authentication unavailable")
 	}
-	root, err := os.MkdirTemp("", "itbem-qa-source-fetch-")
+	root, err := os.MkdirTemp(scratch, "itbem-qa-source-fetch-")
 	if err != nil {
 		return nil, "", err
 	}

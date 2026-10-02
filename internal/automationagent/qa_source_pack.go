@@ -179,7 +179,8 @@ func verifyQASourceOrigin(ctx context.Context, root, expected string) error {
 
 func qaSourceGitCommand(ctx context.Context, root string, args ...string) *exec.Cmd {
 	options := []string{"-c", "core.hooksPath=" + os.DevNull, "-c", "core.fsmonitor=false", "-c", "core.autocrlf=false", "-c", "core.protectHFS=true", "-c", "core.protectNTFS=true", "-c", "credential.helper=", "-c", "protocol.allow=never"}
-	cmd := exec.CommandContext(ctx, "git", append(options, args...)...)
+	executable, arguments := qaSourceCommandArguments(ctx, append(options, args...))
+	cmd := exec.CommandContext(ctx, executable, arguments...)
 	cmd.Dir = root
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull, "GIT_CONFIG_SYSTEM=" + os.DevNull, "GIT_TERMINAL_PROMPT=0", "GIT_ALLOW_PROTOCOL=", "GIT_ATTR_NOSYSTEM=1", "LANG=C"}
 	if systemRoot := os.Getenv("SystemRoot"); systemRoot != "" {
