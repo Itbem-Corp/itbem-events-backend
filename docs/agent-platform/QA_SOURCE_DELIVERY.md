@@ -110,9 +110,12 @@ The signed PostgreSQL fixture also calls the actual terminal `Complete` route
 under a renewed run, with private request/result references for the original
 run. It rejects misplaced source provenance before accounting, accepts the
 original acquisition and inference receipts, projects one QA observation, and
-prevents terminal redelivery from appending a second execution. Its accepted
-inference receipt is seeded synthetic fixture data; provider admission and
-actual worker command execution are not certified by that callback fixture.
+prevents terminal redelivery from appending a second execution. Its inference
+receipt is created by the real gateway under a signed attempt-policy snapshot
+and task-scoped capability. A closed provider transport supplies catalog and
+completion fixtures without external access. Duplicate admission is rejected
+before another provider call, and immutable encrypted request/response capture
+occurs once. Actual worker command execution is not yet joined to this fixture.
 
 Legacy sealed local handoffs retain their original execution behavior. New paid
 inference, historical requeues and live worker activation require their existing

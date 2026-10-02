@@ -25,6 +25,7 @@ import (
 	"events-stocks/internal/agentwork"
 	"events-stocks/internal/automationagent"
 	"events-stocks/internal/deliveryledger"
+	"events-stocks/internal/inferencecapability"
 	"events-stocks/internal/qaevidence"
 	"events-stocks/internal/releasegate"
 	"events-stocks/models"
@@ -101,7 +102,33 @@ func TestQASourceSignedGatewayBindsPostgresAuthorityAndIndependentCheckout(t *te
 	require.NoError(t, err)
 	input, err := json.Marshal(automationagent.TaskInput{Delivery: delivery})
 	require.NoError(t, err)
+	var contentWrites atomic.Int32
 	storage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			prefix := "/synthetic/inference-observations/" + taskID.String() + "/"
+			if !strings.HasPrefix(r.URL.Path, prefix) {
+				t.Error("unexpected private content write")
+				w.WriteHeader(400)
+				return
+			}
+			parts := strings.Split(strings.TrimPrefix(r.URL.Path, prefix), "/")
+			if len(parts) != 2 {
+				t.Error("invalid private content identity")
+				w.WriteHeader(400)
+				return
+			}
+			_, err := uuid.FromString(parts[0])
+			require.NoError(t, err)
+			require.Contains(t, []string{"request.json", "response.json"}, parts[1])
+			require.Equal(t, "AES256", r.Header.Get("X-Amz-Server-Side-Encryption"))
+			require.Equal(t, "*", r.Header.Get("If-None-Match"))
+			body, err := io.ReadAll(io.LimitReader(r.Body, (2<<20)+1))
+			require.NoError(t, err)
+			require.LessOrEqual(t, len(body), 2<<20)
+			contentWrites.Add(1)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		require.Equal(t, http.MethodGet, r.Method)
 		require.Equal(t, "/synthetic/automation/inputs/fixture/input.json", r.URL.Path)
 		_, _ = w.Write(input)
@@ -148,6 +175,7 @@ func TestQASourceSignedGatewayBindsPostgresAuthorityAndIndependentCheckout(t *te
 		})
 	}, AgentCallbackAuthentication)
 	app.PUT("/api/internal/automation/tasks/:id", Complete, AgentCallbackAuthentication)
+	app.POST("/api/internal/automation/inference", Infer)
 	server := httptest.NewServer(app)
 	defer server.Close()
 	callback, err := automationagent.NewHTTPCallback(server.URL, machine, instance.String(), server.Client())
@@ -255,12 +283,69 @@ func TestQASourceSignedGatewayBindsPostgresAuthorityAndIndependentCheckout(t *te
 
 	// Exercise the actual signed terminal callback under a new lease, retaining
 	// the original source run and accepted inference receipt. Provider admission
-	// is outside this fixture: this synthetic receipt produces no provider call.
+	// uses the real gateway adapter with a closed synthetic provider transport.
 	require.NoError(t, db.Model(&models.AutomationAgentInstance{}).Where("id = ?", instance).Update("status", "active").Error)
 	recoveryRun := uuid.Must(uuid.NewV4()).String()
+	require.NoError(t, db.Model(&models.AutomationTask{}).Where("id = ?", taskID).Update("max_completion_tokens", 1024).Error)
+	var workItem models.DeliveryWorkItem
+	require.NoError(t, db.First(&workItem, item).Error)
+	snapshot := newGatewayAttemptPolicySnapshot(t, taskID, run, "delivery.qa", &workItem.ProjectID, 1024, 1, []models.AutomationAIActionRoute{{Provider: "deepseek", Model: "deepseek-flash", ReasoningEnabled: true, ReasoningEffort: "high"}})
+	require.NoError(t, db.Create(&snapshot).Error)
+	previousCredentials, previousProviderClient := inferenceCredentials, inferenceProviderHTTPClient
+	inferenceCredentials = &testCredentialResolver{}
+	t.Cleanup(func() {
+		inferenceCredentials, inferenceProviderHTTPClient = previousCredentials, previousProviderClient
+	})
+	var providerCalls atomic.Int32
+	inferenceProviderHTTPClient = &http.Client{Transport: providerUsageRoundTripper(func(request *http.Request) (*http.Response, error) {
+		respond := func(body string) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
+		}
+		if request.Method == http.MethodGet {
+			switch request.URL.Host + request.URL.Path {
+			case "models.dev/api.json":
+				return respond(`{"deepseek":{"models":{"deepseek-flash":{"id":"deepseek-flash","modalities":{"input":["text"],"output":["text"]},"limit":{"context":1000000,"output":8192}}}}}`)
+			case "api.deepseek.com/models":
+				return respond(`{"data":[{"id":"deepseek-flash"}]}`)
+			}
+		}
+		if request.Method != http.MethodPost || request.URL.Host != "api.deepseek.com" || request.URL.Path != "/chat/completions" {
+			return nil, fmt.Errorf("fixture blocked unexpected provider request")
+		}
+		providerCalls.Add(1)
+		return respond(`{"id":"synthetic-qa-response","model":"deepseek-flash","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"{\"summary\":\"synthetic QA\",\"verdict\":\"passed\",\"checks\":[],\"defects\":[],\"coverage_gaps\":[],\"recommended_actions\":[]}"}}],"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}`)
+	})}
+	callID := uuid.Must(uuid.NewV4())
+	messages, err := automationagent.SyntheticChatMessages("Summarize synthetic QA observations.")
+	require.NoError(t, err)
+	inferBody, err := json.Marshal(inferenceRequest{CallID: callID.String(), Provider: "deepseek", Model: "gateway-managed", TaskID: taskID.String(), RunID: run, Operation: "delivery.qa", MaxCompletionTokens: 1024, Messages: messages})
+	require.NoError(t, err)
+	capability, err := inferencecapability.Mint(strings.Repeat("a", 48), inferencecapability.Scope{TaskID: taskID.String(), RunID: run, Operation: "delivery.qa", WorkerID: worker, AgentKey: "qa", MachineID: machine.MachineID()}, time.Minute)
+	require.NoError(t, err)
+	infer := func() int {
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/api/internal/automation/inference", bytes.NewReader(inferBody))
+		require.NoError(t, err)
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set(inferencecapability.HeaderName, capability)
+		response, err := server.Client().Do(request)
+		require.NoError(t, err)
+		defer response.Body.Close()
+		body, err := io.ReadAll(response.Body)
+		require.NoError(t, err)
+		if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusConflict {
+			t.Log(string(body))
+		}
+		return response.StatusCode
+	}
+	require.Equal(t, http.StatusOK, infer())
+	require.Equal(t, http.StatusConflict, infer(), "duplicate inference must not reach the provider again")
+	require.Equal(t, int32(1), providerCalls.Load())
+	var inferenceReceipt models.AutomationInferenceReceipt
+	require.NoError(t, db.Where("automation_task_id = ? AND run_id = ? AND call_id = ?", taskID, run, callID).First(&inferenceReceipt).Error)
+	require.Equal(t, "accepted", inferenceReceipt.Status)
+	require.Equal(t, snapshot.SnapshotHash, inferenceReceipt.PolicySnapshotHash)
+	inferenceID := inferenceReceipt.ID
 	require.NoError(t, db.Model(&models.AutomationTask{}).Where("id = ?", taskID).Update("run_id", recoveryRun).Error)
-	callID, inferenceID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
-	require.NoError(t, db.Create(&models.AutomationInferenceReceipt{ID: inferenceID, AutomationTaskID: taskID, RunID: run, CallID: callID, Operation: "delivery.qa", WorkerID: worker, AgentKey: "qa", MachineID: machine.MachineID(), PolicySnapshotHash: strings.Repeat("a", 64), QuotaLimit: 1, Status: "accepted", Provider: "synthetic", Model: "fixture", InputTokens: 1, OutputTokens: 1, TotalTokens: 2, UsageJSON: `{"input_tokens":1,"output_tokens":1}`, CreatedAt: time.Now().UTC()}).Error)
 	observation.Repositories[0].Branch = branch
 	observationRaw, err = json.Marshal(observation)
 	require.NoError(t, err)
@@ -298,4 +383,6 @@ func TestQASourceSignedGatewayBindsPostgresAuthorityAndIndependentCheckout(t *te
 	require.NoError(t, db.Model(&models.AutomationExecution{}).Where("automation_task_id = ?", taskID).Count(&executions).Error)
 	require.Equal(t, int64(1), executions)
 	require.Equal(t, int32(2), acquisitions.Load(), "terminal callbacks must not fetch code again")
+	require.Equal(t, int32(1), providerCalls.Load(), "recovery must reuse its gateway receipt without provider replay")
+	require.Equal(t, int32(2), contentWrites.Load(), "original gateway call must capture request and response once")
 }
