@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"events-stocks/internal/automationagent"
 	"events-stocks/internal/qaevidence"
 	"events-stocks/models"
 	"github.com/gofrs/uuid"
@@ -44,8 +45,19 @@ func verifyServerQASourceReceipts(db *gorm.DB, task *models.AutomationTask, run 
 }
 
 func recordServerQASourceReceipt(db *gorm.DB, expected *models.AutomationTask, lease gatewayLease, gateway gatewayIdentity, actor authenticatedAgentCallback, subject qaSourceSubject, packDigest string, packBytes int64, now time.Time) error {
+	return recordServerQASourceBundleReceipt(db, expected, lease, gateway, actor, subject, packDigest, packBytes, "", 0, "", now)
+}
+
+func recordServerQASourceBundleReceipt(db *gorm.DB, expected *models.AutomationTask, lease gatewayLease, gateway gatewayIdentity, actor authenticatedAgentCallback, subject qaSourceSubject, packDigest string, packBytes int64, bundleDigest string, bundleBytes int64, dependencies string, now time.Time) error {
 	if db == nil || expected == nil || expected.ID == uuid.Nil || !validUUIDRun(expected.RunID) || !artifactDigestPattern.MatchString(packDigest) || packBytes < 12 || packBytes > 64<<20 || len(subject.Reference) > 256 || now.IsZero() {
 		return fmt.Errorf("QA source receipt identity invalid")
+	}
+	if bundleDigest == "" {
+		if bundleBytes != 0 || dependencies != "" {
+			return fmt.Errorf("QA source bundle receipt is incomplete")
+		}
+	} else if !artifactDigestPattern.MatchString(bundleDigest) || bundleBytes < packBytes+8 || bundleBytes > automationagent.MaxQASourceBundleBytes || len(dependencies) > 16<<10 || !json.Valid([]byte(dependencies)) {
+		return fmt.Errorf("QA source bundle receipt boundary invalid")
 	}
 	return db.Transaction(func(tx *gorm.DB) error {
 		var current models.AutomationTask
@@ -63,6 +75,7 @@ func recordServerQASourceReceipt(db *gorm.DB, expected *models.AutomationTask, l
 			return err
 		}
 		row := models.AutomationQASourceReceipt{TaskID: current.ID, RunID: current.RunID, Reference: subject.Reference, AgentInstanceID: actor.InstanceID, MatrixDigest: current.EvidenceSubjectDigest, Repository: subject.Repository, Branch: subject.Branch, CommitSHA: subject.SHA, PackSHA256: packDigest, PackBytes: packBytes, AcquiredAt: now.UTC()}
+		row.BundleSHA256, row.BundleBytes, row.DependencyManifest = bundleDigest, bundleBytes, dependencies
 		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&row).Error; err != nil {
 			return err
 		}
@@ -70,7 +83,7 @@ func recordServerQASourceReceipt(db *gorm.DB, expected *models.AutomationTask, l
 		if err := tx.Where("task_id = ? AND run_id = ? AND reference = ?", row.TaskID, row.RunID, row.Reference).First(&saved).Error; err != nil {
 			return err
 		}
-		if saved.AgentInstanceID != row.AgentInstanceID || saved.MatrixDigest != row.MatrixDigest || saved.Repository != row.Repository || saved.Branch != row.Branch || saved.CommitSHA != row.CommitSHA || saved.PackSHA256 != row.PackSHA256 || saved.PackBytes != row.PackBytes {
+		if saved.AgentInstanceID != row.AgentInstanceID || saved.MatrixDigest != row.MatrixDigest || saved.Repository != row.Repository || saved.Branch != row.Branch || saved.CommitSHA != row.CommitSHA || saved.PackSHA256 != row.PackSHA256 || saved.PackBytes != row.PackBytes || saved.BundleSHA256 != row.BundleSHA256 || saved.BundleBytes != row.BundleBytes || saved.DependencyManifest != row.DependencyManifest {
 			return fmt.Errorf("QA source acquisition differs from its immutable receipt")
 		}
 		return nil

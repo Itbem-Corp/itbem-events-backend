@@ -91,6 +91,9 @@ run "QA dependency policy rejects invalid paths and repositories before authenti
 run "QA source wire bundle binds its canonical manifest and every package" \
   go test ./internal/automationagent -run 'TestQASourceBundleWireBindsManifestAndAllPackages$' -count=1
 
+run "QA server dependency policy grants only the configured parent repository" \
+  go test ./internal/automationagent -run 'TestQASourceDependencyPolicyGrantsOnlyConfiguredParent$' -count=1
+
 run "QA ledger observations preserve failures independently of model summaries" \
   go test ./internal/automationagent -run 'TestQALedgerObservationPreservesObservedFailuresAndRejectsMalformedEvidence$' -count=1
 

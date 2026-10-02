@@ -50,7 +50,7 @@ commit. A dirty, substituted or symlinked existing checkout is rejected.
 
 Pack size is at most 64 MiB. A source tree has at most 20,000 files, 128 MiB total
 expanded bytes and 32 MiB per file. The importer validates tree entries before
-checkout. Symlinks and gitlinks are currently unsupported and fail closed.
+checkout. Symlinks and unapproved gitlinks fail closed.
 
 The version 2 client supports a bounded `QASB` binary envelope with a canonical
 JSON manifest and separately hashed root and child Git packs. Authenticated
@@ -63,9 +63,23 @@ blob before atomic checkout publication. Nested gitlinks remain denied.
 
 The server acquisition function can prepare approved bundles using a separate
 repository-scoped token for each child, sharing expanded-tree and combined-pack
-budgets. The current HTTP endpoint still serves version 1 single packs: enabling
-version 2 also requires operator-owned server policy and immutable dependency
-provenance in receipts. Client support alone does not enable backend gitlinks.
+budgets. The HTTP endpoint serves version 2 bundles and stores their digest,
+size, and credential-free dependency descriptors in its immutable source
+receipt. Retrying the same run cannot replace a bundle receipt with a different
+bundle or a legacy single-pack receipt. Upgrade QA clients before activating
+workers against this server version.
+
+Server dependency authority is configured through
+`ITBEM_QA_SOURCE_DEPENDENCIES_JSON`, keyed by the parent GitHub repository and
+then gitlink path. For example:
+
+```json
+{"itbem-corp/itbem-events-backend":{".contracts/itbem-product-contract":"itbem-corp/itbem-product-contract"}}
+```
+
+Missing configuration grants no child reads. Both the server policy and worker
+workspace policy must authorize the dependency. This document does not apply
+that production configuration or provision Source App access.
 
 ## Evidence and remaining qualification
 
@@ -79,9 +93,10 @@ provider and callback, and create no production invoice or release authority.
 
 These fixtures do not certify the entire production worker and ledger chain.
 Current production Source App readiness, full independent worker callback/ledger
-recovery, and pinned submodule source
-delivery remain required work. In particular, repositories with gitlinks such as
-the backend's `.contracts` are not yet supported by this acquisition path.
+recovery, and end-to-end pinned submodule delivery remain required work. The
+signed PostgreSQL fixture exercises version 2 transport and immutable bundle
+receipts with a synthetic root-only supplier; production GitHub acquisition
+with real pinned dependencies is not yet qualified by that fixture.
 
 Legacy sealed local handoffs retain their original execution behavior. New paid
 inference, historical requeues and live worker activation require their existing

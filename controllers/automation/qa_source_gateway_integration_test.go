@@ -123,14 +123,16 @@ func TestQASourceSignedGatewayBindsPostgresAuthorityAndIndependentCheckout(t *te
 		}
 	})
 	const path = "/api/internal/automation/gateway/qa-source"
+	bundleAcquisition, err := qaSourceBundleAcquisition(automationagent.QASourceBundle{Pack: pack, PackSHA256: packDigest})
+	require.NoError(t, err)
 	app.POST(path, func(c echo.Context) error {
-		return gatewayQASourceWithAcquirer(c, func(_ context.Context, subject qaSourceSubject) ([]byte, string, error) {
+		return gatewayQASourceWithBundleAcquirer(c, func(_ context.Context, subject qaSourceSubject) (qaSourceAcquisition, error) {
 			acquisitions.Add(1)
 			require.Equal(t, qaSourceSubject{Reference: "workspace://repo", Repository: "example/service", Branch: branch, SHA: head}, subject)
 			if revoke.Load() {
 				require.NoError(t, db.Model(&models.AutomationAgentInstance{}).Where("id = ?", instance).Update("status", "revoked").Error)
 			}
-			return pack, packDigest, nil
+			return bundleAcquisition, nil
 		})
 	}, AgentCallbackAuthentication)
 	server := httptest.NewServer(app)
@@ -169,13 +171,18 @@ func TestQASourceSignedGatewayBindsPostgresAuthorityAndIndependentCheckout(t *te
 	require.Equal(t, matrix, receipt.MatrixDigest)
 	require.Equal(t, head, receipt.CommitSHA)
 	require.Equal(t, packDigest, receipt.PackSHA256)
+	require.Equal(t, bundleAcquisition.bundleDigest, receipt.BundleSHA256)
+	require.Equal(t, int64(len(bundleAcquisition.body)), receipt.BundleBytes)
+	require.Equal(t, "[]", receipt.DependencyManifest)
 	var currentTask models.AutomationTask
 	require.NoError(t, db.First(&currentTask, taskID).Error)
 	opened, err := openGatewayLease(lease, identity)
 	require.NoError(t, err)
 	actor := authenticatedAgentCallback{InstanceID: instance, AgentKey: "qa", MachineID: machine.MachineID()}
 	subject := qaSourceSubject{Reference: "workspace://repo", Repository: "example/service", Branch: branch, SHA: head}
-	require.NoError(t, recordServerQASourceReceipt(db, &currentTask, opened, identity, actor, subject, packDigest, int64(len(pack)), time.Now().UTC()), "same exact receipt should be idempotent")
+	require.NoError(t, recordServerQASourceBundleReceipt(db, &currentTask, opened, identity, actor, subject, packDigest, int64(len(pack)), bundleAcquisition.bundleDigest, int64(len(bundleAcquisition.body)), bundleAcquisition.dependencies, time.Now().UTC()), "same exact bundle receipt should be idempotent")
+	require.Error(t, recordServerQASourceReceipt(db, &currentTask, opened, identity, actor, subject, packDigest, int64(len(pack)), time.Now().UTC()), "legacy receipt must not erase bundle provenance")
+	require.Error(t, recordServerQASourceBundleReceipt(db, &currentTask, opened, identity, actor, subject, packDigest, int64(len(pack)), strings.Repeat("f", 64), int64(len(bundleAcquisition.body)), bundleAcquisition.dependencies, time.Now().UTC()), "changed bundle must not replace provenance")
 	require.Error(t, recordServerQASourceReceipt(db, &currentTask, opened, identity, actor, subject, strings.Repeat("f", 64), int64(len(pack)), time.Now().UTC()), "a different pack must not replace provenance")
 	observation := qaevidence.Observation{SchemaVersion: qaevidence.SchemaVersion, TaskID: taskID.String(), MatrixDigest: matrix, PreviewPassed: true, RepositoryExecutionOrder: []string{"workspace://repo"}, Repositories: []qaevidence.Repository{{Reference: "workspace://repo", Branch: branch, Commands: []qaevidence.Command{{Index: 0, Phase: "validation", Kind: "unit", Passed: true}}}}}
 	observationRaw, err := json.Marshal(observation)

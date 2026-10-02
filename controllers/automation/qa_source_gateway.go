@@ -24,19 +24,62 @@ import (
 // Signed source requests carry only a workspace selector, queue lease and
 // live run. Repository, commit and matrix come from immutable server input.
 func GatewayQASource(c echo.Context) error {
-	return gatewayQASourceWithAcquirer(c, func(ctx context.Context, subject qaSourceSubject) ([]byte, string, error) {
+	return gatewayQASourceWithBundleAcquirer(c, func(ctx context.Context, subject qaSourceSubject) (qaSourceAcquisition, error) {
+		policy, err := automationagent.LoadQASourceDependencyPolicy(os.Getenv, subject.Repository)
+		if err != nil {
+			return qaSourceAcquisition{}, err
+		}
 		app, err := automationagent.LoadGitHubSourceAppConfig(os.Getenv)
 		if err != nil {
-			return nil, "", err
+			return qaSourceAcquisition{}, err
 		}
-		return automationagent.FetchGitHubQASourcePack(ctx, subject.Repository, subject.SHA, app, nil)
+		bundle, err := automationagent.FetchGitHubQASourceBundle(ctx, subject.Repository, subject.SHA, policy, app, nil)
+		if err != nil {
+			return qaSourceAcquisition{}, err
+		}
+		return qaSourceBundleAcquisition(bundle)
 	})
+}
+
+type qaSourceAcquisition struct {
+	pack         []byte
+	digest       string
+	body         []byte
+	bundleDigest string
+	dependencies string
+}
+
+func qaSourceBundleAcquisition(bundle automationagent.QASourceBundle) (qaSourceAcquisition, error) {
+	body, digest, err := automationagent.EncodeQASourceBundle(bundle)
+	if err != nil {
+		return qaSourceAcquisition{}, err
+	}
+	decoded, err := automationagent.DecodeQASourceBundle(body, digest)
+	if err != nil {
+		return qaSourceAcquisition{}, err
+	}
+	descriptors := make([]map[string]any, 0, len(decoded.Dependencies))
+	for _, child := range decoded.Dependencies {
+		descriptors = append(descriptors, map[string]any{"path": child.Path, "repository": child.Repository, "commit_sha": child.CommitSHA, "pack_sha256": child.PackSHA256, "pack_bytes": len(child.Pack)})
+	}
+	raw, err := json.Marshal(descriptors)
+	if err != nil {
+		return qaSourceAcquisition{}, err
+	}
+	return qaSourceAcquisition{pack: bundle.Pack, digest: bundle.PackSHA256, body: body, bundleDigest: digest, dependencies: string(raw)}, nil
 }
 
 // The route always supplies the server's bounded GitHub acquisition above.
 // An explicit dependency lets isolated database fixtures exercise revocation
 // without granting a production URL or credential override.
 func gatewayQASourceWithAcquirer(c echo.Context, acquire func(context.Context, qaSourceSubject) ([]byte, string, error)) error {
+	return gatewayQASourceWithBundleAcquirer(c, func(ctx context.Context, subject qaSourceSubject) (qaSourceAcquisition, error) {
+		pack, digest, err := acquire(ctx, subject)
+		return qaSourceAcquisition{pack: pack, digest: digest, body: pack}, err
+	})
+}
+
+func gatewayQASourceWithBundleAcquirer(c echo.Context, acquire func(context.Context, qaSourceSubject) (qaSourceAcquisition, error)) error {
 	actor, ok := requireAgentCallbackIdentity(c)
 	if !ok {
 		return utils.Error(c, http.StatusUnauthorized, "Unauthorized", "")
@@ -110,10 +153,11 @@ func gatewayQASourceWithAcquirer(c echo.Context, acquire func(context.Context, q
 		return utils.Error(c, http.StatusForbidden, "Source subject denied", "")
 	}
 	matrix := task.EvidenceSubjectDigest
-	pack, digest, err := acquire(ctx, subject)
+	acquired, err := acquire(ctx, subject)
 	if err != nil {
 		return utils.Error(c, http.StatusServiceUnavailable, "Bounded source acquisition unavailable", "")
 	}
+	pack, digest := acquired.pack, acquired.digest
 	if len(pack) < 12 || len(pack) > 64<<20 || string(pack[:4]) != "PACK" || fmt.Sprintf("%x", sha256.Sum256(pack)) != digest {
 		return utils.Error(c, http.StatusServiceUnavailable, "Source package integrity invalid", "")
 	}
@@ -124,14 +168,24 @@ func gatewayQASourceWithAcquirer(c echo.Context, acquire func(context.Context, q
 	if err != nil || confirmed != subject {
 		return utils.Error(c, http.StatusForbidden, "Source subject changed", "")
 	}
-	if err := recordServerQASourceReceipt(configuration.DB.WithContext(ctx), &task, lease, identity, actor, subject, digest, int64(len(pack)), time.Now().UTC()); err != nil {
+	var bundleBytes int64
+	version, contentType := 1, "application/x-git-packed-objects"
+	if acquired.bundleDigest != "" {
+		decoded, err := automationagent.DecodeQASourceBundle(acquired.body, acquired.bundleDigest)
+		if err != nil || decoded.PackSHA256 != digest {
+			return utils.Error(c, http.StatusServiceUnavailable, "Source bundle integrity invalid", "")
+		}
+		bundleBytes = int64(len(acquired.body))
+		version, contentType = 2, "application/vnd.itbem.qa-source-bundle"
+	}
+	if err := recordServerQASourceBundleReceipt(configuration.DB.WithContext(ctx), &task, lease, identity, actor, subject, digest, int64(len(pack)), acquired.bundleDigest, bundleBytes, acquired.dependencies, time.Now().UTC()); err != nil {
 		return utils.Error(c, http.StatusConflict, "Source receipt could not be sealed", "")
 	}
-	metadata, err := json.Marshal(map[string]any{"schema_version": 1, "task_id": task.ID.String(), "run_id": request.RunID, "matrix_digest": matrix, "repository_ref": subject.Reference, "repository": subject.Repository, "branch": subject.Branch, "commit_sha": subject.SHA, "pack_sha256": digest})
+	metadata, err := json.Marshal(automationagent.QASourceMetadata{SchemaVersion: version, TaskID: task.ID.String(), RunID: request.RunID, MatrixDigest: matrix, Reference: subject.Reference, Repository: subject.Repository, Branch: subject.Branch, CommitSHA: subject.SHA, PackSHA256: digest, BundleSHA256: acquired.bundleDigest})
 	if err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Source metadata unavailable", "")
 	}
 	c.Response().Header().Set("X-ITBEM-QA-Source", base64.RawURLEncoding.EncodeToString(metadata))
 	c.Response().Header().Set("Cache-Control", "no-store")
-	return c.Blob(http.StatusOK, "application/x-git-packed-objects", pack)
+	return c.Blob(http.StatusOK, contentType, acquired.body)
 }
