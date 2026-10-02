@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from sandbox_worktree import snapshot_worktree
 
 ROOT = pathlib.Path("/tmp/itbem-firecracker")
 FIRECRACKER = ROOT / "release-v1.7.0-x86_64" / "firecracker-v1.7.0-x86_64"
@@ -72,9 +73,12 @@ def main() -> None:
     if any(not str(request.get(field, "")).strip() for field in required):
         emit_failure("supervisor request is missing task-scoped binding", request)
     workspace_path = pathlib.Path(str(request["workspace_path"])).absolute()
-    digest = "sha256:" + hashlib.sha256(str(workspace_path).strip().encode()).hexdigest()
+    try:
+        digest, _, _ = snapshot_worktree(workspace_path)
+    except (OSError, RuntimeError, UnicodeError) as exc:
+        emit_failure(f"worktree content binding failed: {exc}", request)
     if request["worktree_digest"] != digest:
-        emit_failure("worktree digest does not match the bound workspace path", request)
+        emit_failure("worktree digest does not match the bound source content", request)
 
     command = str(request.get("command", ""))
     args = request.get("args") or []
