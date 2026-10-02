@@ -106,6 +106,14 @@ not exercise production Source App token minting or grant a configurable
 production Git URL. Production GitHub acquisition with pinned dependencies
 still requires readiness verification.
 
+The signed PostgreSQL fixture also calls the actual terminal `Complete` route
+under a renewed run, with private request/result references for the original
+run. It rejects misplaced source provenance before accounting, accepts the
+original acquisition and inference receipts, projects one QA observation, and
+prevents terminal redelivery from appending a second execution. Its accepted
+inference receipt is seeded synthetic fixture data; provider admission and
+actual worker command execution are not certified by that callback fixture.
+
 Legacy sealed local handoffs retain their original execution behavior. New paid
 inference, historical requeues and live worker activation require their existing
 explicit authorization; running source qualification does not grant them.

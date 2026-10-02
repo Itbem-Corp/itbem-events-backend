@@ -24,6 +24,7 @@ import (
 	"events-stocks/internal/agentcallbackauth"
 	"events-stocks/internal/agentwork"
 	"events-stocks/internal/automationagent"
+	"events-stocks/internal/deliveryledger"
 	"events-stocks/internal/qaevidence"
 	"events-stocks/internal/releasegate"
 	"events-stocks/models"
@@ -43,13 +44,13 @@ func TestQASourceSignedGatewayBindsPostgresAuthorityAndIndependentCheckout(t *te
 	t.Cleanup(func() { require.NoError(t, container.Terminate(context.Background())) })
 	dsn, err := container.ConnectionString(ctx, "sslmode=disable")
 	require.NoError(t, err)
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent), DisableForeignKeyConstraintWhenMigrating: true})
 	require.NoError(t, err)
 	sqlDB, err := db.DB()
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
 	require.NoError(t, db.Exec(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`).Error)
-	require.NoError(t, db.AutoMigrate(&models.AutomationTask{}, &models.AutomationAgentInstance{}, &models.AutomationAgentCallbackNonce{}, &models.AutomationQASourceReceipt{}))
+	require.NoError(t, configuration.MigrateModelsForTest(db))
 	previous := configuration.DB
 	configuration.DB = db
 	t.Cleanup(func() { configuration.DB = previous })
@@ -59,6 +60,8 @@ func TestQASourceSignedGatewayBindsPostgresAuthorityAndIndependentCheckout(t *te
 	public, err := agentcallbackauth.EncodePublicKey(machine.PublicKey())
 	require.NoError(t, err)
 	instance, taskID, item := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
+	worker := uuid.Must(uuid.NewV4()).String()
+	require.NoError(t, db.Create(&models.DeliveryWorkItem{ID: item, ProjectID: uuid.Must(uuid.NewV4()), RequestedBy: "synthetic-human", Title: "synthetic source-to-QA callback"}).Error)
 	run := uuid.Must(uuid.NewV4()).String()
 	expires := time.Now().UTC().Add(time.Minute)
 	require.NoError(t, db.Create(&models.AutomationAgentInstance{ID: instance, AgentKey: "qa", MachineID: machine.MachineID(), PublicKey: public, Status: "active"}).Error)
@@ -104,9 +107,9 @@ func TestQASourceSignedGatewayBindsPostgresAuthorityAndIndependentCheckout(t *te
 		_, _ = w.Write(input)
 	}))
 	defer storage.Close()
-	cfg := &models.Config{AutomationInputBucket: "synthetic", S3Endpoint: storage.URL, S3UsePathStyle: "true", AwsRegion: "us-east-1", S3ClientId: "test", S3ClientSecret: "test"}
+	cfg := &models.Config{AutomationInputBucket: "synthetic", AutomationOutputBucket: "synthetic-outputs", S3Endpoint: storage.URL, S3UsePathStyle: "true", AwsRegion: "us-east-1", S3ClientId: "test", S3ClientSecret: "test"}
 	ref := "s3://synthetic/automation/inputs/fixture/input.json"
-	require.NoError(t, db.Create(&models.AutomationTask{ID: taskID, JobID: uuid.Must(uuid.NewV4()), Operation: "delivery.qa", Status: "cancelled", RunID: run, LeaseExpiresAt: &expires, InputRef: ref, AgentInstanceID: &instance, AgentKey: "qa", MachineID: machine.MachineID(), DeliveryWorkItemID: &item, EvidenceSubjectDigest: matrix}).Error)
+	require.NoError(t, db.Create(&models.AutomationTask{ID: taskID, JobID: uuid.Must(uuid.NewV4()), Operation: "delivery.qa", Status: "cancelled", RunID: run, LeaseExpiresAt: &expires, InputRef: ref, AgentInstanceID: &instance, WorkerID: worker, AgentKey: "qa", MachineID: machine.MachineID(), DeliveryWorkItemID: &item, EvidenceSubjectDigest: matrix, QASourceReceiptRequired: true}).Error)
 	identity := gatewayIdentity{Role: agentwork.RoleQA, Lane: agentwork.LaneQA}
 	lease, err := sealGatewayLease(gatewayLease{Version: 1, Role: string(identity.Role), Lane: string(identity.Lane), TaskID: taskID.String(), InputRef: ref, ReceiptHandle: "synthetic", ExpiresAt: expires.Unix()})
 	require.NoError(t, err)
@@ -144,6 +147,7 @@ func TestQASourceSignedGatewayBindsPostgresAuthorityAndIndependentCheckout(t *te
 			return bundleAcquisition, nil
 		})
 	}, AgentCallbackAuthentication)
+	app.PUT("/api/internal/automation/tasks/:id", Complete, AgentCallbackAuthentication)
 	server := httptest.NewServer(app)
 	defer server.Close()
 	callback, err := automationagent.NewHTTPCallback(server.URL, machine, instance.String(), server.Client())
@@ -248,4 +252,50 @@ func TestQASourceSignedGatewayBindsPostgresAuthorityAndIndependentCheckout(t *te
 	var nonceCount int64
 	require.NoError(t, db.Model(&models.AutomationAgentCallbackNonce{}).Count(&nonceCount).Error)
 	require.Equal(t, int64(3), nonceCount)
+
+	// Exercise the actual signed terminal callback under a new lease, retaining
+	// the original source run and accepted inference receipt. Provider admission
+	// is outside this fixture: this synthetic receipt produces no provider call.
+	require.NoError(t, db.Model(&models.AutomationAgentInstance{}).Where("id = ?", instance).Update("status", "active").Error)
+	recoveryRun := uuid.Must(uuid.NewV4()).String()
+	require.NoError(t, db.Model(&models.AutomationTask{}).Where("id = ?", taskID).Update("run_id", recoveryRun).Error)
+	callID, inferenceID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
+	require.NoError(t, db.Create(&models.AutomationInferenceReceipt{ID: inferenceID, AutomationTaskID: taskID, RunID: run, CallID: callID, Operation: "delivery.qa", WorkerID: worker, AgentKey: "qa", MachineID: machine.MachineID(), PolicySnapshotHash: strings.Repeat("a", 64), QuotaLimit: 1, Status: "accepted", Provider: "synthetic", Model: "fixture", InputTokens: 1, OutputTokens: 1, TotalTokens: 2, UsageJSON: `{"input_tokens":1,"output_tokens":1}`, CreatedAt: time.Now().UTC()}).Error)
+	observation.Repositories[0].Branch = branch
+	observationRaw, err = json.Marshal(observation)
+	require.NoError(t, err)
+	var executionObservation map[string]any
+	require.NoError(t, json.Unmarshal(observationRaw, &executionObservation))
+	prefix := "s3://synthetic-outputs/automation/" + taskID.String() + "/runs/" + run
+	update := automationagent.TaskUpdate{Status: "completed", RunID: recoveryRun, RecoveryRunID: run, WorkerID: worker, AgentKey: "qa", MachineID: machine.MachineID(), RequestRef: prefix + "/request.json", OutputRef: prefix + "/result.json", CallID: callID.String(), ReceiptID: inferenceID.String(), Execution: executionObservation}
+	require.NoError(t, db.Model(&models.AutomationQASourceReceipt{}).Where("id = ?", receipt.ID).Update("run_id", recoveryRun).Error)
+	accepted, err := callback.Update(ctx, taskID.String(), update)
+	require.Error(t, err, "new lease must not borrow source provenance from the wrong original run")
+	require.False(t, accepted)
+	var executions int64
+	require.NoError(t, db.Model(&models.AutomationExecution{}).Where("automation_task_id = ?", taskID).Count(&executions).Error)
+	require.Zero(t, executions, "rejected source provenance must not settle accounting")
+	require.NoError(t, db.Model(&models.AutomationQASourceReceipt{}).Where("id = ?", receipt.ID).Update("run_id", run).Error)
+	accepted, err = callback.Update(ctx, taskID.String(), update)
+	require.NoError(t, err)
+	require.True(t, accepted)
+	var finalTask models.AutomationTask
+	require.NoError(t, db.First(&finalTask, taskID).Error)
+	require.Equal(t, "completed", finalTask.Status)
+	var accounting models.AutomationExecution
+	require.NoError(t, db.Where("automation_task_id = ?", taskID).First(&accounting).Error)
+	require.Equal(t, run, accounting.RunID)
+	require.Equal(t, inferenceID, *accounting.InferenceReceiptID)
+	require.Equal(t, instance, *accounting.AgentInstanceID)
+	var observed models.DeliveryEvent
+	require.NoError(t, db.Where("work_item_id = ? AND event_type = ?", item, deliveryledger.EventTypeQAObserved).First(&observed).Error)
+	projected, err := deliveryledger.ProjectQAObservation(observed)
+	require.NoError(t, err)
+	require.Equal(t, observation, projected.Observation)
+	accepted, err = callback.Update(ctx, taskID.String(), update)
+	require.NoError(t, err)
+	require.False(t, accepted, "terminal redelivery must not commit accounting again")
+	require.NoError(t, db.Model(&models.AutomationExecution{}).Where("automation_task_id = ?", taskID).Count(&executions).Error)
+	require.Equal(t, int64(1), executions)
+	require.Equal(t, int32(2), acquisitions.Load(), "terminal callbacks must not fetch code again")
 }
