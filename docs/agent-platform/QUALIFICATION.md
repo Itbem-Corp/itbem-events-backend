@@ -23,8 +23,14 @@ release state and an immutable `result.json` before its terminal callback.
 Recovery preserves both original run references and makes no model call. The
 PostgreSQL integration fixtures cover signed admission, revocation during
 observation, missing or mutated server evidence, exact recovery references and
-the retained Vault blocker. These component fixtures do not yet prove the whole
-worker/gateway/callback chain in one process-level integration or live release.
+the retained Vault blocker. A further fixture connects the actual release
+worker, signed HTTP callback, gateway handlers, S3 SDK and PostgreSQL ledger.
+It forces the first terminal callback to fail, expires the run lease, then
+proves immutable recovery with one server observation, two zero-call attempt
+snapshots, no inference receipt or cost execution, and no duplicate events on
+terminal redelivery. This proves the release transport chain against synthetic
+approved policy/publication/QA evidence; it does not qualify the full five-role
+workflow, actual QA tool execution or live production release.
 
 The local qualifier first initializes only the repository's declared Git
 submodules at their committed gitlinks. This makes a clean worktree test the

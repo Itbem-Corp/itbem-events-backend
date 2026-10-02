@@ -21,7 +21,7 @@ type AutomationInferenceAttemptPolicy struct {
 	MaxCompletionTokens int        `gorm:"not null" json:"-"`
 	// MaxInferenceCalls is the per-run durable gateway-call quota. It is part
 	// of the signed snapshot so refreshing a worker capability cannot increase it.
-	MaxInferenceCalls int       `gorm:"not null;default:6" json:"-"`
+	MaxInferenceCalls int       `gorm:"not null;default:0" json:"-"`
 	SnapshotHash      string    `gorm:"type:char(64);not null" json:"-"`
 	SignatureKeyID    string    `gorm:"type:varchar(16);not null;default:''" json:"-"`
 	SnapshotSignature string    `gorm:"type:char(64);not null;default:''" json:"-"`

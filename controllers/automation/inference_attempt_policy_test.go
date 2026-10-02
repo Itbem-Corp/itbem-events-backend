@@ -17,6 +17,7 @@ func TestInferenceAttemptCallQuotaFollowsAdmissionBudgets(t *testing.T) {
 		"delivery.qa":             2,
 		"delivery.plan":           1,
 		"delivery.publish":        0,
+		"delivery.release_gate":   0,
 		"automation.chat":         1,
 	} {
 		if got := inferenceAttemptCallQuota(operation); got != want {
