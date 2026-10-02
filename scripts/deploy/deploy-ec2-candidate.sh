@@ -94,6 +94,8 @@ d run -d \
   --restart no \
   --init \
   --env-file "$ENV_FILE" \
+  --env ITBEM_QA_SOURCE_SCRATCH_ROOT=/qa-source \
+  --tmpfs /qa-source:rw,noexec,nosuid,nodev,size=128m,mode=0700,uid=1000,gid=1000 \
   --log-driver awslogs \
   --log-opt "awslogs-region=$AWS_REGION" \
   --log-opt "awslogs-group=$LOG_GROUP" \
@@ -122,6 +124,8 @@ if ! d run -d \
   --restart always \
   --init \
   --env-file "$ENV_FILE" \
+  --env ITBEM_QA_SOURCE_SCRATCH_ROOT=/qa-source \
+  --tmpfs /qa-source:rw,noexec,nosuid,nodev,size=128m,mode=0700,uid=1000,gid=1000 \
   --log-driver awslogs \
   --log-opt "awslogs-region=$AWS_REGION" \
   --log-opt "awslogs-group=$LOG_GROUP" \
