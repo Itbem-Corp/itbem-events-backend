@@ -419,8 +419,8 @@ func validateWorkspaceSandbox(config *WorkspaceConfig) error {
 }
 
 func validateSandboxSupervisorCommand(command []string) error {
-	if len(command) == 0 || len(command) > 8 {
-		return fmt.Errorf("firecracker sandbox requires one supervisor command with at most eight arguments")
+	if len(command) == 0 || len(command) > 16 {
+		return fmt.Errorf("firecracker sandbox requires one supervisor command with at most sixteen elements")
 	}
 	for index, part := range command {
 		part = strings.TrimSpace(part)
@@ -1248,6 +1248,8 @@ type SandboxAttestation struct {
 	EvidenceScope        string `json:"evidence_scope"`
 	GuestCommandVerified bool   `json:"guest_command_verified"`
 	EvidenceDigest       string `json:"evidence_digest,omitempty"`
+	ToolchainImageSHA256 string `json:"toolchain_image_sha256,omitempty"`
+	RegisteredCommand    string `json:"registered_command,omitempty"`
 }
 
 // WorkspaceReadinessSnapshot validates only local registry state and returns
@@ -1302,6 +1304,11 @@ func sandboxAttestation(raw string) *SandboxAttestation {
 	}
 	if len(value.RuntimeVersion) > 64 || len(value.EvidenceScope) > 64 || len(value.EvidenceDigest) > 128 {
 		return nil
+	}
+	if value.ToolchainImageSHA256 != "" || value.RegisteredCommand != "" {
+		if value.RegisteredCommand != "go.test.json.offline" || len(value.ToolchainImageSHA256) != 64 || strings.Trim(value.ToolchainImageSHA256, "0123456789abcdef") != "" {
+			return nil
+		}
 	}
 	return &value
 }

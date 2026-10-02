@@ -33,7 +33,7 @@ func TestGuestExecutionDoesNotInheritHostEnvironment(t *testing.T) {
 }
 
 func TestGuestCommandAllowlistIsNarrow(t *testing.T) {
-	for _, command := range []string{"/bin/sh", "/bin/sha256sum", "/bin/cat"} {
+	for _, command := range []string{"/bin/sh", "/bin/sha256sum", "/bin/cat", "/sdk/bin/go"} {
 		if !allowed(command) {
 			t.Fatalf("expected %q to be allowed", command)
 		}
@@ -42,5 +42,17 @@ func TestGuestCommandAllowlistIsNarrow(t *testing.T) {
 		if allowed(command) {
 			t.Fatalf("expected %q to be rejected", command)
 		}
+	}
+}
+
+func TestGoToolchainRejectsUnregisteredCommandsBeforeExecution(t *testing.T) {
+	for _, args := range [][]string{{"env"}, {"test", "./..."}, {"test", "-json", "-count=1", "-timeout=30s", "../..."}, {"test", "-json", "-count=1", "-timeout=30s", "./...", "-exec=/bin/sh"}} {
+		result := execute(request{Command: "/sdk/bin/go", Args: args}, time.Second)
+		if result.Executed || result.OK || result.Error != "Go command is not registered" {
+			t.Fatalf("unregistered Go command admitted: %#v", result)
+		}
+	}
+	if !goTestArguments([]string{"test", "-json", "-count=1", "-timeout=30s", "./..."}) {
+		t.Fatal("registered command rejected")
 	}
 }

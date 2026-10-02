@@ -940,7 +940,7 @@ func implementationHandoff(result map[string]any) map[string]any {
 
 func implementationHandoffSingle(result map[string]any) map[string]any {
 	handoff := map[string]any{}
-	for _, key := range []string{"workspace", "worktree", "branch", "base_sha", "github_repository", "review_diff_sha256", "diff_check_passed"} {
+	for _, key := range []string{"workspace", "worktree", "branch", "base_sha", "github_repository", "review_diff_sha256", "review_source_sha256", "diff_check_passed"} {
 		if value, ok := result[key]; ok {
 			handoff[key] = value
 		}

@@ -118,7 +118,11 @@ def open_jailed_process(pid_file: pathlib.Path, executable: pathlib.Path, requir
         raise RuntimeError("invalid Jailer child PID")
     descriptor = os.pidfd_open(int(text))
     try:
-        if os.readlink(f"/proc/{int(text)}/exe") != str(executable):
+        try:
+            same_executable = os.path.samefile(f"/proc/{int(text)}/exe", executable)
+        except OSError as exc:
+            raise RuntimeError("Jailer child executable cannot be verified") from exc
+        if not same_executable:
             raise RuntimeError("Jailer child executable does not match this lease")
         if require_namespace:
             status = pathlib.Path(f"/proc/{int(text)}/status").read_text()
@@ -159,6 +163,83 @@ def build_worktree_image(staging: pathlib.Path, image: pathlib.Path, total_bytes
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "mke2fs worktree image failed")
 
 
+def verified_guest_execution(response: dict) -> bool:
+    if not isinstance(response, dict) or response.get("executed") is not True:
+        return False
+    code = response.get("exit_code")
+    if type(code) is not int or code < 0 or code > 255:
+        return False
+    if response.get("ok") is not (code == 0):
+        return False
+    if response.get("error", "") != ("" if code == 0 else "guest command failed"):
+        return False
+    for field in ("stdout", "stderr"):
+        value = response.get(field, "")
+        if not isinstance(value, str):
+            return False
+        try:
+            if len(value.encode("utf-8")) > MAX_OUTPUT:
+                return False
+        except UnicodeError:
+            return False
+    if code == 0:
+        tests = {}
+        packages = set()
+        try:
+            for line in response.get("stdout", "").splitlines():
+                event = json.loads(line)
+                if not isinstance(event, dict):
+                    return False
+                action, test, package = event.get("Action"), event.get("Test"), event.get("Package")
+                if action in ("skip", "fail"):
+                    return False
+                if test:
+                    key = (package, test)
+                    if action == "run":
+                        tests[key] = False
+                    elif action == "pass":
+                        if key not in tests:
+                            return False
+                        tests[key] = True
+                elif action == "pass":
+                    packages.add(package)
+        except (ValueError, TypeError):
+            return False
+        if not tests or not all(tests.values()) or any(package not in packages for package, _ in tests):
+            return False
+    return True
+
+
+def delegated_jailer_parent(relative: str) -> pathlib.Path:
+    path = pathlib.PurePosixPath(relative)
+    if path.is_absolute() or len(path.parts) < 2 or ".." in path.parts or str(path) != relative:
+        raise RuntimeError("jailer cgroup parent must be a normalized delegated relative path")
+    current = next(line.split(":", 2)[2] for line in pathlib.Path("/proc/self/cgroup").read_text().splitlines() if line.startswith("0::"))
+    current_path = pathlib.PurePosixPath(current.lstrip("/"))
+    if path not in (current_path, current_path.parent):
+        raise RuntimeError("jailer cgroup parent is outside the supervisor delegation")
+    parent = pathlib.Path("/sys/fs/cgroup") / path
+    enabled = set((parent / "cgroup.subtree_control").read_text().split())
+    if not {"cpu", "memory", "pids"}.issubset(enabled):
+        raise RuntimeError("delegated parent must already enable cpu, memory and pids")
+    return parent
+
+
+def verify_jailer_constraints(pid_file: pathlib.Path, cgroup: pathlib.Path, uid: int, gid: int, memory_limit: int = 268435456) -> None:
+    pid = int(pid_file.read_text().strip())
+    expected = "0::/" + str(cgroup.relative_to("/sys/fs/cgroup"))
+    if pathlib.Path(f"/proc/{pid}/cgroup").read_text().strip() != expected:
+        raise RuntimeError("Jailer child is outside its lease cgroup")
+    for filename, value in (("memory.max", str(memory_limit)), ("pids.max", "128"), ("cpu.max", "100000 100000")):
+        if " ".join((cgroup / filename).read_text().split()) != value:
+            raise RuntimeError("Jailer resource limit was not enforced: " + filename)
+    status = pathlib.Path(f"/proc/{pid}/status").read_text().splitlines()
+    for name, value in (("Uid:", uid), ("Gid:", gid)):
+        row = next(line.split()[1:] for line in status if line.startswith(name))
+        if row != [str(value)] * 4 or value == 0:
+            raise RuntimeError("Jailer child did not drop its privileges")
+
+
 def apply_production_limits() -> None:
     """Bound the supervisor process before it launches Firecracker."""
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
@@ -166,9 +247,9 @@ def apply_production_limits() -> None:
     resource.setrlimit(resource.RLIMIT_FSIZE, (512 * 1024 * 1024, 512 * 1024 * 1024))
 
 
-def vsock_command(vsock_path: pathlib.Path, command: str, args: list[str]) -> dict:
+def vsock_command(vsock_path: pathlib.Path, command: str, args: list[str], timeout: int = 10) -> dict:
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(10)
+    client.settimeout(timeout)
     try:
         client.connect(str(vsock_path))
         client.sendall(b"CONNECT 52\n")
@@ -182,7 +263,7 @@ def vsock_command(vsock_path: pathlib.Path, command: str, args: list[str]) -> di
             if not chunk:
                 raise RuntimeError("guest agent closed the vsock connection before a response")
             payload += chunk
-            if len(payload) > MAX_OUTPUT:
+            if len(payload) > 2 * MAX_OUTPUT + 4096:
                 raise RuntimeError("guest agent response exceeded the bounded output limit")
         return json.loads(payload.decode())
     finally:
@@ -192,6 +273,10 @@ def vsock_command(vsock_path: pathlib.Path, command: str, args: list[str]) -> di
 def main() -> None:
     profile = os.environ.get("ITBEM_FIRECRACKER_PROFILE", PROFILE_LOCAL).strip().lower()
     force_jailer = False
+    cgroup_parent = None
+    configured_jailer_base = None
+    sdk_path = None
+    sdk_sha256 = None
     argv = list(sys.argv[1:])
     if argv:
         index = 0
@@ -202,6 +287,18 @@ def main() -> None:
             elif argv[index] == "--jailer":
                 force_jailer = True
                 index += 1
+            elif argv[index] == "--cgroup-parent" and index + 1 < len(argv):
+                cgroup_parent = argv[index + 1]
+                index += 2
+            elif argv[index] == "--jailer-base" and index + 1 < len(argv):
+                configured_jailer_base = argv[index + 1]
+                index += 2
+            elif argv[index] in ("--go-sdk-image", "--go-sdk-sha256") and index + 1 < len(argv):
+                if argv[index] == "--go-sdk-image":
+                    sdk_path = pathlib.Path(argv[index + 1])
+                else:
+                    sdk_sha256 = argv[index + 1]
+                index += 2
             else:
                 emit_failure("supervisor accepts --profile local|production and optional --jailer")
     if profile not in (PROFILE_LOCAL, PROFILE_PRODUCTION):
@@ -226,6 +323,17 @@ def main() -> None:
         emit_failure("worktree digest does not match the bound source content", request)
     command = str(request.get("command", ""))
     args = request.get("args") or []
+    go_mode = command in ("go", "/sdk/bin/go") and args == ["test", "-json", "-count=1", "-timeout=30s", "./..."]
+    if go_mode:
+        command = "/sdk/bin/go"
+        if sdk_path is None or not sdk_path.is_absolute() or sdk_path.is_symlink() or not sdk_path.is_file() or sdk_path.stat().st_size > 384 * 1024 * 1024:
+            emit_failure("Go execution requires an operator-configured bounded SDK image", request)
+        if not isinstance(sdk_sha256, str) or not re.fullmatch(r"[a-f0-9]{64}", sdk_sha256):
+            emit_failure("Go SDK image requires a pinned SHA256", request)
+        if hashlib.sha256(sdk_path.read_bytes()).hexdigest() != sdk_sha256:
+            emit_failure("Go SDK image checksum mismatch", request)
+        if request.get("timeout_ms", 0) < 90000:
+            emit_failure("Go execution requires a 90-second outer lifecycle budget", request)
     # The guest agent has a narrow allow-list. The binding mode is retained for
     # the protocol smoke test; the worktree mode reads an actual staged file
     # from a read-only second guest drive.
@@ -234,6 +342,7 @@ def main() -> None:
         command == "/bin/cat" and len(args) == 1 and args[0].startswith("/workspace/")
         and ".." not in pathlib.PurePosixPath(args[0]).parts
     )
+    worktree_mode = worktree_mode or go_mode
     if not binding_mode and not worktree_mode:
         emit_failure("virtio-vsock proof only permits /bin/cat of the binding manifest or /workspace/*", request)
     if request.get("input") or request.get("environment"):
@@ -242,7 +351,12 @@ def main() -> None:
         if not artifact.is_file():
             emit_failure(f"missing Firecracker artifact: {artifact}", request)
     use_jailer = profile == PROFILE_PRODUCTION and (force_jailer or os.environ.get("ITBEM_FIRECRACKER_USE_JAILER", "0") == "1")
+    jail_memory_limit = 1073741824 if go_mode else 268435456
     if use_jailer:
+        try:
+            delegated_parent = delegated_jailer_parent(cgroup_parent or "")
+        except (OSError, RuntimeError, StopIteration) as exc:
+            emit_failure(str(exc), request)
         if not JAILER.is_file() or not os.access(JAILER, os.X_OK):
             emit_failure(f"production jailer profile requires an executable jailer: {JAILER}", request)
         if os.geteuid() != 0:
@@ -256,14 +370,24 @@ def main() -> None:
     # Unix domain sockets have a small path limit; keep the jail base short and
     # make the lease id the unique component instead of nesting under the
     # long-lived supervisor temp directory.
-    jailer_base = pathlib.Path(os.environ.get("ITBEM_FIRECRACKER_JAILER_BASE", "/tmp/itbem-jailer"))
+    jailer_base = pathlib.Path(configured_jailer_base or os.environ.get("ITBEM_FIRECRACKER_JAILER_BASE", "/tmp/itbem-jailer"))
     jailer_id = re.sub(r"[^A-Za-z0-9-]", "-", str(request["lease_id"]))[:48]
     jailer_uid = int(os.environ.get("ITBEM_FIRECRACKER_JAILER_UID", "1000"))
     jailer_gid = int(os.environ.get("ITBEM_FIRECRACKER_JAILER_GID", "1000"))
+    if use_jailer and (jailer_uid <= 0 or jailer_gid <= 0):
+        shutil.rmtree(workdir)
+        emit_failure("jailer child requires non-root UID and GID", request)
     jail_root = jailer_base / FIRECRACKER.name / jailer_id / "root"
+    jail_cgroup = delegated_parent / jailer_id if use_jailer else None
+    if use_jailer and (jail_cgroup.exists() or jail_root.parent.exists()):
+        shutil.rmtree(workdir)
+        emit_failure("refusing to reuse an existing jail or cgroup lease", request)
     if use_jailer:
-        api_socket = jail_root / "run" / "firecracker.sock"
-        vsock_socket = jail_root / "run" / "vsock.sock"
+        api_socket = jail_root / "run" / "api.sock"
+        vsock_socket = jail_root / "run" / "v.sock"
+        if max(len(os.fsencode(api_socket)), len(os.fsencode(vsock_socket))) > 107:
+            shutil.rmtree(workdir)
+            emit_failure("jailer base exceeds the Unix socket path limit", request)
     rootfs = workdir / "rootfs.ext4"
     worktree_image = workdir / "worktree.ext4"
     staging = workdir / "worktree"
@@ -272,8 +396,24 @@ def main() -> None:
     binding = workdir / "binding.txt"
     init_path = workdir / "itbem-init"
     shutil.copy2(ROOTFS, rootfs)
+    sdk_image = workdir / "sdk.ext4"
+    if go_mode:
+        shutil.copyfile(sdk_path, sdk_image)
+        if hashlib.sha256(sdk_image.read_bytes()).hexdigest() != sdk_sha256:
+            shutil.rmtree(workdir)
+            emit_failure("Go SDK changed during staging", request)
     if use_jailer:
-        jailer_base.mkdir(parents=True, exist_ok=True)
+        if not jailer_base.is_absolute():
+            shutil.rmtree(workdir)
+            emit_failure("jailer base must be an operator-owned absolute path", request)
+        jailer_base.mkdir(mode=0o700, parents=True, exist_ok=True)
+        for directory in (jailer_base, *jailer_base.parents):
+            metadata = directory.lstat()
+            writable = metadata.st_mode & 0o022
+            sticky_parent = directory != jailer_base and metadata.st_mode & 0o1000
+            if directory.is_symlink() or metadata.st_uid != 0 or (writable and not sticky_parent):
+                shutil.rmtree(workdir)
+                emit_failure("jailer path is writable by an unprivileged host identity", request)
     worktree_files = 0
     worktree_bytes = 0
     if worktree_mode:
@@ -290,7 +430,7 @@ def main() -> None:
         f"task_id={request['task_id']}\nworkspace_id={request['workspace_id']}\nworktree_digest={request['worktree_digest']}\n",
         encoding="utf-8",
     )
-    expected_file = binding if binding_mode else staging.joinpath(*pathlib.PurePosixPath(args[0]).parts[2:])
+    expected_file = binding if binding_mode or go_mode else staging.joinpath(*pathlib.PurePosixPath(args[0]).parts[2:])
     if not expected_file.is_file() or expected_file.stat().st_size > MAX_OUTPUT:
         shutil.rmtree(workdir)
         emit_failure("guest read proof requires a bounded regular text file", request)
@@ -307,6 +447,12 @@ def main() -> None:
     if worktree_mode:
         init_lines.extend([
             "mount -t ext4 -o ro /dev/vdb /workspace",
+        ])
+    if go_mode:
+        init_lines.extend([
+            "mount -t proc proc /proc",
+            "mount -t tmpfs -o size=512m,nosuid,nodev tmpfs /tmp",
+            "mount -t ext4 -o ro /dev/vdc /sdk",
         ])
     init_lines.extend([
         "/itbem-guest-agent >/dev/console 2>&1 &",
@@ -325,6 +471,8 @@ def main() -> None:
     subprocess.run(["debugfs", "-w", "-R", "mkdir /itbem-fixture", str(rootfs)], capture_output=True, check=False)
     if worktree_mode:
         subprocess.run(["debugfs", "-w", "-R", "mkdir /workspace", str(rootfs)], capture_output=True, check=False)
+    if go_mode:
+        debugfs(rootfs, "mkdir /sdk")
     debugfs_write(rootfs, binding, "/itbem-fixture/binding.txt")
     debugfs_write(rootfs, GUEST_AGENT, "/itbem-guest-agent")
     debugfs_write(rootfs, init_path, "/itbem-init")
@@ -359,11 +507,13 @@ def main() -> None:
                 "--gid", str(jailer_gid),
                 "--chroot-base-dir", str(jailer_base), "--new-pid-ns",
                 "--cgroup-version", "2",
-                "--cgroup", "memory.max=268435456",
+                "--parent-cgroup", cgroup_parent,
+                "--cgroup", "cpu.max=100000 100000",
+                "--cgroup", f"memory.max={jail_memory_limit}",
                 "--cgroup", "pids.max=128",
                 "--resource-limit", "no-file=4096",
                 "--resource-limit", "fsize=536870912",
-                "--", "--api-sock", "/run/firecracker.sock", "--level", "Warning",
+                "--", "--api-sock", "/run/api.sock", "--level", "Warning",
             ]
         process = subprocess.Popen(
             firecracker_command,
@@ -386,7 +536,11 @@ def main() -> None:
             shutil.copy2(rootfs, jail_root / "rootfs.ext4")
             if worktree_mode:
                 shutil.copy2(worktree_image, jail_root / "worktree.ext4")
-            for resource_path in (jail_root / "vmlinux", jail_root / "rootfs.ext4", jail_root / "worktree.ext4"):
+            if go_mode:
+                shutil.copyfile(sdk_image, jail_root / "sdk.ext4")
+                if hashlib.sha256((jail_root / "sdk.ext4").read_bytes()).hexdigest() != sdk_sha256:
+                    raise RuntimeError("jailed SDK image differs from operator pin")
+            for resource_path in (jail_root / "vmlinux", jail_root / "rootfs.ext4", jail_root / "worktree.ext4", jail_root / "sdk.ext4"):
                 if resource_path.exists():
                     os.chmod(resource_path, 0o644)
         for _ in range(100):
@@ -397,6 +551,7 @@ def main() -> None:
             raise RuntimeError("Firecracker API socket did not appear")
         if use_jailer:
             jailed_process = open_jailed_process(jail_root / (FIRECRACKER.name + ".pid"), jail_root / FIRECRACKER.name)
+            verify_jailer_constraints(jail_root / (FIRECRACKER.name + ".pid"), jail_cgroup, jailer_uid, jailer_gid, jail_memory_limit)
         lifecycle["created"] = True
         kernel_path = "/vmlinux" if use_jailer else str(KERNEL)
         rootfs_path = "/rootfs.ext4" if use_jailer else str(rootfs)
@@ -405,8 +560,10 @@ def main() -> None:
         api_put(api_socket, "/drives/rootfs", {"drive_id": "rootfs", "path_on_host": rootfs_path, "is_root_device": True, "is_read_only": True})
         if worktree_mode:
             api_put(api_socket, "/drives/worktree", {"drive_id": "worktree", "path_on_host": worktree_path, "is_root_device": False, "is_read_only": True})
-        api_put(api_socket, "/machine-config", {"vcpu_count": 1, "mem_size_mib": 128, "smt": False})
-        vsock_api_path = "/run/vsock.sock" if use_jailer else str(vsock_socket)
+        if go_mode:
+            api_put(api_socket, "/drives/sdk", {"drive_id": "sdk", "path_on_host": "/sdk.ext4" if use_jailer else str(sdk_image), "is_root_device": False, "is_read_only": True})
+        api_put(api_socket, "/machine-config", {"vcpu_count": 1, "mem_size_mib": 768 if go_mode else 128, "smt": False})
+        vsock_api_path = "/run/v.sock" if use_jailer else str(vsock_socket)
         api_put(api_socket, "/vsock", {"guest_cid": 3, "uds_path": vsock_api_path})
         api_put(api_socket, "/actions", {"action_type": "InstanceStart"})
         deadline = time.time() + 12
@@ -420,9 +577,9 @@ def main() -> None:
             if "ITBEM_VSOCK_AGENT_READY" in captured or "ITBEM_VSOCK_LISTENING" in captured:
                 break
             time.sleep(0.1)
-        response = vsock_command(vsock_socket, command, args)
-        lifecycle["guest_command_executed"] = verified_guest_read(response, expected_output)
-        guest_exit = 0 if lifecycle["guest_command_executed"] else 1
+        response = vsock_command(vsock_socket, command, args, 65 if go_mode else 10)
+        lifecycle["guest_command_executed"] = verified_guest_execution(response) if go_mode else verified_guest_read(response, expected_output)
+        guest_exit = response["exit_code"] if go_mode and lifecycle["guest_command_executed"] else (0 if lifecycle["guest_command_executed"] else 1)
         if not lifecycle["guest_command_executed"]:
             response["error"] = "guest output does not match the content-bound file"
     except Exception as exc:
@@ -437,6 +594,8 @@ def main() -> None:
                 if jailed_process is None:
                     jailed_process = open_jailed_process(jail_root / (FIRECRACKER.name + ".pid"), jail_root / FIRECRACKER.name)
                 lifecycle["destroyed"] = stop_jailed_process(jailed_process)
+                if lifecycle["destroyed"]:
+                    jail_cgroup.rmdir()
             except (OSError, RuntimeError) as exc:
                 lifecycle["destroyed"] = False
                 response["error"] = "Jailer child teardown could not be verified: " + str(exc)
@@ -468,6 +627,9 @@ def main() -> None:
         "guest_command_verified": bool(lifecycle["guest_command_executed"]),
         "evidence_digest": "sha256:" + hashlib.sha256((output + captured).encode()).hexdigest(),
     }
+    if go_mode:
+        attestation["toolchain_image_sha256"] = sdk_sha256
+        attestation["registered_command"] = "go.test.json.offline"
     ATTESTATION_ROOT.mkdir(parents=True, exist_ok=True)
     persisted = ATTESTATION_ROOT / (re.sub(r"[^A-Za-z0-9_.-]", "_", str(request["lease_id"])) + ".json")
     transfer = {
@@ -482,9 +644,10 @@ def main() -> None:
     persisted.write_text(json.dumps({"profile": profile, "request": {"task_id": request["task_id"], "workspace_id": request["workspace_id"], "worktree_digest": request["worktree_digest"]}, "transfer": transfer, "attestation": attestation, "lifecycle": lifecycle}, sort_keys=True) + "\n", encoding="utf-8")
     lifecycle["attestation_persisted"] = persisted.is_file() and persisted.stat().st_size > 0
     shutil.rmtree(workdir, ignore_errors=True)
-    ok = guest_exit == 0 and all(lifecycle.values())
+    protocol_ok = all(lifecycle.values())
+    ok = guest_exit == 0 and protocol_ok
     print(json.dumps({"protocol_version": 1, "operation": "execute", "lease_id": request["lease_id"], "ok": ok, "exit_code": guest_exit, "stdout": output, "stderr": str(response.get("stderr", "")), "error": str(response.get("error", "")), "profile": profile, "task_id": request["task_id"], "workspace_id": request["workspace_id"], "worktree_digest": request["worktree_digest"], "worktree_transfer": transfer, "attestation": attestation, "lifecycle": lifecycle}, separators=(",", ":")))
-    raise SystemExit(0 if ok else 1)
+    raise SystemExit(0 if protocol_ok else 1)
 
 
 if __name__ == "__main__":
