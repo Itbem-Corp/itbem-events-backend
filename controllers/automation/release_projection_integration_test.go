@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"events-stocks/configuration"
+	"events-stocks/internal/deliveryledger"
+	"events-stocks/internal/deliverypolicy"
 	"events-stocks/internal/environmentevidence"
 	"events-stocks/internal/releasegate"
 	"events-stocks/models"
@@ -61,4 +63,33 @@ func TestReleaseProjectionRollsBackEvidenceWhenCurrentPolicyIsMissing(t *testing
 	var count int64
 	require.NoError(t, db.Model(&models.DeliveryEvent{}).Where("work_item_id = ?", itemID).Count(&count).Error)
 	require.Zero(t, count, "rejected policy must roll back the earlier environment observation")
+	var project models.DeliveryProject
+	require.NoError(t, db.First(&project, projectID).Error)
+	mode, method := deliverypolicy.ModeRelease, "squash"
+	tests, branches, health, empty := []string{"unit", "contract"}, []string{"main"}, []string{"health"}, []string{}
+	workflow, environmentName, recovery := ".github/workflows/deploy.yml", "production", string(releasegate.RecoveryRollback)
+	patch := deliverypolicy.Patch{Mode: &mode, MergeMethod: &method, RequiredTestKinds: &tests, AllowedTargetBranches: &branches, DeploymentWorkflow: &workflow, DeploymentEnvironment: &environmentName, RequiredSecretReferences: &empty, RequiredVariableReferences: &empty, RequiredHealthChecks: &health, RecoveryDefault: &recovery}
+	policyID := uuid.Must(uuid.NewV4())
+	layer := deliverypolicy.Layer{SchemaVersion: deliverypolicy.SchemaVersion, RevisionID: policyID.String(), Level: deliverypolicy.LevelProject, OrganizationID: project.ClientID.String(), ProjectID: project.ID.String(), Patch: patch}
+	policyDigest, err := deliverypolicy.LayerDigest(layer)
+	require.NoError(t, err)
+	patchRaw, err := json.Marshal(patch)
+	require.NoError(t, err)
+	require.NoError(t, db.Create(&models.DeliveryPolicyRevision{ID: policyID, SchemaVersion: deliverypolicy.SchemaVersion, Level: string(deliverypolicy.LevelProject), OrganizationID: project.ClientID.String(), ProjectID: &project.ID, PatchJSON: string(patchRaw), ContentSHA256: policyDigest, ProposedBy: "synthetic-policy-author", CreatedAt: now.Add(-2 * time.Hour)}).Error)
+	require.NoError(t, db.Create(&models.DeliveryPolicyDecision{ID: uuid.Must(uuid.NewV4()), PolicyRevisionID: policyID, PolicyDigest: policyDigest, Action: "approved", ActorCognitoSub: "synthetic-independent-reviewer", OccurredAt: now.Add(-time.Hour)}).Error)
+	require.NoError(t, db.Transaction(func(tx *gorm.DB) error { return persistReleaseGateEvaluation(tx, &task, handoff, now) }))
+	var events []models.DeliveryEvent
+	require.NoError(t, db.Where("work_item_id = ?", itemID).Order("sequence").Find(&events).Error)
+	require.Len(t, events, 2)
+	envProjection, err := deliveryledger.ProjectEnvironmentObservation(events[0])
+	require.NoError(t, err)
+	require.Equal(t, digest, envProjection.Observation.MatrixDigest)
+	gateProjection, err := deliveryledger.ProjectGateEvaluation(events[1])
+	require.NoError(t, err)
+	require.Equal(t, "blocked", gateProjection.State, "missing QA and Vault must remain blocking even after policy approval")
+	require.NotEmpty(t, gateProjection.Reasons)
+	require.NoError(t, db.Transaction(func(tx *gorm.DB) error { return persistReleaseGateEvaluation(tx, &task, handoff, now) }))
+	require.NoError(t, db.Model(&models.DeliveryEvent{}).Where("work_item_id = ?", itemID).Count(&count).Error)
+	require.Equal(t, int64(2), count, "projection replay must not duplicate events")
+
 }
