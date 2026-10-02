@@ -66,7 +66,7 @@ type QAExecutionError struct {
 	Cause     error
 }
 
-var errQACapabilityNotAccepted = errors.New("QA task lease was not accepted before execution")
+var errQACapabilityNotAccepted = errors.New("QA task lease is no longer accepted for execution")
 
 type qaCapabilityRefreshError struct {
 	cause error
@@ -169,7 +169,9 @@ func runQAWithCapabilityRefresh(ctx context.Context, taskID, runID string, deliv
 						return qaRevisionFailure(result, artifacts, target, commands, err)
 					}
 				}
-				completed, runErr := runWorkspaceCommand(ctx, target.workspace, target.root, commandTimeout, "", nil, command[0], command[1:]...)
+				completed, runErr := runQACommandWithAuthority(ctx, refresh, func(commandCtx context.Context) (commandResult, error) {
+					return runWorkspaceCommand(commandCtx, target.workspace, target.root, commandTimeout, "", nil, command[0], command[1:]...)
+				})
 				if runErr != nil {
 					result["repository_runs"] = append(result["repository_runs"].([]any), qaRepositoryRun(target, commands, runErr))
 					return result, artifacts, &QAExecutionError{Result: result, Artifacts: artifacts, Cause: runErr}
@@ -187,7 +189,9 @@ func runQAWithCapabilityRefresh(ctx context.Context, taskID, runID string, deliv
 						return qaRevisionFailure(result, artifacts, target, commands, err)
 					}
 				}
-				completed, runErr := runWorkspaceCommand(ctx, target.workspace, target.root, commandTimeout, "", nil, command[0], command[1:]...)
+				completed, runErr := runQACommandWithAuthority(ctx, refresh, func(commandCtx context.Context) (commandResult, error) {
+					return runWorkspaceCommand(commandCtx, target.workspace, target.root, commandTimeout, "", nil, command[0], command[1:]...)
+				})
 				if runErr != nil {
 					result["repository_runs"] = append(result["repository_runs"].([]any), qaRepositoryRun(target, commands, runErr))
 					return result, artifacts, &QAExecutionError{Result: result, Artifacts: artifacts, Cause: runErr}
@@ -222,7 +226,13 @@ func runQAWithCapabilityRefresh(ctx context.Context, taskID, runID string, deliv
 	}
 	if preview, ok := result["preview"].(map[string]any); ok && preview["passed"] == true && captureTarget != nil {
 		if captureTarget.execution.RunStagehand && len(captureTarget.workspace.Config.QASemanticCommand) > 0 {
-			semantic, semanticArtifacts, semanticErr := captureSemanticQAWithRefresh(ctx, taskID, runID, previewURL, delivery, captureTarget.workspace, captureTarget.root, captureTarget.workspace.Config.QASemanticCommand, lookup, refresh)
+			var semantic map[string]any
+			var semanticArtifacts []LocalArtifact
+			semanticErr := runQAStageWithAuthority(ctx, refresh, func(stageCtx context.Context) error {
+				var captureErr error
+				semantic, semanticArtifacts, captureErr = captureSemanticQAWithRefresh(stageCtx, taskID, runID, previewURL, delivery, captureTarget.workspace, captureTarget.root, captureTarget.workspace.Config.QASemanticCommand, lookup, refresh)
+				return captureErr
+			})
 			result["semantic"] = semantic
 			if semanticErr != nil {
 				return result, artifacts, &QAExecutionError{Result: result, Artifacts: artifacts, Cause: semanticErr}
@@ -230,7 +240,16 @@ func runQAWithCapabilityRefresh(ctx context.Context, taskID, runID string, deliv
 			artifacts = append(artifacts, prefixQAArtifacts(semanticArtifacts, captureTarget.workspace.ID)...)
 		}
 		if len(captureTarget.workspace.Config.QAScreenshotCommand) > 0 {
-			screenshot, artifact, captureErr := captureScreenshot(ctx, taskID, previewURL, captureTarget.workspace, captureTarget.root, captureTarget.workspace.Config.QAScreenshotCommand)
+			var screenshot map[string]any
+			var artifact *LocalArtifact
+			captureErr := runQAStageWithAuthority(ctx, refresh, func(stageCtx context.Context) error {
+				if err := refreshQAExecutionAuthority(stageCtx, refresh); err != nil {
+					return err
+				}
+				var captureErr error
+				screenshot, artifact, captureErr = captureScreenshot(stageCtx, taskID, previewURL, captureTarget.workspace, captureTarget.root, captureTarget.workspace.Config.QAScreenshotCommand)
+				return captureErr
+			})
 			result["screenshot"] = screenshot
 			if captureErr != nil {
 				return result, artifacts, &QAExecutionError{Result: result, Artifacts: artifacts, Cause: captureErr}
@@ -241,7 +260,16 @@ func runQAWithCapabilityRefresh(ctx context.Context, taskID, runID string, deliv
 		} else if !semanticArtifactsContainPNG(artifacts) {
 			captures := make([]any, 0, len(qaScreenshotViewports))
 			for index, viewport := range qaScreenshotViewports {
-				screenshot, artifact, captureErr := captureScreenshotAt(ctx, taskID, previewURL, captureTarget.workspace, captureTarget.root, nil, viewport)
+				var screenshot map[string]any
+				var artifact *LocalArtifact
+				captureErr := runQAStageWithAuthority(ctx, refresh, func(stageCtx context.Context) error {
+					if err := refreshQAExecutionAuthority(stageCtx, refresh); err != nil {
+						return err
+					}
+					var captureErr error
+					screenshot, artifact, captureErr = captureScreenshotAt(stageCtx, taskID, previewURL, captureTarget.workspace, captureTarget.root, nil, viewport)
+					return captureErr
+				})
 				if captureErr != nil {
 					return result, artifacts, &QAExecutionError{Result: result, Artifacts: artifacts, Cause: captureErr}
 				}

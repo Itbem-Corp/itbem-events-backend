@@ -52,6 +52,9 @@ run "QA evidence cannot escape through ancestor symlinks" \
 run "QA worker preserves source authority and replays without new inference" \
   go test ./internal/automationagent -run 'TestQAWorkerPreservesReviewedManifestAndRejectsNewSourceBeforeInference$' -count=1
 
+run "QA revocation cancels in-flight commands and their descendants" \
+  go test ./internal/automationagent -run 'Test(QARevocationStopsRunningCommandTree|QACommandCancelsInFlightWhenAuthorityIsRevoked|QACommandStopsAuthorityHeartbeatAfterCompletion)$' -count=1
+
 run "published QA binds the exact clean commit and frozen release matrix" \
   go test ./internal/automationagent -run 'TestPublishedQATargetRequiresExactCleanCommitAndRejectsUntrackedSource$' -count=1
 
