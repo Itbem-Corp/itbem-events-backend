@@ -208,4 +208,33 @@ func TestReleaseObserverSignedAdmissionRejectsCancelledTaskAndReplayedNonce(t *t
 	require.NoError(t, err)
 	require.Equal(t, http.StatusForbidden, call(body), "revocation during observation must discard evidence")
 
+	// Cross the actual HTTP client/server boundary with a fresh synthetic local
+	// identity. No private-key constructor or unsigned transport is substituted.
+	revokeDuringObservation.Store(false)
+	clientIdentity, err := automationagent.LoadLocalMachineIdentity("", t.TempDir())
+	require.NoError(t, err)
+	clientPublic, err := agentcallbackauth.EncodePublicKey(clientIdentity.PublicKey())
+	require.NoError(t, err)
+	clientInstance := uuid.Must(uuid.NewV4())
+	clientRun := uuid.Must(uuid.NewV4()).String()
+	require.NoError(t, db.Create(&models.AutomationAgentInstance{ID: clientInstance, AgentKey: "release", MachineID: clientIdentity.MachineID(), PublicKey: clientPublic, Status: "active"}).Error)
+	require.NoError(t, db.Model(&models.AutomationTask{}).Where("id = ?", taskID).Updates(map[string]any{"run_id": clientRun, "agent_instance_id": clientInstance, "machine_id": clientIdentity.MachineID()}).Error)
+	server := httptest.NewServer(app)
+	defer server.Close()
+	callback, err := automationagent.NewHTTPCallback(server.URL, clientIdentity, clientInstance.String(), server.Client())
+	require.NoError(t, err)
+	gateway, err := automationagent.NewHTTPGateway(server.URL, deriveGatewayToken("synthetic-release-auth-fixture", identity), identity.Role, identity.Lane, server.Client())
+	require.NoError(t, err)
+	clientContext := gateway.BindMessageContext(ctx, automationagent.QueueMessage{ReceiptHandle: lease})
+	clientObservation, err := callback.ObserveRelease(clientContext, gateway, taskID.String(), clientRun, delivery)
+	require.NoError(t, err)
+	clientRaw, err := json.Marshal(clientObservation)
+	require.NoError(t, err)
+	var current models.AutomationTask
+	require.NoError(t, db.First(&current, taskID).Error)
+	require.NoError(t, verifyServerReleaseObservation(db, &current, clientRun, clientInstance, clientRaw))
+	var observationCount int64
+	require.NoError(t, db.Model(&models.AutomationReleaseObservation{}).Where("task_id = ?", taskID).Count(&observationCount).Error)
+	require.Equal(t, int64(2), observationCount, "revoked observation must not create a server receipt")
+
 }

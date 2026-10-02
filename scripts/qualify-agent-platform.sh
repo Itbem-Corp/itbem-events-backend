@@ -29,7 +29,7 @@ prepare_pinned_submodules() {
 run "pinned Git submodule checkout" prepare_pinned_submodules
 
 run "doctor identity and publication authority readiness" \
-  go test ./cmd/itbem-ai-agent -run 'Test(DoctorPublicationReadinessRequiresRoleSpecificGitHubAppConfiguration|DoctorReadinessRejectsMismatchedAndUnknownWorkerIdentities)$' -count=1
+  go test ./cmd/itbem-ai-agent -run 'Test(DoctorPublicationReadinessRequiresRoleSpecificGitHubAppConfiguration|DoctorReadinessRejectsMismatchedAndUnknownWorkerIdentities|DoctorGatewayReleaseObserverRequiresNoPublicationCredential)$' -count=1
 
 run "GitHub source synchronization with a dedicated read-only App" \
   go test ./cmd/itbem-ai-agent ./internal/automationagent -run 'Test(LoadGitHubSourceAppConfigRequiresItsDedicatedNamespace|FetchAuthorizedWorkspaceRemoteRequiresDedicatedSourceApp|GitHubInstallationWorkspaceCommandsDisableCredentialHelpers|RunOnboardingCapabilityProbesUsesExactSHAOperatorCommandsAndCleansUp|GitHubAuthProbeRequiresPublicationOrRegisteredGitHubSourceAndRedactsFailures)$' -count=1

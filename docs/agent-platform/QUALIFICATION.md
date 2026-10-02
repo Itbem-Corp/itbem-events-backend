@@ -13,6 +13,11 @@ bound to the task, run, enrolled instance and exact revision matrix. Completion
 must match that server record, including when recovering a prior run. A worker
 cannot replace this record by reporting its own successful observations.
 
+For a gateway release observer, narrow `ITBEM_AI_CAPABILITIES` to
+`delivery.release_gate`. This profile needs no local GitHub publication key.
+General release profiles and profiles including `delivery.publish` retain their
+publication credential requirement; the observer exception is gateway-only.
+
 The deterministic worker persists an immutable `request.json` before observing
 release state and an immutable `result.json` before its terminal callback.
 Recovery preserves both original run references and makes no model call. The

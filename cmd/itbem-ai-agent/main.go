@@ -364,6 +364,11 @@ func doctorExecutionReady(workspacesReady, providerReady, runtimeReady, githubAp
 }
 
 func githubPublicationRequired(config automationagent.RuntimeConfig) bool {
+	// An explicitly narrowed gateway observer never publishes and obtains all
+	// GitHub evidence from the server. General release workers may still publish.
+	if config.Role == "release_manager" && config.Lane == "release" && config.Transport == "gateway" && len(config.AllowedOperations) == 1 && config.AllowedOperations[0] == "delivery.release_gate" {
+		return false
+	}
 	return (config.Role == "release_manager" && config.Lane == "release") ||
 		(config.Role == "reviewer" && config.Lane == "review")
 }
