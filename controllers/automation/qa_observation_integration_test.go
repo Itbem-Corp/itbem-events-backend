@@ -40,18 +40,24 @@ func TestQAObservationProjectionPersistsExactSubjectAndRejectsChangedRecovery(t 
 	itemID, taskID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
 	require.NoError(t, db.Create(&models.DeliveryWorkItem{ID: itemID, ProjectID: uuid.Must(uuid.NewV4()), RequestedBy: "synthetic-human", Title: "synthetic QA"}).Error)
 	task := models.AutomationTask{ID: taskID, Operation: "delivery.qa", DeliveryWorkItemID: &itemID, EvidenceSubjectDigest: strings.Repeat("a", 64)}
-	observation := qaevidence.Observation{SchemaVersion: 2, TaskID: taskID.String(), MatrixDigest: task.EvidenceSubjectDigest, PreviewPassed: true, RepositoryExecutionOrder: []string{"workspace://repo"}, Repositories: []qaevidence.Repository{{Reference: "workspace://repo", Branch: "itbem-agent/" + taskID.String(), Commands: []qaevidence.Command{{Index: 0, Phase: "validation", Kind: "unit", Passed: false}}}}}
+	observation := qaevidence.Observation{SchemaVersion: 2, TaskID: taskID.String(), MatrixDigest: task.EvidenceSubjectDigest, PreviewPassed: true, RepositoryExecutionOrder: []string{"workspace://repo"}, Repositories: []qaevidence.Repository{{Reference: "workspace://repo", Branch: "itbem-agent/" + taskID.String(), Commands: []qaevidence.Command{{Index: 0, Phase: "validation", Kind: "unit", Passed: false}, {Index: 1, Phase: "qa", Kind: "security:secrets", Passed: true}, {Index: 2, Phase: "qa", Kind: "security:high-critical", Passed: false}}}}}
 	payload, err := json.Marshal(observation)
 	require.NoError(t, err)
 	now := time.Now().UTC()
 	require.NoError(t, persistQAObservation(db, &task, payload, now))
 	require.NoError(t, persistQAObservation(db, &task, payload, now.Add(time.Minute)))
 	var events []models.DeliveryEvent
-	require.NoError(t, db.Where("work_item_id = ?", itemID).Find(&events).Error)
+	require.NoError(t, db.Where("work_item_id = ? AND event_type = ?", itemID, deliveryledger.EventTypeQAObserved).Find(&events).Error)
 	require.Len(t, events, 1)
 	projected, err := deliveryledger.ProjectQAObservation(events[0])
 	require.NoError(t, err)
 	require.Equal(t, observation, projected.Observation)
+	var securityEvent models.DeliveryEvent
+	require.NoError(t, db.Where("work_item_id = ? AND event_type = ?", itemID, deliveryledger.EventTypeSecurityObserved).First(&securityEvent).Error)
+	security, err := deliveryledger.ProjectSecurityObservation(securityEvent)
+	require.NoError(t, err)
+	require.True(t, security.Observation.Repositories[0].SecretScanPassed)
+	require.Equal(t, 1, security.Observation.Repositories[0].HighFindings)
 	observation.Repositories[0].Commands[0].Passed = true
 	changed, err := json.Marshal(observation)
 	require.NoError(t, err)
@@ -62,5 +68,5 @@ func TestQAObservationProjectionPersistsExactSubjectAndRejectsChangedRecovery(t 
 	require.Error(t, persistQAObservation(db, &task, changed, now))
 	var count int64
 	require.NoError(t, db.Model(&models.DeliveryEvent{}).Where("work_item_id = ?", itemID).Count(&count).Error)
-	require.Equal(t, int64(1), count)
+	require.Equal(t, int64(2), count)
 }

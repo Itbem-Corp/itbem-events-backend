@@ -28,7 +28,7 @@ func TestSecurityObservationEventBindsTaskAndMatrix(t *testing.T) {
 		t.Fatalf("security event projection failed: %#v / %v", projected, err)
 	}
 	corrupted := event
-	corrupted.PayloadJSON += " "
+	corrupted.PayloadJSON = strings.Replace(event.PayloadJSON, `"secret_scan_passed":true`, `"secret_scan_passed":false`, 1)
 	if _, err := ProjectSecurityObservation(corrupted); err == nil {
 		t.Fatal("corrupted security event was accepted")
 	}
