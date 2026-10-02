@@ -693,7 +693,7 @@ func worktreeDiffSHA256(ctx context.Context, worktree, baseSHA string, staged bo
 	if staged {
 		args = append(args, "--cached")
 	}
-	args = append(args, "--binary", "--full-index", "--no-ext-diff", strings.ToLower(strings.TrimSpace(baseSHA)))
+	args = append(args, "--binary", "--full-index", "--no-ext-diff", "--no-textconv", strings.ToLower(strings.TrimSpace(baseSHA)))
 	commandCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	command := exec.CommandContext(commandCtx, "git", args...)

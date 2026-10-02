@@ -24,6 +24,61 @@ type artifactFakeStore struct {
 	objects map[string][]byte
 }
 
+func reviewedQAMetadata(t *testing.T, repository, worktree, revision string) map[string]string {
+	t.Helper()
+	base, err := runLocal(context.Background(), repository, time.Minute, "", "git", "rev-parse", revision)
+	if err != nil || base.ExitCode != 0 {
+		t.Fatalf("fixture base unavailable: %#v / %v", base, err)
+	}
+	sha := strings.TrimSpace(base.Output)
+	digest, err := worktreeDiffSHA256(context.Background(), worktree, sha, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return map[string]string{"base_sha": sha, "review_diff_sha256": digest}
+}
+
+func TestRunQARejectsSourceChangesAndPreservesPartialEvidence(t *testing.T) {
+	root := setupImplementationRepository(t)
+	worktree, branch, err := isolatedWorktree(context.Background(), Workspace{Root: root}, "51c0b65f-025f-49d9-963b-06165f280e46")
+	if err != nil {
+		t.Fatal(err)
+	}
+	program := "package main\nimport \"os\"\nfunc main() { if err := os.WriteFile(\"README.md\", []byte(\"modified during QA\\n\"), 0600); err != nil { panic(err) } }\n"
+	if err := os.WriteFile(filepath.Join(worktree, "mutate.go"), []byte(program), 0600); err != nil {
+		t.Fatal(err)
+	}
+	added, err := runLocal(context.Background(), worktree, time.Minute, "", "git", "add", "--intent-to-add", "mutate.go")
+	if err != nil || added.ExitCode != 0 {
+		t.Fatal("synthetic source staging failed")
+	}
+	metadata := reviewedQAMetadata(t, root, worktree, "HEAD")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	defer server.Close()
+	registry, err := json.Marshal(map[string]any{"repo": map[string]any{"path": root, "validation_commands": [][]string{{"go", "run", "mutate.go"}, {"go", "version"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivery, err := json.Marshal(map[string]any{"work_item": map[string]string{"preview_url": server.URL}, "change_sets": []any{map[string]any{"repository_ref": "workspace://repo", "branch": branch, "review_type": "local_worktree", "ci_status": "passed", "metadata": metadata}}, "approved_plan": map[string]any{"qa_execution_matrix": []any{map[string]any{"repository_ref": "workspace://repo", "run_validation": true, "run_qa": false, "run_stagehand": false, "collect_evidence": false}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, _, err := RunQA(context.Background(), "synthetic-qa-task", "synthetic-qa-run", delivery, func(key string) string {
+		if key == "ITBEM_AI_WORKSPACES_JSON" {
+			return string(registry)
+		}
+		return ""
+	})
+	var failure *QAExecutionError
+	if !errors.As(err, &failure) {
+		t.Fatalf("source change did not fail QA with retained evidence: %#v / %v", result, err)
+	}
+	runs := result["repository_runs"].([]any)
+	if len(runs) != 1 || len(runs[0].(map[string]any)["commands"].([]any)) != 1 || runs[0].(map[string]any)["review_binding"].(map[string]string)["review_diff_sha256"] != metadata["review_diff_sha256"] {
+		t.Fatalf("QA executed another command or lost reviewed binding: %#v", result)
+	}
+}
+
 func (s *artifactFakeStore) PutEncryptedObject(_ context.Context, bucket, key string, body []byte, _ string) error {
 	if s.objects == nil {
 		s.objects = map[string][]byte{}
@@ -140,6 +195,9 @@ func main() {
 			t.Fatalf("reviewed worktree for %s was not created: %s / %v", id, worktree, err)
 		}
 		branches[id] = branch
+		if err := os.WriteFile(filepath.Join(worktree, "result.txt"), []byte(id+" reviewed evidence\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	registryEntries := map[string]any{}
@@ -173,8 +231,8 @@ func main() {
 			map[string]any{"reference": "workspace://dashboard", "depends_on": []string{"workspace://api"}},
 		},
 		"change_sets": []any{
-			map[string]any{"repository_ref": "workspace://dashboard", "branch": branches["dashboard"], "review_type": "local_worktree", "ci_status": "passed"},
-			map[string]any{"repository_ref": "workspace://api", "branch": branches["api"], "review_type": "local_worktree", "ci_status": "passed"},
+			map[string]any{"repository_ref": "workspace://dashboard", "branch": branches["dashboard"], "review_type": "local_worktree", "ci_status": "passed", "metadata": reviewedQAMetadata(t, roots["dashboard"], filepath.Join(roots["dashboard"], ".itbem-agent-worktrees", strings.TrimPrefix(branches["dashboard"], "itbem-agent/")), "HEAD")},
+			map[string]any{"repository_ref": "workspace://api", "branch": branches["api"], "review_type": "local_worktree", "ci_status": "passed", "metadata": reviewedQAMetadata(t, roots["api"], filepath.Join(roots["api"], ".itbem-agent-worktrees", strings.TrimPrefix(branches["api"], "itbem-agent/")), "HEAD")},
 		},
 		"approved_plan": map[string]any{"qa_execution_matrix": []any{
 			map[string]any{"repository_ref": "workspace://api", "run_validation": true, "run_qa": true, "run_stagehand": false, "collect_evidence": true},
@@ -996,15 +1054,54 @@ func TestDeliveryQATargetsUsesTheReviewedWorktreeInsteadOfBaseRepository(t *test
 		}
 		return ""
 	}
-	delivery := []byte(`{"context_sources":[{"kind":"repository","reference":"workspace://repo"}],"change_sets":[{"repository_ref":"workspace://repo","branch":"` + branch + `","review_type":"local_worktree","ci_status":"passed"}]}`)
+	if err := os.WriteFile(filepath.Join(worktree, "README.md"), []byte("reviewed change\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := json.Marshal(reviewedQAMetadata(t, root, worktree, "HEAD"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivery := []byte(`{"context_sources":[{"kind":"repository","reference":"workspace://repo"}],"change_sets":[{"repository_ref":"workspace://repo","branch":"` + branch + `","review_type":"local_worktree","ci_status":"passed","metadata":` + string(metadata) + `}]}`)
 	targets, err := deliveryQATargets(delivery, lookup)
 	if err != nil || len(targets) != 1 || targets[0].root != worktree || targets[0].testedDirectory != "reviewed isolated worktree" {
 		t.Fatalf("QA must bind to the reviewed isolated worktree: %#v / %v", targets, err)
 	}
-	contractDelivery := []byte(`{"approved_plan":{"qa_execution_matrix":[{"repository_ref":"workspace://repo","run_validation":true,"run_qa":false,"run_stagehand":false,"collect_evidence":false}]},"context_sources":[{"kind":"repository","reference":"workspace://repo"}],"change_sets":[{"repository_ref":"workspace://repo","branch":"` + branch + `","review_type":"local_worktree","ci_status":"passed"}]}`)
+	contractDelivery := []byte(`{"approved_plan":{"qa_execution_matrix":[{"repository_ref":"workspace://repo","run_validation":true,"run_qa":false,"run_stagehand":false,"collect_evidence":false}]},"context_sources":[{"kind":"repository","reference":"workspace://repo"}],"change_sets":[{"repository_ref":"workspace://repo","branch":"` + branch + `","review_type":"local_worktree","ci_status":"passed","metadata":` + string(metadata) + `}]}`)
 	contractTargets, err := deliveryQATargets(contractDelivery, lookup)
 	if err != nil || len(contractTargets) != 1 || !contractTargets[0].execution.RunValidation || contractTargets[0].execution.RunQA || contractTargets[0].execution.RunStagehand || contractTargets[0].execution.CollectEvidence {
 		t.Fatalf("reviewed worktree must receive its exact approved QA execution contract: %#v / %v", contractTargets, err)
+	}
+	var unbound map[string]any
+	if err := json.Unmarshal(delivery, &unbound); err != nil {
+		t.Fatal(err)
+	}
+	delete(unbound["change_sets"].([]any)[0].(map[string]any), "metadata")
+	unboundJSON, err := json.Marshal(unbound)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deliveryQATargets(unboundJSON, lookup); err == nil {
+		t.Fatal("missing reviewed revision metadata was accepted")
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "README.md"), []byte("changed after review\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deliveryQATargets(delivery, lookup); err == nil {
+		t.Fatal("changed reviewed diff was accepted")
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "README.md"), []byte("reviewed change\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	changedBranch, err := runLocal(context.Background(), worktree, time.Minute, "", "git", "checkout", "-b", "synthetic-wrong-branch")
+	if err != nil || changedBranch.ExitCode != 0 {
+		t.Fatalf("fixture branch change failed: %#v / %v", changedBranch, err)
+	}
+	if _, err := deliveryQATargets(delivery, lookup); err == nil {
+		t.Fatal("same path with a different branch was accepted")
+	}
+	restored, err := runLocal(context.Background(), worktree, time.Minute, "", "git", "checkout", branch)
+	if err != nil || restored.ExitCode != 0 {
+		t.Fatalf("fixture branch restore failed: %#v / %v", restored, err)
 	}
 	stagehandWithoutRunner := []byte(`{"approved_plan":{"qa_execution_matrix":[{"repository_ref":"workspace://repo","run_validation":false,"run_qa":true,"run_stagehand":true,"collect_evidence":true}]},"context_sources":[{"kind":"repository","reference":"workspace://repo"}],"change_sets":[{"repository_ref":"workspace://repo","branch":"` + branch + `","review_type":"local_worktree","ci_status":"passed"}]}`)
 	if _, err := deliveryQATargets(stagehandWithoutRunner, lookup); err == nil {

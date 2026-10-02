@@ -108,7 +108,11 @@ if err == nil { connection.Close(); t.Fatal("guest network reached reserved test
 				if err != nil {
 					t.Fatal(err)
 				}
-				delivery := []byte(`{"work_item":{"preview_url":"` + server.URL + `"},"context_sources":[{"kind":"repository","reference":"workspace://real-go-toolchain"}],"change_sets":[{"repository_ref":"workspace://real-go-toolchain","branch":"` + branch + `","review_type":"local_worktree","ci_status":"passed"}],"approved_plan":{"qa_execution_matrix":[{"repository_ref":"workspace://real-go-toolchain","run_validation":true,"run_qa":false,"run_stagehand":false,"collect_evidence":false}]}}`)
+				metadata, err := json.Marshal(reviewedQAMetadata(t, root, worktree, "HEAD^"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				delivery := []byte(`{"work_item":{"preview_url":"` + server.URL + `"},"context_sources":[{"kind":"repository","reference":"workspace://real-go-toolchain"}],"change_sets":[{"repository_ref":"workspace://real-go-toolchain","branch":"` + branch + `","review_type":"local_worktree","ci_status":"passed","metadata":` + string(metadata) + `}],"approved_plan":{"qa_execution_matrix":[{"repository_ref":"workspace://real-go-toolchain","run_validation":true,"run_qa":false,"run_stagehand":false,"collect_evidence":false}]}}`)
 				result, _, err := RunQA(ctx, "task-go-toolchain-qa", "run-go-toolchain-qa", delivery, func(key string) string {
 					if key == "ITBEM_AI_WORKSPACES_JSON" {
 						return string(registry)
