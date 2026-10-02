@@ -70,6 +70,9 @@ run "QA source authorization requires the exact live instance and frozen revisio
 run "QA source acquisition requires bounded private tmpfs and real process resource limits" \
   go test ./internal/automationagent -run 'TestQASourceResourceBoundaryRejectsUnboundedScratchAndAppliesRealLimits$' -count=1
 
+run "signed QA source client rejects substituted task run matrix repository commit and pack" \
+  go test ./internal/automationagent -run 'TestQASourceSignedClientImportsOnlyExactFrozenPack$' -count=1
+
 run "QA ledger observations preserve failures independently of model summaries" \
   go test ./internal/automationagent -run 'TestQALedgerObservationPreservesObservedFailuresAndRejectsMalformedEvidence$' -count=1
 

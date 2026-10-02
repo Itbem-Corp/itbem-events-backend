@@ -14,7 +14,7 @@ import (
 // Server-side only. The caller must authorize repository and SHA from the
 // immutable task before calling, and revalidate live authority afterwards.
 // No endpoint is enabled until the fetch resource boundary is qualified.
-func fetchGitHubQASourcePack(ctx context.Context, repository, commit string, config GitHubAppConfig, client *http.Client) ([]byte, string, error) {
+func FetchGitHubQASourcePack(ctx context.Context, repository, commit string, config GitHubAppConfig, client *http.Client) ([]byte, string, error) {
 	repository = strings.ToLower(repository)
 	if !githubRepositoryNamePattern.MatchString(repository) || !gitCommitPattern.MatchString(commit) {
 		return nil, "", fmt.Errorf("QA source acquisition identity is invalid")

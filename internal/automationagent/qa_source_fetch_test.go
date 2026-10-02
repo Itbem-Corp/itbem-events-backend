@@ -20,7 +20,7 @@ func TestQASourceFetchKeepsCredentialOutOfArgumentsAndRejectsUnboundCoordinates(
 		t.Fatal("source fetch inherited caller credentials, tracing, or transport configuration")
 	}
 	for _, repository := range []string{"https://outside.invalid/service", "example/service/extra", "example/service\nother"} {
-		if _, _, err := fetchGitHubQASourcePack(context.Background(), repository, strings.Repeat("a", 40), GitHubAppConfig{}, nil); err == nil {
+		if _, _, err := FetchGitHubQASourcePack(context.Background(), repository, strings.Repeat("a", 40), GitHubAppConfig{}, nil); err == nil {
 			t.Fatal("arbitrary source coordinates accepted")
 		}
 	}
