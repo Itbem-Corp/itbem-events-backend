@@ -274,6 +274,7 @@ def main() -> None:
     profile = os.environ.get("ITBEM_FIRECRACKER_PROFILE", PROFILE_LOCAL).strip().lower()
     force_jailer = False
     cgroup_parent = None
+    configured_jailer_base = None
     sdk_path = None
     sdk_sha256 = None
     argv = list(sys.argv[1:])
@@ -288,6 +289,9 @@ def main() -> None:
                 index += 1
             elif argv[index] == "--cgroup-parent" and index + 1 < len(argv):
                 cgroup_parent = argv[index + 1]
+                index += 2
+            elif argv[index] == "--jailer-base" and index + 1 < len(argv):
+                configured_jailer_base = argv[index + 1]
                 index += 2
             elif argv[index] in ("--go-sdk-image", "--go-sdk-sha256") and index + 1 < len(argv):
                 if argv[index] == "--go-sdk-image":
@@ -366,7 +370,7 @@ def main() -> None:
     # Unix domain sockets have a small path limit; keep the jail base short and
     # make the lease id the unique component instead of nesting under the
     # long-lived supervisor temp directory.
-    jailer_base = pathlib.Path(os.environ.get("ITBEM_FIRECRACKER_JAILER_BASE", "/tmp/itbem-jailer"))
+    jailer_base = pathlib.Path(configured_jailer_base or os.environ.get("ITBEM_FIRECRACKER_JAILER_BASE", "/tmp/itbem-jailer"))
     jailer_id = re.sub(r"[^A-Za-z0-9-]", "-", str(request["lease_id"]))[:48]
     jailer_uid = int(os.environ.get("ITBEM_FIRECRACKER_JAILER_UID", "1000"))
     jailer_gid = int(os.environ.get("ITBEM_FIRECRACKER_JAILER_GID", "1000"))
@@ -399,7 +403,17 @@ def main() -> None:
             shutil.rmtree(workdir)
             emit_failure("Go SDK changed during staging", request)
     if use_jailer:
-        jailer_base.mkdir(parents=True, exist_ok=True)
+        if not jailer_base.is_absolute():
+            shutil.rmtree(workdir)
+            emit_failure("jailer base must be an operator-owned absolute path", request)
+        jailer_base.mkdir(mode=0o700, parents=True, exist_ok=True)
+        for directory in (jailer_base, *jailer_base.parents):
+            metadata = directory.lstat()
+            writable = metadata.st_mode & 0o022
+            sticky_parent = directory != jailer_base and metadata.st_mode & 0o1000
+            if directory.is_symlink() or metadata.st_uid != 0 or (writable and not sticky_parent):
+                shutil.rmtree(workdir)
+                emit_failure("jailer path is writable by an unprivileged host identity", request)
     worktree_files = 0
     worktree_bytes = 0
     if worktree_mode:
