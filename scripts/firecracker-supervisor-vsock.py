@@ -118,7 +118,11 @@ def open_jailed_process(pid_file: pathlib.Path, executable: pathlib.Path, requir
         raise RuntimeError("invalid Jailer child PID")
     descriptor = os.pidfd_open(int(text))
     try:
-        if os.readlink(f"/proc/{int(text)}/exe") != str(executable):
+        try:
+            same_executable = os.path.samefile(f"/proc/{int(text)}/exe", executable)
+        except OSError as exc:
+            raise RuntimeError("Jailer child executable cannot be verified") from exc
+        if not same_executable:
             raise RuntimeError("Jailer child executable does not match this lease")
         if require_namespace:
             status = pathlib.Path(f"/proc/{int(text)}/status").read_text()
@@ -206,6 +210,36 @@ def verified_guest_execution(response: dict) -> bool:
     return True
 
 
+def delegated_jailer_parent(relative: str) -> pathlib.Path:
+    path = pathlib.PurePosixPath(relative)
+    if path.is_absolute() or len(path.parts) < 2 or ".." in path.parts or str(path) != relative:
+        raise RuntimeError("jailer cgroup parent must be a normalized delegated relative path")
+    current = next(line.split(":", 2)[2] for line in pathlib.Path("/proc/self/cgroup").read_text().splitlines() if line.startswith("0::"))
+    current_path = pathlib.PurePosixPath(current.lstrip("/"))
+    if path not in (current_path, current_path.parent):
+        raise RuntimeError("jailer cgroup parent is outside the supervisor delegation")
+    parent = pathlib.Path("/sys/fs/cgroup") / path
+    enabled = set((parent / "cgroup.subtree_control").read_text().split())
+    if not {"cpu", "memory", "pids"}.issubset(enabled):
+        raise RuntimeError("delegated parent must already enable cpu, memory and pids")
+    return parent
+
+
+def verify_jailer_constraints(pid_file: pathlib.Path, cgroup: pathlib.Path, uid: int, gid: int) -> None:
+    pid = int(pid_file.read_text().strip())
+    expected = "0::/" + str(cgroup.relative_to("/sys/fs/cgroup"))
+    if pathlib.Path(f"/proc/{pid}/cgroup").read_text().strip() != expected:
+        raise RuntimeError("Jailer child is outside its lease cgroup")
+    for filename, value in (("memory.max", "268435456"), ("pids.max", "128"), ("cpu.max", "100000 100000")):
+        if " ".join((cgroup / filename).read_text().split()) != value:
+            raise RuntimeError("Jailer resource limit was not enforced: " + filename)
+    status = pathlib.Path(f"/proc/{pid}/status").read_text().splitlines()
+    for name, value in (("Uid:", uid), ("Gid:", gid)):
+        row = next(line.split()[1:] for line in status if line.startswith(name))
+        if row != [str(value)] * 4 or value == 0:
+            raise RuntimeError("Jailer child did not drop its privileges")
+
+
 def apply_production_limits() -> None:
     """Bound the supervisor process before it launches Firecracker."""
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
@@ -239,6 +273,7 @@ def vsock_command(vsock_path: pathlib.Path, command: str, args: list[str], timeo
 def main() -> None:
     profile = os.environ.get("ITBEM_FIRECRACKER_PROFILE", PROFILE_LOCAL).strip().lower()
     force_jailer = False
+    cgroup_parent = None
     sdk_path = None
     sdk_sha256 = None
     argv = list(sys.argv[1:])
@@ -251,6 +286,9 @@ def main() -> None:
             elif argv[index] == "--jailer":
                 force_jailer = True
                 index += 1
+            elif argv[index] == "--cgroup-parent" and index + 1 < len(argv):
+                cgroup_parent = argv[index + 1]
+                index += 2
             elif argv[index] in ("--go-sdk-image", "--go-sdk-sha256") and index + 1 < len(argv):
                 if argv[index] == "--go-sdk-image":
                     sdk_path = pathlib.Path(argv[index + 1])
@@ -312,6 +350,10 @@ def main() -> None:
     if go_mode and use_jailer:
         emit_failure("Go toolchain requires a qualified jailer memory and scratch profile before production admission", request)
     if use_jailer:
+        try:
+            delegated_parent = delegated_jailer_parent(cgroup_parent or "")
+        except (OSError, RuntimeError, StopIteration) as exc:
+            emit_failure(str(exc), request)
         if not JAILER.is_file() or not os.access(JAILER, os.X_OK):
             emit_failure(f"production jailer profile requires an executable jailer: {JAILER}", request)
         if os.geteuid() != 0:
@@ -329,10 +371,20 @@ def main() -> None:
     jailer_id = re.sub(r"[^A-Za-z0-9-]", "-", str(request["lease_id"]))[:48]
     jailer_uid = int(os.environ.get("ITBEM_FIRECRACKER_JAILER_UID", "1000"))
     jailer_gid = int(os.environ.get("ITBEM_FIRECRACKER_JAILER_GID", "1000"))
+    if use_jailer and (jailer_uid <= 0 or jailer_gid <= 0):
+        shutil.rmtree(workdir)
+        emit_failure("jailer child requires non-root UID and GID", request)
     jail_root = jailer_base / FIRECRACKER.name / jailer_id / "root"
+    jail_cgroup = delegated_parent / jailer_id if use_jailer else None
+    if use_jailer and (jail_cgroup.exists() or jail_root.parent.exists()):
+        shutil.rmtree(workdir)
+        emit_failure("refusing to reuse an existing jail or cgroup lease", request)
     if use_jailer:
-        api_socket = jail_root / "run" / "firecracker.sock"
-        vsock_socket = jail_root / "run" / "vsock.sock"
+        api_socket = jail_root / "run" / "api.sock"
+        vsock_socket = jail_root / "run" / "v.sock"
+        if max(len(os.fsencode(api_socket)), len(os.fsencode(vsock_socket))) > 107:
+            shutil.rmtree(workdir)
+            emit_failure("jailer base exceeds the Unix socket path limit", request)
     rootfs = workdir / "rootfs.ext4"
     worktree_image = workdir / "worktree.ext4"
     staging = workdir / "worktree"
@@ -442,11 +494,13 @@ def main() -> None:
                 "--gid", str(jailer_gid),
                 "--chroot-base-dir", str(jailer_base), "--new-pid-ns",
                 "--cgroup-version", "2",
+                "--parent-cgroup", cgroup_parent,
+                "--cgroup", "cpu.max=100000 100000",
                 "--cgroup", "memory.max=268435456",
                 "--cgroup", "pids.max=128",
                 "--resource-limit", "no-file=4096",
                 "--resource-limit", "fsize=536870912",
-                "--", "--api-sock", "/run/firecracker.sock", "--level", "Warning",
+                "--", "--api-sock", "/run/api.sock", "--level", "Warning",
             ]
         process = subprocess.Popen(
             firecracker_command,
@@ -480,6 +534,7 @@ def main() -> None:
             raise RuntimeError("Firecracker API socket did not appear")
         if use_jailer:
             jailed_process = open_jailed_process(jail_root / (FIRECRACKER.name + ".pid"), jail_root / FIRECRACKER.name)
+            verify_jailer_constraints(jail_root / (FIRECRACKER.name + ".pid"), jail_cgroup, jailer_uid, jailer_gid)
         lifecycle["created"] = True
         kernel_path = "/vmlinux" if use_jailer else str(KERNEL)
         rootfs_path = "/rootfs.ext4" if use_jailer else str(rootfs)
@@ -491,7 +546,7 @@ def main() -> None:
         if go_mode:
             api_put(api_socket, "/drives/sdk", {"drive_id": "sdk", "path_on_host": str(sdk_image), "is_root_device": False, "is_read_only": True})
         api_put(api_socket, "/machine-config", {"vcpu_count": 1, "mem_size_mib": 768 if go_mode else 128, "smt": False})
-        vsock_api_path = "/run/vsock.sock" if use_jailer else str(vsock_socket)
+        vsock_api_path = "/run/v.sock" if use_jailer else str(vsock_socket)
         api_put(api_socket, "/vsock", {"guest_cid": 3, "uds_path": vsock_api_path})
         api_put(api_socket, "/actions", {"action_type": "InstanceStart"})
         deadline = time.time() + 12
@@ -522,6 +577,8 @@ def main() -> None:
                 if jailed_process is None:
                     jailed_process = open_jailed_process(jail_root / (FIRECRACKER.name + ".pid"), jail_root / FIRECRACKER.name)
                 lifecycle["destroyed"] = stop_jailed_process(jailed_process)
+                if lifecycle["destroyed"]:
+                    jail_cgroup.rmdir()
             except (OSError, RuntimeError) as exc:
                 lifecycle["destroyed"] = False
                 response["error"] = "Jailer child teardown could not be verified: " + str(exc)
