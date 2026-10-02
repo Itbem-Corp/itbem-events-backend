@@ -10,7 +10,11 @@ set -eu
 run() {
   printf '\n==> %s\n' "$1"
   shift
-  "$@"
+  if [ "$1" = go ] && [ "${2:-}" = test ]; then
+    python3 scripts/run_required_go_tests.py "$@"
+  else
+    "$@"
+  fi
 }
 
 # A clean `git worktree` retains only each submodule's gitlink. Initialize the
