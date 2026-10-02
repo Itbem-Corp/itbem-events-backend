@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"events-stocks/internal/agentwork"
@@ -47,6 +48,20 @@ func validateReleaseObservation(taskID string, delivery json.RawMessage, raw jso
 	environment, err := environmentevidence.Decode(envelope.Environment)
 	if err != nil || environment.TaskID != taskID || environment.MatrixDigest != want {
 		return nil, fmt.Errorf("release environment subject changed")
+	}
+	if len(environment.Repositories) != len(candidate.Revisions) {
+		return nil, fmt.Errorf("release environment matrix incomplete")
+	}
+	for _, repository := range environment.Repositories {
+		matched := false
+		for _, revision := range candidate.Revisions {
+			if strings.EqualFold(repository.Repository, revision.Repository) && strings.EqualFold(repository.HeadSHA, revision.SHA) {
+				matched = true
+			}
+		}
+		if !matched {
+			return nil, fmt.Errorf("release environment revision changed")
+		}
 	}
 	return releaseGateHandoff(observed, environment), nil
 }

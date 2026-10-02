@@ -19,7 +19,7 @@ func TestReleaseObservationClientRejectsChangedSubjectAndInventedApproval(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	environment := environmentevidence.Observation{SchemaVersion: 1, TaskID: task, MatrixDigest: digest, Repositories: []environmentevidence.Repository{{Repository: "example/service", HeadSHA: strings.Repeat("a", 40), Workflow: ".github/workflows/deploy.yml", Environment: "production", RequiredSecretReferences: []string{}, RequiredVariableReferences: []string{}, MissingSecretReferences: []string{}, MissingVariableReferences: []string{}}}}
+	environment := environmentevidence.Observation{SchemaVersion: 1, TaskID: task, MatrixDigest: digest, Repositories: []environmentevidence.Repository{{Repository: "example/service", HeadSHA: strings.Repeat("a", 40), Workflow: ".github/workflows/deploy.yml", Environment: "production", WorkflowExists: true, EnvironmentExists: true, RequiredSecretReferences: []string{}, RequiredVariableReferences: []string{}, MissingSecretReferences: []string{}, MissingVariableReferences: []string{}}}}
 	for _, name := range []string{"valid", "sha", "change-set", "approval", "task", "digest", "extra-field"} {
 		t.Run(name, func(t *testing.T) {
 			observed, env := candidate, environment
