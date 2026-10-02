@@ -98,8 +98,13 @@ signed PostgreSQL fixture exercises version 2 transport and immutable bundle
 receipts with locally generated original Git commits, a pinned gitlink, root
 and child packs, and an independent client checkout. It verifies the child's
 original SHA and registered origin and rejects erased dependency provenance.
-The supplier is injected: production GitHub acquisition with pinned
-dependencies is not yet qualified by that fixture.
+The supplier is injected. A separate fixture transfers the original parent
+and child commits through a real Git HTTP backend over verified local TLS,
+builds and decodes the bundle, and verifies both independent checkout SHAs.
+It overrides the fixed GitHub destination only inside the fixture; it does
+not exercise production Source App token minting or grant a configurable
+production Git URL. Production GitHub acquisition with pinned dependencies
+still requires readiness verification.
 
 Legacy sealed local handoffs retain their original execution behavior. New paid
 inference, historical requeues and live worker activation require their existing

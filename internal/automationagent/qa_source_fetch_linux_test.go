@@ -110,6 +110,86 @@ func TestQASourceFetchTransfersExactCommitOverVerifiedTLSAndRefusesRedirect(t *t
 	if requests.Load() < 2 {
 		t.Fatal("fixture did not exercise real Git negotiation and upload-pack")
 	}
+	t.Run("pinned-bundle", func(t *testing.T) {
+		const childPath = ".contracts/contract"
+		git := func(args ...string) string {
+			cmd := exec.Command(gitPath, args...)
+			cmd.Dir = source
+			output, err := cmd.Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			return strings.TrimSpace(string(output))
+		}
+		if err := os.WriteFile(filepath.Join(source, ".gitmodules"), []byte("[submodule \"contract\"]\npath = "+childPath+"\nurl = https://github.com/example/contract.git\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		git("add", ".gitmodules")
+		git("update-index", "--add", "--cacheinfo", "160000,"+commit+","+childPath)
+		git("commit", "-m", "synthetic TLS pinned dependency")
+		parentCommit := git("rev-parse", "HEAD")
+		git("clone", "--bare", source, filepath.Join(serverRoot, "bundle.git"))
+		git("clone", "--bare", filepath.Join(serverRoot, "service.git"), filepath.Join(serverRoot, "contract.git"))
+		fetch := func(ctx context.Context, repository, revision string) (string, error) {
+			root := t.TempDir()
+			if err := qaSourceGit(ctx, root, nil, "init", "--template=", "--initial-branch=source"); err != nil {
+				return "", err
+			}
+			cmd := command(ctx, root, "/"+repository+".git")
+			cmd.Args[len(cmd.Args)-1] = revision
+			if err := cmd.Run(); err != nil {
+				return "", err
+			}
+			return root, nil
+		}
+		parent, err := fetch(ctx, "bundle", parentCommit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := requests.Load()
+		approved := map[string]string{childPath: "example/contract"}
+		pack, digest, children, err := buildQASourceBundle(ctx, parent, parentCommit, approved, func(ctx context.Context, repository, revision string) ([]byte, string, error) {
+			if repository != "example/contract" || revision != commit {
+				t.Fatal("TLS child selection differs from approved pinned identity")
+			}
+			root, err := fetch(ctx, "contract", revision)
+			if err != nil {
+				return nil, "", err
+			}
+			return buildQASourcePack(ctx, root, revision)
+		})
+		if err != nil || len(children) != 1 {
+			t.Fatalf("TLS bundle production failed: %v", err)
+		}
+		if requests.Load()-before < 2 {
+			t.Fatal("child did not use real TLS Git negotiation")
+		}
+		bundle := QASourceBundle{Pack: pack, PackSHA256: digest, Dependencies: []QASourceDependencyPack{{Path: children[0].Path, Repository: children[0].Repository, CommitSHA: children[0].CommitSHA, PackSHA256: children[0].PackSHA256, Pack: children[0].Pack}}}
+		wire, wireDigest, err := EncodeQASourceBundle(bundle)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := DecodeQASourceBundle(wire, wireDigest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		children[0].Pack = decoded.Dependencies[0].Pack
+		workspace := Workspace{Root: t.TempDir(), Config: WorkspaceConfig{RepositoryURL: "https://github.com/example/service.git", BaseBranch: "main"}}
+		branch := "itbem-agent/22222222-2222-4222-8222-222222222222"
+		target, err := materializePublishedQASourceBundle(ctx, workspace, branch, parentCommit, decoded.PackSHA256, decoded.Pack, approved, children)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := verifyQASourceRevision(ctx, target, branch, parentCommit); err != nil {
+			t.Fatal(err)
+		}
+		if err := verifyQASourceRevision(ctx, filepath.Join(target, filepath.FromSlash(childPath)), branch, commit); err != nil {
+			t.Fatal(err)
+		}
+		if err := verifyQASourceOrigin(ctx, filepath.Join(target, filepath.FromSlash(childPath)), "https://github.com/example/contract.git"); err != nil {
+			t.Fatal(err)
+		}
+	})
 	if err := command(ctx, root, "/redirect.git").Run(); err == nil || redirected.Load() {
 		t.Fatal("source transport followed or accepted a redirect")
 	}
