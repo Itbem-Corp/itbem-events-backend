@@ -63,6 +63,7 @@ func newSandboxLease(ctx context.Context, workspace Workspace, directory string)
 				"runtime": evidence.Runtime, "runtime_version": evidence.RuntimeVersion,
 				"transport": evidence.Transport, "evidence_scope": evidence.EvidenceScope,
 				"guest_command_verified": evidence.GuestCommandVerified,
+				"toolchain_image_sha256": evidence.ToolchainImageSHA256, "registered_command": evidence.RegisteredCommand,
 			}
 		}
 	}
@@ -145,6 +146,7 @@ func runWorkspaceCommandUninstrumented(parent context.Context, workspace Workspa
 			"runtime": evidence.Runtime, "runtime_version": evidence.RuntimeVersion,
 			"transport": evidence.Transport, "evidence_scope": evidence.EvidenceScope,
 			"guest_command_verified": evidence.GuestCommandVerified,
+			"toolchain_image_sha256": evidence.ToolchainImageSHA256, "registered_command": evidence.RegisteredCommand,
 		}
 	}
 	if result.SandboxLifecycle != nil {

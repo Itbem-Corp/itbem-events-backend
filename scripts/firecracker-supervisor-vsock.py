@@ -159,6 +159,53 @@ def build_worktree_image(staging: pathlib.Path, image: pathlib.Path, total_bytes
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "mke2fs worktree image failed")
 
 
+def verified_guest_execution(response: dict) -> bool:
+    if not isinstance(response, dict) or response.get("executed") is not True:
+        return False
+    code = response.get("exit_code")
+    if type(code) is not int or code < 0 or code > 255:
+        return False
+    if response.get("ok") is not (code == 0):
+        return False
+    if response.get("error", "") != ("" if code == 0 else "guest command failed"):
+        return False
+    for field in ("stdout", "stderr"):
+        value = response.get(field, "")
+        if not isinstance(value, str):
+            return False
+        try:
+            if len(value.encode("utf-8")) > MAX_OUTPUT:
+                return False
+        except UnicodeError:
+            return False
+    if code == 0:
+        tests = {}
+        packages = set()
+        try:
+            for line in response.get("stdout", "").splitlines():
+                event = json.loads(line)
+                if not isinstance(event, dict):
+                    return False
+                action, test, package = event.get("Action"), event.get("Test"), event.get("Package")
+                if action in ("skip", "fail"):
+                    return False
+                if test:
+                    key = (package, test)
+                    if action == "run":
+                        tests[key] = False
+                    elif action == "pass":
+                        if key not in tests:
+                            return False
+                        tests[key] = True
+                elif action == "pass":
+                    packages.add(package)
+        except (ValueError, TypeError):
+            return False
+        if not tests or not all(tests.values()) or any(package not in packages for package, _ in tests):
+            return False
+    return True
+
+
 def apply_production_limits() -> None:
     """Bound the supervisor process before it launches Firecracker."""
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
@@ -166,9 +213,9 @@ def apply_production_limits() -> None:
     resource.setrlimit(resource.RLIMIT_FSIZE, (512 * 1024 * 1024, 512 * 1024 * 1024))
 
 
-def vsock_command(vsock_path: pathlib.Path, command: str, args: list[str]) -> dict:
+def vsock_command(vsock_path: pathlib.Path, command: str, args: list[str], timeout: int = 10) -> dict:
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(10)
+    client.settimeout(timeout)
     try:
         client.connect(str(vsock_path))
         client.sendall(b"CONNECT 52\n")
@@ -182,7 +229,7 @@ def vsock_command(vsock_path: pathlib.Path, command: str, args: list[str]) -> di
             if not chunk:
                 raise RuntimeError("guest agent closed the vsock connection before a response")
             payload += chunk
-            if len(payload) > MAX_OUTPUT:
+            if len(payload) > 2 * MAX_OUTPUT + 4096:
                 raise RuntimeError("guest agent response exceeded the bounded output limit")
         return json.loads(payload.decode())
     finally:
@@ -192,6 +239,8 @@ def vsock_command(vsock_path: pathlib.Path, command: str, args: list[str]) -> di
 def main() -> None:
     profile = os.environ.get("ITBEM_FIRECRACKER_PROFILE", PROFILE_LOCAL).strip().lower()
     force_jailer = False
+    sdk_path = None
+    sdk_sha256 = None
     argv = list(sys.argv[1:])
     if argv:
         index = 0
@@ -202,6 +251,12 @@ def main() -> None:
             elif argv[index] == "--jailer":
                 force_jailer = True
                 index += 1
+            elif argv[index] in ("--go-sdk-image", "--go-sdk-sha256") and index + 1 < len(argv):
+                if argv[index] == "--go-sdk-image":
+                    sdk_path = pathlib.Path(argv[index + 1])
+                else:
+                    sdk_sha256 = argv[index + 1]
+                index += 2
             else:
                 emit_failure("supervisor accepts --profile local|production and optional --jailer")
     if profile not in (PROFILE_LOCAL, PROFILE_PRODUCTION):
@@ -226,6 +281,17 @@ def main() -> None:
         emit_failure("worktree digest does not match the bound source content", request)
     command = str(request.get("command", ""))
     args = request.get("args") or []
+    go_mode = command in ("go", "/sdk/bin/go") and args == ["test", "-json", "-count=1", "-timeout=30s", "./..."]
+    if go_mode:
+        command = "/sdk/bin/go"
+        if sdk_path is None or not sdk_path.is_absolute() or sdk_path.is_symlink() or not sdk_path.is_file() or sdk_path.stat().st_size > 384 * 1024 * 1024:
+            emit_failure("Go execution requires an operator-configured bounded SDK image", request)
+        if not isinstance(sdk_sha256, str) or not re.fullmatch(r"[a-f0-9]{64}", sdk_sha256):
+            emit_failure("Go SDK image requires a pinned SHA256", request)
+        if hashlib.sha256(sdk_path.read_bytes()).hexdigest() != sdk_sha256:
+            emit_failure("Go SDK image checksum mismatch", request)
+        if request.get("timeout_ms", 0) < 90000:
+            emit_failure("Go execution requires a 90-second outer lifecycle budget", request)
     # The guest agent has a narrow allow-list. The binding mode is retained for
     # the protocol smoke test; the worktree mode reads an actual staged file
     # from a read-only second guest drive.
@@ -234,6 +300,7 @@ def main() -> None:
         command == "/bin/cat" and len(args) == 1 and args[0].startswith("/workspace/")
         and ".." not in pathlib.PurePosixPath(args[0]).parts
     )
+    worktree_mode = worktree_mode or go_mode
     if not binding_mode and not worktree_mode:
         emit_failure("virtio-vsock proof only permits /bin/cat of the binding manifest or /workspace/*", request)
     if request.get("input") or request.get("environment"):
@@ -242,6 +309,8 @@ def main() -> None:
         if not artifact.is_file():
             emit_failure(f"missing Firecracker artifact: {artifact}", request)
     use_jailer = profile == PROFILE_PRODUCTION and (force_jailer or os.environ.get("ITBEM_FIRECRACKER_USE_JAILER", "0") == "1")
+    if go_mode and use_jailer:
+        emit_failure("Go toolchain requires a qualified jailer memory and scratch profile before production admission", request)
     if use_jailer:
         if not JAILER.is_file() or not os.access(JAILER, os.X_OK):
             emit_failure(f"production jailer profile requires an executable jailer: {JAILER}", request)
@@ -272,6 +341,12 @@ def main() -> None:
     binding = workdir / "binding.txt"
     init_path = workdir / "itbem-init"
     shutil.copy2(ROOTFS, rootfs)
+    sdk_image = workdir / "sdk.ext4"
+    if go_mode:
+        shutil.copyfile(sdk_path, sdk_image)
+        if hashlib.sha256(sdk_image.read_bytes()).hexdigest() != sdk_sha256:
+            shutil.rmtree(workdir)
+            emit_failure("Go SDK changed during staging", request)
     if use_jailer:
         jailer_base.mkdir(parents=True, exist_ok=True)
     worktree_files = 0
@@ -290,7 +365,7 @@ def main() -> None:
         f"task_id={request['task_id']}\nworkspace_id={request['workspace_id']}\nworktree_digest={request['worktree_digest']}\n",
         encoding="utf-8",
     )
-    expected_file = binding if binding_mode else staging.joinpath(*pathlib.PurePosixPath(args[0]).parts[2:])
+    expected_file = binding if binding_mode or go_mode else staging.joinpath(*pathlib.PurePosixPath(args[0]).parts[2:])
     if not expected_file.is_file() or expected_file.stat().st_size > MAX_OUTPUT:
         shutil.rmtree(workdir)
         emit_failure("guest read proof requires a bounded regular text file", request)
@@ -307,6 +382,12 @@ def main() -> None:
     if worktree_mode:
         init_lines.extend([
             "mount -t ext4 -o ro /dev/vdb /workspace",
+        ])
+    if go_mode:
+        init_lines.extend([
+            "mount -t proc proc /proc",
+            "mount -t tmpfs -o size=512m,nosuid,nodev tmpfs /tmp",
+            "mount -t ext4 -o ro /dev/vdc /sdk",
         ])
     init_lines.extend([
         "/itbem-guest-agent >/dev/console 2>&1 &",
@@ -325,6 +406,8 @@ def main() -> None:
     subprocess.run(["debugfs", "-w", "-R", "mkdir /itbem-fixture", str(rootfs)], capture_output=True, check=False)
     if worktree_mode:
         subprocess.run(["debugfs", "-w", "-R", "mkdir /workspace", str(rootfs)], capture_output=True, check=False)
+    if go_mode:
+        debugfs(rootfs, "mkdir /sdk")
     debugfs_write(rootfs, binding, "/itbem-fixture/binding.txt")
     debugfs_write(rootfs, GUEST_AGENT, "/itbem-guest-agent")
     debugfs_write(rootfs, init_path, "/itbem-init")
@@ -405,7 +488,9 @@ def main() -> None:
         api_put(api_socket, "/drives/rootfs", {"drive_id": "rootfs", "path_on_host": rootfs_path, "is_root_device": True, "is_read_only": True})
         if worktree_mode:
             api_put(api_socket, "/drives/worktree", {"drive_id": "worktree", "path_on_host": worktree_path, "is_root_device": False, "is_read_only": True})
-        api_put(api_socket, "/machine-config", {"vcpu_count": 1, "mem_size_mib": 128, "smt": False})
+        if go_mode:
+            api_put(api_socket, "/drives/sdk", {"drive_id": "sdk", "path_on_host": str(sdk_image), "is_root_device": False, "is_read_only": True})
+        api_put(api_socket, "/machine-config", {"vcpu_count": 1, "mem_size_mib": 768 if go_mode else 128, "smt": False})
         vsock_api_path = "/run/vsock.sock" if use_jailer else str(vsock_socket)
         api_put(api_socket, "/vsock", {"guest_cid": 3, "uds_path": vsock_api_path})
         api_put(api_socket, "/actions", {"action_type": "InstanceStart"})
@@ -420,9 +505,9 @@ def main() -> None:
             if "ITBEM_VSOCK_AGENT_READY" in captured or "ITBEM_VSOCK_LISTENING" in captured:
                 break
             time.sleep(0.1)
-        response = vsock_command(vsock_socket, command, args)
-        lifecycle["guest_command_executed"] = verified_guest_read(response, expected_output)
-        guest_exit = 0 if lifecycle["guest_command_executed"] else 1
+        response = vsock_command(vsock_socket, command, args, 65 if go_mode else 10)
+        lifecycle["guest_command_executed"] = verified_guest_execution(response) if go_mode else verified_guest_read(response, expected_output)
+        guest_exit = response["exit_code"] if go_mode and lifecycle["guest_command_executed"] else (0 if lifecycle["guest_command_executed"] else 1)
         if not lifecycle["guest_command_executed"]:
             response["error"] = "guest output does not match the content-bound file"
     except Exception as exc:
@@ -468,6 +553,9 @@ def main() -> None:
         "guest_command_verified": bool(lifecycle["guest_command_executed"]),
         "evidence_digest": "sha256:" + hashlib.sha256((output + captured).encode()).hexdigest(),
     }
+    if go_mode:
+        attestation["toolchain_image_sha256"] = sdk_sha256
+        attestation["registered_command"] = "go.test.json.offline"
     ATTESTATION_ROOT.mkdir(parents=True, exist_ok=True)
     persisted = ATTESTATION_ROOT / (re.sub(r"[^A-Za-z0-9_.-]", "_", str(request["lease_id"])) + ".json")
     transfer = {
@@ -482,9 +570,10 @@ def main() -> None:
     persisted.write_text(json.dumps({"profile": profile, "request": {"task_id": request["task_id"], "workspace_id": request["workspace_id"], "worktree_digest": request["worktree_digest"]}, "transfer": transfer, "attestation": attestation, "lifecycle": lifecycle}, sort_keys=True) + "\n", encoding="utf-8")
     lifecycle["attestation_persisted"] = persisted.is_file() and persisted.stat().st_size > 0
     shutil.rmtree(workdir, ignore_errors=True)
-    ok = guest_exit == 0 and all(lifecycle.values())
+    protocol_ok = all(lifecycle.values())
+    ok = guest_exit == 0 and protocol_ok
     print(json.dumps({"protocol_version": 1, "operation": "execute", "lease_id": request["lease_id"], "ok": ok, "exit_code": guest_exit, "stdout": output, "stderr": str(response.get("stderr", "")), "error": str(response.get("error", "")), "profile": profile, "task_id": request["task_id"], "workspace_id": request["workspace_id"], "worktree_digest": request["worktree_digest"], "worktree_transfer": transfer, "attestation": attestation, "lifecycle": lifecycle}, separators=(",", ":")))
-    raise SystemExit(0 if ok else 1)
+    raise SystemExit(0 if protocol_ok else 1)
 
 
 if __name__ == "__main__":
