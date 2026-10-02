@@ -89,7 +89,9 @@ func RunPublication(ctx context.Context, delivery json.RawMessage, lookup func(s
 	if err != nil {
 		return nil, err
 	}
-	for _, capability := range []string{WorkspaceCapabilityStageCommit, WorkspaceCapabilityPublishBranch} {
+	// Validate the complete requested action before authentication, staging or
+	// remote writes. A PR capability failure must not leave a published branch.
+	for _, capability := range auth.Capabilities {
 		if err := workspace.RequireCapability(capability); err != nil {
 			return nil, err
 		}
@@ -144,9 +146,6 @@ func RunPublication(ctx context.Context, delivery json.RawMessage, lookup func(s
 		"deployment": "not attempted; a human preview/release workflow remains required",
 	}
 	if hasPublicationCapability(auth.Capabilities, WorkspaceCapabilityCreatePullReq) {
-		if err := workspace.RequireCapability(WorkspaceCapabilityCreatePullReq); err != nil {
-			return nil, err
-		}
 		prURL, created, err := createGitHubPullRequest(ctx, config, token.Token, remote, auth.Branch, input.WorkItem.Title)
 		if err != nil {
 			return nil, err
