@@ -29,6 +29,7 @@ const (
 
 const (
 	OperationAIChat                  = "ai.chat"
+	OperationDeliveryChat            = "delivery.chat"
 	OperationDocumentAnalyze         = "document.analyze"
 	OperationCodeReview              = "code.review"
 	OperationProductIdeate           = "product.ideate"
@@ -51,7 +52,7 @@ type Assignment struct {
 // this as a switch avoids exposing mutable routing state to callers.
 func AssignmentForOperation(operation string) (Assignment, bool) {
 	switch operation {
-	case OperationAIChat, OperationDocumentAnalyze, OperationDeliverySummary:
+	case OperationAIChat, OperationDeliveryChat, OperationDocumentAnalyze, OperationDeliverySummary:
 		return Assignment{Role: RoleOrchestrator, Lane: LaneOrchestration}, true
 	case OperationProductIdeate, OperationDeliveryPlan, OperationDeliveryImplementation:
 		return Assignment{Role: RolePrincipalEngineer, Lane: LaneEngineering}, true
