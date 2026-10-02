@@ -16,6 +16,8 @@ import os
 import pathlib
 import re
 import resource
+import select
+import signal
 import shutil
 import socket
 import subprocess
@@ -77,6 +79,11 @@ def debugfs_write(rootfs: pathlib.Path, source: pathlib.Path, target: str) -> No
     ], capture_output=True, text=True, check=False)
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f"debugfs write failed: {target}")
+    # debugfs can report success even when a path traverses an unsupported
+    # image symlink. Verify the inserted bytes before ever starting a VM.
+    inserted = subprocess.run(["debugfs", "-R", f"cat {target}", str(rootfs)], capture_output=True, check=False)
+    if inserted.returncode or inserted.stdout != source.read_bytes():
+        raise RuntimeError(f"debugfs insertion verification failed: {target}")
 
 
 def debugfs(rootfs: pathlib.Path, command: str) -> None:
@@ -89,6 +96,52 @@ def stage_worktree(source: pathlib.Path, destination: pathlib.Path) -> tuple[int
     """Compatibility wrapper over the credential-free content-bound snapshot."""
     _, files, total = snapshot_worktree(source, destination)
     return files, total
+
+
+def verified_guest_read(response: dict, expected: bytes) -> bool:
+    output = response.get("stdout")
+    try:
+        observed = output.encode("utf-8") if isinstance(output, str) else None
+    except UnicodeError:
+        return False
+    return (response.get("ok") is True and isinstance(output, str)
+            and not response.get("error") and len(expected) <= MAX_OUTPUT
+            and observed == expected)
+
+
+def open_jailed_process(pid_file: pathlib.Path, executable: pathlib.Path, require_namespace: bool = True) -> int:
+    """Pin the exact Jailer child, never signal a reusable numeric PID."""
+    if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+        raise RuntimeError("Jailer teardown requires Linux pidfd support")
+    text = pid_file.read_text().strip()
+    if not text.isdecimal() or int(text) <= 1:
+        raise RuntimeError("invalid Jailer child PID")
+    descriptor = os.pidfd_open(int(text))
+    try:
+        if os.readlink(f"/proc/{int(text)}/exe") != str(executable):
+            raise RuntimeError("Jailer child executable does not match this lease")
+        if require_namespace:
+            status = pathlib.Path(f"/proc/{int(text)}/status").read_text()
+            namespaces = next((line.split()[1:] for line in status.splitlines() if line.startswith("NSpid:")), [])
+            if len(namespaces) < 2 or namespaces[-1] != "1":
+                raise RuntimeError("Jailer child is not init of its PID namespace")
+    except Exception:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def stop_jailed_process(descriptor: int) -> bool:
+    poller = select.poll()
+    poller.register(descriptor, select.POLLIN)
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            signal.pidfd_send_signal(descriptor, sig)
+        except ProcessLookupError:
+            pass
+        if poller.poll(3000):
+            return True
+    return False
 
 
 def build_worktree_image(staging: pathlib.Path, image: pathlib.Path, total_bytes: int) -> None:
@@ -237,6 +290,16 @@ def main() -> None:
         f"task_id={request['task_id']}\nworkspace_id={request['workspace_id']}\nworktree_digest={request['worktree_digest']}\n",
         encoding="utf-8",
     )
+    expected_file = binding if binding_mode else staging.joinpath(*pathlib.PurePosixPath(args[0]).parts[2:])
+    if not expected_file.is_file() or expected_file.stat().st_size > MAX_OUTPUT:
+        shutil.rmtree(workdir)
+        emit_failure("guest read proof requires a bounded regular text file", request)
+    expected_output = expected_file.read_bytes()
+    try:
+        expected_output.decode("utf-8")
+    except UnicodeError:
+        shutil.rmtree(workdir)
+        emit_failure("guest read proof requires UTF-8 content", request)
     init_lines = [
         "#!/bin/sh",
         "set -eu",
@@ -246,7 +309,7 @@ def main() -> None:
             "mount -t ext4 -o ro /dev/vdb /workspace",
         ])
     init_lines.extend([
-        "/sbin/itbem-guest-agent >/dev/console 2>&1 &",
+        "/itbem-guest-agent >/dev/console 2>&1 &",
         "echo ITBEM_VSOCK_AGENT_READY >/dev/console",
         "exec /bin/sh",
         "",
@@ -255,21 +318,22 @@ def main() -> None:
     # The shared hello rootfs may already contain files from the serial proof.
     # Remove those entries first; debugfs `write` does not replace an existing
     # inode and silently leaving the old init would boot the wrong protocol.
-    subprocess.run(["debugfs", "-w", "-R", "rm /sbin/itbem-init", str(rootfs)], capture_output=True, check=False)
-    subprocess.run(["debugfs", "-w", "-R", "rm /sbin/itbem-guest-agent", str(rootfs)], capture_output=True, check=False)
+    subprocess.run(["debugfs", "-w", "-R", "rm /itbem-init", str(rootfs)], capture_output=True, check=False)
+    subprocess.run(["debugfs", "-w", "-R", "rm /itbem-guest-agent", str(rootfs)], capture_output=True, check=False)
     subprocess.run(["debugfs", "-w", "-R", "rm /itbem-fixture/binding.txt", str(rootfs)], capture_output=True, check=False)
     subprocess.run(["debugfs", "-w", "-R", "rm -r /workspace", str(rootfs)], capture_output=True, check=False)
     subprocess.run(["debugfs", "-w", "-R", "mkdir /itbem-fixture", str(rootfs)], capture_output=True, check=False)
     if worktree_mode:
         subprocess.run(["debugfs", "-w", "-R", "mkdir /workspace", str(rootfs)], capture_output=True, check=False)
     debugfs_write(rootfs, binding, "/itbem-fixture/binding.txt")
-    debugfs_write(rootfs, GUEST_AGENT, "/sbin/itbem-guest-agent")
-    debugfs_write(rootfs, init_path, "/sbin/itbem-init")
-    debugfs(rootfs, "set_inode_field /sbin/itbem-guest-agent mode 0100755")
-    debugfs(rootfs, "set_inode_field /sbin/itbem-init mode 0100755")
+    debugfs_write(rootfs, GUEST_AGENT, "/itbem-guest-agent")
+    debugfs_write(rootfs, init_path, "/itbem-init")
+    debugfs(rootfs, "set_inode_field /itbem-guest-agent mode 0100755")
+    debugfs(rootfs, "set_inode_field /itbem-init mode 0100755")
 
     lifecycle = {"created": False, "worktree_bound": True, "guest_command_executed": False, "destroyed": False, "attestation_persisted": False}
     process = None
+    jailed_process = None
     response = {"ok": False, "stdout": "", "stderr": "", "error": ""}
     guest_exit = 1
     captured = ""
@@ -331,11 +395,13 @@ def main() -> None:
             time.sleep(0.1)
         if not api_socket.exists():
             raise RuntimeError("Firecracker API socket did not appear")
+        if use_jailer:
+            jailed_process = open_jailed_process(jail_root / (FIRECRACKER.name + ".pid"), jail_root / FIRECRACKER.name)
         lifecycle["created"] = True
         kernel_path = "/vmlinux" if use_jailer else str(KERNEL)
         rootfs_path = "/rootfs.ext4" if use_jailer else str(rootfs)
         worktree_path = "/worktree.ext4" if use_jailer else str(worktree_image)
-        api_put(api_socket, "/boot-source", {"kernel_image_path": kernel_path, "boot_args": "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/itbem-init"})
+        api_put(api_socket, "/boot-source", {"kernel_image_path": kernel_path, "boot_args": "console=ttyS0 reboot=k panic=1 pci=off init=/itbem-init"})
         api_put(api_socket, "/drives/rootfs", {"drive_id": "rootfs", "path_on_host": rootfs_path, "is_root_device": True, "is_read_only": True})
         if worktree_mode:
             api_put(api_socket, "/drives/worktree", {"drive_id": "worktree", "path_on_host": worktree_path, "is_root_device": False, "is_read_only": True})
@@ -355,11 +421,10 @@ def main() -> None:
                 break
             time.sleep(0.1)
         response = vsock_command(vsock_socket, command, args)
-        guest_exit = 0 if response.get("ok") else 1
-        if binding_mode:
-            lifecycle["guest_command_executed"] = bool(response.get("ok")) and request["worktree_digest"] in str(response.get("stdout", ""))
-        else:
-            lifecycle["guest_command_executed"] = bool(response.get("ok")) and str(response.get("stdout", "")).strip() != ""
+        lifecycle["guest_command_executed"] = verified_guest_read(response, expected_output)
+        guest_exit = 0 if lifecycle["guest_command_executed"] else 1
+        if not lifecycle["guest_command_executed"]:
+            response["error"] = "guest output does not match the content-bound file"
     except Exception as exc:
         response["error"] = str(exc)
         if stdout_path.exists():
@@ -367,6 +432,17 @@ def main() -> None:
         if stderr_path.exists():
             response["error"] += " | firecracker stderr: " + stderr_path.read_text(errors="replace")[-3000:]
     finally:
+        if use_jailer:
+            try:
+                if jailed_process is None:
+                    jailed_process = open_jailed_process(jail_root / (FIRECRACKER.name + ".pid"), jail_root / FIRECRACKER.name)
+                lifecycle["destroyed"] = stop_jailed_process(jailed_process)
+            except (OSError, RuntimeError) as exc:
+                lifecycle["destroyed"] = False
+                response["error"] = "Jailer child teardown could not be verified: " + str(exc)
+            finally:
+                if jailed_process is not None:
+                    os.close(jailed_process)
         if process is not None:
             try:
                 process.terminate()
@@ -374,12 +450,13 @@ def main() -> None:
             except Exception:
                 process.kill()
                 process.wait(timeout=3)
-            lifecycle["destroyed"] = process.poll() is not None
+            if not use_jailer:
+                lifecycle["destroyed"] = process.poll() is not None
         if stdout_path.exists():
             captured = stdout_path.read_text(errors="replace")
         if stderr_path.exists():
             captured += "\n" + stderr_path.read_text(errors="replace")
-        if use_jailer:
+        if use_jailer and lifecycle["destroyed"]:
             shutil.rmtree(jail_root.parent, ignore_errors=True)
 
     output = str(response.get("stdout", ""))[-MAX_OUTPUT:]
