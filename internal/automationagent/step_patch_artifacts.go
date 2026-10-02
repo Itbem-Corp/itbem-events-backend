@@ -57,7 +57,7 @@ func captureWorktreePatch(ctx context.Context, worktree, baseSHA string, maxByte
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
-	command := exec.CommandContext(commandCtx, "git", "diff", "--binary", "--full-index", "--no-ext-diff", strings.ToLower(strings.TrimSpace(baseSHA)))
+	command := exec.CommandContext(commandCtx, "git", "diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", strings.ToLower(strings.TrimSpace(baseSHA)))
 	command.Dir = worktree
 	command.Env = repositoryCommandEnvironment(os.Environ(), nil)
 	bounded := &boundedPatchBuffer{limit: maxBytes}
