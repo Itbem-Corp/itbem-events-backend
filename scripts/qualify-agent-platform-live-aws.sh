@@ -94,12 +94,17 @@ fi
 
 cd "$repository_root"
 report_file=$(mktemp)
-AWS_ACCESS_KEY_ID=test \
+if AWS_ACCESS_KEY_ID=test \
 AWS_SECRET_ACCESS_KEY=test \
 AWS_REGION=us-east-1 \
 ITBEM_LOCALSTACK_E2E=1 \
 ITBEM_LOCALSTACK_ENDPOINT="http://127.0.0.1:$emulator_port" \
-go test ./internal/automationagent -run '^TestLocalStack(TransportRoundTrip|RedeliveryReusesDurableResultWithoutProviderRepeat)$' -count=1 -timeout 180s -json > "$report_file"
+go test ./internal/automationagent -run '^TestLocalStack(TransportRoundTrip|RedeliveryReusesDurableResultWithoutProviderRepeat)$' -count=1 -timeout 180s -json > "$report_file"; then
+  :
+else
+  cat "$report_file" >&2
+  exit 1
+fi
 python3 scripts/verify_go_test_evidence.py "$report_file" \
   TestLocalStackTransportRoundTrip \
   TestLocalStackRedeliveryReusesDurableResultWithoutProviderRepeat
