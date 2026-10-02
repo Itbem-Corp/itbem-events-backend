@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,7 +15,7 @@ func TestDockerSandboxRoundTrip(t *testing.T) {
 		t.Skip("set ITBEM_DOCKER_SANDBOX_E2E=1 to run the Docker sandbox round-trip")
 	}
 	if _, err := exec.LookPath("docker"); err != nil {
-		t.Skip("docker is not available on this worker")
+		t.Fatal("Docker qualification was requested but docker is not available on this worker")
 	}
 	workspace := Workspace{ID: "sandbox", Root: t.TempDir(), Config: WorkspaceConfig{
 		SandboxRuntime:     WorkspaceSandboxDocker,
@@ -31,7 +32,8 @@ func TestDockerSandboxRoundTrip(t *testing.T) {
 		t.Fatalf("docker sandbox round-trip failed: %#v / %v", result, err)
 	}
 	identity, err := runWorkspaceCommand(context.Background(), workspace, workspace.Root, 30*time.Second, "", nil, "id", "-u")
-	if err != nil || identity.ExitCode != 0 || strings.TrimSpace(identity.Output) != "65532" {
+	expectedUID := strings.Split(dockerSandboxUser(os.Getuid(), os.Getgid()), ":")[0]
+	if err != nil || identity.ExitCode != 0 || strings.TrimSpace(identity.Output) != expectedUID || expectedUID == "0" {
 		t.Fatalf("docker sandbox must run repository commands as non-root: %#v / %v", identity, err)
 	}
 	status, err := runWorkspaceCommand(context.Background(), workspace, workspace.Root, 30*time.Second, "", nil, "cat", "/proc/self/status")
@@ -49,5 +51,22 @@ func TestDockerSandboxRoundTrip(t *testing.T) {
 	worktreeWrite, err := runWorkspaceCommand(context.Background(), workspace, workspace.Root, 30*time.Second, "", nil, "sh", "-c", "printf ok > /workspace/sandbox-write.txt")
 	if err != nil || worktreeWrite.ExitCode != 0 {
 		t.Fatalf("docker sandbox must keep only the worktree writable: %#v / %v", worktreeWrite, err)
+	}
+	t.Setenv("ITBEM_HOST_ONLY_SYNTHETIC_CANARY", "not-forwarded")
+	boundary, err := runWorkspaceCommand(context.Background(), workspace, workspace.Root, 30*time.Second, "", nil, "sh", "-c", `test -z "$ITBEM_HOST_ONLY_SYNTHETIC_CANARY" && test ! -S /var/run/docker.sock && test ! -d /host`)
+	if err != nil || boundary.ExitCode != 0 {
+		t.Fatalf("sandbox exposed host identity or Docker authority: %#v / %v", boundary, err)
+	}
+	for name, body := range map[string]string{
+		"go.mod":          "module sandbox-fixture\n\ngo 1.25\n",
+		"fixture_test.go": "package fixture\nimport \"testing\"\nfunc TestFixture(t *testing.T) { if 2+2 != 4 { t.Fatal(\"arithmetic\") } }\n",
+	} {
+		if err := os.WriteFile(filepath.Join(workspace.Root, name), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	goTest, err := runWorkspaceCommand(context.Background(), workspace, workspace.Root, 90*time.Second, "", map[string]string{"GOTOOLCHAIN": "local"}, "go", "test", "-count=1", "./...")
+	if err != nil || goTest.ExitCode != 0 || !strings.Contains(goTest.Output, "ok") {
+		t.Fatalf("sandbox must execute actual repository tests: %#v / %v", goTest, err)
 	}
 }
