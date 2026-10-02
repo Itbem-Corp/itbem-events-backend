@@ -23,6 +23,19 @@ import (
 // Signed source requests carry only a workspace selector, queue lease and
 // live run. Repository, commit and matrix come from immutable server input.
 func GatewayQASource(c echo.Context) error {
+	return gatewayQASourceWithAcquirer(c, func(ctx context.Context, subject qaSourceSubject) ([]byte, string, error) {
+		app, err := automationagent.LoadGitHubSourceAppConfig(os.Getenv)
+		if err != nil {
+			return nil, "", err
+		}
+		return automationagent.FetchGitHubQASourcePack(ctx, subject.Repository, subject.SHA, app, nil)
+	})
+}
+
+// The route always supplies the server's bounded GitHub acquisition above.
+// An explicit dependency lets isolated database fixtures exercise revocation
+// without granting a production URL or credential override.
+func gatewayQASourceWithAcquirer(c echo.Context, acquire func(context.Context, qaSourceSubject) ([]byte, string, error)) error {
 	actor, ok := requireAgentCallbackIdentity(c)
 	if !ok {
 		return utils.Error(c, http.StatusUnauthorized, "Unauthorized", "")
@@ -96,11 +109,7 @@ func GatewayQASource(c echo.Context) error {
 		return utils.Error(c, http.StatusForbidden, "Source subject denied", "")
 	}
 	matrix := task.EvidenceSubjectDigest
-	app, err := automationagent.LoadGitHubSourceAppConfig(os.Getenv)
-	if err != nil {
-		return utils.Error(c, http.StatusServiceUnavailable, "Source reader unavailable", "")
-	}
-	pack, digest, err := automationagent.FetchGitHubQASourcePack(ctx, subject.Repository, subject.SHA, app, nil)
+	pack, digest, err := acquire(ctx, subject)
 	if err != nil {
 		return utils.Error(c, http.StatusServiceUnavailable, "Bounded source acquisition unavailable", "")
 	}
