@@ -29,3 +29,21 @@ func TestDoctorPublicationReadinessRequiresRoleSpecificGitHubAppConfiguration(t 
 		})
 	}
 }
+
+func TestDoctorReadinessRejectsMismatchedAndUnknownWorkerIdentities(t *testing.T) {
+	roles := []agentwork.Role{"orchestrator", "principal_engineer", "reviewer", "qa", "release_manager", "", "unknown"}
+	lanes := []agentwork.Lane{"orchestration", "engineering", "review", "qa", "release", "", "unknown"}
+	for _, role := range roles {
+		for _, lane := range lanes {
+			if agentwork.IsKnownRoleLane(role, lane) {
+				continue
+			}
+			config := automationagent.RuntimeConfig{WorkerConfig: automationagent.WorkerConfig{Role: role, Lane: lane}}
+			for mask := 0; mask < 16; mask++ {
+				if doctorExecutionReady(mask&1 != 0, mask&2 != 0, mask&4 != 0, mask&8 != 0, config) {
+					t.Fatalf("invalid role/lane admitted: %q/%q", role, lane)
+				}
+			}
+		}
+	}
+}
