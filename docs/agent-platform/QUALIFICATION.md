@@ -116,6 +116,16 @@ provider responses and in-memory callbacks/storage. It does not qualify signed
 gateway admission, database transitions, ledger receipts, independent code
 review, authorized publication or production execution across the five roles.
 
+Published QA targets additionally require the exact clean Git commit, no
+untracked source, and a repository origin, target branch and SHA matching the
+frozen Gatekeeper revision matrix. The worker fixture covers both published
+and local reviewed targets, rejects new source before inference, and verifies
+that the bounded schema-2 observation survives private-result storage,
+terminal callback delivery and recovery without another provider call.
+The observation records command outcomes independently of model summaries.
+These synthetic callback tests do not prove PostgreSQL ledger projection or
+source provisioning on an independent QA host; those remain required.
+
 This check uses only disposable `test` credentials. It must never receive a
 production AWS profile, provider API key, GitHub token, repository checkout or
 secret value.
