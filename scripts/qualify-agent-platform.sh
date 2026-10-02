@@ -61,6 +61,12 @@ run "published QA binds the exact clean commit and frozen release matrix" \
 run "private QA source import preserves commit identity and rejects substituted or unsafe checkouts" \
   go test ./internal/automationagent -run 'Test(QASourcePackMaterializesOriginalPublishedCommitOnIndependentHost|QASourcePackRejectsExpandedOversizeBeforeCheckout|QASourcePackCannotReuseCheckoutThroughSymlink|QASourcePackRejectsReusedCheckoutWithSubstitutedOrigin|QASourcePackRejectsCorruptionWrongCommitAndSymlinkParent|QASourcePackRejectsSymlinkBeforePublishingCheckout|QASourcePackCancelledImportLeavesNoCheckoutOrLock)$' -count=1
 
+run "QA source uses verified TLS, refuses redirects, and cancels pending Git transport" \
+  go test ./internal/automationagent -run 'Test(QASourceFetchTransfersExactCommitOverVerifiedTLSAndRefusesRedirect|QASourceFetchKeepsCredentialOutOfArgumentsAndRejectsUnboundCoordinates|QASourcePackRejectsExecutableLocalConfigurationBeforeReuse|QASourceProducerPreservesOriginalCommitAcrossIndependentCheckouts|QASourcePackOutputBoundAppliesToReaderFrom)$' -count=1
+
+run "QA source authorization requires the exact live instance and frozen revision matrix" \
+  go test ./controllers/automation -run 'Test(QASourceAdmissionRequiresExactLiveTaskAndSignedInstance|QASourceSelectionBindsFrozenMatrixAndRejectsAmbiguity)$' -count=1
+
 run "QA ledger observations preserve failures independently of model summaries" \
   go test ./internal/automationagent -run 'TestQALedgerObservationPreservesObservedFailuresAndRejectsMalformedEvidence$' -count=1
 

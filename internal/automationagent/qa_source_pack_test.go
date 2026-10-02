@@ -155,6 +155,27 @@ func TestQASourcePackRejectsReusedCheckoutWithSubstitutedOrigin(t *testing.T) {
 	}
 }
 
+func TestQASourcePackRejectsExecutableLocalConfigurationBeforeReuse(t *testing.T) {
+	for _, key := range []string{"core.fsmonitor", "filter.synthetic.clean", "include.path", "core.hooksPath"} {
+		t.Run(key, func(t *testing.T) {
+			commit, pack := qaSourcePackFixture(t)
+			workspace := Workspace{ID: "synthetic", Root: t.TempDir(), Config: WorkspaceConfig{RepositoryURL: "https://github.com/example/service.git", BaseBranch: "main"}}
+			branch := "itbem-agent/11111111-1111-4111-8111-111111111111"
+			digest := fmt.Sprintf("%x", sha256.Sum256(pack))
+			target, err := materializePublishedQASourcePack(context.Background(), workspace, branch, commit, digest, pack)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := qaSourceGit(context.Background(), target, nil, "config", key, "/synthetic-untrusted-authority"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := materializePublishedQASourcePack(context.Background(), workspace, branch, commit, digest, pack); err == nil || !strings.Contains(err.Error(), "unsupported authority") {
+				t.Fatalf("untrusted local configuration was reused: %v", err)
+			}
+		})
+	}
+}
+
 func TestQASourcePackMaterializesOriginalPublishedCommitOnIndependentHost(t *testing.T) {
 	commit, pack := qaSourcePackFixture(t)
 	root := t.TempDir()

@@ -62,10 +62,13 @@ func materializePublishedQASourcePack(ctx context.Context, workspace Workspace, 
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return "", fmt.Errorf("QA source target must be a real directory")
 		}
+		if err := verifyQASourceLocalConfig(ctx, target); err != nil {
+			return "", err
+		}
 		if err := verifyQASourceOrigin(ctx, target, remote); err != nil {
 			return "", err
 		}
-		if err := verifyQATargetRevision(ctx, qaTarget{root: target, branch: branch, reviewCommitSHA: commit}); err != nil {
+		if err := verifyQASourceRevision(ctx, target, branch, commit); err != nil {
 			return "", err
 		}
 		if _, err := sandboxWorktreeDigest(target); err != nil {
@@ -102,7 +105,7 @@ func materializePublishedQASourcePack(ctx context.Context, workspace Workspace, 
 			return "", err
 		}
 	}
-	if err := verifyQATargetRevision(ctx, qaTarget{root: stage, branch: branch, reviewCommitSHA: commit}); err != nil {
+	if err := verifyQASourceRevision(ctx, stage, branch, commit); err != nil {
 		return "", err
 	}
 	if _, err := sandboxWorktreeDigest(stage); err != nil {
@@ -112,6 +115,54 @@ func materializePublishedQASourcePack(ctx context.Context, workspace Workspace, 
 		return "", err
 	}
 	return target, nil
+}
+
+func verifyQASourceRevision(ctx context.Context, root, branch, commit string) error {
+	for _, check := range []struct {
+		args     []string
+		expected string
+	}{
+		{[]string{"branch", "--show-current"}, branch},
+		{[]string{"rev-parse", "HEAD"}, commit},
+		{[]string{"diff", "--no-ext-diff", "--no-textconv", "--quiet", "HEAD"}, ""},
+		{[]string{"ls-files", "--others"}, ""},
+	} {
+		bounded, cancel := context.WithTimeout(ctx, 30*time.Second)
+		cmd := qaSourceGitCommand(bounded, root, check.args...)
+		var stdout, stderr boundedCommandBuffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		err := cmd.Run()
+		cancel()
+		if err != nil || strings.TrimSpace(stdout.String()) != check.expected {
+			return fmt.Errorf("QA source does not match its exact clean commit")
+		}
+	}
+	return nil
+}
+
+// Imported source repositories have no operator customization. Fail closed
+// on extra local configuration before commands that could consult filters,
+// monitors, include files, or alternate Git authorities.
+func verifyQASourceLocalConfig(ctx context.Context, root string) error {
+	info, err := os.Lstat(filepath.Join(root, ".git"))
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("QA source Git directory must be private and real")
+	}
+	bounded, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	cmd := qaSourceGitCommand(bounded, root, "config", "--local", "--no-includes", "--name-only", "--list")
+	var stdout, stderr boundedCommandBuffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("QA source local configuration cannot be verified")
+	}
+	allowed := map[string]bool{"core.repositoryformatversion": true, "core.filemode": true, "core.bare": true, "core.logallrefupdates": true, "core.ignorecase": true, "core.precomposeunicode": true, "remote.origin.url": true, "remote.origin.fetch": true}
+	for _, key := range strings.Split(strings.TrimSpace(stdout.String()), "\n") {
+		if !allowed[strings.ToLower(strings.TrimSpace(key))] {
+			return fmt.Errorf("QA source local configuration contains unsupported authority")
+		}
+	}
+	return nil
 }
 
 func verifyQASourceOrigin(ctx context.Context, root, expected string) error {
@@ -127,7 +178,7 @@ func verifyQASourceOrigin(ctx context.Context, root, expected string) error {
 }
 
 func qaSourceGitCommand(ctx context.Context, root string, args ...string) *exec.Cmd {
-	options := []string{"-c", "core.hooksPath=" + os.DevNull, "-c", "core.autocrlf=false", "-c", "core.protectHFS=true", "-c", "core.protectNTFS=true", "-c", "credential.helper=", "-c", "protocol.allow=never"}
+	options := []string{"-c", "core.hooksPath=" + os.DevNull, "-c", "core.fsmonitor=false", "-c", "core.autocrlf=false", "-c", "core.protectHFS=true", "-c", "core.protectNTFS=true", "-c", "credential.helper=", "-c", "protocol.allow=never"}
 	cmd := exec.CommandContext(ctx, "git", append(options, args...)...)
 	cmd.Dir = root
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull, "GIT_CONFIG_SYSTEM=" + os.DevNull, "GIT_TERMINAL_PROMPT=0", "GIT_ALLOW_PROTOCOL=", "GIT_ATTR_NOSYSTEM=1", "LANG=C"}
