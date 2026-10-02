@@ -32,7 +32,7 @@ func TestQASourceSignedClientImportsOnlyExactFrozenPack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, scenario := range []string{"valid", "task", "run", "matrix", "repository", "sha", "digest", "unknown"} {
+	for _, scenario := range []string{"valid", "valid-bundle", "bundle-digest", "bundle-unapproved", "bundle-type", "task", "run", "matrix", "repository", "sha", "digest", "unknown"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := t.TempDir()
 			registry, err := json.Marshal(map[string]WorkspaceConfig{"repo": {Path: root, RepositoryURL: "https://github.com/example/service.git", BaseBranch: "main"}})
@@ -59,6 +59,30 @@ func TestQASourceSignedClientImportsOnlyExactFrozenPack(t *testing.T) {
 					t.Error("source request carried arbitrary coordinates")
 				}
 				metadata := map[string]any{"schema_version": 1, "task_id": task, "run_id": run, "matrix_digest": matrix, "repository_ref": "workspace://repo", "repository": "example/service", "branch": branch, "commit_sha": commit, "pack_sha256": fmt.Sprintf("%x", sha256.Sum256(pack))}
+				payload := pack
+				contentType := "application/x-git-packed-objects"
+				if strings.Contains(scenario, "bundle") {
+					bundle := QASourceBundle{Pack: pack, PackSHA256: fmt.Sprintf("%x", sha256.Sum256(pack))}
+					if scenario == "bundle-unapproved" {
+						bundle.Dependencies = []QASourceDependencyPack{{Path: "contract", Repository: "outside/contract", CommitSHA: commit, PackSHA256: bundle.PackSHA256, Pack: pack}}
+					}
+					var hash string
+					payload, hash, err = EncodeQASourceBundle(bundle)
+					if err != nil {
+						t.Error(err)
+						w.WriteHeader(500)
+						return
+					}
+					metadata["schema_version"] = 2
+					metadata["bundle_sha256"] = hash
+					contentType = "application/vnd.itbem.qa-source-bundle"
+					if scenario == "bundle-digest" {
+						metadata["bundle_sha256"] = strings.Repeat("a", 64)
+					}
+					if scenario == "bundle-type" {
+						contentType = "application/x-git-packed-objects"
+					}
+				}
 				switch scenario {
 				case "task":
 					metadata["task_id"] = run
@@ -77,8 +101,8 @@ func TestQASourceSignedClientImportsOnlyExactFrozenPack(t *testing.T) {
 				}
 				raw, _ := json.Marshal(metadata)
 				w.Header().Set("X-ITBEM-QA-Source", base64.RawURLEncoding.EncodeToString(raw))
-				w.Header().Set("Content-Type", "application/x-git-packed-objects")
-				_, _ = w.Write(pack)
+				w.Header().Set("Content-Type", contentType)
+				_, _ = w.Write(payload)
 			}))
 			defer server.Close()
 			callback := newTestCallbackWithIdentity(t, server, identity, instance)
@@ -88,7 +112,7 @@ func TestQASourceSignedClientImportsOnlyExactFrozenPack(t *testing.T) {
 			}
 			ctx := context.WithValue(context.Background(), gatewayLeaseContextKey{}, "sealed-lease")
 			target, err := callback.AcquireQASource(ctx, gateway, task, run, "workspace://repo", delivery, lookup)
-			if scenario == "valid" {
+			if scenario == "valid" || scenario == "valid-bundle" {
 				if err != nil {
 					t.Fatal(err)
 				}

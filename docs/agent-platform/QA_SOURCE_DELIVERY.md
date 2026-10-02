@@ -52,6 +52,21 @@ Pack size is at most 64 MiB. A source tree has at most 20,000 files, 128 MiB tot
 expanded bytes and 32 MiB per file. The importer validates tree entries before
 checkout. Symlinks and gitlinks are currently unsupported and fail closed.
 
+The version 2 client supports a bounded `QASB` binary envelope with a canonical
+JSON manifest and separately hashed root and child Git packs. Authenticated
+metadata binds the entire envelope through `bundle_sha256`; the root digest
+must also match `pack_sha256`. Operator-owned workspace configuration may set
+`qa_source_dependencies` to a map of relative gitlink paths to GitHub
+`owner/repository` names. Empty policy grants no dependency. Every child must
+match this policy and the original parent's frozen gitlink and `.gitmodules`
+blob before atomic checkout publication. Nested gitlinks remain denied.
+
+The server acquisition function can prepare approved bundles using a separate
+repository-scoped token for each child, sharing expanded-tree and combined-pack
+budgets. The current HTTP endpoint still serves version 1 single packs: enabling
+version 2 also requires operator-owned server policy and immutable dependency
+provenance in receipts. Client support alone does not enable backend gitlinks.
+
 ## Evidence and remaining qualification
 
 Required tests cover real verified TLS Git transport, cancellation of a pending

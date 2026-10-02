@@ -25,6 +25,7 @@ type QASourceMetadata struct {
 	Branch        string `json:"branch"`
 	CommitSHA     string `json:"commit_sha"`
 	PackSHA256    string `json:"pack_sha256"`
+	BundleSHA256  string `json:"bundle_sha256,omitempty"`
 }
 
 func validateQASourceMetadata(raw []byte, taskID, runID, reference string, delivery json.RawMessage, workspace Workspace) (QASourceMetadata, error) {
@@ -34,7 +35,10 @@ func validateQASourceMetadata(raw []byte, taskID, runID, reference string, deliv
 	var metadata QASourceMetadata
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
-	if len(raw) > 4096 || decoder.Decode(&metadata) != nil || decoder.Decode(&struct{}{}) != io.EOF || metadata.SchemaVersion != 1 || metadata.TaskID != taskID || metadata.RunID != runID || metadata.Reference != reference || !sha256DigestPattern.MatchString(metadata.PackSHA256) {
+	if len(raw) > 4096 || decoder.Decode(&metadata) != nil || decoder.Decode(&struct{}{}) != io.EOF || (metadata.SchemaVersion != 1 && metadata.SchemaVersion != 2) || metadata.TaskID != taskID || metadata.RunID != runID || metadata.Reference != reference || !sha256DigestPattern.MatchString(metadata.PackSHA256) {
+		return deny()
+	}
+	if (metadata.SchemaVersion == 1 && metadata.BundleSHA256 != "") || (metadata.SchemaVersion == 2 && !sha256DigestPattern.MatchString(metadata.BundleSHA256)) {
 		return deny()
 	}
 	var input struct {
@@ -118,7 +122,8 @@ func (c *HTTPCallback) AcquireQASource(ctx context.Context, gateway *HTTPGateway
 		return "", &gatewayRequestError{statusCode: response.StatusCode, operation: "QA source acquisition"}
 	}
 	header := response.Header.Get("X-ITBEM-QA-Source")
-	if len(header) > 8192 || response.Header.Get("Content-Type") != "application/x-git-packed-objects" {
+	contentType := response.Header.Get("Content-Type")
+	if len(header) > 8192 || (contentType != "application/x-git-packed-objects" && contentType != "application/vnd.itbem.qa-source-bundle") {
 		return "", fmt.Errorf("QA source response boundary invalid")
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(header)
@@ -128,6 +133,30 @@ func (c *HTTPCallback) AcquireQASource(ctx context.Context, gateway *HTTPGateway
 	metadata, err := validateQASourceMetadata(raw, taskID, runID, reference, delivery, workspace)
 	if err != nil {
 		return "", err
+	}
+	if metadata.SchemaVersion == 2 {
+		if contentType != "application/vnd.itbem.qa-source-bundle" {
+			return "", fmt.Errorf("QA bundle transport type differs from metadata")
+		}
+		body, err := io.ReadAll(io.LimitReader(response.Body, MaxQASourceBundleBytes+1))
+		if err != nil || len(body) > MaxQASourceBundleBytes {
+			return "", fmt.Errorf("QA bundle response exceeds its boundary")
+		}
+		bundle, err := DecodeQASourceBundle(body, metadata.BundleSHA256)
+		if err != nil || bundle.PackSHA256 != metadata.PackSHA256 {
+			return "", fmt.Errorf("QA bundle does not match authenticated source metadata")
+		}
+		children := make([]packedQASourceDependency, 0, len(bundle.Dependencies))
+		for _, child := range bundle.Dependencies {
+			if !strings.EqualFold(workspace.Config.QASourceDependencies[child.Path], child.Repository) {
+				return "", fmt.Errorf("QA bundle dependency is not approved by this workspace")
+			}
+			children = append(children, packedQASourceDependency{pinnedQASourceDependency: pinnedQASourceDependency{Path: child.Path, Repository: child.Repository, CommitSHA: child.CommitSHA}, PackSHA256: child.PackSHA256, Pack: child.Pack})
+		}
+		return materializePublishedQASourceBundle(ctx, workspace, metadata.Branch, metadata.CommitSHA, bundle.PackSHA256, bundle.Pack, workspace.Config.QASourceDependencies, children)
+	}
+	if contentType != "application/x-git-packed-objects" {
+		return "", fmt.Errorf("QA source transport type differs from metadata")
 	}
 	pack, err := io.ReadAll(io.LimitReader(response.Body, maxQASourcePackBytes+1))
 	if err != nil || len(pack) > maxQASourcePackBytes {
