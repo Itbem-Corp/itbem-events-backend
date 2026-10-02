@@ -52,6 +52,9 @@ run "QA evidence cannot escape through ancestor symlinks" \
 run "QA worker preserves source authority and replays without new inference" \
   go test ./internal/automationagent -run 'TestQAWorkerPreservesReviewedManifestAndRejectsNewSourceBeforeInference$' -count=1
 
+run "five role worker chain retains reviewed source and rejects ungranted release" \
+  go test ./internal/automationagent -run 'TestFiveRoleWorkersCarryReviewedSourceAndRefuseUngrantableRelease$' -count=1
+
 run "model-free QA worker with exact-revision evidence" \
   go test ./internal/automationagent -run 'TestWorkerRunsOnboardingProbeDeterministicallyWithoutProvider$' -count=1
 

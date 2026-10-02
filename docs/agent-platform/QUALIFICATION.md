@@ -106,6 +106,16 @@ probe, and require fail-closed release through exact-SHA human grants. Gateway
 transport fixtures do not run inference, modify a repository or publish a PR;
 they do not prove the complete single/multi-repository staging workflow below.
 
+`TestFiveRoleWorkersCarryReviewedSourceAndRefuseUngrantableRelease` additionally
+executes a cost-free worker chain: an orchestrator response feeds engineering,
+engineering fixes an initially failing Go unit test in an isolated worktree,
+the reviewer assesses its frozen handoff without changing source, QA executes
+the unit test and retains the same source manifest, and release refuses to
+publish without a human grant while making no model call. This uses synthetic
+provider responses and in-memory callbacks/storage. It does not qualify signed
+gateway admission, database transitions, ledger receipts, independent code
+review, authorized publication or production execution across the five roles.
+
 This check uses only disposable `test` credentials. It must never receive a
 production AWS profile, provider API key, GitHub token, repository checkout or
 secret value.
