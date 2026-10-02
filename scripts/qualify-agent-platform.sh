@@ -52,6 +52,12 @@ run "QA evidence cannot escape through ancestor symlinks" \
 run "QA worker preserves source authority and replays without new inference" \
   go test ./internal/automationagent -run 'TestQAWorkerPreservesReviewedManifestAndRejectsNewSourceBeforeInference$' -count=1
 
+run "published QA binds the exact clean commit and frozen release matrix" \
+  go test ./internal/automationagent -run 'TestPublishedQATargetRequiresExactCleanCommitAndRejectsUntrackedSource$' -count=1
+
+run "QA ledger observations preserve failures independently of model summaries" \
+  go test ./internal/automationagent -run 'TestQALedgerObservationPreservesObservedFailuresAndRejectsMalformedEvidence$' -count=1
+
 run "five role worker chain retains reviewed source and rejects ungranted release" \
   go test ./internal/automationagent -run 'TestFiveRoleWorkersCarryReviewedSourceAndRefuseUngrantableRelease$' -count=1
 

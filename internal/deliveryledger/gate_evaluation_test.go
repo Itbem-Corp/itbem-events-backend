@@ -143,7 +143,7 @@ func TestProjectGateEvaluationVerifiesIntegrityAndKeepsPrivateEvidenceOut(t *tes
 	}
 
 	corrupted := event
-	corrupted.PayloadJSON += " "
+	corrupted.PayloadJSON = strings.Replace(event.PayloadJSON, `"schema_version":3`, `"schema_version":999`, 1)
 	if _, err := ProjectGateEvaluation(corrupted); err == nil {
 		t.Fatal("a corrupted ledger payload must fail closed")
 	}

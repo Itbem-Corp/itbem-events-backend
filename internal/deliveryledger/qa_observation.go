@@ -108,10 +108,6 @@ func ProjectQAObservation(event models.DeliveryEvent) (QAObservation, error) {
 		return QAObservation{}, fmt.Errorf("delivery QA event envelope is invalid")
 	}
 	payload := []byte(event.PayloadJSON)
-	digest := sha256.Sum256(payload)
-	if !strings.EqualFold(event.PayloadDigest, hex.EncodeToString(digest[:])) {
-		return QAObservation{}, fmt.Errorf("delivery QA event payload digest does not match")
-	}
 	var envelope struct {
 		SchemaVersion int             `json:"schema_version"`
 		Observation   json.RawMessage `json:"observation"`
@@ -124,6 +120,18 @@ func ProjectQAObservation(event models.DeliveryEvent) (QAObservation, error) {
 	observation, err := qaevidence.Decode(envelope.Observation)
 	if err != nil || !strings.EqualFold(observation.MatrixDigest, event.SubjectDigest) {
 		return QAObservation{}, fmt.Errorf("delivery QA event payload is invalid")
+	}
+	observation, err = qaevidence.Canonical(observation)
+	if err != nil {
+		return QAObservation{}, err
+	}
+	canonical, err := json.Marshal(qaObservationPayload{SchemaVersion: qaevidence.SchemaVersion, Observation: observation})
+	if err != nil {
+		return QAObservation{}, err
+	}
+	digest := sha256.Sum256(canonical)
+	if !strings.EqualFold(event.PayloadDigest, hex.EncodeToString(digest[:])) {
+		return QAObservation{}, fmt.Errorf("delivery QA event payload digest does not match")
 	}
 	return QAObservation{EventID: event.ID, Sequence: event.Sequence, Observation: observation, OccurredAt: event.OccurredAt.UTC()}, nil
 }

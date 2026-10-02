@@ -114,6 +114,10 @@ func runQAWithCapabilityRefresh(ctx context.Context, taskID, runID string, deliv
 	if err != nil {
 		return nil, nil, err
 	}
+	matrixDigest, err := qaPublishedMatrixDigest(ctx, delivery, targets)
+	if err != nil {
+		return nil, nil, err
+	}
 	result := map[string]any{"preview": checkPreview(ctx, previewURL), "repository_runs": []any{}, "repository_execution_order": []string{}}
 	artifacts := make([]LocalArtifact, 0)
 	// The preview is a single deployed surface, while commands and artifacts
@@ -149,7 +153,7 @@ func runQAWithCapabilityRefresh(ctx context.Context, taskID, runID string, deliv
 	}
 	for _, target := range targets {
 		commands := make([]any, 0, len(target.workspace.Config.ValidationCommands)+len(target.workspace.Config.QACommands))
-		if target.reviewBinding != nil {
+		if target.reviewBinding != nil || target.reviewCommitSHA != "" {
 			if err := verifyQATargetRevision(ctx, target); err != nil {
 				return qaRevisionFailure(result, artifacts, target, commands, err)
 			}
@@ -160,7 +164,7 @@ func runQAWithCapabilityRefresh(ctx context.Context, taskID, runID string, deliv
 				if err := refreshQAExecutionAuthority(ctx, refresh); err != nil {
 					return qaRevisionFailure(result, artifacts, target, commands, err)
 				}
-				if target.reviewBinding != nil {
+				if target.reviewBinding != nil || target.reviewCommitSHA != "" {
 					if err := verifyQATargetRevision(ctx, target); err != nil {
 						return qaRevisionFailure(result, artifacts, target, commands, err)
 					}
@@ -178,7 +182,7 @@ func runQAWithCapabilityRefresh(ctx context.Context, taskID, runID string, deliv
 				if err := refreshQAExecutionAuthority(ctx, refresh); err != nil {
 					return qaRevisionFailure(result, artifacts, target, commands, err)
 				}
-				if target.reviewBinding != nil {
+				if target.reviewBinding != nil || target.reviewCommitSHA != "" {
 					if err := verifyQATargetRevision(ctx, target); err != nil {
 						return qaRevisionFailure(result, artifacts, target, commands, err)
 					}
@@ -204,7 +208,7 @@ func runQAWithCapabilityRefresh(ctx context.Context, taskID, runID string, deliv
 				artifacts = append(artifacts, prefixQAArtifacts(repositoryArtifacts, target.workspace.ID)...)
 			}
 		}
-		if target.reviewBinding != nil {
+		if target.reviewBinding != nil || target.reviewCommitSHA != "" {
 			if err := verifyQATargetRevision(ctx, target); err != nil {
 				return qaRevisionFailure(result, artifacts, target, commands, err)
 			}
@@ -256,11 +260,21 @@ func runQAWithCapabilityRefresh(ctx context.Context, taskID, runID string, deliv
 		}
 	}
 	for _, target := range targets {
-		if target.reviewBinding != nil {
+		if target.reviewBinding != nil || target.reviewCommitSHA != "" {
 			if err := verifyQATargetRevision(ctx, target); err != nil {
 				return result, artifacts, &QAExecutionError{Result: result, Artifacts: artifacts, Cause: err}
 			}
 		}
+	}
+	if _, err := qaPublishedMatrixDigest(ctx, delivery, targets); err != nil {
+		return result, artifacts, &QAExecutionError{Result: result, Artifacts: artifacts, Cause: err}
+	}
+	observation, err := qaLedgerObservation(taskID, matrixDigest, result)
+	if err != nil {
+		return result, artifacts, &QAExecutionError{Result: result, Artifacts: artifacts, Cause: err}
+	}
+	if observation != nil {
+		result["ledger_observation"] = observation
 	}
 	return result, artifacts, nil
 }
@@ -282,6 +296,9 @@ func qaRepositoryRun(target qaTarget, commands []any, cause error) map[string]an
 }
 
 func qaReviewBindingEvidence(target qaTarget) map[string]string {
+	if target.reviewCommitSHA != "" {
+		return map[string]string{"commit_sha": target.reviewCommitSHA, "review_source_sha256": target.reviewSourceSHA256, "branch": target.branch}
+	}
 	if target.reviewBinding == nil {
 		return nil
 	}
@@ -303,7 +320,22 @@ func refreshQAExecutionAuthority(ctx context.Context, refresh func(context.Conte
 }
 
 func verifyQATargetRevision(ctx context.Context, target qaTarget) error {
-	if err := verifyReviewedWorktree(ctx, target.root, target.reviewBinding); err != nil {
+	if target.reviewCommitSHA != "" {
+		for _, check := range []struct {
+			args     []string
+			expected string
+		}{
+			{[]string{"branch", "--show-current"}, target.branch},
+			{[]string{"rev-parse", "HEAD"}, target.reviewCommitSHA},
+			{[]string{"diff", "--no-ext-diff", "--no-textconv", "--quiet", "HEAD"}, ""},
+			{[]string{"ls-files", "--others"}, ""},
+		} {
+			result, err := runLocal(ctx, target.root, commandTimeout, "", "git", check.args...)
+			if err != nil || result.ExitCode != 0 || strings.TrimSpace(result.Output) != check.expected {
+				return fmt.Errorf("published QA worktree does not match its exact clean commit")
+			}
+		}
+	} else if err := verifyReviewedWorktree(ctx, target.root, target.reviewBinding); err != nil {
 		return err
 	}
 	// Historical sealed attempts have no source manifest. Never retrofit their
@@ -363,6 +395,7 @@ type qaTarget struct {
 	execution          qaExecutionPolicy
 	reviewBinding      *publicationAuthorization
 	reviewSourceSHA256 string
+	reviewCommitSHA    string
 }
 
 // qaExecutionPolicy is persisted inside the human-approved plan. The worker
@@ -441,12 +474,22 @@ func deliveryQATargets(delivery json.RawMessage, lookup func(string) string) ([]
 
 func deliveryQATargetsWithContext(ctx context.Context, delivery json.RawMessage, lookup func(string) string) ([]qaTarget, error) {
 	var input struct {
+		Gatekeeper *struct {
+			Revisions []struct {
+				Repository string `json:"repository"`
+				Branch     string `json:"branch"`
+				SHA        string `json:"sha"`
+			} `json:"revisions"`
+		} `json:"gatekeeper"`
 		ChangeSets []struct {
 			RepositoryRef string `json:"repository_ref"`
 			Branch        string `json:"branch"`
 			ReviewType    string `json:"review_type"`
 			CIStatus      string `json:"ci_status"`
+			CommitSHA     string `json:"commit_sha"`
 			Metadata      struct {
+				RemoteRepository   string `json:"remote_repository"`
+				TargetBranch       string `json:"target_branch"`
 				BaseSHA            string `json:"base_sha"`
 				ReviewDiffSHA256   string `json:"review_diff_sha256"`
 				ReviewSourceSHA256 string `json:"review_source_sha256"`
@@ -462,6 +505,9 @@ func deliveryQATargetsWithContext(ctx context.Context, delivery json.RawMessage,
 		return nil, err
 	}
 	if input.ChangeSets == nil {
+		if input.Gatekeeper != nil {
+			return nil, fmt.Errorf("published QA matrix requires change sets")
+		}
 		// Compatibility for legacy work items that predate immutable change-set
 		// delivery context. New control-plane runs always include a matrix.
 		workspace, err := deliveryRepositoryWorkspace(delivery, lookup)
@@ -473,7 +519,21 @@ func deliveryQATargetsWithContext(ctx context.Context, delivery json.RawMessage,
 	targets := make([]qaTarget, 0, len(input.ChangeSets))
 	seen := map[string]struct{}{}
 	for _, change := range input.ChangeSets {
-		if !strings.EqualFold(strings.TrimSpace(change.ReviewType), "local_worktree") || !strings.EqualFold(strings.TrimSpace(change.CIStatus), "passed") {
+		published := strings.EqualFold(strings.TrimSpace(change.ReviewType), "pull_request")
+		if input.Gatekeeper != nil {
+			// Historical local or older published handoffs must not shadow the
+			// exact immutable revision selected by the server for this task.
+			matches := false
+			for _, revision := range input.Gatekeeper.Revisions {
+				if published && strings.EqualFold(change.Metadata.RemoteRepository, revision.Repository) && change.Metadata.TargetBranch == revision.Branch && strings.EqualFold(change.CommitSHA, revision.SHA) {
+					matches = true
+				}
+			}
+			if !matches {
+				continue
+			}
+		}
+		if (!published && !strings.EqualFold(strings.TrimSpace(change.ReviewType), "local_worktree")) || !strings.EqualFold(strings.TrimSpace(change.CIStatus), "passed") {
 			continue
 		}
 		reference, branch := strings.TrimSpace(change.RepositoryRef), strings.TrimSpace(change.Branch)
@@ -501,6 +561,27 @@ func deliveryQATargetsWithContext(ctx context.Context, delivery json.RawMessage,
 		root := filepath.Join(workspace.Root, ".itbem-agent-worktrees", strings.TrimPrefix(branch, "itbem-agent/"))
 		if info, statErr := os.Stat(root); statErr != nil || !info.IsDir() {
 			return nil, fmt.Errorf("QA requires the exact reviewed local worktree for %s", reference)
+		}
+		if published {
+			commit := strings.ToLower(strings.TrimSpace(change.CommitSHA))
+			if !gitCommitPattern.MatchString(commit) {
+				return nil, fmt.Errorf("published QA requires an exact commit SHA")
+			}
+			target := qaTarget{workspace: workspace, reference: reference, root: root, branch: branch, testedDirectory: "exact published commit worktree", execution: policy, reviewCommitSHA: commit}
+			if err := verifyQATargetRevision(ctx, target); err != nil {
+				return nil, err
+			}
+			digest, err := sandboxWorktreeDigest(root)
+			if err != nil {
+				return nil, err
+			}
+			target.reviewSourceSHA256 = fmt.Sprintf("%x", digest)
+			if err := verifyQATargetRevision(ctx, target); err != nil {
+				return nil, err
+			}
+			seen[reference] = struct{}{}
+			targets = append(targets, target)
+			continue
 		}
 		binding := &publicationAuthorization{Branch: branch, BaseSHA: strings.ToLower(strings.TrimSpace(change.Metadata.BaseSHA)), ReviewDiffSHA256: strings.ToLower(strings.TrimSpace(change.Metadata.ReviewDiffSHA256))}
 		if !gitCommitPattern.MatchString(binding.BaseSHA) || !sha256DigestPattern.MatchString(binding.ReviewDiffSHA256) {

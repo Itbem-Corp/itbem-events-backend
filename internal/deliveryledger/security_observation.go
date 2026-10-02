@@ -101,10 +101,6 @@ func ProjectSecurityObservation(event models.DeliveryEvent) (SecurityObservation
 		return SecurityObservation{}, fmt.Errorf("delivery security event envelope is invalid")
 	}
 	payload := []byte(event.PayloadJSON)
-	digest := sha256.Sum256(payload)
-	if !strings.EqualFold(event.PayloadDigest, hex.EncodeToString(digest[:])) {
-		return SecurityObservation{}, fmt.Errorf("delivery security event payload digest does not match")
-	}
 	var envelope struct {
 		SchemaVersion int             `json:"schema_version"`
 		Observation   json.RawMessage `json:"observation"`
@@ -117,6 +113,18 @@ func ProjectSecurityObservation(event models.DeliveryEvent) (SecurityObservation
 	observation, err := securityevidence.Decode(envelope.Observation)
 	if err != nil || !strings.EqualFold(observation.MatrixDigest, event.SubjectDigest) {
 		return SecurityObservation{}, fmt.Errorf("delivery security event payload is invalid")
+	}
+	observation, err = securityevidence.Canonical(observation)
+	if err != nil {
+		return SecurityObservation{}, err
+	}
+	canonical, err := json.Marshal(securityObservationPayload{SchemaVersion: securityevidence.SchemaVersion, Observation: observation})
+	if err != nil {
+		return SecurityObservation{}, err
+	}
+	digest := sha256.Sum256(canonical)
+	if !strings.EqualFold(event.PayloadDigest, hex.EncodeToString(digest[:])) {
+		return SecurityObservation{}, fmt.Errorf("delivery security event payload digest does not match")
 	}
 	return SecurityObservation{EventID: event.ID, Sequence: event.Sequence, Observation: observation, OccurredAt: event.OccurredAt.UTC()}, nil
 }

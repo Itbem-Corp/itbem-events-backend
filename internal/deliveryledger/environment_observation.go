@@ -102,10 +102,6 @@ func ProjectEnvironmentObservation(event models.DeliveryEvent) (EnvironmentObser
 		return EnvironmentObservation{}, fmt.Errorf("delivery environment event envelope is invalid")
 	}
 	payload := []byte(event.PayloadJSON)
-	digest := sha256.Sum256(payload)
-	if !strings.EqualFold(event.PayloadDigest, hex.EncodeToString(digest[:])) {
-		return EnvironmentObservation{}, fmt.Errorf("delivery environment event payload digest does not match")
-	}
 	var envelope struct {
 		SchemaVersion int             `json:"schema_version"`
 		Observation   json.RawMessage `json:"observation"`
@@ -118,6 +114,18 @@ func ProjectEnvironmentObservation(event models.DeliveryEvent) (EnvironmentObser
 	observation, err := environmentevidence.Decode(envelope.Observation)
 	if err != nil || !strings.EqualFold(observation.MatrixDigest, event.SubjectDigest) {
 		return EnvironmentObservation{}, fmt.Errorf("delivery environment event payload is invalid")
+	}
+	observation, err = environmentevidence.Canonical(observation)
+	if err != nil {
+		return EnvironmentObservation{}, err
+	}
+	canonical, err := json.Marshal(environmentObservationPayload{SchemaVersion: environmentevidence.SchemaVersion, Observation: observation})
+	if err != nil {
+		return EnvironmentObservation{}, err
+	}
+	digest := sha256.Sum256(canonical)
+	if !strings.EqualFold(event.PayloadDigest, hex.EncodeToString(digest[:])) {
+		return EnvironmentObservation{}, fmt.Errorf("delivery environment event payload digest does not match")
 	}
 	return EnvironmentObservation{EventID: event.ID, Sequence: event.Sequence, Observation: observation, OccurredAt: event.OccurredAt.UTC()}, nil
 }
