@@ -80,21 +80,18 @@ The live suite creates isolated queues and fake encrypted objects, then proves
 both the normal transport and an actual SQS redelivery after a failed terminal
 callback. The second delivery must reuse the persisted provider result, bind a
 new lease to the original run, emit exactly one accepted terminal effect, make
-no second provider call, and delete the message only after success. The older
-`ITBEM_LOCALSTACK_E2E` and `ITBEM_LOCALSTACK_ENDPOINT` variables remain accepted
-as compatibility aliases; new automation should use
-`ITBEM_AWS_EMULATOR_E2E` and `ITBEM_AWS_EMULATOR_ENDPOINT`.
+no second provider call, and delete the message only after success. The current
+Go fixtures use `ITBEM_LOCALSTACK_E2E` and `ITBEM_LOCALSTACK_ENDPOINT`; the script
+sets them against Moto. Their historical names do not require LocalStack.
+The runner validates JSON events for both named tests and refuses missing
+execution, skips or failures.
 
-The same live suite also provisions five separate SQS queues and runs one
-worker identity for each configured lane: orchestration, engineering, review,
-QA and release. Every task is first offered to a different role and must be
-rejected before any callback or model call; only the assigned worker may
-consume and delete it. Orchestration, engineering and review must persist real
-encrypted requests/results, QA must execute its exact-SHA onboarding probe
-without a model, and the providerless release worker must fail closed on a
-candidate that lacks authoritative release evidence. This proves transport
-isolation and deterministic rejection, but it does not replace the complete
-single-repository and multi-repository staging workflow below.
+Five-lane transport qualification remains a separate pending requirement:
+provision separate SQS queues and worker identities for orchestration,
+engineering, review, QA and release; reject wrong-role deliveries before any
+callback or model call; require lane-specific persisted evidence, a model-free
+QA probe and fail-closed release. The two current transport tests do not prove
+this matrix or the complete single/multi-repository staging workflow below.
 
 This check uses only disposable `test` credentials. It must never receive a
 production AWS profile, provider API key, GitHub token, repository checkout or
