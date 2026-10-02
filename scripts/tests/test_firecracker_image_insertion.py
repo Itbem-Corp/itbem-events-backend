@@ -46,6 +46,27 @@ class ImageInsertionTest(unittest.TestCase):
             source.write_bytes(b'different bytes')
             with self.assertRaisesRegex(RuntimeError, 'insertion verification failed'):
                 module.debugfs_write(image, source, '/itbem-init')
+            executable = root / 'owned-sleep'
+            shutil.copyfile(shutil.which('sleep'), executable)
+            executable.chmod(0o700)
+            child = subprocess.Popen([str(executable), '30'], env={})
+            try:
+                pid_file = root / 'owned.pid'
+                pid_file.write_text(str(child.pid))
+                with self.assertRaisesRegex(RuntimeError, 'PID namespace'):
+                    module.open_jailed_process(pid_file, executable)
+                with self.assertRaisesRegex(RuntimeError, 'executable'):
+                    module.open_jailed_process(pid_file, root / 'different-executable', require_namespace=False)
+                descriptor = module.open_jailed_process(pid_file, executable, require_namespace=False)
+                try:
+                    self.assertTrue(module.stop_jailed_process(descriptor))
+                finally:
+                    os.close(descriptor)
+                self.assertNotEqual(child.wait(timeout=3), 0)
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                child.wait()
 
 
 if __name__ == '__main__':

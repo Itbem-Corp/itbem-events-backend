@@ -16,6 +16,8 @@ import os
 import pathlib
 import re
 import resource
+import select
+import signal
 import shutil
 import socket
 import subprocess
@@ -105,6 +107,41 @@ def verified_guest_read(response: dict, expected: bytes) -> bool:
     return (response.get("ok") is True and isinstance(output, str)
             and not response.get("error") and len(expected) <= MAX_OUTPUT
             and observed == expected)
+
+
+def open_jailed_process(pid_file: pathlib.Path, executable: pathlib.Path, require_namespace: bool = True) -> int:
+    """Pin the exact Jailer child, never signal a reusable numeric PID."""
+    if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+        raise RuntimeError("Jailer teardown requires Linux pidfd support")
+    text = pid_file.read_text().strip()
+    if not text.isdecimal() or int(text) <= 1:
+        raise RuntimeError("invalid Jailer child PID")
+    descriptor = os.pidfd_open(int(text))
+    try:
+        if os.readlink(f"/proc/{int(text)}/exe") != str(executable):
+            raise RuntimeError("Jailer child executable does not match this lease")
+        if require_namespace:
+            status = pathlib.Path(f"/proc/{int(text)}/status").read_text()
+            namespaces = next((line.split()[1:] for line in status.splitlines() if line.startswith("NSpid:")), [])
+            if len(namespaces) < 2 or namespaces[-1] != "1":
+                raise RuntimeError("Jailer child is not init of its PID namespace")
+    except Exception:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def stop_jailed_process(descriptor: int) -> bool:
+    poller = select.poll()
+    poller.register(descriptor, select.POLLIN)
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            signal.pidfd_send_signal(descriptor, sig)
+        except ProcessLookupError:
+            pass
+        if poller.poll(3000):
+            return True
+    return False
 
 
 def build_worktree_image(staging: pathlib.Path, image: pathlib.Path, total_bytes: int) -> None:
@@ -296,6 +333,7 @@ def main() -> None:
 
     lifecycle = {"created": False, "worktree_bound": True, "guest_command_executed": False, "destroyed": False, "attestation_persisted": False}
     process = None
+    jailed_process = None
     response = {"ok": False, "stdout": "", "stderr": "", "error": ""}
     guest_exit = 1
     captured = ""
@@ -357,6 +395,8 @@ def main() -> None:
             time.sleep(0.1)
         if not api_socket.exists():
             raise RuntimeError("Firecracker API socket did not appear")
+        if use_jailer:
+            jailed_process = open_jailed_process(jail_root / (FIRECRACKER.name + ".pid"), jail_root / FIRECRACKER.name)
         lifecycle["created"] = True
         kernel_path = "/vmlinux" if use_jailer else str(KERNEL)
         rootfs_path = "/rootfs.ext4" if use_jailer else str(rootfs)
@@ -392,6 +432,17 @@ def main() -> None:
         if stderr_path.exists():
             response["error"] += " | firecracker stderr: " + stderr_path.read_text(errors="replace")[-3000:]
     finally:
+        if use_jailer:
+            try:
+                if jailed_process is None:
+                    jailed_process = open_jailed_process(jail_root / (FIRECRACKER.name + ".pid"), jail_root / FIRECRACKER.name)
+                lifecycle["destroyed"] = stop_jailed_process(jailed_process)
+            except (OSError, RuntimeError) as exc:
+                lifecycle["destroyed"] = False
+                response["error"] = "Jailer child teardown could not be verified: " + str(exc)
+            finally:
+                if jailed_process is not None:
+                    os.close(jailed_process)
         if process is not None:
             try:
                 process.terminate()
@@ -399,12 +450,13 @@ def main() -> None:
             except Exception:
                 process.kill()
                 process.wait(timeout=3)
-            lifecycle["destroyed"] = process.poll() is not None
+            if not use_jailer:
+                lifecycle["destroyed"] = process.poll() is not None
         if stdout_path.exists():
             captured = stdout_path.read_text(errors="replace")
         if stderr_path.exists():
             captured += "\n" + stderr_path.read_text(errors="replace")
-        if use_jailer:
+        if use_jailer and lifecycle["destroyed"]:
             shutil.rmtree(jail_root.parent, ignore_errors=True)
 
     output = str(response.get("stdout", ""))[-MAX_OUTPUT:]
