@@ -2,6 +2,7 @@ package automation
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -113,12 +114,18 @@ func gatewayQASourceWithAcquirer(c echo.Context, acquire func(context.Context, q
 	if err != nil {
 		return utils.Error(c, http.StatusServiceUnavailable, "Bounded source acquisition unavailable", "")
 	}
+	if len(pack) < 12 || len(pack) > 64<<20 || string(pack[:4]) != "PACK" || fmt.Sprintf("%x", sha256.Sum256(pack)) != digest {
+		return utils.Error(c, http.StatusServiceUnavailable, "Source package integrity invalid", "")
+	}
 	if load() != nil || task.EvidenceSubjectDigest != matrix {
 		return utils.Error(c, http.StatusForbidden, "Source authority expired", "")
 	}
 	confirmed, err := qaSourceSubjectForTask(&task, input.Delivery, request.Reference)
 	if err != nil || confirmed != subject {
 		return utils.Error(c, http.StatusForbidden, "Source subject changed", "")
+	}
+	if err := recordServerQASourceReceipt(configuration.DB.WithContext(ctx), &task, lease, identity, actor, subject, digest, int64(len(pack)), time.Now().UTC()); err != nil {
+		return utils.Error(c, http.StatusConflict, "Source receipt could not be sealed", "")
 	}
 	metadata, err := json.Marshal(map[string]any{"schema_version": 1, "task_id": task.ID.String(), "run_id": request.RunID, "matrix_digest": matrix, "repository_ref": subject.Reference, "repository": subject.Repository, "branch": subject.Branch, "commit_sha": subject.SHA, "pack_sha256": digest})
 	if err != nil {

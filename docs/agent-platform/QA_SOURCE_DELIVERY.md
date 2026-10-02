@@ -11,6 +11,13 @@ and active instance status are checked before external reads and after acquisiti
 Replayed signed requests are rejected by the durable nonce table. An expired,
 cancelled or mismatched task cannot receive a source response.
 
+Before responding, the server seals an immutable `AutomationQASourceReceipt`
+under row locks for the current task and active instance. It records task, run,
+workspace, instance, matrix, repository, branch, original SHA, pack digest, byte
+count and acquisition timestamp. A repeated identical acquisition is idempotent;
+a different package cannot replace the original receipt. This proves server
+acquisition provenance, not completion of the worker's QA commands.
+
 The response contains a Git pack and bounded metadata binding task, run, revision
 matrix, workspace, repository, branch, original commit SHA and pack SHA-256. The
 client compares these fields with the frozen input and registered workspace before
@@ -50,8 +57,8 @@ acquisition is independently tested. Worker flow fixtures use a synthetic
 provider and callback, and create no production invoice or release authority.
 
 These fixtures do not certify the entire production worker and ledger chain.
-Durable source acquisition receipts, current production Source App readiness,
-full independent worker callback/ledger recovery, and pinned submodule source
+Current production Source App readiness, binding acquisition receipts to the
+completed QA callback, full independent worker callback/ledger recovery, and pinned submodule source
 delivery remain required work. In particular, repositories with gitlinks such as
 the backend's `.contracts` are not yet supported by this acquisition path.
 

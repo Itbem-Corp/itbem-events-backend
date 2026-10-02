@@ -48,7 +48,7 @@ func TestQASourceSignedGatewayBindsPostgresAuthorityAndIndependentCheckout(t *te
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
 	require.NoError(t, db.Exec(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`).Error)
-	require.NoError(t, db.AutoMigrate(&models.AutomationTask{}, &models.AutomationAgentInstance{}, &models.AutomationAgentCallbackNonce{}))
+	require.NoError(t, db.AutoMigrate(&models.AutomationTask{}, &models.AutomationAgentInstance{}, &models.AutomationAgentCallbackNonce{}, &models.AutomationQASourceReceipt{}))
 	previous := configuration.DB
 	configuration.DB = db
 	t.Cleanup(func() { configuration.DB = previous })
@@ -162,6 +162,20 @@ func TestQASourceSignedGatewayBindsPostgresAuthorityAndIndependentCheckout(t *te
 	require.NoError(t, err)
 	require.Equal(t, head, strings.TrimSpace(string(actual)))
 	require.Equal(t, int32(1), acquisitions.Load())
+	var receipt models.AutomationQASourceReceipt
+	require.NoError(t, db.Where("task_id = ? AND run_id = ?", taskID, run).First(&receipt).Error)
+	require.Equal(t, instance, receipt.AgentInstanceID)
+	require.Equal(t, matrix, receipt.MatrixDigest)
+	require.Equal(t, head, receipt.CommitSHA)
+	require.Equal(t, packDigest, receipt.PackSHA256)
+	var currentTask models.AutomationTask
+	require.NoError(t, db.First(&currentTask, taskID).Error)
+	opened, err := openGatewayLease(lease, identity)
+	require.NoError(t, err)
+	actor := authenticatedAgentCallback{InstanceID: instance, AgentKey: "qa", MachineID: machine.MachineID()}
+	subject := qaSourceSubject{Reference: "workspace://repo", Repository: "example/service", Branch: branch, SHA: head}
+	require.NoError(t, recordServerQASourceReceipt(db, &currentTask, opened, identity, actor, subject, packDigest, int64(len(pack)), time.Now().UTC()), "same exact receipt should be idempotent")
+	require.Error(t, recordServerQASourceReceipt(db, &currentTask, opened, identity, actor, subject, strings.Repeat("f", 64), int64(len(pack)), time.Now().UTC()), "a different pack must not replace provenance")
 	captureMutex.Lock()
 	replayBody := append([]byte(nil), capturedBody...)
 	replayHeaders := capturedHeader.Clone()
@@ -176,6 +190,13 @@ func TestQASourceSignedGatewayBindsPostgresAuthorityAndIndependentCheckout(t *te
 	_, err = callback.AcquireQASource(clientCtx, gateway, taskID.String(), run, "workspace://repo", delivery, lookup)
 	require.ErrorContains(t, err, "403")
 	require.Equal(t, int32(2), acquisitions.Load())
+	var receiptCount int64
+	require.NoError(t, db.Model(&models.AutomationQASourceReceipt{}).Where("task_id = ?", taskID).Count(&receiptCount).Error)
+	require.Equal(t, int64(1), receiptCount, "replay or revocation must not append source provenance")
+	var unchangedReceipt models.AutomationQASourceReceipt
+	require.NoError(t, db.First(&unchangedReceipt, receipt.ID).Error)
+	require.Equal(t, receipt.PackSHA256, unchangedReceipt.PackSHA256)
+	require.True(t, receipt.AcquiredAt.Equal(unchangedReceipt.AcquiredAt))
 	// Source acquisition is injected only in this isolated fixture; real TLS
 	// Git transport and resource limits are independently required tests.
 	var nonceCount int64
