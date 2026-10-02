@@ -82,6 +82,9 @@ run "QA worker imports independent source executes tests and recovers without a 
 run "QA pinned dependency discovery treats Gitmodule declarations as data and requires repository approval" \
   go test ./internal/automationagent -run 'TestQASourceDependenciesRequireApprovedRepositoryAndOriginalGitlinkSHA$' -count=1
 
+run "QA source bundle publishes only after all approved original Gitlinks are verified" \
+  go test ./internal/automationagent -run 'TestQASourceBundlePublishesOnlyAfterPinnedChildVerification$' -count=1
+
 run "QA ledger observations preserve failures independently of model summaries" \
   go test ./internal/automationagent -run 'TestQALedgerObservationPreservesObservedFailuresAndRejectsMalformedEvidence$' -count=1
 

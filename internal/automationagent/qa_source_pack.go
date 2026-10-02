@@ -206,6 +206,11 @@ func qaSourceGit(ctx context.Context, root string, input io.Reader, args ...stri
 }
 
 func validateQASourceTree(ctx context.Context, root, commit string) error {
+	dependencies, _ := ctx.Value(qaSourceDependencyBoundaryKey{}).(map[string]string)
+	return validateQASourceTreeWithDependencies(ctx, root, commit, dependencies)
+}
+
+func validateQASourceTreeWithDependencies(ctx context.Context, root, commit string, dependencies map[string]string) error {
 	bounded, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	cmd := qaSourceGitCommand(bounded, root, "ls-tree", "-r", "-z", "-l", commit)
@@ -221,6 +226,7 @@ func validateQASourceTree(ctx context.Context, root, commit string) error {
 	reader := bufio.NewReaderSize(stdout, 8192)
 	var total int64
 	files := 0
+	seenDependencies := map[string]bool{}
 	for {
 		record, readErr := reader.ReadSlice(0)
 		if readErr == io.EOF && len(record) == 0 {
@@ -233,6 +239,10 @@ func validateQASourceTree(ctx context.Context, root, commit string) error {
 		}
 		header, name, found := strings.Cut(string(record[:len(record)-1]), "\t")
 		fields := strings.Fields(header)
+		if found && len(fields) == 4 && fields[0] == "160000" && fields[1] == "commit" && safeQADependencyPath(name) && gitCommitPattern.MatchString(fields[2]) && dependencies[name] == fields[2] && !seenDependencies[name] {
+			seenDependencies[name] = true
+			continue
+		}
 		if !found || len(fields) != 4 || (fields[0] != "100644" && fields[0] != "100755") || fields[1] != "blob" || !utf8.ValidString(name) || name == "" || path.IsAbs(name) || path.Clean(name) != name || strings.ContainsAny(name, "\\\r\n") {
 			cancel()
 			_ = cmd.Wait()
@@ -256,6 +266,16 @@ func validateQASourceTree(ctx context.Context, root, commit string) error {
 	}
 	if err := cmd.Wait(); err != nil {
 		return fmt.Errorf("QA source tree verification failed")
+	}
+	if len(seenDependencies) != len(dependencies) {
+		return fmt.Errorf("QA source pinned dependency matrix incomplete")
+	}
+	if budget, ok := ctx.Value(qaSourceBundleBudgetKey{}).(*qaSourceBundleBudget); ok {
+		if total > budget.bytes || files > budget.files {
+			return fmt.Errorf("QA source bundle expanded tree exceeds its boundary")
+		}
+		budget.bytes -= total
+		budget.files -= files
 	}
 	return nil
 }
