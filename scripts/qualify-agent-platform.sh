@@ -88,6 +88,9 @@ run "QA source bundle publishes only after all approved original Gitlinks are ve
 run "QA dependency policy rejects invalid paths and repositories before authentication" \
   go test ./internal/automationagent -run 'TestQASourceBundleRejectsInvalidApprovalBeforeAuthentication$' -count=1
 
+run "QA source wire bundle binds its canonical manifest and every package" \
+  go test ./internal/automationagent -run 'TestQASourceBundleWireBindsManifestAndAllPackages$' -count=1
+
 run "QA ledger observations preserve failures independently of model summaries" \
   go test ./internal/automationagent -run 'TestQALedgerObservationPreservesObservedFailuresAndRejectsMalformedEvidence$' -count=1
 
