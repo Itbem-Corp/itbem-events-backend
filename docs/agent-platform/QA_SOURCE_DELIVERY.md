@@ -95,8 +95,11 @@ These fixtures do not certify the entire production worker and ledger chain.
 Current production Source App readiness, full independent worker callback/ledger
 recovery, and end-to-end pinned submodule delivery remain required work. The
 signed PostgreSQL fixture exercises version 2 transport and immutable bundle
-receipts with a synthetic root-only supplier; production GitHub acquisition
-with real pinned dependencies is not yet qualified by that fixture.
+receipts with locally generated original Git commits, a pinned gitlink, root
+and child packs, and an independent client checkout. It verifies the child's
+original SHA and registered origin and rejects erased dependency provenance.
+The supplier is injected: production GitHub acquisition with pinned
+dependencies is not yet qualified by that fixture.
 
 Legacy sealed local handoffs retain their original execution behavior. New paid
 inference, historical requeues and live worker activation require their existing

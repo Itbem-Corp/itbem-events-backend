@@ -77,6 +77,15 @@ func TestQASourceSignedGatewayBindsPostgresAuthorityAndIndependentCheckout(t *te
 	require.NoError(t, os.WriteFile(filepath.Join(source, "README.md"), []byte("exact synthetic source\n"), 0600))
 	git(nil, "add", ".")
 	git(nil, "commit", "-m", "synthetic published source")
+	childSHA := strings.TrimSpace(string(git(nil, "rev-parse", "HEAD")))
+	childObjects := git(nil, "rev-list", "--objects", "--no-object-names", "--no-walk", childSHA)
+	childPack := git(childObjects, "pack-objects", "--stdout")
+	childDigest := fmt.Sprintf("%x", sha256.Sum256(childPack))
+	const childPath = ".contracts/contract"
+	require.NoError(t, os.WriteFile(filepath.Join(source, ".gitmodules"), []byte("[submodule \"contract\"]\npath = "+childPath+"\nurl = https://github.com/example/contract.git\n"), 0600))
+	git(nil, "add", ".gitmodules")
+	git(nil, "update-index", "--add", "--cacheinfo", "160000,"+childSHA+","+childPath)
+	git(nil, "commit", "-m", "synthetic pinned dependency")
 	head := strings.TrimSpace(string(git(nil, "rev-parse", "HEAD")))
 	objects := git(nil, "rev-list", "--objects", "--no-object-names", "--no-walk", head)
 	pack := git(objects, "pack-objects", "--stdout")
@@ -123,7 +132,7 @@ func TestQASourceSignedGatewayBindsPostgresAuthorityAndIndependentCheckout(t *te
 		}
 	})
 	const path = "/api/internal/automation/gateway/qa-source"
-	bundleAcquisition, err := qaSourceBundleAcquisition(automationagent.QASourceBundle{Pack: pack, PackSHA256: packDigest})
+	bundleAcquisition, err := qaSourceBundleAcquisition(automationagent.QASourceBundle{Pack: pack, PackSHA256: packDigest, Dependencies: []automationagent.QASourceDependencyPack{{Path: childPath, Repository: "example/contract", CommitSHA: childSHA, PackSHA256: childDigest, Pack: childPack}}})
 	require.NoError(t, err)
 	app.POST(path, func(c echo.Context) error {
 		return gatewayQASourceWithBundleAcquirer(c, func(_ context.Context, subject qaSourceSubject) (qaSourceAcquisition, error) {
@@ -143,7 +152,7 @@ func TestQASourceSignedGatewayBindsPostgresAuthorityAndIndependentCheckout(t *te
 	require.NoError(t, err)
 	clientCtx := gateway.BindMessageContext(ctx, automationagent.QueueMessage{ReceiptHandle: lease})
 	qaRoot := t.TempDir()
-	registry, err := json.Marshal(map[string]automationagent.WorkspaceConfig{"repo": {Path: qaRoot, RepositoryURL: "https://github.com/example/service.git", BaseBranch: "main"}})
+	registry, err := json.Marshal(map[string]automationagent.WorkspaceConfig{"repo": {Path: qaRoot, RepositoryURL: "https://github.com/example/service.git", BaseBranch: "main", QASourceDependencies: map[string]string{childPath: "example/contract"}}})
 	require.NoError(t, err)
 	lookup := func(key string) string {
 		if key == "ITBEM_AI_WORKSPACES_JSON" {
@@ -164,6 +173,16 @@ func TestQASourceSignedGatewayBindsPostgresAuthorityAndIndependentCheckout(t *te
 	actual, err := check.Output()
 	require.NoError(t, err)
 	require.Equal(t, head, strings.TrimSpace(string(actual)))
+	childRoot := filepath.Join(target, filepath.FromSlash(childPath))
+	childContents, err := os.ReadFile(filepath.Join(childRoot, "README.md"))
+	require.NoError(t, err)
+	require.Equal(t, "exact synthetic source\n", string(childContents))
+	childRevision, err := exec.Command("git", "-C", childRoot, "rev-parse", "HEAD").Output()
+	require.NoError(t, err)
+	require.Equal(t, childSHA, strings.TrimSpace(string(childRevision)))
+	childOrigin, err := exec.Command("git", "-C", childRoot, "remote", "get-url", "origin").Output()
+	require.NoError(t, err)
+	require.Equal(t, "https://github.com/example/contract.git", strings.TrimSpace(string(childOrigin)))
 	require.Equal(t, int32(1), acquisitions.Load())
 	var receipt models.AutomationQASourceReceipt
 	require.NoError(t, db.Where("task_id = ? AND run_id = ?", taskID, run).First(&receipt).Error)
@@ -173,7 +192,13 @@ func TestQASourceSignedGatewayBindsPostgresAuthorityAndIndependentCheckout(t *te
 	require.Equal(t, packDigest, receipt.PackSHA256)
 	require.Equal(t, bundleAcquisition.bundleDigest, receipt.BundleSHA256)
 	require.Equal(t, int64(len(bundleAcquisition.body)), receipt.BundleBytes)
-	require.Equal(t, "[]", receipt.DependencyManifest)
+	var descriptors []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(receipt.DependencyManifest), &descriptors))
+	require.Len(t, descriptors, 1)
+	require.Equal(t, childPath, descriptors[0]["path"])
+	require.Equal(t, childSHA, descriptors[0]["commit_sha"])
+	require.Equal(t, childDigest, descriptors[0]["pack_sha256"])
+	require.NotContains(t, receipt.DependencyManifest, "PACK")
 	var currentTask models.AutomationTask
 	require.NoError(t, db.First(&currentTask, taskID).Error)
 	opened, err := openGatewayLease(lease, identity)
@@ -183,6 +208,7 @@ func TestQASourceSignedGatewayBindsPostgresAuthorityAndIndependentCheckout(t *te
 	require.NoError(t, recordServerQASourceBundleReceipt(db, &currentTask, opened, identity, actor, subject, packDigest, int64(len(pack)), bundleAcquisition.bundleDigest, int64(len(bundleAcquisition.body)), bundleAcquisition.dependencies, time.Now().UTC()), "same exact bundle receipt should be idempotent")
 	require.Error(t, recordServerQASourceReceipt(db, &currentTask, opened, identity, actor, subject, packDigest, int64(len(pack)), time.Now().UTC()), "legacy receipt must not erase bundle provenance")
 	require.Error(t, recordServerQASourceBundleReceipt(db, &currentTask, opened, identity, actor, subject, packDigest, int64(len(pack)), strings.Repeat("f", 64), int64(len(bundleAcquisition.body)), bundleAcquisition.dependencies, time.Now().UTC()), "changed bundle must not replace provenance")
+	require.Error(t, recordServerQASourceBundleReceipt(db, &currentTask, opened, identity, actor, subject, packDigest, int64(len(pack)), bundleAcquisition.bundleDigest, int64(len(bundleAcquisition.body)), "[]", time.Now().UTC()), "dependency descriptors must not be erased")
 	require.Error(t, recordServerQASourceReceipt(db, &currentTask, opened, identity, actor, subject, strings.Repeat("f", 64), int64(len(pack)), time.Now().UTC()), "a different pack must not replace provenance")
 	observation := qaevidence.Observation{SchemaVersion: qaevidence.SchemaVersion, TaskID: taskID.String(), MatrixDigest: matrix, PreviewPassed: true, RepositoryExecutionOrder: []string{"workspace://repo"}, Repositories: []qaevidence.Repository{{Reference: "workspace://repo", Branch: branch, Commands: []qaevidence.Command{{Index: 0, Phase: "validation", Kind: "unit", Passed: true}}}}}
 	observationRaw, err := json.Marshal(observation)
@@ -214,6 +240,8 @@ func TestQASourceSignedGatewayBindsPostgresAuthorityAndIndependentCheckout(t *te
 	var unchangedReceipt models.AutomationQASourceReceipt
 	require.NoError(t, db.First(&unchangedReceipt, receipt.ID).Error)
 	require.Equal(t, receipt.PackSHA256, unchangedReceipt.PackSHA256)
+	require.Equal(t, receipt.BundleSHA256, unchangedReceipt.BundleSHA256)
+	require.Equal(t, receipt.DependencyManifest, unchangedReceipt.DependencyManifest)
 	require.True(t, receipt.AcquiredAt.Equal(unchangedReceipt.AcquiredAt))
 	// Source acquisition is injected only in this isolated fixture; real TLS
 	// Git transport and resource limits are independently required tests.
