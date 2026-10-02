@@ -73,6 +73,9 @@ run "QA source acquisition requires bounded private tmpfs and real process resou
 run "signed QA source client rejects substituted task run matrix repository commit and pack" \
   go test ./internal/automationagent -run 'TestQASourceSignedClientImportsOnlyExactFrozenPack$' -count=1
 
+run "QA worker validates the complete frozen source matrix before acquisition" \
+  go test ./internal/automationagent -run 'TestQASourceWorkerValidatesEntireMatrixBeforeAnyAcquisition$' -count=1
+
 run "QA ledger observations preserve failures independently of model summaries" \
   go test ./internal/automationagent -run 'TestQALedgerObservationPreservesObservedFailuresAndRejectsMalformedEvidence$' -count=1
 
