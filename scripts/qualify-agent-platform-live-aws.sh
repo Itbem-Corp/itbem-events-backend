@@ -61,6 +61,11 @@ require_docker_engine() {
 
 require_docker_engine
 
+if docker container inspect "$container_name" >/dev/null 2>&1; then
+  echo "The generated fixture container name is already occupied; refusing to touch it." >&2
+  exit 1
+fi
+
 # Mark immediately before the create attempt, rather than after it succeeds:
 # Docker can create a named container and still return an error while setting
 # it up. The preflight above has already proven the engine responsive, so the
@@ -96,10 +101,15 @@ cd "$repository_root"
 report_file=$(mktemp)
 if AWS_ACCESS_KEY_ID=test \
 AWS_SECRET_ACCESS_KEY=test \
+AWS_SESSION_TOKEN= \
+AWS_PROFILE= \
+AWS_SHARED_CREDENTIALS_FILE=/dev/null \
+AWS_CONFIG_FILE=/dev/null \
 AWS_REGION=us-east-1 \
 ITBEM_LOCALSTACK_E2E=1 \
+ITBEM_GATEWAY_TRANSPORT_E2E=1 \
 ITBEM_LOCALSTACK_ENDPOINT="http://127.0.0.1:$emulator_port" \
-go test ./internal/automationagent -run '^TestLocalStack(TransportRoundTrip|RedeliveryReusesDurableResultWithoutProviderRepeat)$' -count=1 -timeout 180s -json > "$report_file"; then
+go test ./internal/automationagent ./controllers/automation -run '^Test(LocalStackTransportRoundTrip|LocalStackRedeliveryReusesDurableResultWithoutProviderRepeat|LocalGatewayFiveLaneTransportRoundTrip)$' -race -count=1 -timeout 180s -json > "$report_file"; then
   :
 else
   cat "$report_file" >&2
@@ -107,6 +117,12 @@ else
 fi
 python3 scripts/verify_go_test_evidence.py "$report_file" \
   TestLocalStackTransportRoundTrip \
-  TestLocalStackRedeliveryReusesDurableResultWithoutProviderRepeat
+  TestLocalStackRedeliveryReusesDurableResultWithoutProviderRepeat \
+  TestLocalGatewayFiveLaneTransportRoundTrip \
+  TestLocalGatewayFiveLaneTransportRoundTrip/orchestration \
+  TestLocalGatewayFiveLaneTransportRoundTrip/engineering \
+  TestLocalGatewayFiveLaneTransportRoundTrip/review \
+  TestLocalGatewayFiveLaneTransportRoundTrip/qa \
+  TestLocalGatewayFiveLaneTransportRoundTrip/release
 
-printf '\nLive AWS-emulator transport and durable redelivery qualification passed.\n'
+printf '\nLive AWS-emulator, five-lane HTTPS transport and durable redelivery qualification passed. Full engineering delivery remains a separate gate.\n'
