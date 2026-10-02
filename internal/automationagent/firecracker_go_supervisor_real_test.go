@@ -16,6 +16,14 @@ func TestRealFirecrackerGoToolchainLifecycle(t *testing.T) {
 	if supervisor == "" || image == "" || digest == "" {
 		t.Skip("requires operator-pinned Go image and actual Firecracker artifacts")
 	}
+	supervisorCommand := []string{"python3", supervisor, "--profile", "production", "--go-sdk-image", image, "--go-sdk-sha256", digest}
+	if os.Getenv("ITBEM_FIRECRACKER_TEST_JAILER") == "1" {
+		parent := strings.TrimSpace(os.Getenv("ITBEM_FIRECRACKER_TEST_CGROUP_PARENT"))
+		if parent == "" {
+			t.Fatal("jailed Go qualification requires a delegated cgroup parent")
+		}
+		supervisorCommand = append(supervisorCommand, "--jailer", "--cgroup-parent", parent)
+	}
 	for _, failing := range []bool{false, true} {
 		name := "passing"
 		if failing {
@@ -37,7 +45,7 @@ func TestRealFirecrackerGoToolchainLifecycle(t *testing.T) {
 			}
 			workspace := Workspace{ID: "real-go-toolchain", Root: root, Config: WorkspaceConfig{
 				SandboxRuntime: WorkspaceSandboxFirecracker, RequireSandbox: true,
-				SandboxSupervisorCommand: []string{"python3", supervisor, "--profile", "production", "--go-sdk-image", image, "--go-sdk-sha256", digest},
+				SandboxSupervisorCommand: supervisorCommand,
 			}}
 			ctx := withSandboxTaskID(context.Background(), "task-go-toolchain-"+name)
 			result, err := runWorkspaceCommand(ctx, workspace, root, 90*time.Second, "", nil, "go", "test", "-json", "-count=1", "-timeout=30s", "./...")
