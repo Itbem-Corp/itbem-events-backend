@@ -83,15 +83,25 @@ new lease to the original run, emit exactly one accepted terminal effect, make
 no second provider call, and delete the message only after success. The current
 Go fixtures use `ITBEM_LOCALSTACK_E2E` and `ITBEM_LOCALSTACK_ENDPOINT`; the script
 sets them against Moto. Their historical names do not require LocalStack.
-The runner validates JSON events for both named tests and refuses missing
-execution, skips or failures.
+The suite also runs `TestLocalGatewayFiveLaneTransportRoundTrip` in its own Go
+process against the real gateway handlers over verified HTTPS. Five separate
+queues and role tokens must pass readiness, lease acquisition, exact-task
+private input reads, encrypted result writes, actual SQS redelivery and
+fresh-client checkpoint recovery under a new sealed lease,
+visibility extension and acknowledgement. Probes must leave queued work
+unconsumed. Twenty attempts to use another role's token with forged identity
+headers, twenty cross-role input reads and twenty cross-role acknowledgements
+must return 401; same-role
+cross-task reads and input mutation must return 403. Execution clients have no
+AWS credentials. The runner validates JSON events for all three root tests and
+all five lane subtests, refusing missing execution, skips or failures.
 
-Five-lane transport qualification remains a separate pending requirement:
-provision separate SQS queues and worker identities for orchestration,
-engineering, review, QA and release; reject wrong-role deliveries before any
-callback or model call; require lane-specific persisted evidence, a model-free
-QA probe and fail-closed release. The two current transport tests do not prove
-this matrix or the complete single/multi-repository staging workflow below.
+Full five-role engineering qualification remains pending: execute the actual
+worker operations, reject wrong-role deliveries before a task callback or model
+call, verify lane-specific task results and receipts, perform a model-free QA
+probe, and require fail-closed release through exact-SHA human grants. Gateway
+transport fixtures do not run inference, modify a repository or publish a PR;
+they do not prove the complete single/multi-repository staging workflow below.
 
 This check uses only disposable `test` credentials. It must never receive a
 production AWS profile, provider API key, GitHub token, repository checkout or
