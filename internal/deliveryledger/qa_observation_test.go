@@ -57,7 +57,7 @@ func TestProjectQAObservationVerifiesEnvelopeAndPayload(t *testing.T) {
 		t.Fatalf("QA projection leaked private output: %s", encoded)
 	}
 	corrupted := event
-	corrupted.PayloadJSON += " "
+	corrupted.PayloadJSON = strings.Replace(event.PayloadJSON, `"preview_passed":true`, `"preview_passed":false`, 1)
 	if _, err := ProjectQAObservation(corrupted); err == nil {
 		t.Fatal("corrupted QA ledger evidence was accepted")
 	}
