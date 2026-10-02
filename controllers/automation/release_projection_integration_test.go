@@ -3,13 +3,20 @@
 package automation
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"events-stocks/configuration"
+	"events-stocks/internal/agentcallbackauth"
 	"events-stocks/internal/deliveryledger"
 	"events-stocks/internal/deliverypolicy"
 	"events-stocks/internal/environmentevidence"
@@ -17,6 +24,7 @@ import (
 	"events-stocks/internal/releasegate"
 	"events-stocks/models"
 	"github.com/gofrs/uuid"
+	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/require"
 	postgrescontainer "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"gorm.io/driver/postgres"
@@ -128,5 +136,70 @@ func TestReleaseProjectionRollsBackEvidenceWhenCurrentPolicyIsMissing(t *testing
 	projected, err := deliveryledger.ProjectGateEvaluation(latest)
 	require.NoError(t, err)
 	require.Equal(t, "blocked", projected.State, "QA success must not replace absent Vault authority")
+
+	// Exercise the real signed terminal callback with an original immutable
+	// request/result pair. A recovered deterministic run still needs both refs.
+	previousDB := configuration.DB
+	configuration.DB = db
+	t.Cleanup(func() { configuration.DB = previousDB })
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	encodedPublic, err := agentcallbackauth.EncodePublicKey(public)
+	require.NoError(t, err)
+	instance := uuid.Must(uuid.NewV4())
+	require.NoError(t, db.Create(&models.AutomationAgentInstance{ID: instance, AgentKey: "release", MachineID: "synthetic", PublicKey: encodedPublic, Status: "active"}).Error)
+	recoveredTask := nextTask
+	recoveredTask.ID = uuid.Must(uuid.NewV4())
+	recoveredTask.JobID = uuid.Must(uuid.NewV4())
+	recoveredTask.Status, recoveredTask.RunID = "running", uuid.Must(uuid.NewV4()).String()
+	recoveredTask.CompletedAt = nil
+	recoveredTask.AgentInstanceID, recoveredTask.AgentKey, recoveredTask.MachineID = &instance, "release", "synthetic"
+	require.NoError(t, db.Create(&recoveredTask).Error)
+	environment.TaskID = recoveredTask.ID.String()
+	recoveredHandoff, err := json.Marshal(map[string]any{"schema_version": 2, "gatekeeper_input": candidate, "environment_observation": environment})
+	require.NoError(t, err)
+	originalRun := uuid.Must(uuid.NewV4()).String()
+	prefix := "s3://synthetic-outputs/automation/" + recoveredTask.ID.String() + "/runs/" + originalRun
+	callback := callbackRequest{Status: "completed", RunID: recoveredTask.RunID, RecoveryRunID: originalRun, OutputRef: prefix + "/result.json", Execution: recoveredHandoff, Deterministic: true}
+	app := echo.New()
+	app.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			c.Set("config", &models.Config{AutomationOutputBucket: "synthetic-outputs"})
+			return next(c)
+		}
+	})
+	app.PUT("/api/internal/automation/tasks/:id", Complete, AgentCallbackAuthentication)
+	call := func() *httptest.ResponseRecorder {
+		body, marshalErr := json.Marshal(map[string]any{"status": callback.Status, "run_id": callback.RunID, "recovery_run_id": callback.RecoveryRunID, "request_ref": callback.RequestRef, "output_ref": callback.OutputRef, "execution": callback.Execution, "deterministic": callback.Deterministic})
+		require.NoError(t, marshalErr)
+		path := "/api/internal/automation/tasks/" + recoveredTask.ID.String()
+		timestamp, nonce := time.Now().UTC().Unix(), uuid.Must(uuid.NewV4()).String()
+		signature, signErr := agentcallbackauth.SignRequest(private, instance.String(), http.MethodPut, path, timestamp, nonce, body)
+		require.NoError(t, signErr)
+		encoded, encodeErr := agentcallbackauth.EncodeSignature(signature)
+		require.NoError(t, encodeErr)
+		request := httptest.NewRequest(http.MethodPut, path, bytes.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set(agentcallbackauth.InstanceIDHeader, instance.String())
+		request.Header.Set(agentcallbackauth.TimestampHeader, strconv.FormatInt(timestamp, 10))
+		request.Header.Set(agentcallbackauth.NonceHeader, nonce)
+		request.Header.Set(agentcallbackauth.SignatureHeader, encoded)
+		response := httptest.NewRecorder()
+		app.ServeHTTP(response, request)
+		return response
+	}
+	rejected := call()
+	require.Equal(t, http.StatusBadRequest, rejected.Code, rejected.Body.String())
+	callback.RequestRef = prefix + "/request.json"
+	accepted := call()
+	require.Equal(t, http.StatusNoContent, accepted.Code, accepted.Body.String())
+	var completed models.AutomationTask
+	require.NoError(t, db.First(&completed, recoveredTask.ID).Error)
+	require.Equal(t, "completed", completed.Status)
+	latest = models.DeliveryEvent{}
+	require.NoError(t, db.Where("work_item_id = ? AND event_type = ?", itemID, deliveryledger.EventTypeReleaseGateEvaluated).Order("sequence DESC").First(&latest).Error)
+	projected, err = deliveryledger.ProjectGateEvaluation(latest)
+	require.NoError(t, err)
+	require.Equal(t, "blocked", projected.State)
 
 }

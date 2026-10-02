@@ -1142,11 +1142,12 @@ func (w *Worker) completeFromExistingResult(ctx context.Context, taskID, runID s
 	}
 	if result.Deterministic {
 		if result.Operation == "delivery.release_gate" {
-			if !validReceiptUUID(result.RunID) || len(result.Execution) == 0 {
+			expectedRequestRef := "s3://" + w.config.OutputBucket + "/automation/" + taskID + "/runs/" + result.RunID + "/request.json"
+			if !validReceiptUUID(result.RunID) || len(result.Execution) == 0 || result.RequestRef != expectedRequestRef {
 				return false, fmt.Errorf("release observation recovery identity is invalid")
 			}
 			ref := "s3://" + w.config.OutputBucket + "/automation/" + taskID + "/runs/" + result.RunID + "/result.json"
-			_, err = w.callback.Update(ctx, taskID, TaskUpdate{Status: "completed", RunID: runID, RecoveryRunID: result.RunID, OutputRef: ref, Execution: result.Execution, Deterministic: true, ExecutionIdentity: nonEmptyAgentIdentity(result.ExecutionIdentity)})
+			_, err = w.callback.Update(ctx, taskID, TaskUpdate{Status: "completed", RunID: runID, RecoveryRunID: result.RunID, RequestRef: result.RequestRef, OutputRef: ref, Execution: result.Execution, Deterministic: true, ExecutionIdentity: nonEmptyAgentIdentity(result.ExecutionIdentity)})
 			return true, err
 		}
 		_, err = w.callback.Update(ctx, taskID, TaskUpdate{Status: "completed", RunID: runID, OutputRef: "s3://" + w.config.OutputBucket + "/" + key, Execution: result.Execution, Deterministic: true, ExecutionIdentity: nonEmptyAgentIdentity(result.ExecutionIdentity)})

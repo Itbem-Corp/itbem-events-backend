@@ -12,6 +12,45 @@ import (
 	"testing"
 )
 
+type releaseRequestFailureStore struct{ *fakeStore }
+
+func (s releaseRequestFailureStore) PutEncryptedJSON(ctx context.Context, bucket, key string, body []byte) error {
+	if strings.HasSuffix(key, "/request.json") {
+		return errors.New("synthetic storage unavailable")
+	}
+	return s.fakeStore.PutEncryptedJSON(ctx, bucket, key, body)
+}
+
+func TestReleaseWorkerDefersObservationUntilRequestIsDurable(t *testing.T) {
+	input, err := json.Marshal(TaskInput{Delivery: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := releaseRequestFailureStore{&fakeStore{input: input, outputBucket: "itbem-ai-outputs-local"}}
+	callback, provider := &fakeCallback{operation: "delivery.release_gate"}, &countingProvider{}
+	worker, err := NewWorker(WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local", Role: agentwork.RoleReleaseManager, Lane: agentwork.LaneRelease}, store, callback, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observations := 0
+	worker.releaseObserver = func(context.Context, string, string, json.RawMessage) (map[string]any, error) {
+		observations++
+		return nil, errors.New("must not observe")
+	}
+	message := validMessage()
+	message.Payload.Operation = "delivery.release_gate"
+	err = worker.Process(context.Background(), message)
+	var retryable *RetryableError
+	if !errors.As(err, &retryable) || observations != 0 || provider.calls != 0 {
+		t.Fatalf("non-durable request reached execution: %v", err)
+	}
+	for _, update := range callback.updates {
+		if update.Status != "running" {
+			t.Fatal("storage failure sealed a terminal outcome")
+		}
+	}
+}
+
 func TestReleaseWorkerRefusesMissingSignedObserverWithoutInference(t *testing.T) {
 	input, err := json.Marshal(TaskInput{Prompt: "synthetic release", Delivery: json.RawMessage(`{}`)})
 	if err != nil {
@@ -142,7 +181,7 @@ func TestReleaseWorkerPreservesDeterministicObservationOnRecovery(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if recovered.Status != "completed" || !recovered.Deterministic || string(raw) != string(original) || recovered.OutputRef != last.OutputRef || recovered.RecoveryRunID != last.RunID || observations != 1 || provider.calls != 0 {
+	if recovered.Status != "completed" || !recovered.Deterministic || string(raw) != string(original) || recovered.OutputRef != last.OutputRef || recovered.RequestRef == "" || recovered.RequestRef != last.RequestRef || recovered.RecoveryRunID != last.RunID || observations != 1 || provider.calls != 0 {
 		t.Fatalf("recovery repeated observations or changed evidence: %#v calls=%d", recovered, observations)
 	}
 }

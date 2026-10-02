@@ -85,6 +85,9 @@ run "authoritative QA, security, dependency, environment and recovery evidence" 
 run "safe restart/redelivery and durable queue leases" \
   go test ./internal/automationagent -run 'Test(WorkerRecoveryReusesOriginalInferenceRunWithoutCreatingNewCostIdentity|WorkerReusesPersistedResultInsteadOfReexecutingProvider|LongRunningQueueMessageRenewsItsVisibilityLease|ProcessQueueMessageRetainsRetryableWork)$' -count=1
 
+run "release observer signed transport, durable request and deterministic recovery" \
+  go test ./internal/automationagent -run 'Test(ReleaseObserverTransportSignsOnlySealedLeaseAndRun|ReleaseWorkerDefersObservationUntilRequestIsDurable|ReleaseWorkerPreservesDeterministicObservationOnRecovery|ReleaseWorkerRetriesTransientObservationWithoutSealingFailure|ReleaseWorkerRefusesMissingSignedObserverWithoutInference)$' -count=1
+
 run "Linux role isolation, non-consuming doctor and outbound gateway preflight" \
   go test ./cmd/itbem-ai-agent ./internal/automationagent ./controllers/automation -run 'Test(SystemdUnitFailsClosedAndRunsUnprivileged|SystemdDoctorIsReadOnlyAndCannotConsumeQueueWork|SystemdRoleFilesBindExactLaneAndSeparatePublicationSecrets|SystemdInstallerStagesButNeverActivatesServices|DoctorPublicationReadinessRequiresRoleSpecificGitHubAppConfiguration|LoadRuntimeConfigSelectsHTTPSGatewayWithoutAWSIdentity|GatewayTokensAreLaneBoundAndDoNotExposeRoot|GatewayLeaseIsConfidentialTamperEvidentAndIdentityBound)$' -count=1
 
