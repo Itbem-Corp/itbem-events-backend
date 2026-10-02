@@ -292,6 +292,12 @@ func validateWorkerCapabilities(operations []string) error {
 }
 
 func (w *Worker) canProcess(operation string) bool {
+	if w.config.Role != "" {
+		assignment, known := agentwork.AssignmentForOperation(operation)
+		if !known || assignment.Role != w.config.Role || assignment.Lane != w.config.Lane {
+			return false
+		}
+	}
 	if len(w.config.AllowedOperations) == 0 {
 		return true
 	}

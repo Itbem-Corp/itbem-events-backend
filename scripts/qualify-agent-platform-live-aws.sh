@@ -109,7 +109,7 @@ AWS_REGION=us-east-1 \
 ITBEM_LOCALSTACK_E2E=1 \
 ITBEM_GATEWAY_TRANSPORT_E2E=1 \
 ITBEM_LOCALSTACK_ENDPOINT="http://127.0.0.1:$emulator_port" \
-go test ./internal/automationagent ./controllers/automation -run '^Test(LocalStackTransportRoundTrip|LocalStackRedeliveryReusesDurableResultWithoutProviderRepeat|LocalGatewayFiveLaneTransportRoundTrip)$' -race -count=1 -timeout 180s -json > "$report_file"; then
+go test ./internal/automationagent ./controllers/automation -run '^Test(LocalStackTransportRoundTrip|LocalStackRedeliveryReusesDurableResultWithoutProviderRepeat|LocalStackRoleAdmissionKeepsCrossLaneDeliveriesUnclaimed|LocalGatewayFiveLaneTransportRoundTrip)$' -race -count=1 -timeout 180s -json > "$report_file"; then
   :
 else
   cat "$report_file" >&2
@@ -118,6 +118,12 @@ fi
 python3 scripts/verify_go_test_evidence.py "$report_file" \
   TestLocalStackTransportRoundTrip \
   TestLocalStackRedeliveryReusesDurableResultWithoutProviderRepeat \
+  TestLocalStackRoleAdmissionKeepsCrossLaneDeliveriesUnclaimed \
+  TestLocalStackRoleAdmissionKeepsCrossLaneDeliveriesUnclaimed/orchestration \
+  TestLocalStackRoleAdmissionKeepsCrossLaneDeliveriesUnclaimed/engineering \
+  TestLocalStackRoleAdmissionKeepsCrossLaneDeliveriesUnclaimed/review \
+  TestLocalStackRoleAdmissionKeepsCrossLaneDeliveriesUnclaimed/qa \
+  TestLocalStackRoleAdmissionKeepsCrossLaneDeliveriesUnclaimed/release \
   TestLocalGatewayFiveLaneTransportRoundTrip \
   TestLocalGatewayFiveLaneTransportRoundTrip/orchestration \
   TestLocalGatewayFiveLaneTransportRoundTrip/engineering \
