@@ -216,5 +216,6 @@ func TestReleaseProjectionRollsBackEvidenceWhenCurrentPolicyIsMissing(t *testing
 	projected, err = deliveryledger.ProjectGateEvaluation(latest)
 	require.NoError(t, err)
 	require.Equal(t, "blocked", projected.State)
+	verifyReleaseWorkerControlPlaneRecovery(t, db, itemID, candidate, digest)
 
 }

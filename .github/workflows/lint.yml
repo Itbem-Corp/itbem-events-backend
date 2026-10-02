@@ -49,7 +49,7 @@ jobs:
         run: go test -race -tags=integration ./controllers/automation -run '^TestQAObservationProjectionPersistsExactSubjectAndRejectsChangedRecovery$' -count=1 -timeout 180s
       - name: Verify signed release admission and replay rejection
         run: go test -race -tags=integration ./controllers/automation -run '^TestReleaseObserverSignedAdmissionRejectsCancelledTaskAndReplayedNonce$' -count=1 -timeout 180s
-      - name: Verify release evidence transaction rollback
+      - name: Verify release transaction rollback and signed worker recovery
         run: go test -race -tags=integration ./controllers/automation -run '^TestReleaseProjectionRollsBackEvidenceWhenCurrentPolicyIsMissing$' -count=1 -timeout 180s
       - name: Verify release ledger projections after JSONB storage
         run: go test -race -tags=integration ./internal/deliveryledger -run '^TestLedgerProjectionsSurvivePostgreSQLJSONBAndRejectTampering$' -count=1 -timeout 180s

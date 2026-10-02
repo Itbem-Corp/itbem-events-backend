@@ -38,7 +38,7 @@ func inferenceAttemptCallQuota(operation string) int {
 		return 6
 	case "delivery.qa":
 		return 2
-	case "delivery.publish":
+	case "delivery.publish", "delivery.release_gate":
 		return 0
 	default:
 		return 1
