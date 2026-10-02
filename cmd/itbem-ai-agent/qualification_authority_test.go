@@ -47,3 +47,21 @@ func TestDoctorReadinessRejectsMismatchedAndUnknownWorkerIdentities(t *testing.T
 		}
 	}
 }
+
+func TestDoctorGatewayReleaseObserverRequiresNoPublicationCredential(t *testing.T) {
+	config := automationagent.RuntimeConfig{Transport: "gateway", WorkerConfig: automationagent.WorkerConfig{Role: agentwork.RoleReleaseManager, Lane: agentwork.LaneRelease, AllowedOperations: []string{"delivery.release_gate"}}}
+	if githubPublicationRequired(config) || !doctorExecutionReady(true, true, true, false, config) {
+		t.Fatal("narrowed gateway observer required a local GitHub credential")
+	}
+	for _, capabilities := range [][]string{nil, {"delivery.publish"}, {"delivery.release_gate", "delivery.publish"}, {"unknown"}} {
+		config.AllowedOperations = capabilities
+		if !githubPublicationRequired(config) {
+			t.Fatal("publication-capable or unknown profile lost its authority requirement")
+		}
+	}
+	config.AllowedOperations = []string{"delivery.release_gate"}
+	config.Transport = "aws"
+	if !githubPublicationRequired(config) {
+		t.Fatal("legacy transport received gateway-only authority")
+	}
+}

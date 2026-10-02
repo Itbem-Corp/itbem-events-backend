@@ -5,6 +5,27 @@ separates repeatable local qualification from live GitHub, staging and
 production evidence. A local pass is necessary but never grants merge or
 release authority.
 
+Release observations use the enrolled instance signature together with the
+release lane gateway token. The server loads the sealed task input and collects
+GitHub and environment evidence; the worker sends only its queue lease and run
+ID. Before returning evidence, the server stores its canonical payload digest
+bound to the task, run, enrolled instance and exact revision matrix. Completion
+must match that server record, including when recovering a prior run. A worker
+cannot replace this record by reporting its own successful observations.
+
+For a gateway release observer, narrow `ITBEM_AI_CAPABILITIES` to
+`delivery.release_gate`. This profile needs no local GitHub publication key.
+General release profiles and profiles including `delivery.publish` retain their
+publication credential requirement; the observer exception is gateway-only.
+
+The deterministic worker persists an immutable `request.json` before observing
+release state and an immutable `result.json` before its terminal callback.
+Recovery preserves both original run references and makes no model call. The
+PostgreSQL integration fixtures cover signed admission, revocation during
+observation, missing or mutated server evidence, exact recovery references and
+the retained Vault blocker. These component fixtures do not yet prove the whole
+worker/gateway/callback chain in one process-level integration or live release.
+
 The local qualifier first initializes only the repository's declared Git
 submodules at their committed gitlinks. This makes a clean worktree test the
 same pinned source graph as CI without naming a product or repository in the

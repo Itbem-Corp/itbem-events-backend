@@ -3072,6 +3072,15 @@ func Complete(c echo.Context) error {
 	if task.Operation == "delivery.release_gate" && request.Status == "completed" && (!request.Deterministic || len(request.Execution) == 0) {
 		return utils.Error(c, http.StatusBadRequest, "Invalid automation result", "release Gatekeeper completion requires deterministic execution evidence")
 	}
+	if task.Operation == "delivery.release_gate" && request.Status == "completed" {
+		actor, authenticated := requireAgentCallbackIdentity(c)
+		if !authenticated {
+			return nil
+		}
+		if err := verifyServerReleaseObservation(configuration.DB, &task, ledgerRunID, actor.InstanceID, request.Execution); err != nil {
+			return utils.Error(c, http.StatusBadRequest, "Invalid release observation", "release evidence must match the server observation for this task and run")
+		}
+	}
 	if task.Operation == "delivery.onboarding_probe" && request.Status == "completed" && (!request.Deterministic || len(request.Execution) == 0) {
 		return utils.Error(c, http.StatusBadRequest, "Invalid automation result", "onboarding probe completion requires deterministic execution evidence")
 	}
