@@ -74,6 +74,7 @@ try {
     $env:ITBEM_AGENT_LIVE_EVAL = '0'
     foreach ($name in $providerEnvironmentNames) { [Environment]::SetEnvironmentVariable($name,'','Process') }
     $offlinePath = Join-Path $reportDirectory 'offline.jsonl'
+    $null = New-Item -ItemType File -Path $offlinePath
     $harnessPackages = @('internal/automationagent','controllers/delivery','controllers/automation','services/automationcost','services/deliveryworkflow','internal/runtimeroute')
     & $goCommand test ./internal/automationagent ./controllers/delivery ./controllers/automation ./services/automationcost ./services/deliveryworkflow ./internal/runtimeroute -shuffle=49207 -count=3 -timeout 180s -json 2>&1 | Tee-Object -FilePath $offlinePath
     $testExit = $LASTEXITCODE

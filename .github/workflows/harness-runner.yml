@@ -25,5 +25,10 @@ jobs:
         with:
           persist-credentials: false
       - name: Verify offline isolation and fail-closed evidence
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Verify synthetic rejection and real Go JSON compatibility
         shell: powershell
-        run: ./scripts/Test-AgentHarnessIsolation.ps1
+        run: ./scripts/Test-AgentHarnessIsolation.ps1 -RealGoPath (Get-Command go).Source
