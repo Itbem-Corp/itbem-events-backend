@@ -79,6 +79,8 @@ func TestQASourceSignedGatewayBindsPostgresAuthorityAndIndependentCheckout(t *te
 	git(nil, "config", "user.name", "Synthetic Fixture")
 	git(nil, "config", "user.email", "fixture@example.invalid")
 	require.NoError(t, os.WriteFile(filepath.Join(source, "README.md"), []byte("exact synthetic source\n"), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(source, "go.mod"), []byte("module synthetic-source\n\ngo 1.25\n"), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(source, "source_test.go"), []byte("package source\nimport(\"os\";\"testing\")\nfunc TestFrozenSource(t *testing.T){body,err:=os.ReadFile(\"README.md\");if err!=nil||string(body)!=\"exact synthetic source\\n\"{t.Fatal(\"source changed\")}}\n"), 0600))
 	git(nil, "add", ".")
 	git(nil, "commit", "-m", "synthetic published source")
 	childSHA := strings.TrimSpace(string(git(nil, "rev-parse", "HEAD")))
@@ -385,4 +387,5 @@ func TestQASourceSignedGatewayBindsPostgresAuthorityAndIndependentCheckout(t *te
 	require.Equal(t, int32(2), acquisitions.Load(), "terminal callbacks must not fetch code again")
 	require.Equal(t, int32(1), providerCalls.Load(), "recovery must reuse its gateway receipt without provider replay")
 	require.Equal(t, int32(2), contentWrites.Load(), "original gateway call must capture request and response once")
+	verifyQAWorkerGatewayRecovery(t, db, item, machine, instance, bundleAcquisition, head, childPath, &providerCalls)
 }

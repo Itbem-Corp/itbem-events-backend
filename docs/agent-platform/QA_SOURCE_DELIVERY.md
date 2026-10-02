@@ -115,7 +115,13 @@ receipt is created by the real gateway under a signed attempt-policy snapshot
 and task-scoped capability. A closed provider transport supplies catalog and
 completion fixtures without external access. Duplicate admission is rejected
 before another provider call, and immutable encrypted request/response capture
-occurs once. Actual worker command execution is not yet joined to this fixture.
+occurs once. An additional worker flow joins the actual signed claim, object
+gateway, independent source import, real synthetic `go test`, frozen inference
+policy, gateway receipt and terminal projection. A simulated first terminal
+HTTP 503 leaves the private result intact; after lease expiry, the worker
+completes it under a new run while preserving the original source/inference
+run, one source receipt, one inference receipt and one accounting execution.
+Source acquisition and provider responses remain closed local fixtures.
 
 Legacy sealed local handoffs retain their original execution behavior. New paid
 inference, historical requeues and live worker activation require their existing
