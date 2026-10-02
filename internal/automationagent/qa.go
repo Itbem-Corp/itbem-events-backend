@@ -66,7 +66,7 @@ type QAExecutionError struct {
 	Cause     error
 }
 
-var errQACapabilityNotAccepted = errors.New("inference lease was not accepted before Stagehand")
+var errQACapabilityNotAccepted = errors.New("QA task lease was not accepted before execution")
 
 type qaCapabilityRefreshError struct {
 	cause error
@@ -74,9 +74,9 @@ type qaCapabilityRefreshError struct {
 
 func (e *qaCapabilityRefreshError) Error() string {
 	if e == nil || e.cause == nil {
-		return "Stagehand inference capability refresh failed"
+		return "QA execution authority refresh failed"
 	}
-	return fmt.Sprintf("Stagehand inference capability refresh failed: %v", e.cause)
+	return fmt.Sprintf("QA execution authority refresh failed: %v", e.cause)
 }
 
 func (e *qaCapabilityRefreshError) Unwrap() error {
@@ -157,6 +157,9 @@ func runQAWithCapabilityRefresh(ctx context.Context, taskID, runID string, deliv
 		result["repository_execution_order"] = append(result["repository_execution_order"].([]string), target.reference)
 		if target.execution.RunValidation {
 			for index, command := range target.workspace.Config.ValidationCommands {
+				if err := refreshQAExecutionAuthority(ctx, refresh); err != nil {
+					return qaRevisionFailure(result, artifacts, target, commands, err)
+				}
 				if target.reviewBinding != nil {
 					if err := verifyQATargetRevision(ctx, target); err != nil {
 						return qaRevisionFailure(result, artifacts, target, commands, err)
@@ -172,6 +175,9 @@ func runQAWithCapabilityRefresh(ctx context.Context, taskID, runID string, deliv
 		}
 		if target.execution.RunQA {
 			for index, command := range target.workspace.Config.QACommands {
+				if err := refreshQAExecutionAuthority(ctx, refresh); err != nil {
+					return qaRevisionFailure(result, artifacts, target, commands, err)
+				}
 				if target.reviewBinding != nil {
 					if err := verifyQATargetRevision(ctx, target); err != nil {
 						return qaRevisionFailure(result, artifacts, target, commands, err)
@@ -280,6 +286,20 @@ func qaReviewBindingEvidence(target qaTarget) map[string]string {
 		return nil
 	}
 	return map[string]string{"base_sha": target.reviewBinding.BaseSHA, "review_diff_sha256": target.reviewBinding.ReviewDiffSHA256, "review_source_sha256": target.reviewSourceSHA256, "branch": target.reviewBinding.Branch}
+}
+
+func refreshQAExecutionAuthority(ctx context.Context, refresh func(context.Context) (bool, error)) error {
+	if refresh == nil {
+		return nil
+	}
+	accepted, err := refresh(ctx)
+	if err != nil {
+		return &qaCapabilityRefreshError{cause: err}
+	}
+	if !accepted {
+		return &qaCapabilityRefreshError{cause: errQACapabilityNotAccepted}
+	}
+	return nil
 }
 
 func verifyQATargetRevision(ctx context.Context, target qaTarget) error {
