@@ -77,6 +77,11 @@ def debugfs_write(rootfs: pathlib.Path, source: pathlib.Path, target: str) -> No
     ], capture_output=True, text=True, check=False)
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f"debugfs write failed: {target}")
+    # debugfs can report success even when a path traverses an unsupported
+    # image symlink. Verify the inserted bytes before ever starting a VM.
+    inserted = subprocess.run(["debugfs", "-R", f"cat {target}", str(rootfs)], capture_output=True, check=False)
+    if inserted.returncode or inserted.stdout != source.read_bytes():
+        raise RuntimeError(f"debugfs insertion verification failed: {target}")
 
 
 def debugfs(rootfs: pathlib.Path, command: str) -> None:
@@ -246,7 +251,7 @@ def main() -> None:
             "mount -t ext4 -o ro /dev/vdb /workspace",
         ])
     init_lines.extend([
-        "/sbin/itbem-guest-agent >/dev/console 2>&1 &",
+        "/itbem-guest-agent >/dev/console 2>&1 &",
         "echo ITBEM_VSOCK_AGENT_READY >/dev/console",
         "exec /bin/sh",
         "",
@@ -255,18 +260,18 @@ def main() -> None:
     # The shared hello rootfs may already contain files from the serial proof.
     # Remove those entries first; debugfs `write` does not replace an existing
     # inode and silently leaving the old init would boot the wrong protocol.
-    subprocess.run(["debugfs", "-w", "-R", "rm /sbin/itbem-init", str(rootfs)], capture_output=True, check=False)
-    subprocess.run(["debugfs", "-w", "-R", "rm /sbin/itbem-guest-agent", str(rootfs)], capture_output=True, check=False)
+    subprocess.run(["debugfs", "-w", "-R", "rm /itbem-init", str(rootfs)], capture_output=True, check=False)
+    subprocess.run(["debugfs", "-w", "-R", "rm /itbem-guest-agent", str(rootfs)], capture_output=True, check=False)
     subprocess.run(["debugfs", "-w", "-R", "rm /itbem-fixture/binding.txt", str(rootfs)], capture_output=True, check=False)
     subprocess.run(["debugfs", "-w", "-R", "rm -r /workspace", str(rootfs)], capture_output=True, check=False)
     subprocess.run(["debugfs", "-w", "-R", "mkdir /itbem-fixture", str(rootfs)], capture_output=True, check=False)
     if worktree_mode:
         subprocess.run(["debugfs", "-w", "-R", "mkdir /workspace", str(rootfs)], capture_output=True, check=False)
     debugfs_write(rootfs, binding, "/itbem-fixture/binding.txt")
-    debugfs_write(rootfs, GUEST_AGENT, "/sbin/itbem-guest-agent")
-    debugfs_write(rootfs, init_path, "/sbin/itbem-init")
-    debugfs(rootfs, "set_inode_field /sbin/itbem-guest-agent mode 0100755")
-    debugfs(rootfs, "set_inode_field /sbin/itbem-init mode 0100755")
+    debugfs_write(rootfs, GUEST_AGENT, "/itbem-guest-agent")
+    debugfs_write(rootfs, init_path, "/itbem-init")
+    debugfs(rootfs, "set_inode_field /itbem-guest-agent mode 0100755")
+    debugfs(rootfs, "set_inode_field /itbem-init mode 0100755")
 
     lifecycle = {"created": False, "worktree_bound": True, "guest_command_executed": False, "destroyed": False, "attestation_persisted": False}
     process = None
@@ -335,7 +340,7 @@ def main() -> None:
         kernel_path = "/vmlinux" if use_jailer else str(KERNEL)
         rootfs_path = "/rootfs.ext4" if use_jailer else str(rootfs)
         worktree_path = "/worktree.ext4" if use_jailer else str(worktree_image)
-        api_put(api_socket, "/boot-source", {"kernel_image_path": kernel_path, "boot_args": "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/itbem-init"})
+        api_put(api_socket, "/boot-source", {"kernel_image_path": kernel_path, "boot_args": "console=ttyS0 reboot=k panic=1 pci=off init=/itbem-init"})
         api_put(api_socket, "/drives/rootfs", {"drive_id": "rootfs", "path_on_host": rootfs_path, "is_root_device": True, "is_read_only": True})
         if worktree_mode:
             api_put(api_socket, "/drives/worktree", {"drive_id": "worktree", "path_on_host": worktree_path, "is_root_device": False, "is_read_only": True})
