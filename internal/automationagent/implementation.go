@@ -616,12 +616,17 @@ func runWorkspaceImplementation(ctx context.Context, taskID string, workspace Wo
 	if len(patchBytes) == 0 || len(patchBytes) > maxStepPatchArtifactBytes {
 		return nil, fmt.Errorf("reviewed patch exceeds the supported artifact size")
 	}
+	sourceDigest, err := sandboxWorktreeDigest(worktree)
+	if err != nil {
+		return nil, fmt.Errorf("could not bind reviewed source manifest: %w", err)
+	}
 	return map[string]any{
 		"workspace": "workspace://" + workspace.ID,
 		"worktree":  "workspace://" + workspace.ID + "#" + branch, "branch": branch,
 		"base_sha":              baseSHA,
 		"github_repository":     githubRepository,
 		"review_diff_sha256":    reviewDiffSHA256,
+		"review_source_sha256":  fmt.Sprintf("%x", sourceDigest),
 		"patch_already_applied": alreadyApplied, "patch_hunk_counts_normalized": patchNormalized, "diff_check_passed": diffCheck.ExitCode == 0,
 		"diff_check": diffCheck.Output, "diff_stat": stat.Output, "validations": validations,
 		"allowed_paths":             allowedPaths,

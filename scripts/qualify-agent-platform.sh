@@ -37,6 +37,12 @@ run "generic onboarding, monorepo discovery and prompt-injection boundary" \
 run "single-repository worktree and exact reviewed diff" \
   go test ./internal/automationagent -run 'TestRunImplementationUsesIsolatedWorktree$' -count=1
 
+run "reviewed source manifest rejects untracked and ignored source" \
+  go test ./internal/automationagent -run 'TestQAReviewedSourceManifestRejectsGitInvisibleChanges$' -count=1
+
+run "server preserves the reviewed source manifest" \
+  go test ./controllers/automation -run 'TestImplementationHandoffCreatesAnAuditableLocalChangeSet$' -count=1
+
 run "model-free QA worker with exact-revision evidence" \
   go test ./internal/automationagent -run 'TestWorkerRunsOnboardingProbeDeterministicallyWithoutProvider$' -count=1
 
