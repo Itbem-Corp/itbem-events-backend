@@ -5,12 +5,18 @@ on:
     paths:
       - scripts/Test-AgentHarness.ps1
       - scripts/Test-AgentHarnessIsolation.ps1
+      - scripts/Start-LocalAIControlPlane.ps1
+      - scripts/IsolatedQualificationEnvironment.ps1
+      - scripts/Test-IsolatedQualificationEnvironment.ps1
       - .github/workflows/harness-runner.yml
   push:
     branches: [main]
     paths:
       - scripts/Test-AgentHarness.ps1
       - scripts/Test-AgentHarnessIsolation.ps1
+      - scripts/Start-LocalAIControlPlane.ps1
+      - scripts/IsolatedQualificationEnvironment.ps1
+      - scripts/Test-IsolatedQualificationEnvironment.ps1
       - .github/workflows/harness-runner.yml
 
 permissions:
@@ -32,3 +38,6 @@ jobs:
       - name: Verify synthetic rejection and real Go JSON compatibility
         shell: powershell
         run: ./scripts/Test-AgentHarnessIsolation.ps1 -RealGoPath (Get-Command go).Source
+      - name: Verify disposable qualification identity boundaries
+        shell: powershell
+        run: ./scripts/Test-IsolatedQualificationEnvironment.ps1
