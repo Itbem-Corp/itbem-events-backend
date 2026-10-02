@@ -250,3 +250,16 @@ For the exact approved subject:
 Every item must be represented by immutable control-plane evidence and an
 ordered ledger event. Missing, stale, malformed or contradictory evidence is a
 block, never a warning that an agent may override.
+
+Sandbox source binding uses the versioned `itbem-sandbox-source-v1` manifest,
+not a hash of the host path. It binds each sorted relative filename, executable
+bit, byte length and SHA-256 content digest. Git metadata and installed
+dependencies (`node_modules`, `.next`, `.venv`, `venv`) are excluded; dependency
+qualification remains an independent gate. Credential filenames are rejected
+before reading, including reserved `.aws`, `.ssh`, `.local`, `.codex` and
+`.config` authority directories, apart from explicit `.env.example`, `.env.sample` and
+`.env.template` templates. Symlinks, non-regular files and oversized transfers
+fail closed. The guest supervisor verifies the content digest again over the
+actual staged snapshot before building its read-only worktree image. This
+manifest check does not prove a running VM or qualify an arbitrary guest
+toolchain; those require the live lifecycle and engineering workflow evidence.
