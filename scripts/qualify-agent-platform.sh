@@ -85,6 +85,9 @@ run "QA pinned dependency discovery treats Gitmodule declarations as data and re
 run "QA source bundle publishes only after all approved original Gitlinks are verified" \
   go test ./internal/automationagent -run 'TestQASourceBundlePublishesOnlyAfterPinnedChildVerification$' -count=1
 
+run "QA dependency policy rejects invalid paths and repositories before authentication" \
+  go test ./internal/automationagent -run 'TestQASourceBundleRejectsInvalidApprovalBeforeAuthentication$' -count=1
+
 run "QA ledger observations preserve failures independently of model summaries" \
   go test ./internal/automationagent -run 'TestQALedgerObservationPreservesObservedFailuresAndRejectsMalformedEvidence$' -count=1
 

@@ -13,8 +13,60 @@ import (
 
 // Server-side only. The caller must authorize repository and SHA from the
 // immutable task before calling, and revalidate live authority afterwards.
-// No endpoint is enabled until the fetch resource boundary is qualified.
 func FetchGitHubQASourcePack(ctx context.Context, repository, commit string, config GitHubAppConfig, client *http.Client) ([]byte, string, error) {
+	return fetchGitHubQASource(ctx, repository, commit, config, client, buildQASourcePack)
+}
+
+// QASourceBundle carries raw Git packages without credentials or rewritten
+// commits. Transport must bind every descriptor to its server receipt.
+type QASourceBundle struct {
+	Pack         []byte
+	PackSHA256   string
+	Dependencies []QASourceDependencyPack
+}
+
+type QASourceDependencyPack struct {
+	Path       string
+	Repository string
+	CommitSHA  string
+	PackSHA256 string
+	Pack       []byte
+}
+
+// Approved dependencies come from operator policy, never request payloads or
+// repository declarations. Each child gets a fresh repository-scoped token.
+func FetchGitHubQASourceBundle(ctx context.Context, repository, commit string, approved map[string]string, config GitHubAppConfig, client *http.Client) (QASourceBundle, error) {
+	var result QASourceBundle
+	if len(approved) > 16 {
+		return result, fmt.Errorf("QA dependency approval exceeds its boundary")
+	}
+	policy := make(map[string]string, len(approved))
+	for path, repository := range approved {
+		if !safeQADependencyPath(path) || !githubRepositoryNamePattern.MatchString(strings.ToLower(repository)) {
+			return result, fmt.Errorf("QA dependency approval is invalid")
+		}
+		policy[path] = strings.ToLower(repository)
+	}
+	pack, digest, err := fetchGitHubQASource(ctx, repository, commit, config, client, func(ctx context.Context, root, commit string) ([]byte, string, error) {
+		pack, digest, children, err := buildQASourceBundle(ctx, root, commit, policy, func(ctx context.Context, repository, commit string) ([]byte, string, error) {
+			return FetchGitHubQASourcePack(ctx, repository, commit, config, client)
+		})
+		if err != nil {
+			return nil, "", err
+		}
+		for _, child := range children {
+			result.Dependencies = append(result.Dependencies, QASourceDependencyPack{Path: child.Path, Repository: child.Repository, CommitSHA: child.CommitSHA, PackSHA256: child.PackSHA256, Pack: child.Pack})
+		}
+		return pack, digest, nil
+	})
+	if err != nil {
+		return QASourceBundle{}, err
+	}
+	result.Pack, result.PackSHA256 = pack, digest
+	return result, nil
+}
+
+func fetchGitHubQASource(ctx context.Context, repository, commit string, config GitHubAppConfig, client *http.Client, consume func(context.Context, string, string) ([]byte, string, error)) ([]byte, string, error) {
 	repository = strings.ToLower(repository)
 	if !githubRepositoryNamePattern.MatchString(repository) || !gitCommitPattern.MatchString(commit) {
 		return nil, "", fmt.Errorf("QA source acquisition identity is invalid")
@@ -47,7 +99,7 @@ func FetchGitHubQASourcePack(ctx context.Context, repository, commit string, con
 	if err := qaSourceGit(ctx, root, nil, "cat-file", "-e", commit+"^{commit}"); err != nil {
 		return nil, "", err
 	}
-	return buildQASourcePack(ctx, root, commit)
+	return consume(ctx, root, commit)
 }
 
 func qaSourceFetchCommand(ctx context.Context, root, repository, commit, token string) *exec.Cmd {

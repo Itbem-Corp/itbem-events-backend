@@ -9,6 +9,7 @@ import (
 	"path"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type pinnedQASourceDependency struct {
@@ -129,7 +130,7 @@ func readPinnedQASourceDependencies(ctx context.Context, root, commit string, ap
 }
 
 func safeQADependencyPath(value string) bool {
-	if value == "" || len(value) > 256 || path.IsAbs(value) || path.Clean(value) != value || strings.ContainsAny(value, "\\\r\n\t") {
+	if value == "" || len(value) > 256 || !utf8.ValidString(value) || path.IsAbs(value) || path.Clean(value) != value || strings.ContainsAny(value, "\x00\\\r\n\t") {
 		return false
 	}
 	for _, component := range strings.Split(value, "/") {
