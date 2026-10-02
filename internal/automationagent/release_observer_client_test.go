@@ -1,12 +1,55 @@
 package automationagent
 
 import (
+	"context"
 	"encoding/json"
+	"events-stocks/internal/agentwork"
 	"events-stocks/internal/environmentevidence"
 	"events-stocks/internal/releasegate"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+func TestReleaseObserverTransportSignsOnlySealedLeaseAndRun(t *testing.T) {
+	identity, instance := newTestMachineIdentity(t)
+	const run = "22222222-2222-4222-8222-222222222222"
+	called := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+			w.WriteHeader(500)
+			return
+		}
+		assertSignedCallbackRequest(t, r, body, identity, instance)
+		var payload map[string]string
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Error(err)
+		}
+		if r.Method != http.MethodPost || r.URL.Path != "/api/internal/automation/gateway/release-observation" || len(payload) != 2 || payload["lease_token"] != "sealed-lease" || payload["run_id"] != run {
+			t.Error("observer transmitted an unexpected authority or subject")
+		}
+		if r.Header.Get("X-Agent-Gateway-Token") != "synthetic-lane-token" || r.Header.Get("X-Agent-Role") != string(agentwork.RoleReleaseManager) || r.Header.Get("X-Agent-Lane") != string(agentwork.LaneRelease) {
+			t.Error("observer omitted gateway identity")
+		}
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+	callback := newTestCallbackWithIdentity(t, server, identity, instance)
+	gateway, err := NewHTTPGateway(server.URL, "synthetic-lane-token", agentwork.RoleReleaseManager, agentwork.LaneRelease, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.WithValue(context.Background(), gatewayLeaseContextKey{}, "sealed-lease")
+	_, err = callback.ObserveRelease(ctx, gateway, "11111111-1111-4111-8111-111111111111", run, json.RawMessage(`{"worker_candidate":"must-never-be-sent"}`))
+	if !called || err == nil {
+		t.Fatal("signed observation did not preserve server denial")
+	}
+}
 
 func TestReleaseObservationClientRejectsChangedSubjectAndInventedApproval(t *testing.T) {
 	const task = "11111111-1111-4111-8111-111111111111"
