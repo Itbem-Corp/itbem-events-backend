@@ -3,7 +3,6 @@ package automationagent
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"events-stocks/internal/agentwork"
 	"net/http"
 	"net/http/httptest"
@@ -74,7 +73,8 @@ func TestWorkerRunsOnboardingProbeDeterministicallyWithoutProvider(t *testing.T)
 	}
 	input, _ := json.Marshal(TaskInput{Delivery: delivery})
 	store, callback := &fakeStore{input: input, outputBucket: "acme-private-evidence"}, &fakeCallback{}
-	worker, err := NewWorker(WorkerConfig{InputBucket: "acme-private-inputs", OutputBucket: "acme-private-evidence", Role: agentwork.RoleQA, Lane: agentwork.LaneQA}, store, callback, fakeProvider{err: errors.New("provider must not be called")})
+	provider := &countingProvider{}
+	worker, err := NewWorker(WorkerConfig{InputBucket: "acme-private-inputs", OutputBucket: "acme-private-evidence", Role: agentwork.RoleQA, Lane: agentwork.LaneQA}, store, callback, provider)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,6 +88,17 @@ func TestWorkerRunsOnboardingProbeDeterministicallyWithoutProvider(t *testing.T)
 	}
 	if len(callback.updates) != 2 || callback.updates[1].Status != "completed" || !callback.updates[1].Deterministic || callback.updates[1].Provider != "" || len(callback.updates[1].Execution) == 0 {
 		t.Fatalf("deterministic completion was not reported correctly: %#v", callback.updates)
+	}
+	if provider.calls != 0 {
+		t.Fatalf("model-free QA probe invoked inference %d times", provider.calls)
+	}
+	executionRaw, err := json.Marshal(callback.updates[1].Execution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution, err := DecodeOnboardingProbeExecution(executionRaw)
+	if err != nil || execution.TaskID != message.Payload.TaskID || execution.Revision != revision || execution.ExecutorRole != "qa" {
+		t.Fatalf("worker did not return exact task/revision QA evidence: %#v / %v", execution, err)
 	}
 }
 
