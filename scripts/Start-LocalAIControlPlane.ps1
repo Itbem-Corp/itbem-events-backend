@@ -84,6 +84,8 @@ if ($hasOIDCIssuer) {
     if (-not (Test-LoopbackHostName $DatabaseHost) -or -not (Test-LoopbackHostName $redisUri.Host) -or $redisUri.Port -lt 1) {
         throw 'Local OIDC qualification requires loopback PostgreSQL and Valkey endpoints.'
     }
+    . (Join-Path $PSScriptRoot 'IsolatedQualificationEnvironment.ps1')
+    Initialize-IsolatedQualificationEnvironment
 }
 
 function Read-EnvironmentFile([string]$Path) {
@@ -305,7 +307,7 @@ Test-LocalPostgreSQL $composeFile $DatabaseUser $DatabaseName $DatabaseProbeCont
 # `workspace://` references. A production Secrets Manager ID never crosses
 # into this local launcher.
 $agentSettingsPath = Join-Path $repositoryRoot '.env.ai.local'
-if (Test-Path -LiteralPath $agentSettingsPath -PathType Leaf) {
+if (-not $hasOIDCIssuer -and (Test-Path -LiteralPath $agentSettingsPath -PathType Leaf)) {
     $agentSettings = Read-EnvironmentFile $agentSettingsPath
     foreach ($name in @('ITBEM_GITHUB_APP_ID', 'ITBEM_GITHUB_INSTALLATION_ID', 'ITBEM_GITHUB_INSTALLATION_IDS', 'ITBEM_GITHUB_APP_PRIVATE_KEY', 'ITBEM_GITHUB_APP_PRIVATE_KEY_FILE', 'ITBEM_GITHUB_API_BASE_URL', 'ITBEM_GITHUB_SOURCE_APP_ID', 'ITBEM_GITHUB_SOURCE_INSTALLATION_ID', 'ITBEM_GITHUB_SOURCE_INSTALLATION_IDS', 'ITBEM_GITHUB_SOURCE_APP_PRIVATE_KEY', 'ITBEM_GITHUB_SOURCE_APP_PRIVATE_KEY_FILE', 'ITBEM_GITHUB_SOURCE_API_BASE_URL', 'GITHUB_REVIEW_WEBHOOK_SECRET', 'GITHUB_REVIEW_REPOSITORIES', 'ITBEM_AI_WORKSPACES_JSON', 'AUTOMATION_CALLBACK_SECRET', 'AUTOMATION_ATTEMPT_POLICY_SIGNING_KEY', 'AUTOMATION_ATTEMPT_POLICY_SIGNING_KEY_PREVIOUS', 'AI_PROVIDER_CREDENTIALS_LOCAL_FILE', 'AUTOMATION_PRICING_JSON', 'AUTOMATION_PROVIDER_CATALOG_SYNC_HOURS')) {
         if (-not [string]::IsNullOrWhiteSpace($agentSettings[$name])) {
@@ -401,6 +403,7 @@ if ($RoleLanes) {
 # using the caller's normal AWS credential chain. Restore it before the API
 # process starts so user synchronization and invitation management are real.
 foreach ($name in $awsCredentialEnvironment.Keys) {
+    if ($hasOIDCIssuer) { continue }
     $value = $awsCredentialEnvironment[$name]
     if ($null -eq $value) {
         Remove-Item -Path "Env:$name" -ErrorAction SilentlyContinue
@@ -465,7 +468,7 @@ if ($RoleLanes) {
 }
 $env:AUTOMATION_INPUT_BUCKET = $inputBucket
 $env:AUTOMATION_OUTPUT_BUCKET = $outputBucket
-$env:SQS_ENDPOINT = $LocalStackEndpoint
+$env:SQS_ENDPOINT = $AwsEmulatorEndpoint
 $callbackSecret = [Environment]::GetEnvironmentVariable('AUTOMATION_CALLBACK_SECRET', 'Process')
 if ([string]::IsNullOrWhiteSpace($callbackSecret)) {
     $callbackSecret = 'local-automation-callback-secret'

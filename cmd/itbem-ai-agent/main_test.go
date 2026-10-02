@@ -11,7 +11,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -82,12 +81,18 @@ func TestMachineIdentityEnrollmentReportPersistsAndShowsOnlyPublicMaterial(t *te
 	if _, err := agentcallbackauth.DecodePublicKey(first["public_key"]); err != nil {
 		t.Fatalf("public key is not canonical base64url: %v", err)
 	}
-	encoded, err := json.Marshal(first)
-	if err != nil {
-		t.Fatal(err)
+	if _, err := uuid.FromString(first["machine_id"]); err != nil {
+		t.Fatal("enrollment machine identity is not a UUID")
 	}
-	if strings.Contains(string(encoded), "private") || strings.Contains(string(encoded), filepath.Base(stateDirectory)) {
-		t.Fatalf("enrollment output exposed non-public material: %s", encoded)
+	// Only named public fields may leave enrollment. Random UUID/key values
+	// can legitimately contain the short TempDir basename (usually "001").
+	if len(first) != 2 {
+		t.Fatal("enrollment output contains unexpected fields")
+	}
+	for key := range first {
+		if key != "machine_id" && key != "public_key" {
+			t.Fatal("enrollment output contains a non-public field")
+		}
 	}
 }
 
