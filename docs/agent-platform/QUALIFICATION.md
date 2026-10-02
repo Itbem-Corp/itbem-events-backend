@@ -32,6 +32,14 @@ terminal redelivery. This proves the release transport chain against synthetic
 approved policy/publication/QA evidence; it does not qualify the full five-role
 workflow, actual QA tool execution or live production release.
 
+The QA worker refreshes its live authority before commands and during running
+validation, QA, screenshot and semantic-capture stages. Each heartbeat is
+bounded to five seconds and revocation or refresh failure cancels the stage's
+context. The command runner terminates its process group on cancellation. A
+Linux fixture verifies that a running command and its child stop on revocation;
+the existing VM/container teardown contracts still require their own lifecycle
+qualification. Source provisioning on an independent QA host remains pending.
+
 The local qualifier first initializes only the repository's declared Git
 submodules at their committed gitlinks. This makes a clean worktree test the
 same pinned source graph as CI without naming a product or repository in the
