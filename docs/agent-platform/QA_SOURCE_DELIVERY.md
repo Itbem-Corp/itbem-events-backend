@@ -18,6 +18,12 @@ count and acquisition timestamp. A repeated identical acquisition is idempotent;
 a different package cannot replace the original receipt. This proves server
 acquisition provenance, not completion of the worker's QA commands.
 
+New published QA tasks freeze `QASourceReceiptRequired=true` when created.
+Their completed callback must cover exactly the source receipts for the same
+matrix, workspace branches and enrolled instance. Recovery verifies receipts
+against the original run ID. Authorized retries preserve this requirement.
+Historical sealed tasks default to false and are not retroactively changed.
+
 The response contains a Git pack and bounded metadata binding task, run, revision
 matrix, workspace, repository, branch, original commit SHA and pack SHA-256. The
 client compares these fields with the frozen input and registered workspace before
@@ -57,8 +63,8 @@ acquisition is independently tested. Worker flow fixtures use a synthetic
 provider and callback, and create no production invoice or release authority.
 
 These fixtures do not certify the entire production worker and ledger chain.
-Current production Source App readiness, binding acquisition receipts to the
-completed QA callback, full independent worker callback/ledger recovery, and pinned submodule source
+Current production Source App readiness, full independent worker callback/ledger
+recovery, and pinned submodule source
 delivery remain required work. In particular, repositories with gitlinks such as
 the backend's `.contracts` are not yet supported by this acquisition path.
 

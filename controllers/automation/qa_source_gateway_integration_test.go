@@ -24,6 +24,7 @@ import (
 	"events-stocks/internal/agentcallbackauth"
 	"events-stocks/internal/agentwork"
 	"events-stocks/internal/automationagent"
+	"events-stocks/internal/qaevidence"
 	"events-stocks/internal/releasegate"
 	"events-stocks/models"
 	"github.com/gofrs/uuid"
@@ -176,6 +177,16 @@ func TestQASourceSignedGatewayBindsPostgresAuthorityAndIndependentCheckout(t *te
 	subject := qaSourceSubject{Reference: "workspace://repo", Repository: "example/service", Branch: branch, SHA: head}
 	require.NoError(t, recordServerQASourceReceipt(db, &currentTask, opened, identity, actor, subject, packDigest, int64(len(pack)), time.Now().UTC()), "same exact receipt should be idempotent")
 	require.Error(t, recordServerQASourceReceipt(db, &currentTask, opened, identity, actor, subject, strings.Repeat("f", 64), int64(len(pack)), time.Now().UTC()), "a different pack must not replace provenance")
+	observation := qaevidence.Observation{SchemaVersion: qaevidence.SchemaVersion, TaskID: taskID.String(), MatrixDigest: matrix, PreviewPassed: true, RepositoryExecutionOrder: []string{"workspace://repo"}, Repositories: []qaevidence.Repository{{Reference: "workspace://repo", Branch: branch, Commands: []qaevidence.Command{{Index: 0, Phase: "validation", Kind: "unit", Passed: true}}}}}
+	observationRaw, err := json.Marshal(observation)
+	require.NoError(t, err)
+	require.NoError(t, verifyServerQASourceReceipts(db, &currentTask, run, instance, observationRaw))
+	require.Error(t, verifyServerQASourceReceipts(db, &currentTask, uuid.Must(uuid.NewV4()).String(), instance, observationRaw), "another run cannot borrow acquisition provenance")
+	require.Error(t, verifyServerQASourceReceipts(db, &currentTask, run, uuid.Must(uuid.NewV4()), observationRaw), "another instance cannot borrow acquisition provenance")
+	observation.Repositories[0].Branch = "itbem-agent/" + uuid.Must(uuid.NewV4()).String()
+	changedRaw, err := json.Marshal(observation)
+	require.NoError(t, err)
+	require.Error(t, verifyServerQASourceReceipts(db, &currentTask, run, instance, changedRaw), "callback branch must match source acquisition")
 	captureMutex.Lock()
 	replayBody := append([]byte(nil), capturedBody...)
 	replayHeaders := capturedHeader.Clone()

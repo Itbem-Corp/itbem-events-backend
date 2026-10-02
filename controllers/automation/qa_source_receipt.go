@@ -1,14 +1,47 @@
 package automation
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 
+	"events-stocks/internal/qaevidence"
 	"events-stocks/models"
 	"github.com/gofrs/uuid"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
+
+func verifyServerQASourceReceipts(db *gorm.DB, task *models.AutomationTask, run string, instance uuid.UUID, raw json.RawMessage) error {
+	if db == nil || task == nil || task.Operation != "delivery.qa" || !validUUIDRun(run) || instance == uuid.Nil {
+		return fmt.Errorf("QA source provenance identity invalid")
+	}
+	observation, err := qaevidence.Decode(raw)
+	if err != nil || observation.TaskID != task.ID.String() || observation.MatrixDigest != task.EvidenceSubjectDigest {
+		return fmt.Errorf("QA source provenance subject changed")
+	}
+	var receipts []models.AutomationQASourceReceipt
+	if err := db.Where("task_id = ? AND run_id = ?", task.ID, run).Find(&receipts).Error; err != nil {
+		return err
+	}
+	if len(receipts) != len(observation.Repositories) {
+		return fmt.Errorf("QA source provenance matrix incomplete")
+	}
+	seen := map[string]bool{}
+	for _, repository := range observation.Repositories {
+		matches := 0
+		for _, receipt := range receipts {
+			if receipt.Reference == repository.Reference && receipt.Branch == repository.Branch && receipt.AgentInstanceID == instance && receipt.MatrixDigest == task.EvidenceSubjectDigest && artifactDigestPattern.MatchString(receipt.PackSHA256) && receipt.PackBytes >= 12 && receipt.PackBytes <= 64<<20 {
+				matches++
+			}
+		}
+		if matches != 1 || seen[repository.Reference] {
+			return fmt.Errorf("QA source provenance does not match the original acquisition")
+		}
+		seen[repository.Reference] = true
+	}
+	return nil
+}
 
 func recordServerQASourceReceipt(db *gorm.DB, expected *models.AutomationTask, lease gatewayLease, gateway gatewayIdentity, actor authenticatedAgentCallback, subject qaSourceSubject, packDigest string, packBytes int64, now time.Time) error {
 	if db == nil || expected == nil || expected.ID == uuid.Nil || !validUUIDRun(expected.RunID) || !artifactDigestPattern.MatchString(packDigest) || packBytes < 12 || packBytes > 64<<20 || len(subject.Reference) > 256 || now.IsZero() {

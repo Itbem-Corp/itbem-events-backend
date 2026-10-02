@@ -3081,6 +3081,15 @@ func Complete(c echo.Context) error {
 			return utils.Error(c, http.StatusBadRequest, "Invalid release observation", "release evidence must match the server observation for this task and run")
 		}
 	}
+	if task.Operation == "delivery.qa" && task.QASourceReceiptRequired && request.Status == "completed" {
+		actor, authenticated := requireAgentCallbackIdentity(c)
+		if !authenticated {
+			return nil
+		}
+		if err := verifyServerQASourceReceipts(configuration.DB, &task, ledgerRunID, actor.InstanceID, request.Execution); err != nil {
+			return utils.Error(c, http.StatusBadRequest, "Invalid QA source provenance", "QA evidence must match source receipts for its original run and enrolled instance")
+		}
+	}
 	if task.Operation == "delivery.onboarding_probe" && request.Status == "completed" && (!request.Deterministic || len(request.Execution) == 0) {
 		return utils.Error(c, http.StatusBadRequest, "Invalid automation result", "onboarding probe completion requires deterministic execution evidence")
 	}
@@ -5246,17 +5255,18 @@ func newStrandedGitHubReviewRecovery(original *models.AutomationTask, now time.T
 		return nil, fmt.Errorf("queued GitHub review recovery boundary is invalid")
 	}
 	return &models.AutomationTask{
-		ID:                    uuid.Must(uuid.NewV4()),
-		JobID:                 uuid.Must(uuid.NewV4()),
-		RequestedBy:           original.RequestedBy,
-		DeliveryWorkItemID:    original.DeliveryWorkItemID,
-		DeliveryOnboardingID:  original.DeliveryOnboardingID,
-		CorrelationID:         original.CorrelationID,
-		Operation:             original.Operation,
-		EvidenceSubjectDigest: strings.ToLower(strings.TrimSpace(original.EvidenceSubjectDigest)),
-		MaxCompletionTokens:   original.MaxCompletionTokens,
-		InputRef:              original.InputRef,
-		Status:                "queued",
+		ID:                      uuid.Must(uuid.NewV4()),
+		JobID:                   uuid.Must(uuid.NewV4()),
+		RequestedBy:             original.RequestedBy,
+		DeliveryWorkItemID:      original.DeliveryWorkItemID,
+		DeliveryOnboardingID:    original.DeliveryOnboardingID,
+		CorrelationID:           original.CorrelationID,
+		Operation:               original.Operation,
+		EvidenceSubjectDigest:   strings.ToLower(strings.TrimSpace(original.EvidenceSubjectDigest)),
+		QASourceReceiptRequired: original.QASourceReceiptRequired,
+		MaxCompletionTokens:     original.MaxCompletionTokens,
+		InputRef:                original.InputRef,
+		Status:                  "queued",
 	}, nil
 }
 
@@ -5385,16 +5395,17 @@ func newCodeReviewRetryTask(original *models.AutomationTask) (*models.Automation
 		return nil, fmt.Errorf("code review retry boundary is invalid")
 	}
 	return &models.AutomationTask{
-		ID:                    uuid.Must(uuid.NewV4()),
-		JobID:                 uuid.Must(uuid.NewV4()),
-		RequestedBy:           original.RequestedBy,
-		DeliveryWorkItemID:    original.DeliveryWorkItemID,
-		CorrelationID:         original.CorrelationID,
-		Operation:             original.Operation,
-		EvidenceSubjectDigest: strings.ToLower(strings.TrimSpace(original.EvidenceSubjectDigest)),
-		MaxCompletionTokens:   original.MaxCompletionTokens,
-		InputRef:              original.InputRef,
-		Status:                "queued",
+		ID:                      uuid.Must(uuid.NewV4()),
+		JobID:                   uuid.Must(uuid.NewV4()),
+		RequestedBy:             original.RequestedBy,
+		DeliveryWorkItemID:      original.DeliveryWorkItemID,
+		CorrelationID:           original.CorrelationID,
+		Operation:               original.Operation,
+		EvidenceSubjectDigest:   strings.ToLower(strings.TrimSpace(original.EvidenceSubjectDigest)),
+		QASourceReceiptRequired: original.QASourceReceiptRequired,
+		MaxCompletionTokens:     original.MaxCompletionTokens,
+		InputRef:                original.InputRef,
+		Status:                  "queued",
 	}, nil
 }
 

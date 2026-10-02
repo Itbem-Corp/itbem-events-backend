@@ -733,6 +733,7 @@ func enqueueAgentRun(c echo.Context, workItemID uuid.UUID, requestedBy string, r
 	}
 	inputRef := "s3://" + cfg.AutomationInputBucket + "/" + inputKey
 	task := &models.AutomationTask{ID: taskID, JobID: jobID, RequestedBy: requestedBy, DeliveryWorkItemID: &item.ID, CorrelationID: item.ID.String(), Operation: spec.operation, EvidenceSubjectDigest: evidenceSubjectDigest, MaxCompletionTokens: maxCompletionTokens, InputRef: inputRef, Status: "queued"}
+	task.QASourceReceiptRequired = spec.operation == "delivery.qa" && evidenceSubjectDigest != ""
 	if continuation != nil {
 		task.ContinuationID = &continuation.ID
 	}
