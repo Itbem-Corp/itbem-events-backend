@@ -1,0 +1,29 @@
+name: Harness runner evidence
+
+on:
+  pull_request:
+    paths:
+      - scripts/Test-AgentHarness.ps1
+      - scripts/Test-AgentHarnessIsolation.ps1
+      - .github/workflows/harness-runner.yml
+  push:
+    branches: [main]
+    paths:
+      - scripts/Test-AgentHarness.ps1
+      - scripts/Test-AgentHarnessIsolation.ps1
+      - .github/workflows/harness-runner.yml
+
+permissions:
+  contents: read
+
+jobs:
+  evidence:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - name: Verify offline isolation and fail-closed evidence
+        shell: powershell
+        run: ./scripts/Test-AgentHarnessIsolation.ps1

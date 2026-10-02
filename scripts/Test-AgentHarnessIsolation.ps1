@@ -51,6 +51,7 @@ try {
     $null = New-Item -ItemType Directory -Path $scriptRoot -Force
     $null = New-Item -ItemType Directory -Path $fakeBin -Force
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Test-AgentHarness.ps1') -Destination (Join-Path $scriptRoot 'Test-AgentHarness.ps1')
+    Set-Content -LiteralPath (Join-Path $backendRoot 'go.mod') -Value 'module harness-fixture'
 
     $goLines = @('@echo off')
     for ($index = 0; $index -lt $allProbeNames.Count; $index++) {
@@ -58,7 +59,14 @@ try {
         $name = $allProbeNames[$index]
         $goLines += $redirect + '"%ITBEM_AGENT_HARNESS_CAPTURE%" echo ' + $name + '=%' + $name + '%'
     }
-    $goLines += @('echo {"Action":"pass"}', 'exit /b 0')
+    $captureLines = @($goLines)
+    $fixturePackages = @('internal/automationagent','controllers/delivery','controllers/automation','services/automationcost','services/deliveryworkflow','internal/runtimeroute')
+    foreach ($package in $fixturePackages) {
+        $goLines += 'echo {"Action":"pass","Package":"harness-fixture/' + $package + '","Test":"TestExecuted"}'
+        $goLines += 'echo {"Action":"pass","Package":"harness-fixture/' + $package + '"}'
+    }
+    $successfulLines = @($goLines)
+    $goLines += 'exit /b 0'
     [IO.File]::WriteAllLines((Join-Path $fakeBin 'go.cmd'), [string[]]$goLines, [Text.Encoding]::ASCII)
 
     $isolatedCapture = Join-Path $testRoot 'offline-child-environment.txt'
@@ -77,6 +85,24 @@ try {
         throw 'Offline child received a synthetic provider sentinel.'
     }
 
+    $invalidStreams = [ordered]@{
+        empty = @()
+        missingPackage = @('echo {"Action":"pass"}')
+        truncated = @($successfulLines | Select-Object -SkipLast 1)
+        noExecutedTests = @($successfulLines | Where-Object { $_ -notmatch 'TestExecuted' })
+        failedTest = @($successfulLines) + @('echo {"Action":"fail","Package":"harness-fixture/internal/automationagent","Test":"TestFailure"}')
+        duplicateTerminal = @($successfulLines) + @('echo {"Action":"pass","Package":"harness-fixture/internal/automationagent"}')
+        malformed = @('echo malformed-json')
+    }
+    foreach ($streamName in $invalidStreams.Keys) {
+        $invalidStream = $invalidStreams[$streamName]
+        $invalidLines = @($captureLines) + @($invalidStream) + @('exit /b 0')
+        [IO.File]::WriteAllLines((Join-Path $fakeBin 'go.cmd'), [string[]]$invalidLines, [Text.Encoding]::ASCII)
+        $invalidCapture = Join-Path $testRoot ([guid]::NewGuid().ToString('N') + '.txt')
+        $invalid = Invoke-HarnessChild -HarnessArguments @() -CapturePath $invalidCapture
+        if ($invalid.ExitCode -eq 0) { throw "Invalid test stream '$streamName' was accepted despite exit zero." }
+    }
+
     foreach ($legacyArguments in @(@('-LiveMiniMax'), @('-LiveProvider','openai'))) {
         $legacyCapture = Join-Path $testRoot ([guid]::NewGuid().ToString('N') + '.txt')
         $legacy = Invoke-HarnessChild -HarnessArguments $legacyArguments -CapturePath $legacyCapture
@@ -85,7 +111,7 @@ try {
         }
     }
 
-    'Offline child provider environment scrubbed; retired live selectors failed before Go launch.'
+    'Offline child environment scrubbed; incomplete test evidence rejected; retired live selectors failed before Go launch.'
 } finally {
     if (Test-Path -LiteralPath $testRoot -PathType Container) {
         $resolvedRoot = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $testRoot).Path)
