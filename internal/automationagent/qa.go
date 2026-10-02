@@ -1413,6 +1413,10 @@ func readSafeWorkspaceArtifact(root, path string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("evidence root is invalid")
 	}
+	rootInfo, err := os.Lstat(root)
+	if err != nil || !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("evidence root must be a real directory")
+	}
 	path, err = filepath.Abs(path)
 	if err != nil {
 		return nil, fmt.Errorf("evidence artifact is invalid")
@@ -1421,11 +1425,43 @@ func readSafeWorkspaceArtifact(root, path string) ([]byte, error) {
 	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		return nil, fmt.Errorf("evidence artifact is outside the registered workspace")
 	}
+	for _, component := range strings.Split(filepath.ToSlash(relative), "/") {
+		if sandboxWorktreeCredential(component) || sandboxWorktreeExcluded(component) {
+			return nil, fmt.Errorf("evidence artifact contains a restricted authority path")
+		}
+	}
 	info, err := os.Lstat(path)
-	if err != nil || info.Mode()&os.ModeSymlink != 0 {
+	if err != nil || !info.Mode().IsRegular() || info.Size() > maxQAArtifactBytes {
 		return nil, fmt.Errorf("evidence artifact must be a regular local file")
 	}
-	return readLocalArtifact(path)
+	allowed := map[string]bool{".png": true, ".jpg": true, ".jpeg": true, ".webp": true, ".mp4": true, ".webm": true, ".json": true, ".txt": true}
+	if !allowed[strings.ToLower(filepath.Ext(path))] {
+		return nil, fmt.Errorf("evidence artifact type is not allowed")
+	}
+	confined, err := os.OpenRoot(root)
+	if err != nil {
+		return nil, fmt.Errorf("evidence root is unavailable")
+	}
+	defer confined.Close()
+	openedRoot, err := confined.Stat(".")
+	if err != nil || !os.SameFile(rootInfo, openedRoot) {
+		return nil, fmt.Errorf("evidence root changed before reading")
+	}
+	file, err := openSandboxSourceFile(confined, relative)
+	if err != nil {
+		return nil, fmt.Errorf("evidence artifact cannot be opened within its workspace")
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) || opened.Size() != info.Size() {
+		return nil, fmt.Errorf("evidence artifact changed before reading")
+	}
+	body, err := io.ReadAll(io.LimitReader(file, maxQAArtifactBytes+1))
+	after, statErr := file.Stat()
+	if err != nil || statErr != nil || int64(len(body)) != opened.Size() || len(body) > maxQAArtifactBytes || after.Size() != opened.Size() || !after.ModTime().Equal(opened.ModTime()) {
+		return nil, fmt.Errorf("evidence artifact changed or exceeds the size limit")
+	}
+	return body, nil
 }
 
 func readLocalArtifact(path string) ([]byte, error) {
