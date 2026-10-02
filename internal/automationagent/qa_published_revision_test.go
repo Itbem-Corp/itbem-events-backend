@@ -102,4 +102,23 @@ func TestPublishedQATargetRequiresExactCleanCommitAndRejectsUntrackedSource(t *t
 	if _, err := qaPublishedMatrixDigest(context.Background(), matrixPayload([]releasegate.Revision{revision}), nil); err == nil {
 		t.Fatal("omitted repository accepted")
 	}
+	var current map[string]any
+	if err := json.Unmarshal(matrixPayload([]releasegate.Revision{revision}), &current); err != nil {
+		t.Fatal(err)
+	}
+	changes := current["change_sets"].([]any)
+	changes[0].(map[string]any)["review_type"] = "pull_request"
+	changes[0].(map[string]any)["ci_status"] = "passed"
+	current["change_sets"] = append([]any{
+		map[string]any{"repository_ref": "workspace://repo", "branch": branch, "review_type": "local_worktree", "ci_status": "passed"},
+		map[string]any{"repository_ref": "workspace://repo", "branch": branch, "review_type": "pull_request", "ci_status": "passed", "commit_sha": strings.Repeat("b", 40), "metadata": map[string]string{"remote_repository": revision.Repository, "target_branch": "main"}},
+	}, changes...)
+	raw, err := json.Marshal(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, err := deliveryQATargets(raw, lookup)
+	if err != nil || len(selected) != 1 || selected[0].reviewCommitSHA != revision.SHA {
+		t.Fatalf("historical records shadowed frozen revision: %#v %v", selected, err)
+	}
 }

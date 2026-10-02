@@ -474,6 +474,13 @@ func deliveryQATargets(delivery json.RawMessage, lookup func(string) string) ([]
 
 func deliveryQATargetsWithContext(ctx context.Context, delivery json.RawMessage, lookup func(string) string) ([]qaTarget, error) {
 	var input struct {
+		Gatekeeper *struct {
+			Revisions []struct {
+				Repository string `json:"repository"`
+				Branch     string `json:"branch"`
+				SHA        string `json:"sha"`
+			} `json:"revisions"`
+		} `json:"gatekeeper"`
 		ChangeSets []struct {
 			RepositoryRef string `json:"repository_ref"`
 			Branch        string `json:"branch"`
@@ -481,6 +488,8 @@ func deliveryQATargetsWithContext(ctx context.Context, delivery json.RawMessage,
 			CIStatus      string `json:"ci_status"`
 			CommitSHA     string `json:"commit_sha"`
 			Metadata      struct {
+				RemoteRepository   string `json:"remote_repository"`
+				TargetBranch       string `json:"target_branch"`
 				BaseSHA            string `json:"base_sha"`
 				ReviewDiffSHA256   string `json:"review_diff_sha256"`
 				ReviewSourceSHA256 string `json:"review_source_sha256"`
@@ -496,6 +505,9 @@ func deliveryQATargetsWithContext(ctx context.Context, delivery json.RawMessage,
 		return nil, err
 	}
 	if input.ChangeSets == nil {
+		if input.Gatekeeper != nil {
+			return nil, fmt.Errorf("published QA matrix requires change sets")
+		}
 		// Compatibility for legacy work items that predate immutable change-set
 		// delivery context. New control-plane runs always include a matrix.
 		workspace, err := deliveryRepositoryWorkspace(delivery, lookup)
@@ -508,6 +520,19 @@ func deliveryQATargetsWithContext(ctx context.Context, delivery json.RawMessage,
 	seen := map[string]struct{}{}
 	for _, change := range input.ChangeSets {
 		published := strings.EqualFold(strings.TrimSpace(change.ReviewType), "pull_request")
+		if input.Gatekeeper != nil {
+			// Historical local or older published handoffs must not shadow the
+			// exact immutable revision selected by the server for this task.
+			matches := false
+			for _, revision := range input.Gatekeeper.Revisions {
+				if published && strings.EqualFold(change.Metadata.RemoteRepository, revision.Repository) && change.Metadata.TargetBranch == revision.Branch && strings.EqualFold(change.CommitSHA, revision.SHA) {
+					matches = true
+				}
+			}
+			if !matches {
+				continue
+			}
+		}
 		if (!published && !strings.EqualFold(strings.TrimSpace(change.ReviewType), "local_worktree")) || !strings.EqualFold(strings.TrimSpace(change.CIStatus), "passed") {
 			continue
 		}
