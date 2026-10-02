@@ -49,6 +49,9 @@ run "server preserves the reviewed source manifest" \
 run "QA evidence cannot escape through ancestor symlinks" \
   go test ./internal/automationagent -run 'TestQAArtifactReadsConfineAncestorLinksAndAuthorityPaths$' -count=1
 
+run "QA worker preserves source authority and replays without new inference" \
+  go test ./internal/automationagent -run 'TestQAWorkerPreservesReviewedManifestAndRejectsNewSourceBeforeInference$' -count=1
+
 run "model-free QA worker with exact-revision evidence" \
   go test ./internal/automationagent -run 'TestWorkerRunsOnboardingProbeDeterministicallyWithoutProvider$' -count=1
 
