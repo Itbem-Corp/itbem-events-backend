@@ -74,6 +74,8 @@ try {
     $env:ITBEM_AGENT_LIVE_EVAL = '0'
     foreach ($name in $providerEnvironmentNames) { [Environment]::SetEnvironmentVariable($name,'','Process') }
     $offlinePath = Join-Path $reportDirectory 'offline.jsonl'
+    $null = New-Item -ItemType File -Path $offlinePath
+    $harnessPackages = @('internal/automationagent','controllers/delivery','controllers/automation','services/automationcost','services/deliveryworkflow','internal/runtimeroute')
     & $goCommand test ./internal/automationagent ./controllers/delivery ./controllers/automation ./services/automationcost ./services/deliveryworkflow ./internal/runtimeroute -shuffle=49207 -count=3 -timeout 180s -json 2>&1 | Tee-Object -FilePath $offlinePath
     $testExit = $LASTEXITCODE
     $semanticExit = 0
@@ -86,6 +88,26 @@ try {
             if (-not $_.Trim()) { return }
             $_ | ConvertFrom-Json -ErrorAction Stop
         })
+        # Exit zero alone cannot prove execution: require one terminal pass
+        # and at least one executed test for every requested package. A
+        # truncated, empty, skipped-only or unexpected stream fails closed.
+        if ($offlineRows.Count -eq 0) { throw 'Empty harness test stream.' }
+        $moduleLine = @(Get-Content -LiteralPath (Join-Path $repoRoot 'go.mod') | Where-Object { $_ -match '^module\s+\S+\s*$' })
+        if ($moduleLine.Count -ne 1) { throw 'Cannot identify harness module.' }
+        $moduleName = ($moduleLine[0] -replace '^module\s+', '').Trim()
+        $expectedPackages = @($harnessPackages | ForEach-Object { $moduleName + '/' + $_ })
+        foreach ($row in $offlineRows) {
+            if ($row.Package -notin $expectedPackages -or $row.Action -notin @('start','run','pause','cont','pass','fail','skip','output','bench')) {
+                throw 'Unexpected harness test event or package.'
+            }
+        }
+        foreach ($package in $expectedPackages) {
+            $terminalRows = @($offlineRows | Where-Object { $_.Package -eq $package -and -not $_.Test -and $_.Action -in @('pass','fail','skip') })
+            $executedTests = @($offlineRows | Where-Object { $_.Package -eq $package -and $_.Test -and $_.Action -eq 'pass' })
+            if ($terminalRows.Count -ne 1 -or $terminalRows[0].Action -ne 'pass' -or $executedTests.Count -eq 0) {
+                throw "Missing successful execution evidence for $package."
+            }
+        }
         $offlineSummary = [ordered]@{
             pass = @($offlineRows | Where-Object Action -eq 'pass').Count
             fail = @($offlineRows | Where-Object Action -eq 'fail').Count
