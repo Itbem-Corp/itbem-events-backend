@@ -75,8 +75,7 @@ try {
     foreach ($name in $providerEnvironmentNames) { [Environment]::SetEnvironmentVariable($name,'','Process') }
     $offlinePath = Join-Path $reportDirectory 'offline.jsonl'
     $harnessPackages = @('internal/automationagent','controllers/delivery','controllers/automation','services/automationcost','services/deliveryworkflow','internal/runtimeroute')
-    $packageArguments = @($harnessPackages | ForEach-Object { './' + $_ })
-    & $goCommand test @packageArguments -shuffle=49207 -count=3 -timeout 180s -json 2>&1 | Tee-Object -FilePath $offlinePath
+    & $goCommand test ./internal/automationagent ./controllers/delivery ./controllers/automation ./services/automationcost ./services/deliveryworkflow ./internal/runtimeroute -shuffle=49207 -count=3 -timeout 180s -json 2>&1 | Tee-Object -FilePath $offlinePath
     $testExit = $LASTEXITCODE
     $semanticExit = 0
     # Keep the operator-facing result aligned with the auditable JSONL. The
