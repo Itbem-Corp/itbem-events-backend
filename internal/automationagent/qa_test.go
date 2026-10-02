@@ -729,7 +729,7 @@ func TestRunQARefreshesCapabilityAfterRepositoryCommandsBeforeStagehand(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(order), "qa-command\nrefresh\nstagehand\n"; got != want {
+	if got, want := string(order), "refresh\nqa-command\nrefresh\nstagehand\n"; got != want {
 		t.Fatalf("capability must refresh after repository QA and immediately before Stagehand; got %q, want %q", got, want)
 	}
 	observedCapability, err := os.ReadFile(fixture.capabilityPath)
@@ -751,9 +751,14 @@ func TestRunQADoesNotStartStagehandWhenCapabilityRefreshFailsOrIsRejected(t *tes
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newStagehandCapabilityRefreshFixture(t)
 			installGatewayTestCapability(t, fixture.taskID, fixture.runID, inferencecapability.OperationDeliveryQA)
+			refreshCalls := 0
 			_, _, err := runQAWithCapabilityRefresh(context.Background(), fixture.taskID, fixture.runID, fixture.delivery, fixture.lookup, func(context.Context) (bool, error) {
+				refreshCalls++
 				if err := appendRefreshOrder(fixture.orderPath); err != nil {
 					return false, err
+				}
+				if refreshCalls == 1 {
+					return true, nil
 				}
 				return test.accepted, test.cause
 			})
@@ -769,7 +774,7 @@ func TestRunQADoesNotStartStagehandWhenCapabilityRefreshFailsOrIsRejected(t *tes
 				t.Fatalf("refresh error must be preserved for retry, got %v", err)
 			}
 			order, readErr := os.ReadFile(fixture.orderPath)
-			if readErr != nil || string(order) != "qa-command\nrefresh\n" {
+			if readErr != nil || string(order) != "refresh\nqa-command\nrefresh\n" {
 				t.Fatalf("Stagehand must not start after a failed/rejected refresh: order=%q err=%v", order, readErr)
 			}
 			if _, statErr := os.Stat(fixture.capabilityPath); !errors.Is(statErr, os.ErrNotExist) {
@@ -786,6 +791,50 @@ type stagehandCapabilityRefreshFixture struct {
 	lookup         func(string) string
 	orderPath      string
 	capabilityPath string
+}
+
+func TestQAStopsBetweenCommandsWhenTaskAuthorityIsRevoked(t *testing.T) {
+	fixture := newStagehandCapabilityRefreshFixture(t)
+	var registry map[string]WorkspaceConfig
+	if err := json.Unmarshal([]byte(fixture.lookup("ITBEM_AI_WORKSPACES_JSON")), &registry); err != nil {
+		t.Fatal(err)
+	}
+	for id, config := range registry {
+		if len(config.QACommands) != 1 {
+			t.Fatal("fixture must contain exactly one QA command")
+		}
+		config.QACommands = append(config.QACommands, config.QACommands[0])
+		registry[id] = config
+	}
+	raw, err := json.Marshal(registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lookup := func(key string) string {
+		if key == "ITBEM_AI_WORKSPACES_JSON" {
+			return string(raw)
+		}
+		return fixture.lookup(key)
+	}
+	calls := 0
+	result, _, err := runQAWithCapabilityRefresh(context.Background(), fixture.taskID, fixture.runID, fixture.delivery, lookup, func(context.Context) (bool, error) {
+		calls++
+		if err := appendRefreshOrder(fixture.orderPath); err != nil {
+			return false, err
+		}
+		return calls == 1, nil
+	})
+	if !errors.Is(err, errQACapabilityNotAccepted) {
+		t.Fatalf("revocation was not propagated: %v", err)
+	}
+	order, readErr := os.ReadFile(fixture.orderPath)
+	if readErr != nil || string(order) != "refresh\nqa-command\nrefresh\n" || calls != 2 {
+		t.Fatalf("another command ran after revocation: %q / %v", order, readErr)
+	}
+	runs := result["repository_runs"].([]any)
+	if len(runs) != 1 || len(runs[0].(map[string]any)["commands"].([]any)) != 1 {
+		t.Fatalf("partial execution evidence lost: %#v", result)
+	}
 }
 
 func newStagehandCapabilityRefreshFixture(t *testing.T) stagehandCapabilityRefreshFixture {
