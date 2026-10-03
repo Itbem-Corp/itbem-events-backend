@@ -41,3 +41,11 @@ the authorized sandbox. Admission creates tasks; it does not execute generated
 source or certify implementation correctness. Screening/cache scorers do not
 score this distinct corpus. A single case can describe a pilot result only; it
 cannot establish general software engineering model quality.
+
+`scripts/prepare_implementation_candidate.py` prepares the two validated source
+files with the evaluator-owned module and oracle. Its `expected_worktree_digest`
+uses the same versioned byte manifest as the sandbox, with explicit non-executable
+0644 file modes. An execution must match that digest before its result can be
+associated with this package. Changes to candidate bytes, oracle bytes, execution
+bits or the file inventory change the binding. Preparation alone does not prove
+execution, authenticate a provider response or measure implementation correctness.
