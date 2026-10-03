@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"unicode"
 )
 
 // Go's struct decoder accepts repeated keys and case-insensitive field aliases.
@@ -37,7 +38,17 @@ func validateJSONIntegrity(payload []byte) error {
 				if !ok {
 					return fmt.Errorf("QA JSON object key is invalid")
 				}
-				normalized := strings.ToLower(key)
+				// Lowercasing misses Unicode aliases such as long s and Kelvin K.
+				// Canonicalize the complete SimpleFold cycle, matching EqualFold.
+				normalized := strings.Map(func(r rune) rune {
+					minimum := r
+					for alias := unicode.SimpleFold(r); alias != r; alias = unicode.SimpleFold(alias) {
+						if alias < minimum {
+							minimum = alias
+						}
+					}
+					return minimum
+				}, key)
 				if seen[normalized] {
 					return fmt.Errorf("QA JSON object contains a duplicate or case-aliased field")
 				}

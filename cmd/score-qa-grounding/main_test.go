@@ -31,6 +31,7 @@ func TestScoreRetainsGroundedAndFailedEvidence(t *testing.T) {
 		{"malformed", "not-json", false},
 		{"duplicate-result", strings.Replace(valid, `"passed":false`, `"passed":true,"passed":false`, 1), false},
 		{"case-aliased-result", strings.Replace(valid, `"passed":false`, `"PASSED":true,"passed":false`, 1), false},
+		{"unicode-aliased-result", strings.Replace(valid, `"passed":false`, `"pa\u017f\u017fed":true,"passed":false`, 1), false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			output := filepath.Join(root, test.name+"-score.json")

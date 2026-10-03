@@ -18,6 +18,8 @@ func TestJSONIntegrityRejectsAmbiguousObjects(t *testing.T) {
 	for _, input := range []string{
 		`{"passed":false,"passed":true}`,
 		`{"passed":false,"PASSED":true}`,
+		`{"passed":false,"pa\u017f\u017fed":true}`,
+		`{"kind":"unit","\u212aind":"security"}`,
 		`{"passed":false,"p\u0061ssed":true}`,
 		`{"commands":[{"index":0,"index":1}]}`,
 		`{"outer":{"passed":false,"passed":true}}`,
