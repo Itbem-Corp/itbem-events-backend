@@ -105,3 +105,32 @@ func TestScoreRetainsGroundedAndFailedEvidence(t *testing.T) {
 		t.Fatal("oversize input accepted")
 	}
 }
+
+func TestVersionedGroundingFixtures(t *testing.T) {
+	fixture := filepath.Join("..", "..", "internal", "qaevidence", "testdata", "grounding")
+	for _, test := range []struct {
+		name string
+		exit int
+	}{{"grounded", 0}, {"invented", 1}} {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			exit := run([]string{"-observation", filepath.Join(fixture, "observation.json"), "-claims", filepath.Join(fixture, test.name+"-claims.json")}, &stdout, &stderr)
+			if exit != test.exit {
+				t.Fatalf("exit=%d, stderr=%s", exit, stderr.String())
+			}
+			var score struct {
+				Passed bool     `json:"passed"`
+				Errors []string `json:"errors"`
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &score); err != nil {
+				t.Fatal(err)
+			}
+			if score.Passed != (test.exit == 0) {
+				t.Fatal("fixture score changed")
+			}
+			if test.name == "invented" && (len(score.Errors) != 1 || !strings.Contains(score.Errors[0], "unknown or duplicated")) {
+				t.Fatal("invented fixture failed for an unrelated reason")
+			}
+		})
+	}
+}

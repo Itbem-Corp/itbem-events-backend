@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "task_id": "a4a4b837-2e18-43af-9f58-6d59629db2bb",
+  "matrix_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "preview_passed": true,
+  "verdict": "failed",
+  "commands": [
+    {"reference": "workspace://invented", "index": 0, "phase": "validation", "kind": "unit", "passed": true},
+    {"reference": "workspace://repo", "index": 1, "phase": "qa", "kind": "security", "passed": false}
+  ]
+}
