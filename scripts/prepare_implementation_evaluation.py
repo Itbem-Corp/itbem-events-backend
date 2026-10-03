@@ -22,7 +22,7 @@ TASK = ('Repair this Go pagination package. Pages are one-based; page < 1 defaul
 def prepare():
     raw = {name: (CASE / 'fixture' / name).read_bytes()
            for name in ['go.mod'] + EDITABLE}
-    source = {name: value.decode('utf-8') for name, value in raw.items()}
+    source = {name: value.decode('utf-8').replace('\r\n', '\n') for name, value in raw.items()}
     prompt = TASK + '\n\nSupplied source (JSON):\n' + json.dumps(source, sort_keys=True, ensure_ascii=False)
     return {'schema_version': 1, 'case_version': 'pagination-v1',
             'status': 'prepared_not_executed', 'model_quality_measured': False,
@@ -30,7 +30,9 @@ def prepare():
             'candidate_execution': 'authorized_isolated_sandbox_only',
             'editable_files': EDITABLE, 'prompt': prompt,
             'prompt_sha256': hashlib.sha256(prompt.encode('utf-8')).hexdigest(),
-            'fixture_sha256': {name: hashlib.sha256(value).hexdigest() for name, value in raw.items()},
+            'fixture_sha256': {name: hashlib.sha256(value.encode('utf-8')).hexdigest() for name, value in source.items()},
+            'fixture_raw_sha256': {name: hashlib.sha256(value).hexdigest() for name, value in raw.items()},
+            'prompt_line_endings': 'LF; original checkout bytes retained separately',
             'private_oracle_sha256': hashlib.sha256((CASE / 'oracle/page_test.go').read_bytes()).hexdigest()}
 
 

@@ -42,3 +42,8 @@ replacement for each editable file. Other paths, duplicate fields, empty content
 NUL and invalid UTF-8 are rejected. The report hashes the response and replacement
 contents. response_contract_valid does not mean the Go package compiles or meets
 the task: candidate_executed remains false and implementation_correctness null.
+
+Model-facing fixture text uses LF line endings so Windows CRLF and Linux LF
+checkouts produce the same prompt. fixture_sha256 hashes normalized model input;
+fixture_raw_sha256 separately identifies the original checkout bytes. This is
+line-ending normalization only, not rewriting candidate answers or the oracle.
