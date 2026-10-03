@@ -2681,7 +2681,7 @@ func AgentHeartbeat(c echo.Context) error {
 	if profileErr != nil || !profileSupportsCapabilities(profile, request.Capabilities) {
 		return utils.Error(c, http.StatusBadRequest, "Invalid agent heartbeat", "")
 	}
-	if !providerAllowed(request.Provider) || len(strings.TrimSpace(request.Model)) == 0 || len(strings.TrimSpace(request.Model)) > 128 || request.Concurrency < 1 || request.Concurrency > 8 {
+	if request.Concurrency < 1 || request.Concurrency > 8 {
 		return utils.Error(c, http.StatusBadRequest, "Invalid agent heartbeat", "")
 	}
 	role, lane, err := normalizeWorkerRoleLane(request.Role, request.Lane)
