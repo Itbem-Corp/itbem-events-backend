@@ -26,6 +26,8 @@ on:
       - scripts/Test-AgentHarnessIsolation.ps1
       - scripts/Score-HarnessSemantics.ps1
       - scripts/Test-HarnessSemantics.ps1
+      - scripts/Report-HarnessCosts.ps1
+      - scripts/Test-HarnessCosts.ps1
       - go.mod
       - go.sum
   pull_request:
@@ -52,6 +54,8 @@ on:
       - scripts/Test-AgentHarnessIsolation.ps1
       - scripts/Score-HarnessSemantics.ps1
       - scripts/Test-HarnessSemantics.ps1
+      - scripts/Report-HarnessCosts.ps1
+      - scripts/Test-HarnessCosts.ps1
       - go.mod
       - go.sum
 
@@ -79,6 +83,9 @@ jobs:
       - name: Verify semantic scorer rejects unsupported evidence
         shell: pwsh
         run: ./scripts/Test-HarnessSemantics.ps1
+      - name: Verify cost coverage and unknown amounts
+        shell: pwsh
+        run: ./scripts/Test-HarnessCosts.ps1
 
   localstack-integration:
     runs-on: ubuntu-latest
