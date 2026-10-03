@@ -25,6 +25,14 @@ def cache_fixture():
     return evidence
 
 class CacheTests(unittest.TestCase):
+    def test_ambiguous_price_snapshot_cannot_qualify_savings(self):
+        evidence = cache_fixture()
+        original = evidence['calls'][0]['pricing_snapshot_json']
+        evidence['calls'][0]['pricing_snapshot_json'] = '{"rates_microusd_per_million":{},' + original[1:]
+        row = analyze(CORPUS, evidence)['results']['minimax-m3']
+        self.assertFalse(row['qualified_with_complete_accounting'])
+        self.assertIsNone(row['input_savings_microusd'])
+
     def test_checked_in_generation_and_answer_separation(self):
         self.assertEqual(SERVER, json.loads((ROOT / 'internal/modelevaluation/cache_corpus.json').read_text()))
         self.assertEqual(CORPUS, json.loads((ROOT / 'scripts/model-evaluation-cache-corpus.json').read_text()))
@@ -35,6 +43,10 @@ class CacheTests(unittest.TestCase):
 
     def test_paired_accounting_and_correct_answers(self):
         result = analyze(CORPUS, cache_fixture())
+        for row in result['screening']['results'].values():
+            self.assertEqual(set(row['by_category']), {'review_bug', 'review_clean'})
+            self.assertTrue(all(item['denominator'] == 10 and item['successes'] == 10
+                                for item in row['by_category'].values()))
         for row in result['results'].values():
             self.assertEqual(row['input_savings_microusd'], 13500)
             self.assertEqual(row['cache_read_gain_tokens'], 15000)

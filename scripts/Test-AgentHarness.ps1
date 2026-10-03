@@ -8,7 +8,10 @@ param(
     [string]$ScoreReportPath = '',
     [string]$PriorReport = '',
     [string]$Role = 'all',
-    [string]$CredentialSource = ''
+    [string]$CredentialSource = '',
+    [switch]$RequireNoSkips,
+    [ValidateRange(30, 1800)]
+    [int]$TestTimeoutSeconds = 600
 )
 
 $ErrorActionPreference = 'Stop'
@@ -33,7 +36,13 @@ if ($ScoreSemantics -and -not $ScoreReportPath) {
 if ($AllowSemanticFailures -and -not ($ScoreSemantics -or $ScoreReportPath)) {
     throw '-AllowSemanticFailures requires semantic scoring.'
 }
-$goCandidate = Join-Path (Split-Path $repoRoot -Parent) '.local/toolchains/go1.25.12/bin/go.exe'
+if ($RequireNoSkips -and $ScoreReportPath) {
+    throw '-RequireNoSkips applies to offline Go tests and cannot be combined with semantic replay.'
+}
+$goVersionLine = @(Get-Content -LiteralPath (Join-Path $repoRoot 'go.mod') | Where-Object { $_ -match '^go\s+\d+\.\d+(\.\d+)?\s*$' })
+if ($goVersionLine.Count -ne 1) { throw 'Cannot determine the required Go toolchain from go.mod.' }
+$requiredGoVersion = ($goVersionLine[0] -split '\s+')[1]
+$goCandidate = Join-Path (Split-Path $repoRoot -Parent) ('.local/toolchains/go' + $requiredGoVersion + '/bin/go.exe')
 $goCommand = if (Test-Path -LiteralPath $goCandidate) { $goCandidate } else { (Get-Command go).Source }
 $reportDirectory = Join-Path $repoRoot ('.local/harness-evals/' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff'))
 $null = New-Item -ItemType Directory -Path $reportDirectory
@@ -75,8 +84,8 @@ try {
     foreach ($name in $providerEnvironmentNames) { [Environment]::SetEnvironmentVariable($name,'','Process') }
     $offlinePath = Join-Path $reportDirectory 'offline.jsonl'
     $null = New-Item -ItemType File -Path $offlinePath
-    $harnessPackages = @('internal/automationagent','controllers/delivery','controllers/automation','services/automationcost','services/deliveryworkflow','internal/runtimeroute')
-    & $goCommand test ./internal/automationagent ./controllers/delivery ./controllers/automation ./services/automationcost ./services/deliveryworkflow ./internal/runtimeroute -shuffle=49207 -count=3 -timeout 180s -json 2>&1 | Tee-Object -FilePath $offlinePath
+    $testPackages = @('./internal/automationagent','./controllers/delivery','./controllers/automation','./services/automationcost','./services/deliveryworkflow','./internal/runtimeroute')
+    & $goCommand test @testPackages -shuffle=49207 -count=3 -timeout ($TestTimeoutSeconds.ToString() + 's') -json 2>&1 | Tee-Object -FilePath $offlinePath
     $testExit = $LASTEXITCODE
     $semanticExit = 0
     # Keep the operator-facing result aligned with the auditable JSONL. The
@@ -88,44 +97,68 @@ try {
             if (-not $_.Trim()) { return }
             $_ | ConvertFrom-Json -ErrorAction Stop
         })
-        # Exit zero alone cannot prove execution: require one terminal pass
-        # and at least one executed test for every requested package. A
-        # truncated, empty, skipped-only or unexpected stream fails closed.
+        # A zero exit alone cannot prove that every requested package ran.
+        # Require one successful terminal event per package, including tests
+        # that ran: an empty/no-test/truncated stream must fail closed.
         if ($offlineRows.Count -eq 0) { throw 'Empty harness test stream.' }
         $moduleLine = @(Get-Content -LiteralPath (Join-Path $repoRoot 'go.mod') | Where-Object { $_ -match '^module\s+\S+\s*$' })
         if ($moduleLine.Count -ne 1) { throw 'Cannot identify harness module.' }
         $moduleName = ($moduleLine[0] -replace '^module\s+', '').Trim()
-        $expectedPackages = @($harnessPackages | ForEach-Object { $moduleName + '/' + $_ })
+        $expectedPackages = @($testPackages | ForEach-Object { $moduleName + '/' + $_.Substring(2) })
         foreach ($row in $offlineRows) {
             if ($row.Package -notin $expectedPackages -or $row.Action -notin @('start','run','pause','cont','pass','fail','skip','output','bench')) {
                 throw 'Unexpected harness test event or package.'
             }
         }
-        foreach ($package in $expectedPackages) {
-            $terminalRows = @($offlineRows | Where-Object { $_.Package -eq $package -and -not $_.Test -and $_.Action -in @('pass','fail','skip') })
-            $executedTests = @($offlineRows | Where-Object { $_.Package -eq $package -and $_.Test -and $_.Action -eq 'pass' })
-            if ($terminalRows.Count -ne 1 -or $terminalRows[0].Action -ne 'pass' -or $executedTests.Count -eq 0) {
-                throw "Missing successful execution evidence for $package."
+        $packageIssues = @()
+        foreach ($package in $testPackages) {
+            $packageName = $moduleName + '/' + $package.Substring(2)
+            $terminalRows = @($offlineRows | Where-Object {
+                $_.Package -eq $packageName -and -not $_.Test -and $_.Action -in @('pass','fail','skip')
+            })
+            $testPasses = @($offlineRows | Where-Object {
+                $_.Package -eq $packageName -and $_.Test -and $_.Action -eq 'pass'
+            })
+            if ($terminalRows.Count -ne 1 -or $terminalRows[0].Action -ne 'pass' -or $testPasses.Count -eq 0) {
+                $packageIssues += "Missing successful test evidence for $packageName."
             }
         }
         $offlineSummary = [ordered]@{
+            schema_version = 1
+            go_exit_code = $testExit
+            package_issues = @($packageIssues)
+            failed_tests = @($offlineRows | Where-Object { $_.Test -and $_.Action -eq 'fail' } | Select-Object Package, Test -Unique)
+            skipped_tests = @($offlineRows | Where-Object { $_.Test -and $_.Action -eq 'skip' } | Select-Object Package, Test -Unique)
+            require_no_skips = [bool]$RequireNoSkips
+            test_executions_passed = @($offlineRows | Where-Object { $_.Test -and $_.Action -eq 'pass' }).Count
+            distinct_tests_passed = @($offlineRows | Where-Object { $_.Test -and $_.Action -eq 'pass' } | Select-Object Package, Test -Unique).Count
             pass = @($offlineRows | Where-Object Action -eq 'pass').Count
             fail = @($offlineRows | Where-Object Action -eq 'fail').Count
             skip = @($offlineRows | Where-Object Action -eq 'skip').Count
             pause = @($offlineRows | Where-Object Action -eq 'pause').Count
             continuation = @($offlineRows | Where-Object Action -eq 'cont').Count
         }
-        $summaryJSON = $offlineSummary | ConvertTo-Json -Compress
+        $offlineSummary['passed'] = ($testExit -eq 0 -and $offlineSummary.fail -eq 0 -and $packageIssues.Count -eq 0 -and (-not $RequireNoSkips -or $offlineSummary.skip -eq 0))
+        $summaryJSON = $offlineSummary | ConvertTo-Json -Depth 5 -Compress
+        [IO.File]::WriteAllText((Join-Path $reportDirectory 'offline-summary.json'), $summaryJSON)
         Write-Host "Offline harness summary: $summaryJSON"
-        if ($offlineSummary.fail -gt 0) { $testExit = 1 }
+        if (-not $offlineSummary.passed) { $testExit = 1 }
     } catch {
-        Write-Error "Offline harness output could not be summarized safely: $($_.Exception.Message)"
+        Write-Warning "Offline harness output could not be summarized safely: $($_.Exception.Message)"
         $testExit = 1
     }
     Write-Host "Evaluation artifacts: $reportDirectory"
     if ($testExit -ne 0) { throw "Harness evaluation failed (exit $testExit); inspect the saved evidence." }
     if ($semanticExit -ne 0 -and -not $AllowSemanticFailures) { throw "Semantic evaluation failed (exit $semanticExit); inspect the saved evidence." }
 } finally {
-    foreach ($name in $trackedNames) { [Environment]::SetEnvironmentVariable($name,$previous[$name],'Process') }
+    foreach ($name in $trackedNames) {
+        # PowerShell may bind null as an empty string on newer .NET runtimes.
+        # Preserve absence as well as values in the invoking process.
+        if ($null -eq $previous[$name]) {
+            Remove-Item -LiteralPath ('Env:' + $name) -ErrorAction SilentlyContinue
+        } else {
+            [Environment]::SetEnvironmentVariable($name,$previous[$name],'Process')
+        }
+    }
     Pop-Location
 }

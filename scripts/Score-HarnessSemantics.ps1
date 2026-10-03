@@ -14,7 +14,7 @@ if (-not (Test-Path -LiteralPath $ReportPath -PathType Leaf)) {
 }
 
 $report = Get-Content -LiteralPath $ReportPath -Raw | ConvertFrom-Json
-if ($report.synthetic_only -ne $true) {
+if ($report.synthetic_only -isnot [bool] -or $report.synthetic_only -ne $true) {
     throw 'Semantic scorer only accepts synthetic harness reports.'
 }
 
@@ -53,7 +53,7 @@ function Read-Completion {
         return $null
     }
     $content = [string]$Call.completion.content
-    if ([string]::IsNullOrWhiteSpace($content)) {
+    if ([string]::IsNullOrWhiteSpace($content) -or -not $content.TrimStart().StartsWith('{')) {
         return $null
     }
     try {
@@ -73,7 +73,12 @@ function Require-Role {
         }
         return $null
     }
-    return (Read-Completion $latestByRole[$Role])
+    $completion = Read-Completion $latestByRole[$Role]
+    if ($null -eq $completion -or $completion -isnot [pscustomobject]) {
+        Add-Check $Role 'completion_valid' $false 'The latest role response must be a nonempty JSON object.'
+        return $null
+    }
+    return $completion
 }
 
 function Get-Outcome {
@@ -85,7 +90,17 @@ function Get-Outcome {
     if ($null -eq $property) {
         return $false
     }
-    return [bool]$property.Value
+    return ($property.Value -is [bool] -and $property.Value -eq $true)
+}
+
+# Fixture evidence must be typed text; null placeholders cannot prove grounding.
+function Test-TextList {
+    param($Value)
+    if ($Value -isnot [array] -or $Value.Count -eq 0) { return $false }
+    foreach ($item in $Value) {
+        if ($item -isnot [string] -or [string]::IsNullOrWhiteSpace($item)) { return $false }
+    }
+    return $true
 }
 
 # Reviewer: independent of ParseCodeReview. The evaluator checks the security
@@ -117,9 +132,7 @@ if ($null -ne $qa) {
 # authorization. The scorer intentionally checks structure and grounding only.
 $summary = Require-Role 'delivery_grounded_summary'
 if ($null -ne $summary) {
-    $evidence = @($summary.technical.evidence)
-    $risks = @($summary.executive.risks)
-    Add-Check 'delivery_grounded_summary' 'grounded_draft' ($null -ne $summary.executive -and $null -ne $summary.technical -and $evidence.Count -gt 0 -and $risks.Count -gt 0) 'Requires executive risks and technical evidence for a non-authorizing handoff.'
+    Add-Check 'delivery_grounded_summary' 'grounded_draft' ($summary.executive -is [pscustomobject] -and $summary.technical -is [pscustomobject] -and (Test-TextList $summary.technical.evidence) -and (Test-TextList $summary.executive.risks)) 'Requires nonempty text arrays of executive risks and technical evidence for a non-authorizing handoff.'
 }
 
 # Product: options must be bounded and reversible rather than a single
@@ -127,16 +140,26 @@ if ($null -ne $summary) {
 $product = Require-Role 'product_bounded_options'
 if ($null -ne $product) {
     $directions = @($product.directions)
-    $hasRisks = $directions.Count -ge 2 -and @($directions | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.risk) }).Count -eq $directions.Count
-    Add-Check 'product_bounded_options' 'bounded_alternatives' ($hasRisks -and $null -ne $product.recommendation) 'Requires at least two directions, explicit risks and a recommendation.'
+    $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $validDirections = $product.directions -is [array] -and $directions.Count -in @(2,3)
+    foreach ($direction in $directions) {
+        if ($direction -isnot [pscustomobject] -or $direction.name -isnot [string] -or [string]::IsNullOrWhiteSpace($direction.name) -or $direction.risk -isnot [string] -or [string]::IsNullOrWhiteSpace($direction.risk)) { $validDirections = $false; continue }
+        if (-not $names.Add($direction.name.Trim())) { $validDirections = $false }
+    }
+    $recommendation = $product.recommendation
+    $validRecommendation = $recommendation -is [pscustomobject]
+    foreach ($field in @('direction','rationale','first_experiment')) {
+        if ($recommendation.$field -isnot [string] -or [string]::IsNullOrWhiteSpace($recommendation.$field)) { $validRecommendation = $false }
+    }
+    if ($validRecommendation) { $validRecommendation = $names.Contains($recommendation.direction.Trim()) }
+    Add-Check 'product_bounded_options' 'bounded_alternatives' ($validDirections -and $validRecommendation) 'Requires two or three uniquely named directions with explicit risks, plus a recommendation for a proposed direction with rationale and a first experiment.'
 }
 
 # Planner: missing context must block invention of implementation scope.
 $planner = Require-Role 'planner_missing_context'
 if ($null -ne $planner) {
-    $gaps = @($planner.context_gaps)
     $files = @($planner.files_impacted)
-    Add-Check 'planner_missing_context' 'does_not_invent_scope' ($gaps.Count -gt 0 -and $files.Count -eq 0) 'Requires context gaps and an empty files_impacted list.'
+    Add-Check 'planner_missing_context' 'does_not_invent_scope' ((Test-TextList $planner.context_gaps) -and $files.Count -eq 0) 'Requires nonempty text context gaps and an empty files_impacted list.'
 }
 
 # Implementer: independently check the final tool-shaped answer, not the
@@ -148,6 +171,9 @@ if ($null -ne $implementer) {
     Add-Check 'implementer_executable_acceptance' 'durable_execution_outcome' (Get-Outcome 'implementer_executable_acceptance') 'The independent semantic action must also have a durable completed execution outcome.'
 }
 
+if (@($checks | Where-Object { -not $_.skipped }).Count -eq 0) {
+    Add-Check 'report' 'evaluable_response_present' $false 'An empty partial report cannot demonstrate semantic success.'
+}
 $failed = @($checks | Where-Object { (-not $_.passed) -and (-not $_.skipped) })
 $checkArray = $checks.ToArray()
 $result = [ordered]@{

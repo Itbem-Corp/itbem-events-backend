@@ -56,6 +56,9 @@ func Decode(payload []byte) (Observation, error) {
 		return Observation{}, fmt.Errorf("QA observation size is invalid")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
+	if err := validateJSONIntegrity(payload); err != nil {
+		return Observation{}, err
+	}
 	decoder.DisallowUnknownFields()
 	var observation Observation
 	if err := decoder.Decode(&observation); err != nil {
@@ -63,6 +66,30 @@ func Decode(payload []byte) (Observation, error) {
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return Observation{}, fmt.Errorf("QA observation must contain one JSON document")
+	}
+	// Zero-value decoding must not invent a failed result or command index zero
+	// when a captured record omitted the corresponding field or supplied null.
+	var presence struct {
+		PreviewPassed *bool `json:"preview_passed"`
+		Repositories  []struct {
+			Commands []struct {
+				Index  *int  `json:"index"`
+				Passed *bool `json:"passed"`
+			} `json:"commands"`
+		} `json:"repositories"`
+	}
+	if err := json.Unmarshal(payload, &presence); err != nil {
+		return Observation{}, err
+	}
+	if presence.PreviewPassed == nil {
+		return Observation{}, fmt.Errorf("QA observation requires an explicit preview result")
+	}
+	for _, repository := range presence.Repositories {
+		for _, command := range repository.Commands {
+			if command.Index == nil || command.Passed == nil {
+				return Observation{}, fmt.Errorf("QA observation command requires explicit index and result")
+			}
+		}
 	}
 	if err := Validate(observation); err != nil {
 		return Observation{}, err

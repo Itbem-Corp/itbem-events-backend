@@ -48,7 +48,8 @@ func TestAgentHarnessRunnerKeepsOfflineAndReportReplayModes(t *testing.T) {
 	source := string(runner)
 	for _, required := range []string{
 		"-ScoreReportPath",
-		"$goCommand test ./internal/automationagent ./controllers/delivery ./controllers/automation",
+		"$goCommand test @testPackages",
+		"'./internal/automationagent','./controllers/delivery','./controllers/automation'",
 		"Offline harness summary:",
 	} {
 		if !strings.Contains(source, required) {

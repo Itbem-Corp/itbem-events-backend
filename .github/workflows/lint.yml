@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main]
 
+# A new PR revision supersedes its old checks. Push validation remains independent.
+# Scope the group to this workflow and PR so unrelated checks cannot be cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   lint:
     runs-on: ubuntu-latest

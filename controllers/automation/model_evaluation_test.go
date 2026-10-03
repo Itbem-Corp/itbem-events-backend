@@ -3,6 +3,7 @@ package automation
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,7 +33,7 @@ func TestEvaluationRequiresPrimaryRootBeforeAdmissionOrDispatch(t *testing.T) {
 }
 
 func TestEvaluationGatewayBindsMessagesBudgetRouteAndCrossRunQuota(t *testing.T) {
-	for _, scenario := range []string{"valid", "modified-prompt", "wrong-route", "wrong-tokens", "expired-reservation", "over-budget", "reused-across-runs", "ambiguous-batch"} {
+	for _, scenario := range []string{"valid", "modified-prompt", "wrong-route", "wrong-tokens", "expired-reservation", "over-budget", "reused-across-runs", "ambiguous-batch", "pilot-valid", "pilot-excess-sequence", "pilot-wrong-case", "pilot-swapped-candidate", "unknown-corpus", "pilot-rebound-prompt", "pilot-wrong-corpus-hash", "pilot-wrong-prompt-hash"} {
 		t.Run(scenario, func(t *testing.T) {
 			db, mock, cleanup := attemptPolicyClaimDB(t)
 			defer cleanup()
@@ -40,12 +41,28 @@ func TestEvaluationGatewayBindsMessagesBudgetRouteAndCrossRunQuota(t *testing.T)
 			expires := time.Now().UTC().Add(time.Hour)
 			task := models.AutomationTask{ID: taskID, ModelEvaluationID: &batchID, Operation: "ai.chat", MaxCompletionTokens: 4096, BudgetReservationExpiresAt: &expires}
 			route, _ := modelevaluation.Route(modelevaluation.MiniMax)
-			messages, _ := automationagent.SyntheticChatMessages("synthetic case")
+			prompt, corpusHash := "synthetic case", ""
+			if strings.HasPrefix(scenario, "pilot-") {
+				var err error
+				prompt, corpusHash, err = modelevaluation.ImplementationPilotInput()
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			messages, _ := automationagent.SyntheticChatMessages(prompt)
+			if scenario == "pilot-rebound-prompt" {
+				messages[1].Content += " altered"
+			}
 			hash, _ := modelevaluation.MessageDigest(messages)
+			promptHash := modelevaluation.Digest([]byte(prompt))
 			_, routeHash, _ := canonicalInferenceRoutes([]models.AutomationAIActionRoute{route})
 			snapshot := newGatewayAttemptPolicySnapshot(t, taskID, "new-run", "ai.chat", nil, 4096, 1, []models.AutomationAIActionRoute{route})
 			request := inferenceRequest{TaskID: taskID.String(), RunID: "new-run", Operation: "ai.chat", MaxCompletionTokens: 4096, Messages: messages}
 			budget := int64(1000000)
+			version, caseID, sequence := modelevaluation.CorpusVersion, "synthetic", 1
+			if strings.HasPrefix(scenario, "pilot-") {
+				version, caseID = modelevaluation.ImplementationPilotVersion, "pagination-v1"
+			}
 			switch scenario {
 			case "modified-prompt":
 				request.Messages = append([]automationagent.Message(nil), messages...)
@@ -59,12 +76,24 @@ func TestEvaluationGatewayBindsMessagesBudgetRouteAndCrossRunQuota(t *testing.T)
 				task.BudgetReservationExpiresAt = &past
 			case "over-budget":
 				budget = 1000001
+			case "pilot-excess-sequence":
+				sequence = 4
+			case "pilot-wrong-case":
+				caseID = "foreign-case"
+			case "pilot-swapped-candidate":
+				sequence = 2
+			case "unknown-corpus":
+				version = "foreign-corpus"
+			case "pilot-wrong-corpus-hash":
+				corpusHash = "foreign-corpus-hash"
+			case "pilot-wrong-prompt-hash":
+				promptHash = "foreign-prompt-hash"
 			}
 			mock.ExpectQuery(`SELECT \* FROM "automation_model_evaluation_calls" WHERE automation_task_id = \$1 AND evaluation_id = \$2 LIMIT \$3`).WithArgs(taskID, batchID, 1).
-				WillReturnRows(sqlmock.NewRows([]string{"automation_task_id", "evaluation_id", "sequence", "case_id", "candidate", "messages_hash", "route_hash", "reservation_micros"}).AddRow(taskID, batchID, 1, "synthetic", string(modelevaluation.MiniMax), hash, routeHash, 20000))
+				WillReturnRows(sqlmock.NewRows([]string{"automation_task_id", "evaluation_id", "sequence", "case_id", "candidate", "messages_hash", "route_hash", "reservation_micros", "prompt_hash"}).AddRow(taskID, batchID, sequence, caseID, string(modelevaluation.MiniMax), hash, routeHash, 20000, promptHash))
 			mock.ExpectQuery(`SELECT \* FROM "automation_model_evaluations" WHERE id = \$1 ORDER BY .* FOR UPDATE`).WithArgs(batchID, 1).
-				WillReturnRows(sqlmock.NewRows([]string{"id", "status", "budget_micros", "reservation_micros", "pricing_json"}).AddRow(batchID, "active", budget, 500000, evaluationTestPricing))
-			if scenario == "valid" || scenario == "reused-across-runs" || scenario == "ambiguous-batch" {
+				WillReturnRows(sqlmock.NewRows([]string{"id", "status", "budget_micros", "reservation_micros", "pricing_json", "corpus_version", "corpus_hash"}).AddRow(batchID, "active", budget, 500000, evaluationTestPricing, version, corpusHash))
+			if scenario == "valid" || scenario == "pilot-valid" || scenario == "reused-across-runs" || scenario == "ambiguous-batch" {
 				used := 0
 				if scenario == "reused-across-runs" {
 					used = 1
@@ -80,7 +109,7 @@ func TestEvaluationGatewayBindsMessagesBudgetRouteAndCrossRunQuota(t *testing.T)
 			}
 			scope := gatewayInferenceScope{}
 			err := validateEvaluationInference(db, task, request, snapshot, &scope)
-			if scenario == "valid" {
+			if scenario == "valid" || scenario == "pilot-valid" {
 				if err != nil || scope.EvaluationID == nil || scope.EvaluationPricingJSON != evaluationTestPricing {
 					t.Fatalf("valid scoped admission failed: %v", err)
 				}

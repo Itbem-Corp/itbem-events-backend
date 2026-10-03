@@ -4,6 +4,7 @@
 /.local/ai-provider-credentials.json
 /.local/ai-provider-credentials/
 /.local/ai-attempt-policy-signing-key
+/.local/harness-evals/
 tools/stagehand-qa/node_modules/
 
 # Claude Code — personal settings (no subir al repo)

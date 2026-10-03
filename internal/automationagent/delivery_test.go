@@ -441,7 +441,7 @@ func TestParseDeliverySummaryRepairsStructuredEvidenceCitations(t *testing.T) {
 }
 
 func TestValidateDeliverySummaryGroundsHumanDecisions(t *testing.T) {
-	content := `{"executive":{"what_changed":"Delivery flow","why":"Reduce review friction","how_to_test":"Open the QA evidence","risks":["Human release gate remains required"]},"technical":{"decisions":["Plan gate approved by reviewer"],"evidence":["1e5c5eb5-38cb-46af-9e50-a196ad7fc333 — Synthetic authorization test"]}}`
+	content := `{"executive":{"what_changed":"Delivery flow","why":"Reduce review friction","how_to_test":"Open the QA evidence","risks":["Human release gate remains required"]},"technical":{"decisions":["Plan gate approved by reviewer"],"decision_claims":{"schema_version":1,"gates":[{"index":0,"gate_id":"","kind":"plan","decision":"approved"}]},"evidence":["1e5c5eb5-38cb-46af-9e50-a196ad7fc333 — Synthetic authorization test"]}}`
 	summary, err := ParseDeliverySummary(content)
 	if err != nil {
 		t.Fatal(err)
@@ -686,7 +686,7 @@ func TestRunImplementationUsesIsolatedWorktree(t *testing.T) {
 
 func TestIsolatedWorktreeAtRejectsInvalidAndUnavailableFrozenRevisions(t *testing.T) {
 	root := t.TempDir()
-	for _, command := range [][]string{{"git", "init"}, {"git", "config", "user.email", "test@example.invalid"}, {"git", "config", "user.name", "ITBEM Test"}} {
+	for _, command := range [][]string{{"git", "init"}, {"git", "config", "core.autocrlf", "false"}, {"git", "config", "user.email", "test@example.invalid"}, {"git", "config", "user.name", "ITBEM Test"}} {
 		result, err := runLocal(context.Background(), root, commandTimeout, "", command[0], command[1:]...)
 		if err != nil || result.ExitCode != 0 {
 			t.Fatalf("git setup failed: %#v / %v", result, err)
@@ -832,7 +832,7 @@ func setupImplementationRepository(t *testing.T) string {
 	if err := os.MkdirAll(root, 0700); err != nil {
 		t.Fatal(err)
 	}
-	for _, command := range [][]string{{"git", "init"}, {"git", "config", "user.email", "test@example.invalid"}, {"git", "config", "user.name", "ITBEM Test"}} {
+	for _, command := range [][]string{{"git", "init"}, {"git", "config", "core.autocrlf", "false"}, {"git", "config", "user.email", "test@example.invalid"}, {"git", "config", "user.name", "ITBEM Test"}} {
 		result, err := runLocal(context.Background(), root, commandTimeout, "", command[0], command[1:]...)
 		if err != nil || result.ExitCode != 0 {
 			t.Fatalf("git setup failed: %#v, %v", result, err)

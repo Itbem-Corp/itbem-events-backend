@@ -2,6 +2,8 @@ package automation
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -9,6 +11,7 @@ import (
 
 	"events-stocks/configuration"
 	"events-stocks/internal/automationagent"
+	"events-stocks/internal/evidencejson"
 	"events-stocks/models"
 	"events-stocks/services/automationcost"
 	"github.com/gofrs/uuid"
@@ -67,7 +70,7 @@ func reserveAutomationInferenceReceipt(tx *gorm.DB, request inferenceRequest, ta
 
 // acceptInferenceReceipt persists only accounting metadata derived from the
 // normalized response received by the cloud gateway. Prompt and completion
-// text are deliberately not passed to this function or stored in this table.
+// text is never stored in this table; only its exact-byte digest is retained.
 func acceptInferenceReceipt(ctx context.Context, cfg *models.Config, scope gatewayInferenceScope, completion automationagent.Completion, status string) (models.AutomationInferenceReceipt, error) {
 	var receipt models.AutomationInferenceReceipt
 	if configuration.DB == nil || cfg == nil || scope.ReceiptID == uuid.Nil || scope.CallID == uuid.Nil || (status != "accepted" && status != "rejected") || completion.Usage == nil ||
@@ -86,6 +89,9 @@ func acceptInferenceReceipt(ctx context.Context, cfg *models.Config, scope gatew
 	if err != nil || ledger.InputTokens+ledger.OutputTokens == 0 {
 		return receipt, errors.New("provider usage could not be verified")
 	}
+	// Provider-supplied response bindings were discarded by sanitization. This
+	// binding identifies the exact final-answer bytes observed by the gateway.
+	usage["_itbem_response"] = inferenceResponseBinding(completion.Content)
 	usageJSON, err := json.Marshal(usage)
 	if err != nil {
 		return receipt, errors.New("provider usage could not be recorded")
@@ -126,6 +132,30 @@ func acceptInferenceReceipt(ctx context.Context, cfg *models.Config, scope gatew
 		return tx.First(&receipt, "id = ?", reserved.ID).Error
 	})
 	return receipt, err
+}
+
+func inferenceResponseBinding(content string) map[string]any {
+	digest := sha256.Sum256([]byte(content))
+	return map[string]any{"version": "utf8-final-answer-v1", "sha256": hex.EncodeToString(digest[:]), "bytes": len([]byte(content))}
+}
+
+func recordedInferenceResponseBinding(raw string) (*string, *int64) {
+	var usage map[string]json.RawMessage
+	if evidencejson.Validate([]byte(raw)) != nil || json.Unmarshal([]byte(raw), &usage) != nil {
+		return nil, nil
+	}
+	var binding struct {
+		Version string `json:"version"`
+		SHA256  string `json:"sha256"`
+		Bytes   *int64 `json:"bytes"`
+	}
+	if json.Unmarshal(usage["_itbem_response"], &binding) != nil || binding.Version != "utf8-final-answer-v1" || binding.Bytes == nil || *binding.Bytes < 0 || len(binding.SHA256) != 64 || binding.SHA256 != strings.ToLower(binding.SHA256) {
+		return nil, nil
+	}
+	if _, err := hex.DecodeString(binding.SHA256); err != nil {
+		return nil, nil
+	}
+	return &binding.SHA256, binding.Bytes
 }
 
 func sameInferenceReceiptStepID(left, right *uuid.UUID) bool {

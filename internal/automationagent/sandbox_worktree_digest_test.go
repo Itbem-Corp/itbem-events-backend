@@ -109,8 +109,18 @@ func TestSandboxWorktreeDigestExcludesGitAuthority(t *testing.T) {
 }
 
 func TestSandboxWorktreeDigestMatchesPythonSupervisor(t *testing.T) {
-	python, err := exec.LookPath("python3")
-	if err != nil {
+	var python string
+	for _, name := range []string{"python3", "python"} {
+		candidate, err := exec.LookPath(name)
+		if err == nil && exec.Command(candidate, "-c", "import os; assert hasattr(os, 'O_DIRECTORY') and hasattr(os, 'O_NOFOLLOW')").Run() == nil {
+			python = candidate
+			break
+		}
+	}
+	if python == "" {
+		if os.Getenv("ITBEM_REQUIRE_POSIX_SUPERVISOR_PROOF") == "1" {
+			t.Fatal("POSIX Python supervisor proof required but its runtime is unavailable")
+		}
 		t.Skip("Python supervisor runtime unavailable")
 	}
 	root := t.TempDir()
