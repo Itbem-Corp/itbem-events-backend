@@ -20,6 +20,9 @@ outbox event for three calls. This does not qualify HTTP admission of the pilot.
 The gateway also rejects unknown corpus versions, a pilot sequence beyond three,
 a foreign pilot case and a candidate assigned to the wrong pilot sequence. Its
 existing message, route, budget and cross-run receipt checks still apply.
+Pilot inference additionally requires the embedded corpus digest, frozen prompt
+digest and exact normal worker message digest. Rebinding an altered prompt into
+the call ledger cannot authorize different model input.
 
 Before enabling central admission, preserve message/route/receipt bindings and
 cross-run paid-call quotas and qualify the complete admission flow through

@@ -32,8 +32,12 @@ func TestImplementationPilotReservesExactWorkerEnvelopeWithoutAdmission(t *testi
 		t.Fatalf("pilot reservation invalid: %#v / %v", plan, err)
 	}
 	seen := map[Candidate]bool{}
+	frozenPrompt, corpusHash, err := ImplementationPilotInput()
+	if err != nil || len(corpusHash) != 64 {
+		t.Fatalf("invalid frozen pilot input: %v", err)
+	}
 	for _, call := range plan.Calls {
-		if call.CaseID != "pagination-v1" || seen[call.Candidate] || call.PromptSHA256 != Digest([]byte(call.Prompt)) {
+		if call.CaseID != "pagination-v1" || seen[call.Candidate] || call.Prompt != frozenPrompt || call.PromptSHA256 != Digest([]byte(call.Prompt)) {
 			t.Fatalf("invalid pilot call binding: %#v", call)
 		}
 		seen[call.Candidate] = true

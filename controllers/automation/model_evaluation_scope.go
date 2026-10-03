@@ -4,6 +4,7 @@ import (
 	"errors"
 	"time"
 
+	"events-stocks/internal/automationagent"
 	"events-stocks/internal/modelevaluation"
 	"events-stocks/models"
 	"events-stocks/services/automationcost"
@@ -51,6 +52,18 @@ func validateEvaluationInference(tx *gorm.DB, task models.AutomationTask, reques
 	if batch.CorpusVersion == modelevaluation.ImplementationPilotVersion {
 		candidates := []modelevaluation.Candidate{modelevaluation.MiniMax, modelevaluation.DeepSeek, modelevaluation.Luna}
 		if call.CaseID != "pagination-v1" || call.Candidate != string(candidates[call.Sequence-1]) {
+			return errEvaluationAdmission
+		}
+		prompt, corpusHash, err := modelevaluation.ImplementationPilotInput()
+		if err != nil || batch.CorpusHash != corpusHash || call.PromptHash != modelevaluation.Digest([]byte(prompt)) {
+			return errEvaluationAdmission
+		}
+		messages, err := automationagent.SyntheticChatMessages(prompt)
+		if err != nil {
+			return errEvaluationAdmission
+		}
+		messageHash, err := modelevaluation.MessageDigest(messages)
+		if err != nil || call.MessagesHash != messageHash {
 			return errEvaluationAdmission
 		}
 	}
