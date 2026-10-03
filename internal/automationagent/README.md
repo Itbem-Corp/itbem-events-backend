@@ -439,7 +439,7 @@ malformed, invented or mismatched claims withhold that structured report.
 The private result retains the sanitized model response, usage, independently
 observed execution and `qa_grounding` diagnostics: `score_kind` is
 `structured_qa_grounding`, and `status` is `passed`, `failed` or `unavailable`.
-Historical contexts without a ledger remain unavailable for grounding; their
+The status records claims correspondence only. Separate `report_valid` and optional `report_error` fields record narrative acceptance; matching claims can have status passed while semantic/screenshot guards withhold the report. Historical contexts without a ledger remain unavailable for grounding; their
 ordinary narrative validation still applies. Grounding success is correspondence,
 not a passing QA verdict. Existing preview, semantic, screenshot, defect and
 coverage guards still apply. A rejected narrative does not erase completed QA,

@@ -69,7 +69,7 @@ func TestQAReportGroundingRequiresObservedModelClaims(t *testing.T) {
 				if report == nil || score["status"] != "passed" {
 					t.Fatalf("valid control failed: %v", score)
 				}
-			} else if report != nil || score["status"] != "failed" {
+			} else if report != nil || score["status"] != "passed" || score["report_valid"] != false || score["report_error"] == nil {
 				t.Fatalf("grounded claims overrode %s failure: %v", failure, score)
 			}
 		})

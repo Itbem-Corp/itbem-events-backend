@@ -14,24 +14,33 @@ import (
 // projection manufactured from the observation. Historical runs without a
 // ledger remain explicitly unavailable for grounding.
 func qaReportWithGrounding(content string, execution map[string]any) (map[string]any, map[string]any) {
-	grounding := map[string]any{"score_kind": "structured_qa_grounding", "status": "unavailable"}
-	observed, exists := execution["ledger_observation"]
-	if exists {
-		grounding["status"] = "failed"
-	}
-	reject := func(err error) (map[string]any, map[string]any) {
-		grounding["error"] = err.Error()
+	grounding := qaClaimsGrounding(content, execution)
+	grounding["report_valid"] = false
+	if grounding["status"] == "failed" {
 		return nil, grounding
 	}
 	report, err := ParseDeliveryQAReport(content)
+	if err == nil {
+		err = ValidateDeliveryQAReport(report, execution)
+	}
 	if err != nil {
-		return reject(err)
+		grounding["report_error"] = err.Error()
+		return nil, grounding
 	}
-	if err := ValidateDeliveryQAReport(report, execution); err != nil {
-		return reject(err)
-	}
+	grounding["report_valid"] = true
+	return report, grounding
+}
+
+func qaClaimsGrounding(content string, execution map[string]any) map[string]any {
+	grounding := map[string]any{"score_kind": "structured_qa_grounding", "status": "unavailable"}
+	observed, exists := execution["ledger_observation"]
 	if !exists {
-		return report, grounding
+		return grounding
+	}
+	grounding["status"] = "failed"
+	reject := func(err error) map[string]any {
+		grounding["error"] = err.Error()
+		return grounding
 	}
 	if _, ok := observed.(map[string]any); !ok {
 		return reject(fmt.Errorf("QA ledger observation must be an object"))
@@ -52,7 +61,7 @@ func qaReportWithGrounding(content string, execution map[string]any) (map[string
 		return reject(err)
 	}
 	grounding["status"] = "passed"
-	return report, grounding
+	return grounding
 }
 
 func qaPublishedMatrixDigest(ctx context.Context, delivery json.RawMessage, targets []qaTarget) (string, error) {
