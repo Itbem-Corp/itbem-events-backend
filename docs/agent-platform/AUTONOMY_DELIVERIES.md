@@ -30,8 +30,10 @@ it does not declare the five-lane platform production autonomous.
 
 The existing policy supports human and delegated gate modes, and an immutable
 work-item snapshot binds repository revisions, Vault and policy digests.
-However, completing a continuation still unconditionally sets
-`waiting_for_user`; there is no complete delegated decision coordinator.
+The QA continuation now advances under delegated authority when the sealed
+observation and independent exact-SHA review prove its current revision matrix.
+Other decision phases still use `waiting_for_user`; there is no complete
+delegated decision coordinator.
 Publication still requires an exact temporary grant, and final release
 authorization checks a named human actor. These boundaries must be implemented
 together with independent evidence, not removed to obtain apparent autonomy.
@@ -66,3 +68,29 @@ make one multi-repository task dispatchable.
 The platform qualifier runs the named preparation and continuation recovery
 fixtures using its existing required-test verifier. These checks prove those
 components only; they do not satisfy the live V1 acceptance contract.
+
+## Delegated QA increment
+
+Only signed, source-receipt-bound QA tasks admitted under the frozen delegated
+policy can decide QA automatically. The coordinator rechecks the sealed event,
+task lifetime, current preview, changed repositories and target branches,
+operator test identities, independent source receipts and the latest independent
+`Bema Review / exact-sha` publication for the exact repository, PR and commit.
+Model prose or a verdict cannot authorize a transition. Missing proof, failing
+security checks and an unchanged failed revision matrix require escalation.
+
+Passed QA creates a delegated QA gate and schedules the summary phase. A failed
+functional check schedules implementation within the unchanged approved plan,
+with at most three accumulated code/QA correction decisions. It allocates a new
+approved plan version referencing the original approval and fresh execution
+steps; old steps and evidence are retained. A changed definition or active plan
+execution prevents a correction. Legacy tasks and human policies retain manual
+QA decisions. Publication grants are revoked; this increment grants neither
+merge nor deployment authority.
+
+The gate, new plan/steps, epoch and next continuation commit in one transaction
+under the work-item lock. CI runs a real disposable PostgreSQL test with race
+detection covering concurrent replay, automatic success, fresh correction
+execution, human policy, wrong source/PR/actor, corrupted JSONB evidence,
+correction exhaustion and rollback when scheduling the next phase fails.
+These are component qualifications, not evidence of live production autonomy.

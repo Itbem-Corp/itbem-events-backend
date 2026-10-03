@@ -606,6 +606,11 @@ func completeContinuation(db *gorm.DB, intent models.DeliveryContinuation, task 
 			}
 			action = deliveryworkflow.ActionSubmitCodeReview
 		case "qa":
+			if handled, err := coordinateDelegatedQA(tx, &item, intent, task, time.Now().UTC()); err != nil {
+				return err
+			} else if handled {
+				return nil
+			}
 			structured, _ := output["structured_result"].(map[string]any)
 			if structured["verdict"] != "passed" {
 				item.AgentProgress = "blocked"

@@ -56,3 +56,26 @@ func TestAutonomySnapshotRejectsTamperingAndUnresolvedPolicy(t *testing.T) {
 		t.Fatal("unresolved policy was accepted as autonomous authority")
 	}
 }
+
+func TestReadAutonomyAuthorityVerifiesSealAndReturnsIndependentFrozenContent(t *testing.T) {
+	input := autonomySnapshotFixture(t, deliverypolicy.GateApprovalDelegated)
+	input.Repositories[0].Policy.RequiredTestKinds = []string{"unit"}
+	event, err := newAutonomySnapshotEvent(uuid.Must(uuid.NewV4()), input, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	event.ID, event.Sequence = uuid.Must(uuid.NewV4()), 1
+	read, err := ReadAutonomyAuthority(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read.Repositories[0].Policy.RequiredTestKinds[0] = "invented"
+	again, err := ReadAutonomyAuthority(event)
+	if err != nil || again.Repositories[0].Policy.RequiredTestKinds[0] != "unit" {
+		t.Fatal("frozen authority was mutated")
+	}
+	event.PayloadDigest = strings.Repeat("f", 64)
+	if _, err := ReadAutonomyAuthority(event); err == nil {
+		t.Fatal("private reader accepted a forged seal")
+	}
+}
