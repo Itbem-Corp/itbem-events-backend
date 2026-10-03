@@ -1,5 +1,7 @@
 # Evaluación del harness — 2026-09-20
 
+La guía operativa vigente está en [EVIDENCE_WORKFLOW.md](EVIDENCE_WORKFLOW.md). Este documento conserva resultados y contratos históricos; cada seguimiento describe su revisión y no reemplaza la validación del head actual.
+
 > **Registro histórico.** Las rondas live y sus comandos fueron realizados con
 > el harness anterior, que usaba un adaptador directo de proveedor. Ese modo se
 > retiró porque eludía el gateway central; no debe repetirse. El runner vigente

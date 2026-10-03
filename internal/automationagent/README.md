@@ -1,5 +1,7 @@
 # ITBEM Go AI worker
 
+For current validation commands, evidence interpretation and review handoff, see [EVIDENCE_WORKFLOW.md](EVIDENCE_WORKFLOW.md). Historical evaluation rounds are recorded separately in [HARNESS_EVALUATION.md](HARNESS_EVALUATION.md).
+
 `cmd/itbem-ai-agent` is the local execution plane for ITBEM-only automation.
 It polls the private SQS queue, reads only task-scoped S3 inputs, calls the
 configured model provider, writes AES-256 encrypted output back to the private
