@@ -31,6 +31,9 @@ func DecodeClaims(payload []byte) (Claims, error) {
 		return Claims{}, fmt.Errorf("QA claims size is invalid")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
+	if err := validateJSONIntegrity(payload); err != nil {
+		return Claims{}, err
+	}
 	decoder.DisallowUnknownFields()
 	var claims Claims
 	if err := decoder.Decode(&claims); err != nil {

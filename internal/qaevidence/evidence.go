@@ -56,6 +56,9 @@ func Decode(payload []byte) (Observation, error) {
 		return Observation{}, fmt.Errorf("QA observation size is invalid")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
+	if err := validateJSONIntegrity(payload); err != nil {
+		return Observation{}, err
+	}
 	decoder.DisallowUnknownFields()
 	var observation Observation
 	if err := decoder.Decode(&observation); err != nil {
