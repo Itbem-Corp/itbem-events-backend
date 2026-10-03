@@ -44,6 +44,20 @@ class ScoringTests(unittest.TestCase):
             self.assertEqual(row['successes'], 20)
             self.assertEqual(row['unknown_cost_count'], 0)
 
+    def test_ambiguous_model_json_is_not_successful(self):
+        for answer in ('{"bug":false,"bug":true,"code":"missing_organization_authorization"}',
+                       '{"bug":false,"\\u0062ug":true,"code":"missing_organization_authorization"}',
+                       '{"metadata":{"value":1,"value":2}}',
+                       '{"value":NaN}', '{"value":Infinity}', '{"value":-Infinity}'):
+            with self.subTest(answer=answer):
+                evidence = fixture()
+                evidence['calls'][0]['final_answer'] = answer
+                row = score(CORPUS, evidence)['results']['minimax-m3']
+                self.assertEqual(row['valid_json_count'], 19)
+                self.assertEqual(row['successes'], 19)
+                self.assertEqual(row['denominator'], 20)
+                self.assertEqual(row['unknown_cost_count'], 0)
+
     def test_ambiguous_accounting(self):
         evidence = fixture()
         evidence['calls'][0].update(receipt_status='ambiguous', status='failed', total_cost_microusd=0)

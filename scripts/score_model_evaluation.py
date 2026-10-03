@@ -14,6 +14,20 @@ CANDIDATES = {
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
 
+def decode_model_answer(raw):
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('Duplicate model answer field.')
+            result[key] = value
+        return result
+
+    def reject_constant(value):
+        raise ValueError('Non-JSON numeric constant in model answer.')
+
+    return json.loads(raw, object_pairs_hook=unique_object, parse_constant=reject_constant)
+
 def score(corpus, evidence):
     cases = {case['id']: case for case in corpus['cases']}
     calls = evidence['calls']
@@ -63,7 +77,7 @@ def score(corpus, evidence):
             case = cases[call['case_id']]
             answer = None
             try:
-                answer = json.loads(call.get('final_answer', ''))
+                answer = decode_model_answer(call.get('final_answer', ''))
                 format_ok = isinstance(answer, dict)
             except (ValueError, TypeError):
                 format_ok = False
