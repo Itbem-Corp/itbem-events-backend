@@ -98,10 +98,11 @@ func readPinnedQASourceDependencies(ctx context.Context, root, commit string, ap
 			entry = &declaration{}
 			modules[name] = entry
 		}
-		if suffix == "path" {
+		switch suffix {
+		case "path":
 			entry.path = value
 			entry.paths++
-		} else if suffix == "url" {
+		case "url":
 			entry.url = value
 			entry.urls++
 		}

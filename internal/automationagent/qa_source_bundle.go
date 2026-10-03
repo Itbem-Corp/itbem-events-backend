@@ -29,7 +29,7 @@ func materializePublishedQASourceBundle(ctx context.Context, workspace Workspace
 		return "", fmt.Errorf("QA source dependency count exceeds its boundary")
 	}
 	expected := map[string]string{}
-	var total int64 = int64(len(pack))
+	total := int64(len(pack))
 	for _, child := range children {
 		if !validQASourcePackEnvelope(child.PackSHA256, child.Pack) {
 			return "", fmt.Errorf("QA source child package integrity invalid")
