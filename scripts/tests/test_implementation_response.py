@@ -11,6 +11,15 @@ def response():
 
 
 class ImplementationResponseTests(unittest.TestCase):
+    def test_deeply_nested_json_retains_failed_outcome(self):
+        raw = b'[' * 2000 + b']' * 2000
+        report = assess(raw)
+        self.assertFalse(report['response_contract_valid'])
+        self.assertFalse(report['candidate_executed'])
+        self.assertTrue(report['response_read_complete'])
+        self.assertEqual(report['response_sha256'], hashlib.sha256(raw).hexdigest())
+        self.assertTrue(report['validation_error'])
+
     def test_invalid_response_is_retained_as_failure_with_complete_hash(self):
         for raw in (b'{}', b'\xff', b'{"changes":[],"changes":[]}'):
             with self.subTest(raw=raw):

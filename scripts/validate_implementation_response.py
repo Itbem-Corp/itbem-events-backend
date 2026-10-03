@@ -41,7 +41,7 @@ def validate(raw):
 def assess(raw):
     try:
         return validate(raw)
-    except ValueError as error:
+    except (ValueError, RecursionError) as error:
         # A bounded read of an oversized response does not identify the entire
         # input. Retain an explicit unavailable hash instead of hashing a prefix.
         complete = len(raw) <= MAX_RESPONSE_BYTES
