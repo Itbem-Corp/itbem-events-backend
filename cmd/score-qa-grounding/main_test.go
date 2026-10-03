@@ -31,6 +31,7 @@ func TestScoreRetainsGroundedAndFailedEvidence(t *testing.T) {
 		{"malformed", "not-json", false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			output := filepath.Join(root, test.name+"-score.json")
 			if err := os.WriteFile(claims, []byte(test.input), 0600); err != nil {
 				t.Fatal(err)
 			}
@@ -61,6 +62,34 @@ func TestScoreRetainsGroundedAndFailedEvidence(t *testing.T) {
 		})
 	}
 	var stdout, stderr bytes.Buffer
+	if run([]string{"-observation", observation, "-claims", claims, "-output", observation}, &stdout, &stderr) != 2 {
+		t.Fatal("score overwrote observation input")
+	}
+	unchanged, err := os.ReadFile(observation)
+	if err != nil || string(unchanged) != observed {
+		t.Fatal("observation input was modified")
+	}
+	if err := os.WriteFile(output, []byte("existing evidence"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if run([]string{"-observation", observation, "-claims", claims, "-output", output}, &stdout, &stderr) != 2 {
+		t.Fatal("score overwrote existing evidence")
+	}
+	unchanged, err = os.ReadFile(output)
+	if err != nil || string(unchanged) != "existing evidence" {
+		t.Fatal("existing score was modified")
+	}
+	alias := filepath.Join(root, "observation-alias.json")
+	if err := os.Link(observation, alias); err != nil {
+		t.Fatal(err)
+	}
+	if run([]string{"-observation", observation, "-claims", claims, "-output", alias}, &stdout, &stderr) != 2 {
+		t.Fatal("score overwrote hard-link input alias")
+	}
+	unchanged, err = os.ReadFile(observation)
+	if err != nil || string(unchanged) != observed {
+		t.Fatal("aliased observation input was modified")
+	}
 	if run([]string{"-observation", observation, "-claims", filepath.Join(root, "missing")}, &stdout, &stderr) != 1 {
 		t.Fatal("missing claims accepted")
 	}

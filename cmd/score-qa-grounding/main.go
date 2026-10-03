@@ -84,8 +84,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	encoded = append(encoded, '\n')
 	if *outputPath != "" {
-		if err := os.WriteFile(*outputPath, encoded, 0600); err != nil {
+		// Evidence is write-once: exclusive creation also protects input paths,
+		// hard-link aliases and symlinks from being overwritten by a score.
+		file, err := os.OpenFile(*outputPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		if err != nil {
 			fmt.Fprintln(stderr, err)
+			return 2
+		}
+		_, writeErr := file.Write(encoded)
+		closeErr := file.Close()
+		if writeErr != nil || closeErr != nil {
+			fmt.Fprintln(stderr, "score output could not be completed", writeErr, closeErr)
 			return 2
 		}
 	}
