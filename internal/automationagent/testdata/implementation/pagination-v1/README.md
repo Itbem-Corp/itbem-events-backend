@@ -54,3 +54,12 @@ response hash. Oversized inputs are read only to 64 KiB + 1; their report record
 the observed byte count, response_read_complete=false and response_sha256=null.
 Publication still refuses existing destinations. No failed response files are
 promoted as replacements, and no candidate code is executed.
+
+Prepare sandbox package data without materializing or executing source:
+python3 scripts/prepare_implementation_candidate.py --response <response.json> --output <new-package.json>
+The package contains the two validated replacement files plus evaluator-owned
+go.mod and page_test.go, with hashes for every file. Invalid responses retain
+their failed assessment and yield no package files. Only an authorized isolated
+sandbox may consume this data. prepared_prompt_sha256 identifies the current
+task input; it does not attest which prompt a model received. Bind that separately
+to the actual central-gateway receipt before attributing model quality.
