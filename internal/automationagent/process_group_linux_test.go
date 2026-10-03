@@ -36,16 +36,27 @@ func TestQARevocationStopsRunningCommandTree(t *testing.T) {
 	if parseErr != nil || pid < 1 {
 		t.Fatal("synthetic child identity invalid")
 	}
-	// A reaped child disappears; a killed child may briefly remain a zombie.
-	// Neither may keep executing after the worker acknowledges revocation.
-	stat, statErr := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
-	if statErr == nil {
-		fields := strings.Fields(string(stat))
-		if len(fields) < 3 || fields[2] != "Z" {
-			t.Fatalf("child remained executable after revocation: %s", stat)
+	// SIGKILL has been sent to the entire group, but observing the shell's
+	// exit does not synchronize with the child's final scheduler transition.
+	// Require the child to disappear or become a zombie within a bounded
+	// interval; a leaked sleep remains executable for 30 seconds and fails.
+	deadline := time.Now().Add(time.Second)
+	for {
+		stat, statErr := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+		if os.IsNotExist(statErr) {
+			break
 		}
-	} else if !os.IsNotExist(statErr) {
-		t.Fatal(statErr)
+		if statErr != nil {
+			t.Fatal(statErr)
+		}
+		fields := strings.Fields(string(stat))
+		if len(fields) >= 3 && fields[2] == "Z" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("child remained executable after bounded revocation cleanup: %s", stat)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
