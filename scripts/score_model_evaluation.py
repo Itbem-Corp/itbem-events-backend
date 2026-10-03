@@ -181,7 +181,14 @@ def score(corpus, evidence):
             'api_equivalent_cost_per_success_usd': costs / 1_000_000 / success if success and not unknown_costs else None,
             'cases': scored,
         }
-    return {'batch': evidence['batch'], 'screening_only': True, 'complete': evidence['batch']['status'] == 'completed', 'limitation': '20 synthetic cases per model; not general quality certification or multi-file implementation validation. MiniMax values are API-equivalent, not a subscription invoice.', 'results': summary}
+    reported_complete = batch.get('status') == 'completed'
+    incomplete = sum(call.get('status') != 'completed' or call.get('receipt_status') != 'accepted'
+                     for call in calls)
+    return {'batch': batch, 'screening_only': True,
+            'reported_complete': reported_complete, 'incomplete_outcome_count': incomplete,
+            'complete': reported_complete and incomplete == 0,
+            'limitation': '20 synthetic cases per model; not general quality certification or multi-file implementation validation. MiniMax values are API-equivalent, not a subscription invoice.',
+            'results': summary}
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

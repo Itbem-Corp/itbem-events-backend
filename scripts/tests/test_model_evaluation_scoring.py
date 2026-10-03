@@ -37,6 +37,18 @@ def fixture(corpus=CORPUS):
 
 
 class ScoringTests(unittest.TestCase):
+    def test_completed_batch_cannot_hide_unfinished_outcomes(self):
+        for status, receipt in (('running', 'accepted'), ('failed', 'accepted'),
+                                ('completed', 'ambiguous')):
+            with self.subTest(status=status, receipt=receipt):
+                evidence = fixture()
+                evidence['calls'][0].update(status=status, receipt_status=receipt)
+                result = score(CORPUS, evidence)
+                self.assertFalse(result['complete'])
+                self.assertTrue(result['reported_complete'])
+                self.assertEqual(result['incomplete_outcome_count'], 1)
+                self.assertEqual(result['results']['minimax-m3']['denominator'], 20)
+
     def test_failure_diagnostics_distinguish_answer_and_execution(self):
         evidence = fixture()
         evidence['calls'][0]['final_answer'] = 'not-json'
@@ -55,6 +67,19 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(row['failure_reason_counts']['invalid_json'], 2)
         self.assertEqual(row['failure_reason_counts']['answer_mismatch'], 1)
         self.assertTrue(all(not case['failure_reasons'] for case in row['cases'][3:]))
+
+    def test_completion_is_independent_of_answer_quality_and_not_inferred(self):
+        evidence = fixture()
+        evidence['calls'][0]['final_answer'] = '{"wrong":true}'
+        result = score(CORPUS, evidence)
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['incomplete_outcome_count'], 0)
+        self.assertEqual(result['results']['minimax-m3']['successes'], 19)
+        evidence['batch']['status'] = 'active'
+        result = score(CORPUS, evidence)
+        self.assertFalse(result['complete'])
+        self.assertFalse(result['reported_complete'])
+        self.assertEqual(result['incomplete_outcome_count'], 0)
 
     def test_reused_receipt_or_run_cannot_count_as_new_outcome(self):
         for field in ('receipt_id', 'run_id'):

@@ -1,5 +1,7 @@
 # Offline model evaluation reports
 
+`reported_complete` preserves whether the batch declares completion. `complete` also requires all 60 recorded tasks to be completed with accepted receipts; `incomplete_outcome_count` discloses contradictory unfinished/unaccepted rows. A completed run may still contain wrong or invalid model answers, so completion does not mean quality success. An active batch is never promoted to complete solely because its rows appear completed. Cache qualification uses the checked `complete` value.
+
 Each scored case includes `failure_reasons`; each candidate includes `failure_reason_counts`. Reasons distinguish task/receipt failures, unexpected routes, truncation, recorded result errors, invalid JSON and exact-answer mismatches. They may overlap on one case, so their counts must not be summed as a number of failed cases. A parsed JSON object with the wrong keys, types or values is an answer mismatch; invalid JSON is a separate failure. Successes, denominators and accounting retain their existing definitions. Cache analysis includes these diagnostics in its nested `screening` report.
 
 Every supplied run and receipt identity must be a nonblank string without surrounding whitespace, and may occur only once per export. Accepted outcomes require both identities. Failed outcomes may omit identities that were never assigned and remain in the denominator; reused identities are rejected even on failed rows. This prevents counting an exported receipt more than once, but does not authenticate the receipt itself.
