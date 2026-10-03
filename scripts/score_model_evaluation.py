@@ -4,7 +4,7 @@ import hashlib
 import json
 import math
 import statistics
-from evaluation_report import publish_report, read_input
+from evaluation_report import decode_json, publish_report, read_input
 
 CANDIDATES = {
     'minimax-m3': ('minimax', 'MiniMax-M3'),
@@ -19,18 +19,7 @@ SCREENING_VERSION = 'synthetic-screening-20-2026-09-30-v1'
 CACHE_VERSION = 'synthetic-prefix-cache-20-2026-10-01-v1'
 
 def decode_model_answer(raw):
-    def unique_object(pairs):
-        result = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError('Duplicate model answer field.')
-            result[key] = value
-        return result
-
-    def reject_constant(value):
-        raise ValueError('Non-JSON numeric constant in model answer.')
-
-    return json.loads(raw, object_pairs_hook=unique_object, parse_constant=reject_constant)
+    return decode_json(raw)
 
 def score(corpus, evidence):
     version = corpus.get('corpus_version', SCREENING_VERSION)
@@ -98,7 +87,7 @@ def score(corpus, evidence):
             valid_json += format_ok
             receipt_ok = call.get('receipt_status') == 'accepted'
             if receipt_ok:
-                routes = json.loads(call.get('sealed_routes_json', '[]'))
+                routes = decode_json(call.get('sealed_routes_json', '[]'))
                 effort = '' if candidate == 'minimax-m3' else 'high'
                 if len(routes) != 1 or (routes[0].get('provider'), routes[0].get('model')) != expected_route or routes[0].get('reasoning_enabled') is not True or routes[0].get('reasoning_effort', '') != effort:
                     raise ValueError('Accepted call has an unexpected sealed reasoning route.')

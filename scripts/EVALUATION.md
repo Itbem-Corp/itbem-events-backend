@@ -14,6 +14,8 @@ Choose a new output filename for each report. Both commands publish a completed 
 
 Each CLI report includes `input_sha256.corpus` and `input_sha256.evidence`, computed from the exact bytes read, including any BOM or whitespace. These hashes identify inputs; they do not authenticate gateway receipts or prove that an exported file is complete.
 
+Input files use the same strict JSON decoder as model answers: duplicate decoded field names (including escaped aliases and nested duplicates) and `NaN`/infinity constants are rejected before scoring. Valid UTF-8 BOMs and repeated field names in separate objects are supported. Input decoding failure does not publish a report or change the input file.
+
 The scorer treats duplicate decoded model-answer fields, including escaped aliases and nested duplicates, and non-JSON numeric constants as format failures. Failed answers remain in the denominator; known usage and costs remain counted. Exact answer matching, attribution and receipt checks still apply independently.
 
 These commands are offline and make no provider calls. Synthetic fixtures validate the evaluator, not live model quality. Run their tests in Linux, where the full sandbox suite is supported:

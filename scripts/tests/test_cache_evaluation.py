@@ -25,6 +25,14 @@ def cache_fixture():
     return evidence
 
 class CacheTests(unittest.TestCase):
+    def test_ambiguous_price_snapshot_cannot_qualify_savings(self):
+        evidence = cache_fixture()
+        original = evidence['calls'][0]['pricing_snapshot_json']
+        evidence['calls'][0]['pricing_snapshot_json'] = '{"rates_microusd_per_million":{},' + original[1:]
+        row = analyze(CORPUS, evidence)['results']['minimax-m3']
+        self.assertFalse(row['qualified_with_complete_accounting'])
+        self.assertIsNone(row['input_savings_microusd'])
+
     def test_checked_in_generation_and_answer_separation(self):
         self.assertEqual(SERVER, json.loads((ROOT / 'internal/modelevaluation/cache_corpus.json').read_text()))
         self.assertEqual(CORPUS, json.loads((ROOT / 'scripts/model-evaluation-cache-corpus.json').read_text()))

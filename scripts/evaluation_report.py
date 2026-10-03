@@ -6,9 +6,24 @@ from pathlib import Path
 import tempfile
 
 
+def decode_json(raw):
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('Duplicate evaluation JSON field.')
+            result[key] = value
+        return result
+
+    def reject_constant(value):
+        raise ValueError('Non-JSON numeric constant in evaluation JSON.')
+
+    return json.loads(raw, object_pairs_hook=unique_object, parse_constant=reject_constant)
+
+
 def read_input(path):
     raw = Path(path).read_bytes()
-    return json.loads(raw.decode('utf-8-sig')), hashlib.sha256(raw).hexdigest()
+    return decode_json(raw.decode('utf-8-sig')), hashlib.sha256(raw).hexdigest()
 
 
 def publish_report(path, report):

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from build_cache_evaluation_corpus import VERSION, build
 from score_model_evaluation import CANDIDATES, score
-from evaluation_report import publish_report, read_input
+from evaluation_report import decode_json, publish_report, read_input
 
 def integer(value):
     return type(value) is int and value >= 0
@@ -17,7 +17,7 @@ def components(call):
     if not all(integer(call.get(key)) for key in ('input_tokens', 'output_tokens', 'total_cost_microusd')):
         return None
     try:
-        snapshot = json.loads(call['pricing_snapshot_json'])
+        snapshot = decode_json(call['pricing_snapshot_json'])
         rates = snapshot['rates_microusd_per_million']
     except (KeyError, TypeError, ValueError):
         return None
@@ -50,7 +50,7 @@ def analyze(corpus, evidence):
     result = {}
     for candidate in CANDIDATES:
         rows = [call for call in evidence['calls'] if call['candidate'] == candidate]
-        rate_snapshots = {json.dumps(json.loads(call['pricing_snapshot_json'])['rates_microusd_per_million'], sort_keys=True)
+        rate_snapshots = {json.dumps(decode_json(call['pricing_snapshot_json'])['rates_microusd_per_million'], sort_keys=True)
                           for call in rows if components(call) is not None}
         if len(rate_snapshots) > 1:
             raise ValueError('Experimental conditions have different historical rates.')

@@ -67,6 +67,13 @@ class ScoringTests(unittest.TestCase):
             self.assertEqual(row['successes'], 20)
             self.assertEqual(row['unknown_cost_count'], 0)
 
+    def test_ambiguous_sealed_route_is_rejected(self):
+        evidence = fixture()
+        original = evidence['calls'][0]['sealed_routes_json']
+        evidence['calls'][0]['sealed_routes_json'] = '[{"provider":"unexpected",' + original[2:]
+        with self.assertRaisesRegex(ValueError, 'Duplicate evaluation JSON field'):
+            score(CORPUS, evidence)
+
     def test_ambiguous_model_json_is_not_successful(self):
         for answer in ('{"bug":false,"bug":true,"code":"missing_organization_authorization"}',
                        '{"bug":false,"\\u0062ug":true,"code":"missing_organization_authorization"}',
