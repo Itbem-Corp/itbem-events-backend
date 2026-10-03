@@ -40,6 +40,15 @@ run "delegated QA binds frozen authority, exact checkout and independent review"
 run "server authority reader verifies the immutable seal" \
   go test ./internal/deliveryledger -run 'TestReadAutonomyAuthorityVerifiesSealAndReturnsIndependentFrozenContent$' -count=1
 
+run "delegated publication retains scoped authority and pre-publication security" \
+  go test ./internal/automationagent -run 'Test(DelegatedPublicationRequiresOperatorSecurityChecksAndIsolation|PublicationAuthorityRenewalRejectsRevocationAndExpiry|PublicationHandoffRetainsTargetAndSecurityReceipts)$' -count=1
+
+run "signed reviewer findings remain private and cannot contradict publication" \
+  go test ./controllers/automation -run 'TestCodeReviewPublicationForTaskRequiresExactIndependentGitHubEvidence$' -count=1
+
+run "code coordination waits for every current repository publication" \
+  go test ./controllers/delivery -run 'TestDelegatedCodeWaitsForEveryCurrentRepositoryPublication$' -count=1
+
 run "doctor identity and publication authority readiness" \
   go test ./cmd/itbem-ai-agent -run 'Test(DoctorPublicationReadinessRequiresRoleSpecificGitHubAppConfiguration|DoctorReadinessRejectsMismatchedAndUnknownWorkerIdentities|DoctorGatewayReleaseObserverRequiresNoPublicationCredential)$' -count=1
 

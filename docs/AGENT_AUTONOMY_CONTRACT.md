@@ -28,6 +28,16 @@ los fallos funcionales admiten como máximo tres correcciones dentro del mismo
 plan aprobado, con pasos nuevos y resultados anteriores conservados. Esta
 decisión no concede publicación, merge ni despliegue.
 
+La publicación también puede delegarse explícitamente: la política congelada y
+el mandato deben permitirla. El coordinador concede sólo el repositorio, base,
+rama y hash del diff validados, con vencimiento de 30 minutos. El Publisher ejecuta
+los controles de seguridad registrados en sandbox y renueva autoridad antes de
+los efectos remotos. El PR se crea mientras código sigue pendiente; el Reviewer
+independiente revisa su SHA exacto antes de que el coordinador pueda aprobar código,
+pasar a preview y iniciar QA. La decisión de código también respeta el mandato.
+Los hallazgos privados sellados alimentan correcciones dentro del plan aprobado;
+riesgos de seguridad altos/críticos y evidencia insuficiente requieren atención.
+
 ## Multi-repo
 
 Una tarea puede congelar varios repositorios. Para planificación, el agente

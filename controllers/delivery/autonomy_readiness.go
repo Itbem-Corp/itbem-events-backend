@@ -50,7 +50,7 @@ func describeAutonomyReadiness(policy deliverypolicy.ResolvedPolicy, sourceReady
 		}
 	}
 	add("github_protections", "unknown", "Protecciones de GitHub", "Verifica con las identidades configuradas la aprobación independiente y Bema Review / exact-sha sobre el commit final.")
-	add("delegated_coordinator", "missing", "Continuidad delegada", "QA dispone de decisiones delegadas con evidencia sellada y correcciones acotadas. Falta completar las decisiones de plan y código, publicación y release para acreditar autonomía de producción.")
+	add("delegated_coordinator", "missing", "Continuidad delegada", "QA, código y publicación disponen de coordinación delegada con evidencia sellada y correcciones acotadas. Faltan plan, ejecución de merge y release, y calificación operacional para acreditar autonomía de producción.")
 	if policy.Mode == deliverypolicy.ModeRelease {
 		add("release_environment", "unknown", "Entorno de release", "Comprueba la promoción autorizada, SHA desplegado, salud y recuperación con el entorno real.")
 	}

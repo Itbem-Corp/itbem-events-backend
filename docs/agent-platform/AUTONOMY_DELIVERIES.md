@@ -32,9 +32,11 @@ The existing policy supports human and delegated gate modes, and an immutable
 work-item snapshot binds repository revisions, Vault and policy digests.
 The QA continuation now advances under delegated authority when the sealed
 observation and independent exact-SHA review prove its current revision matrix.
-Other decision phases still use `waiting_for_user`; there is no complete
-delegated decision coordinator.
-Publication still requires an exact temporary grant, and final release
+Code decisions also advance from independently published PR reviews when the
+task mandate delegates them. Plans still require human approval; there is no
+complete delegated decision coordinator. Publication requires an exact temporary
+grant, which the coordinator may issue under explicit frozen publication authority.
+Final release
 authorization checks a named human actor. These boundaries must be implemented
 together with independent evidence, not removed to obtain apparent autonomy.
 The Go runtime has a deterministic release observer, but no implemented GitHub
@@ -96,3 +98,42 @@ detection covering concurrent replay, automatic success, fresh correction
 execution, human policy, wrong source/PR/actor, corrupted JSONB evidence,
 correction exhaustion and rollback when scheduling the next phase fails.
 These are component qualifications, not evidence of live production autonomy.
+
+## Delegated code and publication increment
+
+The existing publication flow creates a PR while code review is pending. The
+independent Reviewer inspects that immutable head before code can enter preview
+and QA. This increment connects that flow; it does not invent a local review or
+represent publication as code approval.
+
+An implementation continuation with frozen delegated repository authority may
+issue a 30-minute grant for each changed workspace only when its mandate does
+not reserve `authorize_publication` for a human. Each grant binds the current
+implementation, unchanged approved definition, frozen base, repository, branch,
+diff SHA-256 and allowed target branches. Grant creation and all durable intents
+share the completion transaction. Replayed completion creates no duplicate grant.
+
+Before remote effects, a delegated Publisher executes operator-owned
+`security:secrets` and `security:high-critical` commands in a Docker or Firecracker
+sandbox, verifies that they did not change the diff, and renews control-plane
+authority. Expired/revoked grants, stale epochs and changed local diffs reject
+renewal. The worker checks expiry/renewal again before commit, push and PR creation.
+Failures after a confirmed push retain partial effect evidence for reconciliation.
+
+A durable `code_review` intent waits up to 24 hours for all published repositories,
+their CI, consumed grants, exact current diffs and latest independent PR/SHA review.
+It makes no model call. When the mandate permits `approve_code_review`, passing
+reviews create one delegated gate and queue preview; verified preview then queues
+QA. A functional change request can queue a fresh execution of the same approved
+definition within the shared three-correction budget. Sealed private Reviewer
+findings provide the actual correction context; missing/altered findings, unchanged
+failed diffs, oversized context or high/critical security findings escalate.
+Human mandates retain their decisions, and the plan, merge and release boundaries
+remain in place.
+
+The publication callback now accepts its admitted `code_review` state and retains
+the grant's diff fingerprint, security receipts and actual target branch. CI tests
+real PostgreSQL continuation/replay, rollback, correction and preview-to-QA, plus
+revocation, expiry, stale epochs, changed diffs and rejected callback receipts.
+These tests use synthetic worker/GitHub evidence and do not certify a live remote
+publication or production deployment.

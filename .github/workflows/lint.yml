@@ -64,6 +64,10 @@ jobs:
         run: go test -race -tags=integration ./internal/deliveryledger -run '^TestLedgerProjectionsSurvivePostgreSQLJSONBAndRejectTampering$' -count=1 -timeout 180s
       - name: Verify delegated QA decisions and correction rollback against PostgreSQL
         run: go test -race -tags=integration ./controllers/delivery -run '^TestDelegatedQACoordinatorPostgresTransactions$' -count=1 -timeout 180s
+      - name: Verify delegated code decisions and publication continuity against PostgreSQL
+        run: go test -race -tags=integration ./controllers/delivery -run '^TestDelegatedCodePublicationPostgresContinuation$' -count=1 -timeout 180s
+      - name: Verify delegated publication revocation and source receipts against PostgreSQL
+        run: go test -race -tags=integration ./controllers/automation -run '^TestDelegatedPublicationPostgresFencesAndReceipts$' -count=1 -timeout 180s
       - name: Qualify isolated AWS transport and role lanes
         env:
           ITBEM_AWS_EMULATOR_PORT: "14567"

@@ -23,15 +23,16 @@ const (
 // GitHubCodeReviewPublication is the credential-free, exact-SHA handoff from
 // the Reviewer lane. GitHub remains the authority for the review itself.
 type GitHubCodeReviewPublication struct {
-	SchemaVersion int    `json:"schema_version"`
-	Repository    string `json:"repository"`
-	PullRequest   int    `json:"pull_request"`
-	HeadSHA       string `json:"head_sha"`
-	PatchSHA256   string `json:"patch_sha256"`
-	SubjectSHA256 string `json:"subject_sha256"`
-	PayloadSHA256 string `json:"payload_sha256"`
-	Verdict       string `json:"verdict"`
-	Event         string `json:"event"`
+	ReviewResult  json.RawMessage `json:"review_result,omitempty"`
+	SchemaVersion int             `json:"schema_version"`
+	Repository    string          `json:"repository"`
+	PullRequest   int             `json:"pull_request"`
+	HeadSHA       string          `json:"head_sha"`
+	PatchSHA256   string          `json:"patch_sha256"`
+	SubjectSHA256 string          `json:"subject_sha256"`
+	PayloadSHA256 string          `json:"payload_sha256"`
+	Verdict       string          `json:"verdict"`
+	Event         string          `json:"event"`
 	// ReviewGatePassed is calculated from the already parsed, boundary-checked
 	// verdict before this record is published. It is never model-provided: only
 	// an independent approval, or an explicitly non-blocking maintainability

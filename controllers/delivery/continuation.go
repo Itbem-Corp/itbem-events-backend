@@ -384,6 +384,15 @@ func dispatchContinuation(ctx context.Context, db *gorm.DB, cfg *models.Config) 
 	if intent.Phase == "preview" {
 		return advanceAvailablePreview(db, intent)
 	}
+	if intent.Phase == "code_review" {
+		if err := advanceDelegatedCodeReview(db, intent); err != nil {
+			if intent.Attempts >= 2 {
+				return finishContinuation(db, intent, "blocked", "La evidencia independiente de código no cumple su contrato; revisa la revisión, el diff y la autorización de publicación.")
+			}
+			return db.Model(&intent).Where("status <> ?", "superseded").Updates(map[string]any{"status": "pending", "attempts": intent.Attempts + 1, "available_at": time.Now().UTC().Add(time.Minute)}).Error
+		}
+		return nil
+	}
 	var task models.AutomationTask
 	err = db.Where("continuation_id = ?", intent.ID).First(&task).Error
 	if err == gorm.ErrRecordNotFound {
@@ -656,6 +665,15 @@ func completeContinuation(db *gorm.DB, intent models.DeliveryContinuation, task 
 		case "publish":
 			// Publication remains gated by its exact, short-lived human grant.
 			item.AgentProgress = "waiting_for_preview"
+			var grant models.DeliveryPublicationGrant
+			if intent.PublicationGrantID != "" {
+				if err := tx.First(&grant, "id = ?", intent.PublicationGrantID).Error; err != nil {
+					return err
+				}
+				if grant.GrantedBy == delegatedCoordinatorActor {
+					item.AgentProgress = "queued"
+				}
+			}
 			if err := tx.Save(&item).Error; err != nil {
 				return err
 			}
@@ -681,6 +699,19 @@ func completeContinuation(db *gorm.DB, intent models.DeliveryContinuation, task 
 		}
 		item.AgentProgress = "waiting_for_user"
 		item.BlockedReason = ""
+		if intent.Phase == "implementation" {
+			if handled, err := coordinateDelegatedPublication(tx, &item, intent, task, time.Now().UTC()); err != nil {
+				return err
+			} else if handled {
+				if err := recordContinuationMessage(tx, intent, "ready", "La implementación validada tiene publicación acotada autorizada; código seguirá pendiente hasta la revisión independiente del PR exacto."); err != nil {
+					return err
+				}
+				if err := tx.Save(&item).Error; err != nil {
+					return err
+				}
+				return tx.Model(&intent).Update("status", "done").Error
+			}
+		}
 		if err := recordContinuationMessage(tx, intent, "ready", "El resultado de esta fase está disponible con su evidencia. Revisa la decisión correspondiente para continuar; no he aprobado ni publicado una entrega."); err != nil {
 			return err
 		}

@@ -167,15 +167,17 @@ type deliveryAgentGate struct {
 // deliveryAgentPublication is authorization data, never a credential. The
 // worker independently mints a GitHub App installation token at use time.
 type deliveryAgentPublication struct {
-	GrantID          string   `json:"grant_id"`
-	RepositoryRef    string   `json:"repository_ref"`
-	BaseSHA          string   `json:"base_sha"`
-	GitHubRepository string   `json:"github_repository"`
-	ReviewDiffSHA256 string   `json:"review_diff_sha256"`
-	Branch           string   `json:"branch"`
-	Capabilities     []string `json:"capabilities"`
-	ExpiresAt        string   `json:"expires_at"`
-	ApprovalReason   string   `json:"approval_reason"`
+	AllowedTargetBranches []string `json:"allowed_target_branches,omitempty"`
+	GateAuthority         string   `json:"gate_authority,omitempty"`
+	GrantID               string   `json:"grant_id"`
+	RepositoryRef         string   `json:"repository_ref"`
+	BaseSHA               string   `json:"base_sha"`
+	GitHubRepository      string   `json:"github_repository"`
+	ReviewDiffSHA256      string   `json:"review_diff_sha256"`
+	Branch                string   `json:"branch"`
+	Capabilities          []string `json:"capabilities"`
+	ExpiresAt             string   `json:"expires_at"`
+	ApprovalReason        string   `json:"approval_reason"`
 }
 
 type deliveryAgentContext struct {
@@ -697,6 +699,9 @@ func enqueueAgentRun(c echo.Context, workItemID uuid.UUID, requestedBy string, r
 		input.Prompt += " Execute the normalized delivery.plan_steps graph, satisfy each step's acceptance criteria, and do not begin a dependent step until all of its declared dependencies are complete. Steps without dependencies are independent; do not invent dependencies. Preserve the human gates and autonomy boundary."
 	}
 	evidenceSubjectDigest := ""
+	if phase == "publish" && publicationGrant != nil && publicationGrant.GrantedBy == delegatedCoordinatorActor {
+		evidenceSubjectDigest = publicationGrant.ReviewDiffSHA256
+	}
 	if phase == "qa" || phase == "release_gate" {
 		candidate, candidateErr := storedReleaseGateCandidate(item, changeSets)
 		if candidateErr != nil {
@@ -1192,6 +1197,16 @@ func buildDeliveryAgentInput(item models.DeliveryWorkItem, project models.Delive
 		input.Delivery.Publication = &deliveryAgentPublication{
 			GrantID: grants[0].ID.String(), RepositoryRef: grants[0].RepositoryRef, BaseSHA: grants[0].BaseSHA, GitHubRepository: grants[0].GitHubRepository,
 			ReviewDiffSHA256: grants[0].ReviewDiffSHA256, Branch: grants[0].Branch, Capabilities: capabilities, ExpiresAt: grants[0].ExpiresAt.UTC().Format(time.RFC3339), ApprovalReason: grants[0].Reason,
+		}
+		if grants[0].GrantedBy == delegatedCoordinatorActor {
+			input.Delivery.Publication.GateAuthority = "delegated"
+			var reason struct {
+				AllowedTargetBranches []string `json:"allowed_target_branches"`
+			}
+			if json.Unmarshal([]byte(grants[0].Reason), &reason) != nil || len(reason.AllowedTargetBranches) == 0 {
+				return input, fmt.Errorf("delegated publication lacks frozen target branches")
+			}
+			input.Delivery.Publication.AllowedTargetBranches = reason.AllowedTargetBranches
 		}
 	}
 	if len(snapshots) == 0 {

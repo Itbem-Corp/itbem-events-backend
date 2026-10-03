@@ -524,7 +524,9 @@ func (w *Worker) Process(ctx context.Context, message TaskMessage) error {
 		if !accepted {
 			return nil
 		}
-		publication, runErr := RunPublication(ctx, input.Delivery, os.Getenv)
+		publication, runErr := runPublicationWithAuthority(withSandboxTaskID(ctx, message.Payload.TaskID), input.Delivery, os.Getenv, func(refreshCtx context.Context) (bool, error) {
+			return w.callback.Update(refreshCtx, message.Payload.TaskID, TaskUpdate{Status: "running", RunID: runID, ProgressStep: "publishing"})
+		})
 		if runErr != nil {
 			var effectErr *PublicationEffectError
 			if errors.As(runErr, &effectErr) {
@@ -1026,7 +1028,7 @@ func implementationHandoffSingle(result map[string]any) map[string]any {
 // command text. The full private result remains encrypted in object storage.
 func publicationHandoff(result map[string]any) map[string]any {
 	handoff := map[string]any{}
-	for _, key := range []string{"grant_id", "workspace", "worktree", "repository_ref", "branch", "base_sha", "review_diff_sha256", "commit_sha", "remote_repository", "branch_published", "commit_created", "pull_request_url", "pull_request_created"} {
+	for _, key := range []string{"grant_id", "workspace", "worktree", "repository_ref", "branch", "target_branch", "base_sha", "review_diff_sha256", "commit_sha", "remote_repository", "branch_published", "commit_created", "pull_request_url", "pull_request_created", "security_checks"} {
 		if value, ok := result[key]; ok {
 			handoff[key] = value
 		}
