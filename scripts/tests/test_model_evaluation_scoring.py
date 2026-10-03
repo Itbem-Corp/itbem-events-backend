@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import unittest
 
-from score_model_evaluation import CANDIDATES, score
+from score_model_evaluation import CANDIDATES, SCREENING_VERSION, score
 
 ROOT = Path(__file__).resolve().parents[2]
 CORPUS = json.loads((ROOT / 'scripts/model-evaluation-screening-corpus.json').read_text(encoding='utf-8-sig'))
@@ -33,10 +33,33 @@ def fixture(corpus=CORPUS):
                 'cache_write_tokens': 0, 'reasoning_tokens': 0,
             })
     return {'batch': {'status': 'completed', 'budget_microusd': 1000000,
-                      'reservation_microusd': 600, 'corpus_version': corpus.get('corpus_version')}, 'calls': calls}
+                      'reservation_microusd': 600, 'corpus_version': corpus.get('corpus_version', SCREENING_VERSION)}, 'calls': calls}
 
 
 class ScoringTests(unittest.TestCase):
+    def test_modified_corpus_cannot_redefine_success(self):
+        for mutation in ('expected', 'duplicate', 'type', 'version'):
+            with self.subTest(mutation=mutation):
+                corpus = copy.deepcopy(CORPUS)
+                if mutation == 'expected':
+                    corpus['cases'][0]['expected'] = {'bug': False, 'code': 'none'}
+                elif mutation == 'duplicate':
+                    corpus['cases'].append(copy.deepcopy(corpus['cases'][0]))
+                elif mutation == 'type':
+                    corpus['cases'][0]['expected']['bug'] = 1
+                else:
+                    corpus['corpus_version'] = 'unknown'
+                with self.assertRaises(ValueError):
+                    score(corpus, fixture(CORPUS if mutation == 'duplicate' else corpus))
+
+    def test_screening_batch_requires_matching_version(self):
+        for version in (None, '', 'unknown', 'synthetic-prefix-cache-20-2026-10-01-v1'):
+            with self.subTest(version=version):
+                evidence = fixture()
+                evidence['batch']['corpus_version'] = version
+                with self.assertRaises(ValueError):
+                    score(CORPUS, evidence)
+
     def test_complete_fixture(self):
         result = score(CORPUS, fixture())
         self.assertTrue(result['screening_only'])

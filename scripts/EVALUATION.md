@@ -8,6 +8,8 @@ python scripts/score_model_evaluation.py --corpus scripts/model-evaluation-scree
 
 For the matched-prefix cache experiment, use `scripts/analyze_cache_evaluation.py` with `scripts/model-evaluation-cache-corpus.json` and the matching exported receipts.
 
+The scorer compares the complete parsed corpus with its checked-in frozen reference, including expected answer types and case-list entries. Formatting may differ, but changing answers, prompts, metadata or cases requires a separately reviewed corpus revision. Receipts must carry the matching `batch.corpus_version`: `synthetic-screening-20-2026-09-30-v1` for screening or `synthetic-prefix-cache-20-2026-10-01-v1` for cache. Missing versions are rejected rather than inferred. The local reference is part of the trusted checkout; this comparison does not authenticate that checkout.
+
 Choose a new output filename for each report. Both commands publish a completed report without replacing an existing file, including input evidence or a hard link to it. Publication requires hard-link support on the destination filesystem; unsupported filesystems fail without an overwrite fallback. Concurrent writers have one winner. This guarantees complete-file visibility during publication, not durability through filesystem or power failure.
 
 Each CLI report includes `input_sha256.corpus` and `input_sha256.evidence`, computed from the exact bytes read, including any BOM or whitespace. These hashes identify inputs; they do not authenticate gateway receipts or prove that an exported file is complete.

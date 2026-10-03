@@ -15,6 +15,9 @@ CANDIDATES = {
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
 
+SCREENING_VERSION = 'synthetic-screening-20-2026-09-30-v1'
+CACHE_VERSION = 'synthetic-prefix-cache-20-2026-10-01-v1'
+
 def decode_model_answer(raw):
     def unique_object(pairs):
         result = {}
@@ -30,6 +33,18 @@ def decode_model_answer(raw):
     return json.loads(raw, object_pairs_hook=unique_object, parse_constant=reject_constant)
 
 def score(corpus, evidence):
+    version = corpus.get('corpus_version', SCREENING_VERSION)
+    references = {SCREENING_VERSION: 'model-evaluation-screening-corpus.json',
+                  CACHE_VERSION: 'model-evaluation-cache-corpus.json'}
+    if version not in references:
+        raise ValueError('Unrecognized evaluation corpus version.')
+    trusted, _ = read_input(Path(__file__).resolve().parent / references[version])
+    # Canonical JSON retains the boolean/numeric distinction that dict equality
+    # loses (True == 1), and compares the complete list before indexing cases.
+    if canonical(corpus) != canonical(trusted):
+        raise ValueError('Evaluation corpus differs from the frozen answer key.')
+    if evidence['batch'].get('corpus_version') != version:
+        raise ValueError('Evidence batch does not match the frozen corpus version.')
     cases = {case['id']: case for case in corpus['cases']}
     calls = evidence['calls']
     batch = evidence['batch']
@@ -39,10 +54,8 @@ def score(corpus, evidence):
         raise ValueError('Missing or invalid normal USD 1 batch reservation.')
     if len(cases) != 20 or len(calls) != 60:
         raise ValueError('Expected exactly 20 cases and 60 recorded outcomes, including failures.')
-    cache_profile = corpus.get('corpus_version') == 'synthetic-prefix-cache-20-2026-10-01-v1'
+    cache_profile = version == CACHE_VERSION
     clean_denominator = 10 if cache_profile else 5
-    if cache_profile and batch.get('corpus_version') != corpus['corpus_version']:
-        raise ValueError('Cache evidence does not match the versioned corpus.')
     if sum(case.get('category') == 'review_clean' for case in cases.values()) != clean_denominator:
         raise ValueError('Unexpected number of clean review cases.')
     seen = set()
