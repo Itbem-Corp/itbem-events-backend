@@ -2,6 +2,7 @@ package automationagent
 
 import (
 	"context"
+	"crypto/rand"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -177,6 +178,8 @@ func TestModelsDevMetadataEnrichesLiveAvailabilityAndKeepsPriceTiers(t *testing.
 }
 
 func TestResolveProviderModelLimitsForOpenAIDeepSeekOpenRouterAndMiniMax(t *testing.T) {
+	// Repetitions start cold while retaining the within-run cache assertion.
+	identitySuffix := rand.Text()
 	const publicMetadata = `{"openai":{"models":{"gpt-4.1-mini":{"id":"gpt-4.1-mini","modalities":{"input":["text"],"output":["text"]},"limit":{"context":4096,"output":2048}}}},"deepseek":{"models":{"deepseek-flash":{"id":"deepseek-flash","modalities":{"input":["text"],"output":["text"]},"limit":{"context":2048,"output":1024}}}},"openrouter":{"models":{"vendor/model-limits":{"id":"vendor/model-limits","modalities":{"input":["text"],"output":["text"]},"limit":{"context":1000,"output":400}}}},"minimax":{"models":{"MiniMax-M3":{"id":"MiniMax-M3","modalities":{"input":["text"],"output":["text"]},"limit":{"context":1000000,"output":131072}}}}}`
 	var requests atomic.Int64
 	client := &http.Client{Transport: providerModelsRoundTripper(func(request *http.Request) (*http.Response, error) {
@@ -190,22 +193,22 @@ func TestResolveProviderModelLimitsForOpenAIDeepSeekOpenRouterAndMiniMax(t *test
 		var body string
 		switch request.URL.String() {
 		case "https://api.openai.com/v1/models":
-			if request.Header.Get("Authorization") != "Bearer unique-openai-limit-key" {
+			if request.Header.Get("Authorization") != "Bearer unique-openai-limit-key"+identitySuffix {
 				t.Fatal("OpenAI account model request did not use its provider key")
 			}
 			body = `{"data":[{"id":"gpt-4.1-mini"}]}`
 		case "https://api.deepseek.com/models":
-			if request.Header.Get("Authorization") != "Bearer unique-deepseek-limit-key" {
+			if request.Header.Get("Authorization") != "Bearer unique-deepseek-limit-key"+identitySuffix {
 				t.Fatal("DeepSeek account model request did not use its provider key")
 			}
 			body = `{"data":[{"id":"deepseek-flash"}]}`
 		case "https://openrouter.ai/api/v1/models":
-			if request.Header.Get("Authorization") != "Bearer unique-openrouter-limit-key" {
+			if request.Header.Get("Authorization") != "Bearer unique-openrouter-limit-key"+identitySuffix {
 				t.Fatal("OpenRouter account model request did not use its provider key")
 			}
 			body = `{"data":[{"id":"vendor/model-limits","context_length":800,"max_output_tokens":300,"architecture":{"input_modalities":["text"],"output_modalities":["text"]},"supported_parameters":["max_completion_tokens"]}]}`
 		case miniMaxTokenPlanRemainsURL:
-			if request.Header.Get("Authorization") != "Bearer unique-minimax-limit-key" {
+			if request.Header.Get("Authorization") != "Bearer unique-minimax-limit-key"+identitySuffix {
 				t.Fatal("MiniMax token-plan check did not use its provider key")
 			}
 			body = `{"model_remains":[{"model_name":"MiniMax-M3"}],"base_resp":{"status_code":0}}`
@@ -220,12 +223,12 @@ func TestResolveProviderModelLimitsForOpenAIDeepSeekOpenRouterAndMiniMax(t *test
 		apiKey   string
 		want     inferenceModelLimits
 	}{
-		{ProviderOpenAI, "gpt-4.1-mini", "unique-openai-limit-key", inferenceModelLimits{ContextWindowTokens: 4096, MaxOutputTokens: 2048}},
-		{ProviderDeepSeek, "deepseek-flash", "unique-deepseek-limit-key", inferenceModelLimits{ContextWindowTokens: 2048, MaxOutputTokens: 1024}},
+		{ProviderOpenAI, "gpt-4.1-mini", "unique-openai-limit-key" + identitySuffix, inferenceModelLimits{ContextWindowTokens: 4096, MaxOutputTokens: 2048}},
+		{ProviderDeepSeek, "deepseek-flash", "unique-deepseek-limit-key" + identitySuffix, inferenceModelLimits{ContextWindowTokens: 2048, MaxOutputTokens: 1024}},
 		// A live provider limit lower than the public descriptor is retained.
-		{ProviderOpenRouter, "vendor/model-limits", "unique-openrouter-limit-key", inferenceModelLimits{ContextWindowTokens: 800, MaxOutputTokens: 300}},
+		{ProviderOpenRouter, "vendor/model-limits", "unique-openrouter-limit-key" + identitySuffix, inferenceModelLimits{ContextWindowTokens: 800, MaxOutputTokens: 300}},
 		// MiniMax's adapter cap is stricter than the published output value.
-		{ProviderMiniMax, "MiniMax-M3", "unique-minimax-limit-key", inferenceModelLimits{ContextWindowTokens: 1000000, MaxOutputTokens: miniMaxM3CompletionLimit}},
+		{ProviderMiniMax, "MiniMax-M3", "unique-minimax-limit-key" + identitySuffix, inferenceModelLimits{ContextWindowTokens: 1000000, MaxOutputTokens: miniMaxM3CompletionLimit}},
 	}
 	// Each -count iteration needs cold fixture identities to prove both the
 	// first lookup and reuse. Remove only this test's keys, preserving unrelated

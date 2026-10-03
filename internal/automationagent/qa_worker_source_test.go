@@ -17,9 +17,12 @@ import (
 )
 
 func TestQAWorkerPreservesReviewedManifestAndRejectsNewSourceBeforeInference(t *testing.T) {
-	for _, scenario := range []struct{ changed, published bool }{{false, false}, {true, false}, {false, true}, {true, true}} {
+	for _, scenario := range []struct {
+		changed, published bool
+		claims             string
+	}{{false, false, ""}, {true, false, ""}, {false, true, ""}, {true, true, ""}, {false, true, "correct"}, {false, true, "invented"}, {false, true, "duplicate"}} {
 		changed, published := scenario.changed, scenario.published
-		t.Run(fmt.Sprintf("changed=%v/published=%v", changed, published), func(t *testing.T) {
+		t.Run(fmt.Sprintf("changed=%v/published=%v/claims=%s", changed, published, scenario.claims), func(t *testing.T) {
 			root := setupImplementationRepository(t)
 			worktree, branch, err := isolatedWorktree(context.Background(), Workspace{Root: root}, "a4a4b837-2e18-43af-9f58-6d59629db2bb")
 			if err != nil {
@@ -84,7 +87,7 @@ func TestQAWorkerPreservesReviewedManifestAndRejectsNewSourceBeforeInference(t *
 				t.Fatal(err)
 			}
 			store, callback := &fakeStore{input: input, outputBucket: "itbem-ai-outputs-local"}, &fakeCallback{operation: "delivery.qa"}
-			provider := &countingProvider{completion: Completion{Provider: ProviderMiniMax, Model: "MiniMax-M3", Content: `{"summary":"synthetic observed QA","verdict":"passed","checks":[],"defects":[],"coverage_gaps":[],"recommended_actions":[]}`, Usage: map[string]any{}, CallID: "b00cc804-1c27-4a30-9543-c0275f4d34a3", ReceiptID: "25a26d3e-c23d-435d-a2b3-eaa5a47b13fc"}}
+			provider := &countingProvider{completion: Completion{Provider: ProviderMiniMax, Model: "MiniMax-M3", Content: `{"summary":"synthetic observed QA","verdict":"passed","checks":[{"name":"Preview","status":"passed","detail":"Observed HTTP 200"}],"defects":[],"coverage_gaps":[],"recommended_actions":[]}`, Usage: map[string]any{"total_tokens": 9}, CallID: "b00cc804-1c27-4a30-9543-c0275f4d34a3", ReceiptID: "25a26d3e-c23d-435d-a2b3-eaa5a47b13fc"}}
 			worker, err := NewWorker(WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local", Role: agentwork.RoleQA, Lane: agentwork.LaneQA}, store, callback, provider)
 			if err != nil {
 				t.Fatal(err)
@@ -93,6 +96,20 @@ func TestQAWorkerPreservesReviewedManifestAndRejectsNewSourceBeforeInference(t *
 			message.Payload.Operation = "delivery.qa"
 			if published {
 				message.Payload.TaskID = "a4a4b837-2e18-43af-9f58-6d59629db2bb"
+			}
+			if scenario.claims != "" {
+				reference := "workspace://repo"
+				if scenario.claims == "invented" {
+					reference = "workspace://invented"
+				}
+				content := strings.TrimSuffix(provider.completion.Content, "}")
+				provider.completion.Content = content + fmt.Sprintf(`,"claims":{"schema_version":1,"task_id":%q,"matrix_digest":%q,"preview_passed":true,"verdict":"passed","commands":[{"reference":%q,"index":0,"phase":"validation","kind":"","passed":true}]}}`, message.Payload.TaskID, matrixDigest, reference)
+				if scenario.claims == "duplicate" {
+					provider.completion.Content = strings.Replace(provider.completion.Content, `"index":0`, `"index":1,"index":0`, 1)
+					if !strings.Contains(provider.completion.Content, `"index":1,"index":0`) {
+						t.Fatal("duplicate fixture was not injected")
+					}
+				}
 			}
 			if err := worker.Process(context.Background(), message); err != nil {
 				t.Fatal(err)
@@ -119,6 +136,35 @@ func TestQAWorkerPreservesReviewedManifestAndRejectsNewSourceBeforeInference(t *
 			key := "itbem-ai-outputs-local/automation/" + message.Payload.TaskID + "/runs/" + last.RunID + "/result.json"
 			if err := json.Unmarshal(store.writes[key], &result); err != nil {
 				t.Fatal(err)
+			}
+			var savedContent, suppliedContent map[string]any
+			if err := json.Unmarshal([]byte(result["content"].(string)), &savedContent); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal([]byte(provider.completion.Content), &suppliedContent); err != nil {
+				t.Fatal(err)
+			}
+			savedContentBytes, _ := json.Marshal(savedContent)
+			suppliedContentBytes, _ := json.Marshal(suppliedContent)
+			if string(savedContentBytes) != string(suppliedContentBytes) || result["usage"].(map[string]any)["total_tokens"] != float64(9) {
+				t.Fatalf("grounding rejection lost response or accounting: content=%v usage=%v", result["content"], result["usage"])
+			}
+			grounding := result["qa_grounding"].(map[string]any)
+			if published {
+				promoted := len(result["structured_result"].(map[string]any)) != 0
+				if scenario.claims == "correct" {
+					if grounding["status"] != "passed" || !promoted {
+						t.Fatal("correct model claims were not promoted")
+					}
+				} else if grounding["status"] != "failed" || promoted {
+					t.Fatal("invalid or absent model claims were promoted against a ledger")
+				}
+				requestKey := "itbem-ai-outputs-local/automation/" + message.Payload.TaskID + "/runs/" + last.RunID + "/request.json"
+				if !strings.Contains(string(store.writes[requestKey]), "STRUCTURED QA CLAIMS CONTRACT") {
+					t.Fatal("model request omitted claims contract")
+				}
+			} else if grounding["status"] != "unavailable" {
+				t.Fatal("historical QA was falsely certified as grounded")
 			}
 			artifacts := result["artifacts"].(map[string]any)
 			// The result must retain deterministic execution evidence independently of the model summary.

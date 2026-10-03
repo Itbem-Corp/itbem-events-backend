@@ -75,14 +75,21 @@ func prepareTransportFixtureBuckets(t *testing.T, client *s3.Client, config *Run
 }
 
 func TestLocalStackTransportRoundTrip(t *testing.T) {
-	if testing.Short() || os.Getenv("ITBEM_LOCALSTACK_E2E") != "1" {
+	if os.Getenv("ITBEM_LOCALSTACK_E2E") != "1" {
 		t.Skip("set ITBEM_LOCALSTACK_E2E=1 to run against local loopback LocalStack")
 	}
+	if testing.Short() {
+		t.Fatal("explicit LocalStack integration cannot run with -short")
+	}
+	t.Setenv("AWS_SESSION_TOKEN", "")
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
 	endpoint := os.Getenv("ITBEM_LOCALSTACK_ENDPOINT")
 	if endpoint == "" {
 		endpoint = "http://localhost:4566"
+	}
+	if err := validateLocalEndpoint(endpoint); err != nil {
+		t.Fatal(err)
 	}
 	config := RuntimeConfig{WorkerConfig: WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"}, AWSRegion: "us-east-1", SQSEndpoint: endpoint, S3Endpoint: endpoint}
 	runtime, err := NewAWSRuntime(context.Background(), config)
@@ -192,14 +199,21 @@ func (p *integrationCountingProvider) Complete(_ context.Context, _ []Message, _
 }
 
 func TestLocalStackRedeliveryReusesDurableResultWithoutProviderRepeat(t *testing.T) {
-	if testing.Short() || os.Getenv("ITBEM_LOCALSTACK_E2E") != "1" {
+	if os.Getenv("ITBEM_LOCALSTACK_E2E") != "1" {
 		t.Skip("set ITBEM_LOCALSTACK_E2E=1 to run against local loopback LocalStack")
 	}
+	if testing.Short() {
+		t.Fatal("explicit LocalStack integration cannot run with -short")
+	}
+	t.Setenv("AWS_SESSION_TOKEN", "")
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
 	endpoint := os.Getenv("ITBEM_LOCALSTACK_ENDPOINT")
 	if endpoint == "" {
 		endpoint = "http://localhost:4566"
+	}
+	if err := validateLocalEndpoint(endpoint); err != nil {
+		t.Fatal(err)
 	}
 	config := RuntimeConfig{WorkerConfig: WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"}, AWSRegion: "us-east-1", SQSEndpoint: endpoint, S3Endpoint: endpoint}
 	runtime, err := NewAWSRuntime(context.Background(), config)

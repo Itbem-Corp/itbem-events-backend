@@ -1,5 +1,7 @@
 # Evaluación del harness — 2026-09-20
 
+La guía operativa vigente está en [EVIDENCE_WORKFLOW.md](EVIDENCE_WORKFLOW.md). Este documento conserva resultados y contratos históricos; cada seguimiento describe su revisión y no reemplaza la validación del head actual.
+
 > **Registro histórico.** Las rondas live y sus comandos fueron realizados con
 > el harness anterior, que usaba un adaptador directo de proveedor. Ese modo se
 > retiró porque eludía el gateway central; no debe repetirse. El runner vigente
@@ -265,3 +267,270 @@ fallos**, con 15 skips opt-in, 12 pausas y 12 continuaciones. Artefacto:
 `.local/harness-evals/20260921-165311-975/offline.jsonl`. Esta integración no
 llama al proveedor cuando se usa el modo replay y no toca colas productivas ni
 EventiApp.
+
+> Las rondas siguientes hasta la migración final se ejecutaron sobre el checkout
+> local `ace2e0d`. Sus resultados se mantienen como evidencia histórica de ese
+> estado; la validación del candidato sobre `main` se registra por separado.
+
+## Seguimiento: integridad y repetibilidad (2026-10-02)
+
+El runner ahora exige evidencia completa de los seis paquetes y guarda
+`offline-summary.json` con el código de Go, pruebas fallidas y carencias por
+paquete. La regresión con Go simulado rechaza seis variantes: salida vacía,
+truncada, duplicada, sin pruebas, malformada y con fallos aunque Go devuelva cero.
+También comprueba aislamiento y restauración del entorno tras éxito y fallo.
+Se corrigió la restauración de variables ausentes: PowerShell las convertía en
+variables vacías. Los selectores live retirados siguen bloqueados.
+
+Se corrigió una prueba de límites que reutilizaba identidades entre repeticiones
+en la caché global. Cada ronda usa una identidad sintética nueva, manteniendo la
+verificación de ocho consultas iniciales y reutilización dentro de la ronda.
+La caché de producción no cambió. Una ejecución completa pasó y tardó 80.093 s
+en `automationagent`; tres rondas superan el antiguo timeout de 180 s. Se
+mantienen `-shuffle=49207` y `-count=3`, con timeout por paquete de 600 s,
+configurable mediante `-TestTimeoutSeconds` (30–1800 s).
+
+La validación completa del runner pasó: **1,342 pruebas distintas aprobadas
+tres veces (4,026 ejecuciones), cero fallos y seis paquetes completos**.
+`automationagent` tardó 231.130 s. El resumen contabiliza `pass: 4032` porque
+incluye seis resultados de paquete. `go vet` pasó en los seis paquetes y
+`git diff --check` pasó. Se añadió un job Windows para aislamiento en pushes
+y pull requests relevantes; se validó el YAML localmente, sin observar todavía
+una ejecución remota de ese job.
+
+Evidencia local: `.local/harness-evals/20261002-225907-469/offline.jsonl` y
+`offline-summary.json`. Seis pruebas se omitieron en cada ronda: dos requieren
+LocalStack, una Docker sandbox, dos Firecracker y una soporte de symlinks.
+Estas omisiones no certifican esas integraciones. No se consumieron inferencias
+reales ni se demuestra calidad semántica del modelo. Siguen pendientes las
+evaluaciones de calidad e integración descritas anteriormente.
+
+## Seguimiento: evidencia semántica ausente o mal tipada (2026-10-02)
+
+El scorer omitía checks cuando un rol presente tenía respuesta vacía, nula o
+JSON inválido. Además, convertía la cadena `"false"` en un resultado de ejecución
+verdadero. Se corrigieron ambas rutas: cada rol presente requiere un objeto
+JSON, y el resultado duradero requiere un booleano literal `true`. Se rechazan
+arrays, incluidos los de un objeto que PowerShell podría desempaquetar.
+El marcador `synthetic_only` también requiere un booleano literal verdadero.
+
+`-AllowPartial` puede omitir roles ausentes, pero no respuestas inválidas de
+roles presentes ni un reporte sin checks evaluables. `-AllowFailures` conserva
+`passed: false` y cambia únicamente la política del código de salida.
+
+Pasaron **57 casos sintéticos** en `scripts/Test-HarnessSemantics.ps1`, incluidos
+un reporte completo válido, respuestas inválidas por cada uno de los seis
+roles, una última respuesta corrupta tras una respuesta válida, resultados con
+tipos incorrectos y reportes parciales. También pasaron las regresiones de
+aislamiento, los tests Go `TestAgentHarness` tres veces y `git diff --check`.
+Se agregó el scorer y su batería al job Windows y a los filtros de push y PR;
+se verificó la configuración localmente, sin ejecución remota observada.
+No se repitió la suite Go completa porque no hubo cambios nuevos en el runtime
+Go: su validación anterior sigue documentada arriba. Estos checks refuerzan la
+integridad del resultado del scorer; no certifican calidad experta del modelo.
+
+## Seguimiento: omisiones y política de evidencia (2026-10-02)
+
+El resumen offline ahora conserva `skipped_tests` con paquete y nombre, además
+de separar `test_executions_passed` de `distinct_tests_passed`. El contador
+histórico `pass` permanece compatible e incluye eventos de paquete; no debe
+interpretarse como número de casos distintos. `passed` expresa el resultado
+conjunto del código de Go y los controles de integridad de evidencia.
+
+`-RequireNoSkips` exige cero omisiones, conserva las identidades omitidas y
+termina con error aunque Go devuelva cero. El modo offline normal mantiene las
+omisiones visibles y puede aprobar sus regresiones locales. La opción estricta
+no habilita LocalStack, Docker ni Firecracker, y no puede combinarse con replay
+semántico. Pasaron las regresiones con Go simulado para una ejecución completa
+estricta y para omisiones repetidas (dos eventos, una identidad), tanto en modo
+normal como estricto. También se comprueba que todos los informes válidamente
+parseados de streams inválidos retienen `passed: false`. Pasaron los tests Go
+`TestAgentHarness` tres veces y `git diff --check`. No se repitió la suite Go
+completa: los cambios afectan al resumen y su política, probados con el runner
+real y una salida Go controlada; no cambian código de ejecución Go.
+
+## Seguimiento: pruebas reales de Docker y LocalStack (2026-10-02)
+
+La prueba real `TestDockerSandboxRoundTrip` pasó en 2.69 s: UID 65532,
+capacidades eliminadas, no-new-privileges, ausencia de interfaz externa,
+filesystem raíz de solo lectura y worktree escribible. Se usó la imagen
+fijada por digest que ya estaba disponible. Esto valida ese recorrido local;
+no certifica Firecracker ni aislamiento de producción.
+
+Se ejecutaron las dos pruebas LocalStack dos veces en un contenedor dedicado
+sin buckets preparados. La ejecución inicial reveló fixtures desactualizados:
+capacidad de inferencia ausente, identidad del worker ausente, aserción de solo
+dos callbacks, ruta de resultado antigua y recibos de inferencia ausentes.
+Se actualizaron los fixtures para el protocolo vigente sin relajar el worker:
+claims con capacidades sintéticas, identidad del emisor, progreso intermedio,
+resultados por run y recibos UUID. La redelivery conserva su aserción de una
+sola llamada al proveedor simulado tras el fallo del primer callback terminal.
+
+Ambas pruebas pasaron dos veces (4 ejecuciones, 0.359 s de paquete). Cada prueba
+crea buckets y una cola únicos y elimina solo sus recursos; se verificaron cero
+buckets y cero colas al terminar y se detuvo el contenedor temporal. Los logs
+están en `../../../.local/harness-localstack-isolated.log` y
+`../../../.local/harness-docker-integration.log`. Los rechazos esperados de
+LocalStack explícito con `-short` y Docker explícito sin executable también
+fueron comprobados. `go vet ./internal/automationagent` y `git diff --check`
+pasaron. Se agregó un job CI LocalStack dedicado con imagen fijada por digest;
+el YAML se validó localmente, sin ejecución remota observada todavía.
+No se consumieron inferencias reales. Firecracker y la prueba de symlink
+siguen sin certificarse en este entorno.
+
+## Seguimiento: symlinks y evidencia CI de runtime (2026-10-02)
+
+La prueba de rechazo de artefactos symlink pasó dos veces en Linux, usando el
+binario de tests compilado con Go 1.25.12 en un contenedor con imagen fijada,
+UID 65532, red deshabilitada, raíz read-only, capabilities eliminadas y /tmp
+temporal. Evidencia: `../../../.local/harness-linux-symlink-proof.log`.
+En Windows, `ITBEM_REQUIRE_SYMLINK_PROOF=1` produjo el fallo esperado por falta
+de privilegios, sin una omisión silenciosa. Se conserva la omisión ordinaria
+cuando el operador no exige explícitamente esa prueba.
+
+El job de integración Linux ahora precarga la imagen Docker fijada y ejecuta
+dos veces tanto Docker sandbox como rechazo de symlink. Exige la prueba symlink
+mediante su flag explícito. LocalStack y sandbox guardan JSONL con `pipefail`,
+y un paso `always()` conserva esos logs por siete días incluso si un test falla.
+El YAML y las conexiones entre pasos, flags y archivo de evidencia se validaron
+localmente. `go vet ./internal/automationagent` y `git diff --check` pasaron.
+Todavía no hay una ejecución remota observada de estos cambios de CI. No se
+certifica Firecracker, calidad del modelo ni autonomía de producción.
+
+## Seguimiento: gates obligatorios antes de binarios (2026-10-02)
+
+El job `build` no dependía de otros jobs, por lo que podía publicar artefactos
+binarios aunque fallaran aislamiento, scorer o integraciones. Ahora requiere
+`harness-isolation` y `localstack-integration`, sin un override `always()` en el
+job de build. Dependencias fallidas, canceladas u omitidas impiden el build.
+
+Se amplió su regresión a los seis paquetes del harness más el comando del
+agente, con tres repeticiones y shuffle 49207. Se preserva JSONL con pipefail y
+upload de evidencia incluso al fallar. Los filtros de push y PR ahora incluyen
+los controladores Delivery/Automation, runtimeroute y Stagehand. El build fija
+Node 22.23.1 y ejecuta el syntax check y las pruebas offline de Stagehand antes
+de compilar binarios.
+
+Validación local: siete paquetes completos, **1,362 pruebas distintas aprobadas
+tres veces (4,086 ejecuciones), cero fallos**, más **25 tests Stagehand, cero
+omisiones**, `go vet` en los siete paquetes y `git diff --check`. La regresión
+Go offline mantuvo 18 omisiones (seis tests por ronda), separadas de los gates
+de integración dedicados. Evidencia local:
+`../../../.local/harness-expanded-ci-validation.jsonl` y
+`../../../.local/harness-stagehand-ci-validation.log`.
+Se verificaron YAML, dependencias, orden de pasos y filtros. Estas verificaciones
+locales no constituyen una ejecución remota de GitHub Actions; esa evidencia
+sigue pendiente.
+
+## Seguimiento: filtros vacíos y ejecución requerida en CI (2026-10-02)
+
+Los pasos Go de CI podían aprobar cuando un filtro dejaba de encontrar tests.
+Se agregó `cmd/verify-test-evidence`: exige los paquetes esperados, una única
+finalización exitosa por paquete, tests presentes y el número exacto de
+repeticiones para cada test observado. Rechaza JSONL corrupto, fallos, eventos
+posteriores al cierre de un paquete y pruebas requeridas ausentes u omitidas.
+
+LocalStack y sandbox declaran sus dos pruebas obligatorias y exigen cero skips.
+La regresión general permite omisiones opcionales explícitas y ahora incluye el
+paquete del verificador (ocho paquetes en la configuración de CI). Se preserva
+el log aunque falle el verificador. Los cambios de su código activan el workflow.
+
+Pasaron tres repeticiones de las regresiones del verificador, `go vet` de su
+paquete y `git diff --check`. También aceptó el JSONL real existente de la suite
+de siete paquetes/tres rondas y un replay `go tool test2json` del log LocalStack
+real existente (dos pruebas, dos rondas). El replay no ejecutó LocalStack de
+nuevo. Se comprobaron YAML, filtros y llamadas al verificador en cada pipeline.
+No se repitió la suite completa de ocho paquetes en esta continuación; la
+validación nueva del verificador y la evidencia previa se mantienen separadas.
+Todavía falta observar la ejecución remota del workflow actualizado.
+
+## Migración a main y validación del candidato (2026-10-02)
+
+Se trasladaron únicamente las mejoras de este objetivo a un worktree basado en
+`main` e453cfe, preservando el checkout original ace2e0d y sus otros cambios.
+Se conservaron las correcciones ya presentes en main: fixtures LocalStack
+propios, capacidades sintéticas, límites de modelo actualizados y validación
+estricta de eventos/paquetes del runner. Se mantiene la prueba con Go real y
+la derivación del módulo y la lista canónica de paquetes en el aislamiento.
+
+Pasaron diez variantes inválidas del runner, su comprobación con Go real,
+57 regresiones del scorer, 25 tests Stagehand tras instalar su lockfile, Docker
+real y dos ejecuciones de ambas pruebas LocalStack con verificación JSONL y
+limpieza de recursos. La primera suite completa sobre main encontró tres
+problemas de portabilidad: fixtures dependientes de core.autocrlf global y
+selección del alias Python3 inactivo de Windows. Se fijó autocrlf solo en los
+repositorios temporales y se detecta un Python con las APIs POSIX requeridas.
+Las pruebas de fuente exacta y la cadena de cinco roles pasaron tres veces
+tras esa corrección. La comparación de digest Go/Python y el rechazo de symlink
+pasaron dos veces en Linux; Windows no certifica el supervisor POSIX.
+
+CI exige explícitamente esa prueba POSIX y su identidad en el verificador,
+y Stagehand instala dependencias desde el lockfile antes del syntax/test gate.
+La repetición completa de ocho paquetes con las correcciones finales sigue
+en curso al preparar este registro. Su log es
+`../../../.local/harness-main-final-validation.jsonl`; no se declara verde
+antes de terminar. Se prepara un PR borrador para obtener evidencia de CI
+remoto; no se autoriza merge, despliegue ni inferencia real.
+
+### Corrección del código de salida en GitHub Actions
+
+El PR borrador #259 obtuvo integración LocalStack y pruebas Docker/POSIX
+verdes en CI. Los 57 casos semánticos también pasaron, pero el paso heredó
+LASTEXITCODE=1 del último caso negativo. El script ahora establece cero solo
+al terminar todas las verificaciones y la limpieza; las excepciones continúan
+fallando. Se reprodujo el wrapper de Actions localmente y pasó con salida cero.
+La suite completa local sigue en curso; no se declara validación final.
+
+### Orden de ejecución en evidencia JSONL
+
+El verificador ahora rechaza resultados antes de ejecutar, ejecuciones
+superpuestas y resultados duplicados aunque los totales finales coincidan.
+Cuatro casos adversariales adicionales pasaron en tres repeticiones; go vet
+pasó. La evidencia real LocalStack (dos repeticiones) y la suite anterior de
+siete paquetes (tres repeticiones) siguen siendo aceptadas con esta validación.
+Estas comprobaciones prueban consistencia del log, no autenticidad criptográfica.
+
+### Selección de toolchain coherente con go.mod
+
+El runner offline obtiene la versión requerida desde go.mod en lugar de buscar
+Go 1.25.12 cuando el módulo ya exige 1.25.13. El workspace local también se
+alineó a 1.25.13. El fixture de aislamiento declara explícitamente su mínimo Go.
+La prueba con fake Go y con el binario real 1.25.13 pasó. La suite offline real,
+con GOTOOLCHAIN=local, terminó con seis paquetes y tres repeticiones: 5,430
+ ejecuciones aprobadas, 39 skips opcionales y cero fallos. El JSONL completo
+pasó el verificador de evidencia. Los artefactos locales quedan ignorados por
+Git; siguen disponibles para auditoría. El nuevo commit requiere checks de CI.
+
+### Rechazo de evidencia semántica vacía o mal tipada
+
+El scorer aceptaba listas con placeholders nulos/vacíos como riesgos, evidencia
+o huecos de contexto, y podía convertir riesgos numéricos u objetos a texto.
+Ahora exige arrays no vacíos de strings útiles para resumen/planner y riesgos
+string no vacíos en cada alternativa de producto. Veinte casos adversariales
+nuevos pasaron junto a los anteriores: 77 casos sintéticos en total. Es una
+comprobación determinista de estas fixtures; no demuestra calidad experta ni
+que los textos estén respaldados por evidencia independiente. El nuevo commit
+requiere ejecutar CI nuevamente; el head anterior 92140a1 tenía todos sus
+checks verdes y sus artefactos descargados/verificados.
+
+### Recomendaciones de producto revisables
+
+El scorer ahora comprueba dos o tres alternativas con nombres únicos y riesgos
+útiles. La recomendación debe nombrar una alternativa propuesta, incluir un
+rationale y un primer experimento. No basta con que el campo exista o contenga
+un objeto vacío. Once casos adversariales adicionales cubren esos límites;
+los 88 casos sintéticos pasaron. Las pruebas del parser real de producto también
+pasaron tres veces. La evaluación sigue siendo smoke estructural/semántico de
+fixtures, no revisión experta del valor de producto ni verificación de hechos.
+El commit previo 6f7d1f8 pasó aislamiento/scorer en CI; la nueva revisión requiere
+checks nuevamente.
+
+### Sustitución de verificaciones obsoletas del PR
+
+Build AI Agent agrupa solo ejecuciones pull_request de la misma referencia y
+workflow para cancelar una verificación anterior cuando llega otra. Push y
+workflow_dispatch usan run_id como grupo único; no se cancelan mutuamente ni
+se reduce su cobertura. Se mantiene la prueba del HEAD y del merge simulado.
+La sintaxis y las expresiones pasaron actionlint. Esto configura la política;
+no se declara aún una cancelación observada ni ahorro medido. La siguiente
+revisión debe pasar CI normalmente.

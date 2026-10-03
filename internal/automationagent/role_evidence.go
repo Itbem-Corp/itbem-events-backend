@@ -109,28 +109,26 @@ func ValidateDeliverySummaryEvidence(summary map[string]any, delivery json.RawMe
 	if len(input.Gates) == 0 && len(decisions) > 0 {
 		return fmt.Errorf("delivery summary cannot invent human decisions when no gates are recorded")
 	}
-	if len(input.Gates) > 0 {
-		decisionText := make([]string, 0, len(decisions))
-		for _, raw := range decisions {
-			text, ok := raw.(string)
-			if !ok || strings.TrimSpace(text) == "" {
-				return fmt.Errorf("delivery summary human decisions must be non-empty strings")
+	rawSummary, err := json.Marshal(summary)
+	if err != nil {
+		return err
+	}
+	claims, err := ValidateSummaryDecisionClaims(string(rawSummary), delivery)
+	if err != nil {
+		return err
+	}
+	if len(claims) > 0 {
+		canonical := make([]any, len(claims))
+		for _, claim := range claims {
+			label := fmt.Sprintf("%s: %s (snapshot index %d)", claim.Kind, claim.Decision, *claim.Index)
+			if claim.GateID != "" {
+				label += " — gate " + claim.GateID
 			}
-			decisionText = append(decisionText, strings.ToLower(strings.TrimSpace(text)))
+			canonical[*claim.Index] = label
 		}
-		joinedDecisions := strings.Join(decisionText, " ")
-		for _, rawGate := range input.Gates {
-			var gate struct {
-				Kind     string `json:"kind"`
-				Decision string `json:"decision"`
-			}
-			if err := json.Unmarshal(rawGate, &gate); err != nil || strings.TrimSpace(gate.Kind) == "" || strings.TrimSpace(gate.Decision) == "" {
-				return fmt.Errorf("recorded human gate is incomplete")
-			}
-			if !summaryMentionsGateKind(joinedDecisions, gate.Kind) || !summaryMentionsGateDecision(joinedDecisions, gate.Decision) {
-				return fmt.Errorf("delivery summary human decisions are not grounded in the recorded %s gate", gate.Kind)
-			}
-		}
+		technical["decisions"] = canonical
+		repairs, _ := technical["_harness_repairs"].([]any)
+		technical["_harness_repairs"] = append(repairs, "technical.decisions rendered from validated model decision_claims")
 	}
 	entries, ok := technical["evidence"].([]any)
 	if !ok || len(entries) == 0 || len(allowed) == 0 {
@@ -153,49 +151,4 @@ func ValidateDeliverySummaryEvidence(summary map[string]any, delivery json.RawMe
 		}
 	}
 	return nil
-}
-
-func normalizedSummaryToken(value string) string {
-	return strings.Join(strings.Fields(strings.NewReplacer("_", " ", "-", " ").Replace(strings.ToLower(strings.TrimSpace(value)))), " ")
-}
-
-func summaryMentionsGateKind(decisions, kind string) bool {
-	decisions = normalizedSummaryToken(decisions)
-	kind = normalizedSummaryToken(kind)
-	if kind == "" {
-		return false
-	}
-	if strings.Contains(decisions, kind) {
-		return true
-	}
-	// The UI and model use the human labels while the durable contract uses
-	// compact gate keys. Keep aliases deterministic and bounded.
-	switch kind {
-	case "code review":
-		return strings.Contains(decisions, "implementation") || strings.Contains(decisions, "code review")
-	case "qa review":
-		return strings.Contains(decisions, "qa")
-	case "release review":
-		return strings.Contains(decisions, "release")
-	default:
-		return false
-	}
-}
-
-func summaryMentionsGateDecision(decisions, decision string) bool {
-	decisions = normalizedSummaryToken(decisions)
-	decision = normalizedSummaryToken(decision)
-	if strings.Contains(decisions, decision) {
-		return true
-	}
-	switch decision {
-	case "approved", "approve":
-		return strings.Contains(decisions, "approval")
-	case "request changes", "changes requested":
-		return strings.Contains(decisions, "rework") || strings.Contains(decisions, "changes requested") || strings.Contains(decisions, "request changes")
-	case "rejected", "reject":
-		return strings.Contains(decisions, "denied") || strings.Contains(decisions, "declined")
-	default:
-		return false
-	}
 }

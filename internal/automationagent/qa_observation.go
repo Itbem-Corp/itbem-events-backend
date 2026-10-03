@@ -10,6 +10,60 @@ import (
 	"events-stocks/internal/releasegate"
 )
 
+// qaReportWithGrounding evaluates the original model response, never a claims
+// projection manufactured from the observation. Historical runs without a
+// ledger remain explicitly unavailable for grounding.
+func qaReportWithGrounding(content string, execution map[string]any) (map[string]any, map[string]any) {
+	grounding := qaClaimsGrounding(content, execution)
+	grounding["report_valid"] = false
+	if grounding["status"] == "failed" {
+		return nil, grounding
+	}
+	report, err := ParseDeliveryQAReport(content)
+	if err == nil {
+		err = ValidateDeliveryQAReport(report, execution)
+	}
+	if err != nil {
+		grounding["report_error"] = err.Error()
+		return nil, grounding
+	}
+	grounding["report_valid"] = true
+	return report, grounding
+}
+
+func qaClaimsGrounding(content string, execution map[string]any) map[string]any {
+	grounding := map[string]any{"score_kind": "structured_qa_grounding", "status": "unavailable"}
+	observed, exists := execution["ledger_observation"]
+	if !exists {
+		return grounding
+	}
+	grounding["status"] = "failed"
+	reject := func(err error) map[string]any {
+		grounding["error"] = err.Error()
+		return grounding
+	}
+	if _, ok := observed.(map[string]any); !ok {
+		return reject(fmt.Errorf("QA ledger observation must be an object"))
+	}
+	raw, err := json.Marshal(observed)
+	if err != nil {
+		return reject(err)
+	}
+	observation, err := qaevidence.Decode(raw)
+	if err != nil {
+		return reject(err)
+	}
+	claims, err := qaevidence.DecodeReportClaims([]byte(content))
+	if err != nil {
+		return reject(err)
+	}
+	if err := qaevidence.ValidateGrounding(observation, claims); err != nil {
+		return reject(err)
+	}
+	grounding["status"] = "passed"
+	return grounding
+}
+
 func qaPublishedMatrixDigest(ctx context.Context, delivery json.RawMessage, targets []qaTarget) (string, error) {
 	var input struct {
 		Gatekeeper *struct {

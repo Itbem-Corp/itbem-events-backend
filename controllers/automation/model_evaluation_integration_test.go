@@ -163,8 +163,8 @@ func TestEvaluationRealGatewaySerializesAndAccounts(t *testing.T) {
 		encoded, _ := json.Marshal(map[string]any{"id": "synthetic-response", "model": model, "choices": []any{map[string]any{"finish_reason": "stop", "message": map[string]any{"role": "assistant", "content": `{"ok":true}`}}}, "usage": map[string]any{"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}})
 		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(encoded))}, nil
 	})}
-	call := func(task models.AutomationTask, changed bool) *httptest.ResponseRecorder {
-		request := inferenceRequest{CallID: uuid.Must(uuid.NewV4()).String(), Provider: "minimax", Model: "gateway-managed", TaskID: task.ID.String(), RunID: task.RunID, Operation: "ai.chat", MaxCompletionTokens: 4096, Messages: append([]automationagent.Message(nil), messages...)}
+	call := func(task models.AutomationTask, changed bool, inputMessages []automationagent.Message) *httptest.ResponseRecorder {
+		request := inferenceRequest{CallID: uuid.Must(uuid.NewV4()).String(), Provider: "minimax", Model: "gateway-managed", TaskID: task.ID.String(), RunID: task.RunID, Operation: "ai.chat", MaxCompletionTokens: 4096, Messages: append([]automationagent.Message(nil), inputMessages...)}
 		if changed {
 			request.Messages[1].Content = "unauthorized modified prompt"
 		}
@@ -179,22 +179,22 @@ func TestEvaluationRealGatewaySerializesAndAccounts(t *testing.T) {
 		require.NoError(t, Infer(c))
 		return recorder
 	}
-	require.Equal(t, http.StatusConflict, call(tasks[0], true).Code)
+	require.Equal(t, http.StatusConflict, call(tasks[0], true, messages).Code)
 	first := make(chan *httptest.ResponseRecorder, 1)
-	go func() { first <- call(tasks[0], false) }()
+	go func() { first <- call(tasks[0], false, messages) }()
 	select {
 	case <-entered:
 	case <-time.After(10 * time.Second):
 		t.Fatal("first fake provider call did not start")
 	}
-	require.Equal(t, http.StatusConflict, call(tasks[1], false).Code)
+	require.Equal(t, http.StatusConflict, call(tasks[1], false, messages).Code)
 	require.Equal(t, int32(1), providerCalls.Load(), "concurrent admission reached a provider")
 	close(release)
 	firstResult := <-first
 	require.Equal(t, http.StatusOK, firstResult.Code, firstResult.Body.String())
-	require.Equal(t, http.StatusConflict, call(tasks[0], false).Code, "second call for a task must be rejected")
+	require.Equal(t, http.StatusConflict, call(tasks[0], false, messages).Code, "second call for a task must be rejected")
 	for _, task := range tasks[1:] {
-		result := call(task, false)
+		result := call(task, false, messages)
 		require.Equal(t, http.StatusOK, result.Code, result.Body.String())
 	}
 	var receipts []models.AutomationInferenceReceipt
@@ -211,6 +211,7 @@ func TestEvaluationRealGatewaySerializesAndAccounts(t *testing.T) {
 	require.Error(t, db.Model(&batch).Update("budget_micros", 2000000).Error)
 	require.Error(t, db.Model(&models.AutomationModelEvaluationCall{}).Where("automation_task_id = ?", tasks[0].ID).Update("candidate", "luna-medium").Error)
 	// The normal root-only provenance query must work on real PostgreSQL.
+	require.NoError(t, db.Model(&tasks[0]).Update("run_id", "synthetic-recovery-run").Error)
 	configureAIActionPolicyTestRoot(t, models.RootLevelPrimary)
 	recorder := httptest.NewRecorder()
 	c := echo.New().NewContext(httptest.NewRequest(http.MethodGet, "/evaluation", nil), recorder)
@@ -221,13 +222,100 @@ func TestEvaluationRealGatewaySerializesAndAccounts(t *testing.T) {
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	require.NotContains(t, recorder.Body.String(), "Return synthetic")
 	require.NotContains(t, recorder.Body.String(), "must-not-be-read")
+	var exported struct {
+		Data struct {
+			Calls []struct {
+				TaskID       uuid.UUID `json:"task_id"`
+				RunID        string    `json:"run_id"`
+				ReceiptRunID string    `json:"receipt_run_id"`
+			} `json:"calls"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &exported))
+	recoveredExportFound := false
+	for _, call := range exported.Data.Calls {
+		if call.TaskID == tasks[0].ID {
+			require.Equal(t, "synthetic-recovery-run", call.RunID)
+			require.Equal(t, "synthetic-run", call.ReceiptRunID)
+			recoveredExportFound = true
+		}
+	}
+	require.True(t, recoveredExportFound)
+	// Multiple receipts must not expand one task into multiple exported outcomes.
+	var duplicateReceipt models.AutomationInferenceReceipt
+	require.NoError(t, db.Where("automation_task_id = ?", tasks[0].ID).First(&duplicateReceipt).Error)
+	duplicateReceipt.ID = uuid.Must(uuid.NewV4())
+	duplicateReceipt.CallID = uuid.Must(uuid.NewV4())
+	duplicateReceipt.RunID = "synthetic-export-duplicate-run"
+	require.NoError(t, db.Create(&duplicateReceipt).Error)
+	ambiguousRecorder := httptest.NewRecorder()
+	ambiguousContext := echo.New().NewContext(httptest.NewRequest(http.MethodGet, "/evaluation", nil), ambiguousRecorder)
+	ambiguousContext.Set("cognito_sub", "synthetic")
+	ambiguousContext.SetParamNames("id")
+	ambiguousContext.SetParamValues(batchID.String())
+	require.NoError(t, GetModelEvaluation(ambiguousContext))
+	require.Equal(t, http.StatusServiceUnavailable, ambiguousRecorder.Code)
+	require.NotContains(t, ambiguousRecorder.Body.String(), "receipt_id")
+	// Receipts remain durable; the disposable database retains this control.
 	require.NoError(t, db.Model(&batch).Update("status", "halted").Error)
-	for _, version := range []string{modelevaluation.CorpusVersion, modelevaluation.CacheCorpusVersion} {
-		t.Run("normal admission and concurrent dispatch/"+version, func(t *testing.T) { testEvaluationAdmissionAndDispatch(t, db, version) })
+	for _, version := range []string{modelevaluation.CorpusVersion, modelevaluation.CacheCorpusVersion, modelevaluation.ImplementationPilotVersion} {
+		t.Run("normal admission and concurrent dispatch/"+version, func(t *testing.T) {
+			testEvaluationAdmissionAndDispatch(t, db, version, func(task models.AutomationTask, input []automationagent.Message, changed bool) *httptest.ResponseRecorder {
+				return call(task, changed, input)
+			}, providerCalls.Load)
+		})
+	}
+	t.Run("prepared pilot dispatch cardinality", func(t *testing.T) { testPreparedPilotDispatch(t, db) })
+}
+
+// Seed synthetic ledger rows to isolate cardinality guards. Dispatch writes an
+// outbox event without contacting a provider.
+func testPreparedPilotDispatch(t *testing.T, db *gorm.DB) {
+	configureAIActionPolicyTestRoot(t, models.RootLevelPrimary)
+	require.NoError(t, automationqueue.Init("us-east-1", "integration", "integration", "http://127.0.0.1:1/queue/evaluation", "", "", "", "http://127.0.0.1:1"))
+	for _, count := range []int{2, 3, 4} {
+		t.Run(fmt.Sprintf("calls-%d", count), func(t *testing.T) {
+			batchID := uuid.Must(uuid.NewV4())
+			batch := models.AutomationModelEvaluation{ID: batchID, RequestedBy: "synthetic-pilot", CorpusVersion: modelevaluation.ImplementationPilotVersion, BudgetMicros: modelevaluation.MaxBudgetMicros, ReservationMicros: 30000, PricingJSON: evaluationIntegrationPricing, Status: "active", CreatedAt: time.Now().UTC()}
+			require.NoError(t, db.Create(&batch).Error)
+			for index := 0; index < count; index++ {
+				taskID := uuid.Must(uuid.NewV4())
+				task := models.AutomationTask{ID: taskID, JobID: uuid.Must(uuid.NewV4()), ModelEvaluationID: &batchID, RequestedBy: "synthetic-pilot", CorrelationID: batchID.String(), Operation: "ai.chat", MaxCompletionTokens: modelevaluation.MaxCompletionTokens, InputRef: "s3://synthetic/pilot.json", Status: "pending"}
+				require.NoError(t, db.Create(&task).Error)
+				call := models.AutomationModelEvaluationCall{AutomationTaskID: taskID, EvaluationID: batchID, Sequence: index + 1, CaseID: "pagination-v1", Candidate: string(modelevaluation.MiniMax), ReservationMicros: 10000}
+				require.NoError(t, db.Create(&call).Error)
+			}
+			response := httptest.NewRecorder()
+			c := echo.New().NewContext(httptest.NewRequest(http.MethodPost, "/evaluation", nil), response)
+			c.Set("cognito_sub", "synthetic-pilot")
+			c.SetParamNames("id")
+			c.SetParamValues(batchID.String())
+			require.NoError(t, DispatchNextModelEvaluation(c))
+			expected := http.StatusConflict
+			if count == 3 {
+				expected = http.StatusAccepted
+			}
+			require.Equal(t, expected, response.Code, response.Body.String())
+			var outbox int64
+			require.NoError(t, db.Model(&models.OutboxEvent{}).Where("correlation_id = ?", batchID.String()).Count(&outbox).Error)
+			if count == 3 {
+				require.Equal(t, int64(1), outbox)
+			} else {
+				require.Zero(t, outbox)
+			}
+			require.NoError(t, db.Model(&batch).Update("status", "halted").Error)
+		})
 	}
 }
 
-func testEvaluationAdmissionAndDispatch(t *testing.T, db *gorm.DB, version string) {
+func testEvaluationAdmissionAndDispatch(t *testing.T, db *gorm.DB, version string, infer func(models.AutomationTask, []automationagent.Message, bool) *httptest.ResponseRecorder, providerCount func() int32) {
+	expectedCalls, err := modelevaluation.ExpectedCalls(version)
+	require.NoError(t, err)
+	frozenPilotPrompt := ""
+	if version == modelevaluation.ImplementationPilotVersion {
+		frozenPilotPrompt, _, err = modelevaluation.ImplementationPilotInput()
+		require.NoError(t, err)
+	}
 	var uploaded atomic.Int32
 	storage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPut || r.Header.Get("X-Amz-Server-Side-Encryption") != "AES256" {
@@ -237,6 +325,10 @@ func testEvaluationAdmissionAndDispatch(t *testing.T, db *gorm.DB, version strin
 		var input automationagent.TaskInput
 		if json.NewDecoder(r.Body).Decode(&input) != nil || input.Prompt == "" {
 			http.Error(w, "invalid input", 400)
+			return
+		}
+		if frozenPilotPrompt != "" && input.Prompt != frozenPilotPrompt {
+			http.Error(w, "pilot input differs from frozen corpus", 400)
 			return
 		}
 		uploaded.Add(1)
@@ -267,13 +359,36 @@ func testEvaluationAdmissionAndDispatch(t *testing.T, db *gorm.DB, version strin
 	require.Equal(t, http.StatusBadRequest, invoke(CreateModelEvaluation, strings.TrimSuffix(request, "}")+`,"routes":[]}`).Code)
 	created := invoke(CreateModelEvaluation, request)
 	require.Equal(t, http.StatusCreated, created.Code, created.Body.String())
-	require.Equal(t, int32(60), uploaded.Load())
+	require.Equal(t, int32(expectedCalls), uploaded.Load())
 	require.Equal(t, http.StatusOK, invoke(CreateModelEvaluation, request).Code)
-	require.Equal(t, int32(60), uploaded.Load(), "idempotent admission uploaded inputs again")
+	require.Equal(t, int32(expectedCalls), uploaded.Load(), "idempotent admission uploaded inputs again")
 	var calls []models.AutomationModelEvaluationCall
 	require.NoError(t, db.Where("evaluation_id = ?", batchID).Order("sequence").Find(&calls).Error)
-	require.Len(t, calls, 60)
-	for i := 0; i < 60; i += 3 {
+	require.Len(t, calls, expectedCalls)
+	if frozenPilotPrompt != "" {
+		_, corpusHash, err := modelevaluation.ImplementationPilotInput()
+		require.NoError(t, err)
+		var admitted models.AutomationModelEvaluation
+		require.NoError(t, db.First(&admitted, "id = ?", batchID).Error)
+		require.Equal(t, corpusHash, admitted.CorpusHash)
+		messages, err := automationagent.SyntheticChatMessages(frozenPilotPrompt)
+		require.NoError(t, err)
+		messageHash, err := modelevaluation.MessageDigest(messages)
+		require.NoError(t, err)
+		for index, candidate := range []modelevaluation.Candidate{modelevaluation.MiniMax, modelevaluation.DeepSeek, modelevaluation.Luna} {
+			require.Equal(t, index+1, calls[index].Sequence)
+			require.Equal(t, "pagination-v1", calls[index].CaseID)
+			require.Equal(t, string(candidate), calls[index].Candidate)
+			require.Equal(t, modelevaluation.Digest([]byte(frozenPilotPrompt)), calls[index].PromptHash)
+			require.Equal(t, messageHash, calls[index].MessagesHash)
+			route, err := modelevaluation.Route(candidate)
+			require.NoError(t, err)
+			_, routeHash, err := canonicalInferenceRoutes([]models.AutomationAIActionRoute{route})
+			require.NoError(t, err)
+			require.Equal(t, routeHash, calls[index].RouteHash)
+		}
+	}
+	for i := 0; i < expectedCalls; i += 3 {
 		require.Equal(t, calls[i].MessagesHash, calls[i+1].MessagesHash)
 		require.Equal(t, calls[i].MessagesHash, calls[i+2].MessagesHash)
 	}
@@ -296,17 +411,125 @@ func testEvaluationAdmissionAndDispatch(t *testing.T, db *gorm.DB, version strin
 	require.NoError(t, db.Model(&models.OutboxEvent{}).Where("correlation_id = ?", batchID.String()).Count(&outbox).Error)
 	require.Equal(t, int64(1), queued)
 	require.Equal(t, int64(1), outbox)
+	if frozenPilotPrompt != "" {
+		messages, err := automationagent.SyntheticChatMessages(frozenPilotPrompt)
+		require.NoError(t, err)
+		before := providerCount()
+		for index, binding := range calls {
+			var task models.AutomationTask
+			require.NoError(t, db.First(&task, "id = ?", binding.AutomationTaskID).Error)
+			require.Equal(t, "queued", task.Status)
+			expires := time.Now().UTC().Add(time.Hour)
+			task.Status, task.RunID = "running", fmt.Sprintf("synthetic-pilot-run-%d", index)
+			task.WorkerID, task.AgentKey, task.MachineID = uuid.Must(uuid.NewV4()).String(), "generalist", uuid.Must(uuid.NewV4()).String()
+			task.LeaseExpiresAt, task.BudgetReservationExpiresAt = &expires, &expires
+			require.NoError(t, db.Save(&task).Error)
+			_, err := freezeAutomationInferenceAttemptPolicy(db, task, task.RunID, time.Now().UTC())
+			require.NoError(t, err)
+			require.Equal(t, http.StatusConflict, infer(task, messages, true).Code)
+			require.Equal(t, before+int32(index), providerCount(), "altered pilot prompt reached provider")
+			result := infer(task, messages, false)
+			require.Equal(t, http.StatusOK, result.Code, result.Body.String())
+			require.Equal(t, http.StatusConflict, infer(task, messages, false).Code, "pilot receipt permitted repeated inference")
+			require.Equal(t, before+int32(index)+1, providerCount())
+			var receipt models.AutomationInferenceReceipt
+			require.NoError(t, db.Where("automation_task_id = ?", task.ID).First(&receipt).Error)
+			route, err := modelevaluation.Route(modelevaluation.Candidate(binding.Candidate))
+			require.NoError(t, err)
+			require.Equal(t, "accepted", receipt.Status)
+			require.Equal(t, task.RunID, receipt.RunID)
+			require.Equal(t, route.Provider, receipt.Provider)
+			require.Equal(t, route.Model, receipt.Model)
+			require.Equal(t, int64(10), receipt.InputTokens)
+			require.Equal(t, int64(20), receipt.OutputTokens)
+			responseHash, responseBytes := recordedInferenceResponseBinding(receipt.UsageJSON)
+			require.NotNil(t, responseHash)
+			require.NotNil(t, responseBytes)
+			require.Equal(t, modelevaluation.Digest([]byte(`{"ok":true}`)), *responseHash)
+			require.Equal(t, int64(len(`{"ok":true}`)), *responseBytes)
+			require.NotContains(t, receipt.UsageJSON, `{"ok":true}`)
+			require.Error(t, db.Model(&receipt).Update("usage_json", `{}`).Error, "resolved response binding must remain immutable")
+			require.Positive(t, receipt.TotalCostMicros)
+			require.LessOrEqual(t, receipt.TotalCostMicros, binding.ReservationMicros)
+			require.NoError(t, db.Model(&task).Update("status", "completed").Error)
+			dispatched := invoke(DispatchNextModelEvaluation, "")
+			if index+1 < len(calls) {
+				require.Equal(t, http.StatusAccepted, dispatched.Code, dispatched.Body.String())
+			} else {
+				require.Equal(t, http.StatusOK, dispatched.Code, dispatched.Body.String())
+			}
+		}
+		var completed models.AutomationModelEvaluation
+		require.NoError(t, db.First(&completed, "id = ?", batchID).Error)
+		require.Equal(t, "completed", completed.Status)
+		exportedResponse := invoke(GetModelEvaluation, "")
+		require.Equal(t, http.StatusOK, exportedResponse.Code, exportedResponse.Body.String())
+		var exported struct {
+			Data struct {
+				Batch models.AutomationModelEvaluation `json:"batch"`
+				Calls []struct {
+					models.AutomationModelEvaluationCall
+					Status          string    `json:"status"`
+					ReceiptID       uuid.UUID `json:"receipt_id"`
+					ReceiptRunID    string    `json:"receipt_run_id"`
+					ReceiptStatus   string    `json:"receipt_status"`
+					ActualProvider  string    `json:"actual_provider"`
+					ActualModel     string    `json:"actual_model"`
+					InputTokens     int64     `json:"input_tokens"`
+					OutputTokens    int64     `json:"output_tokens"`
+					TotalCostMicros int64     `json:"total_cost_microusd"`
+					PolicyHash      string    `json:"policy_hash"`
+					ResponseSHA256  *string   `json:"response_sha256"`
+					ResponseBytes   *int64    `json:"response_bytes"`
+				} `json:"calls"`
+			} `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(exportedResponse.Body.Bytes(), &exported))
+		require.Equal(t, completed.ID, exported.Data.Batch.ID)
+		require.Equal(t, "completed", exported.Data.Batch.Status)
+		require.Len(t, exported.Data.Calls, expectedCalls)
+		for index, outcome := range exported.Data.Calls {
+			// PostgreSQL may return time.Local while JSON uses time.UTC for the
+			// same instant. Normalize locations without dropping timestamp checks.
+			expectedBinding := calls[index]
+			expectedBinding.CreatedAt = expectedBinding.CreatedAt.UTC()
+			outcome.CreatedAt = outcome.CreatedAt.UTC()
+			require.Equal(t, expectedBinding, outcome.AutomationModelEvaluationCall)
+			var receipt models.AutomationInferenceReceipt
+			require.NoError(t, db.Where("automation_task_id = ?", outcome.AutomationTaskID).First(&receipt).Error)
+			require.Equal(t, "completed", outcome.Status)
+			require.Equal(t, receipt.ID, outcome.ReceiptID)
+			require.Equal(t, receipt.RunID, outcome.ReceiptRunID)
+			require.Equal(t, receipt.Status, outcome.ReceiptStatus)
+			require.Equal(t, receipt.Provider, outcome.ActualProvider)
+			require.Equal(t, receipt.Model, outcome.ActualModel)
+			require.Equal(t, receipt.InputTokens, outcome.InputTokens)
+			require.Equal(t, receipt.OutputTokens, outcome.OutputTokens)
+			require.Equal(t, receipt.TotalCostMicros, outcome.TotalCostMicros)
+			require.Equal(t, receipt.PolicySnapshotHash, outcome.PolicyHash)
+			require.NotNil(t, outcome.ResponseSHA256)
+			require.NotNil(t, outcome.ResponseBytes)
+			require.Equal(t, modelevaluation.Digest([]byte(`{"ok":true}`)), *outcome.ResponseSHA256)
+			require.Equal(t, int64(len(`{"ok":true}`)), *outcome.ResponseBytes)
+		}
+		require.NotContains(t, exportedResponse.Body.String(), frozenPilotPrompt)
+		require.NotContains(t, exportedResponse.Body.String(), "must-not-be-read")
+		repeated := strings.Replace(request, batchID.String(), uuid.Must(uuid.NewV4()).String(), 1)
+		require.Equal(t, http.StatusConflict, invoke(CreateModelEvaluation, repeated).Code)
+		require.Equal(t, int32(expectedCalls), uploaded.Load())
+		return
+	}
 	require.NoError(t, db.Model(&models.AutomationTask{}).Where("id = ?", calls[0].AutomationTaskID).Update("status", "failed").Error)
 	require.Equal(t, http.StatusConflict, invoke(DispatchNextModelEvaluation, "").Code)
 	var batch models.AutomationModelEvaluation
 	require.NoError(t, db.First(&batch, "id = ?", batchID).Error)
 	require.Equal(t, "halted", batch.Status)
 	require.Equal(t, http.StatusConflict, invoke(DispatchNextModelEvaluation, "").Code)
-	require.Equal(t, int32(60), uploaded.Load())
+	require.Equal(t, int32(expectedCalls), uploaded.Load())
 	// Completed or halted history cannot be retried under a fresh ID.
 	repeated := strings.Replace(request, batchID.String(), uuid.Must(uuid.NewV4()).String(), 1)
 	require.Equal(t, http.StatusConflict, invoke(CreateModelEvaluation, repeated).Code)
-	require.Equal(t, int32(60), uploaded.Load())
+	require.Equal(t, int32(expectedCalls), uploaded.Load())
 }
 
 const evaluationIntegrationPricing = `{"version":"synthetic","basis":"api_equivalent","models":{"minimax:minimax-m3":{"input_microusd_per_million":600000,"output_microusd_per_million":2400000},"deepseek:deepseek-flash":{"input_microusd_per_million":300000,"output_microusd_per_million":1200000},"openrouter:openai/gpt-6-luna":{"input_microusd_per_million":200000,"output_microusd_per_million":750000}}}`

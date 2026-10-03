@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import unittest
 
-from score_model_evaluation import CANDIDATES, score
+from score_model_evaluation import CANDIDATES, SCREENING_VERSION, score
 
 ROOT = Path(__file__).resolve().parents[2]
 CORPUS = json.loads((ROOT / 'scripts/model-evaluation-screening-corpus.json').read_text(encoding='utf-8-sig'))
@@ -33,16 +33,180 @@ def fixture(corpus=CORPUS):
                 'cache_write_tokens': 0, 'reasoning_tokens': 0,
             })
     return {'batch': {'status': 'completed', 'budget_microusd': 1000000,
-                      'reservation_microusd': 600, 'corpus_version': corpus.get('corpus_version')}, 'calls': calls}
+                      'reservation_microusd': 600, 'corpus_version': corpus.get('corpus_version', SCREENING_VERSION)}, 'calls': calls}
 
 
 class ScoringTests(unittest.TestCase):
+    def test_task_identity_cannot_hide_reuse_with_padding(self):
+        evidence = fixture()
+        evidence['calls'][1]['task_id'] = ' ' + evidence['calls'][0]['task_id'] + ' '
+        with self.assertRaisesRegex(ValueError, 'task identity'):
+            score(CORPUS, evidence)
+
+    def test_receipt_run_identity_survives_recovery_and_legacy_remains_unknown(self):
+        evidence = fixture()
+        legacy = score(CORPUS, evidence)['results']['minimax-m3']
+        self.assertEqual(legacy['unknown_receipt_run_count'], 20)
+        self.assertIsNone(legacy['cases'][0]['receipt_run_id'])
+        for call in evidence['calls']:
+            call['receipt_run_id'] = call['run_id'] + '-original'
+        row = score(CORPUS, evidence)['results']['minimax-m3']
+        self.assertEqual(row['unknown_receipt_run_count'], 0)
+        self.assertEqual(row['cases'][0]['receipt_run_id'], evidence['calls'][0]['receipt_run_id'])
+        self.assertNotEqual(row['cases'][0]['receipt_run_id'], row['cases'][0]['run_id'])
+        self.assertEqual(row['successes'], 20)
+        evidence['calls'][1]['receipt_run_id'] = evidence['calls'][0]['receipt_run_id']
+        with self.assertRaisesRegex(ValueError, 'Reused evaluation outcome identity'):
+            score(CORPUS, evidence)
+
+    def test_supplied_accepted_receipt_run_identity_must_be_valid(self):
+        for value in (None, '', True, ' ', ' padded '):
+            with self.subTest(value=value):
+                evidence = fixture()
+                evidence['calls'][0]['receipt_run_id'] = value
+                with self.assertRaises(ValueError):
+                    score(CORPUS, evidence)
+
+    def test_category_results_keep_all_cases_and_expose_weak_categories(self):
+        evidence = fixture()
+        for category in ('review_bug', 'qa_evidence', 'summary'):
+            index = next(i for i, case in enumerate(CORPUS['cases']) if case['category'] == category)
+            evidence['calls'][index]['final_answer'] = 'not-json' if category == 'review_bug' else '{"wrong":true}'
+        row = score(CORPUS, evidence)['results']['minimax-m3']
+        self.assertEqual(row['successes'], 17)
+        categories = row['by_category']
+        self.assertEqual(sum(item['denominator'] for item in categories.values()), 20)
+        self.assertEqual(sum(item['successes'] for item in categories.values()), 17)
+        self.assertEqual(categories['summary']['success_rate'], .5)
+        self.assertEqual(categories['planning']['denominator'], 3)
+        self.assertEqual(categories['planning']['successes'], 3)
+        self.assertEqual(categories['review_bug']['valid_json_count'], 4)
+        self.assertEqual(categories['review_clean']['successes'], 5)
+        self.assertEqual(sum(item['failures'] for item in categories.values()), 3)
+        for case in row['cases']:
+            self.assertEqual(case['category'], next(item['category'] for item in CORPUS['cases'] if item['id'] == case['case_id']))
+
+    def test_completed_batch_cannot_hide_unfinished_outcomes(self):
+        for status, receipt in (('running', 'accepted'), ('failed', 'accepted'),
+                                ('completed', 'ambiguous')):
+            with self.subTest(status=status, receipt=receipt):
+                evidence = fixture()
+                evidence['calls'][0].update(status=status, receipt_status=receipt)
+                result = score(CORPUS, evidence)
+                self.assertFalse(result['complete'])
+                self.assertTrue(result['reported_complete'])
+                self.assertEqual(result['incomplete_outcome_count'], 1)
+                self.assertEqual(result['results']['minimax-m3']['denominator'], 20)
+
+    def test_failure_diagnostics_distinguish_answer_and_execution(self):
+        evidence = fixture()
+        evidence['calls'][0]['final_answer'] = 'not-json'
+        evidence['calls'][1]['final_answer'] = '{"wrong":true}'
+        evidence['calls'][2].update(status='failed', receipt_status='ambiguous',
+                                  actual_model='unexpected', finish_reason='length',
+                                  result_error='synthetic failure', final_answer='not-json')
+        row = score(CORPUS, evidence)['results']['minimax-m3']
+        self.assertEqual(row['successes'], 17)
+        self.assertEqual(row['denominator'], 20)
+        self.assertEqual(row['cases'][0]['failure_reasons'], ['invalid_json'])
+        self.assertEqual(row['cases'][1]['failure_reasons'], ['answer_mismatch'])
+        self.assertEqual(set(row['cases'][2]['failure_reasons']), {
+            'task_not_completed', 'receipt_not_accepted', 'unexpected_route',
+            'truncated', 'result_error', 'invalid_json'})
+        self.assertEqual(row['failure_reason_counts']['invalid_json'], 2)
+        self.assertEqual(row['failure_reason_counts']['answer_mismatch'], 1)
+        self.assertTrue(all(not case['failure_reasons'] for case in row['cases'][3:]))
+
+    def test_completion_is_independent_of_answer_quality_and_not_inferred(self):
+        evidence = fixture()
+        evidence['calls'][0]['final_answer'] = '{"wrong":true}'
+        result = score(CORPUS, evidence)
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['incomplete_outcome_count'], 0)
+        self.assertEqual(result['results']['minimax-m3']['successes'], 19)
+        evidence['batch']['status'] = 'active'
+        result = score(CORPUS, evidence)
+        self.assertFalse(result['complete'])
+        self.assertFalse(result['reported_complete'])
+        self.assertEqual(result['incomplete_outcome_count'], 0)
+
+    def test_reused_receipt_or_run_cannot_count_as_new_outcome(self):
+        for field in ('receipt_id', 'run_id'):
+            with self.subTest(field=field):
+                evidence = fixture()
+                evidence['calls'][1][field] = evidence['calls'][0][field]
+                with self.assertRaises(ValueError):
+                    score(CORPUS, evidence)
+
+    def test_accepted_identities_must_be_nonblank_strings(self):
+        for field in ('run_id', 'receipt_id'):
+            for value in (True, 123, ['identity'], ' ', ' padded '):
+                with self.subTest(field=field, value=value):
+                    evidence = fixture()
+                    evidence['calls'][0][field] = value
+                    with self.assertRaises(ValueError):
+                        score(CORPUS, evidence)
+
+    def test_modified_corpus_cannot_redefine_success(self):
+        for mutation in ('expected', 'duplicate', 'type', 'version'):
+            with self.subTest(mutation=mutation):
+                corpus = copy.deepcopy(CORPUS)
+                if mutation == 'expected':
+                    corpus['cases'][0]['expected'] = {'bug': False, 'code': 'none'}
+                elif mutation == 'duplicate':
+                    corpus['cases'].append(copy.deepcopy(corpus['cases'][0]))
+                elif mutation == 'type':
+                    corpus['cases'][0]['expected']['bug'] = 1
+                else:
+                    corpus['corpus_version'] = 'unknown'
+                with self.assertRaises(ValueError):
+                    score(corpus, fixture(CORPUS if mutation == 'duplicate' else corpus))
+
+    def test_screening_batch_requires_matching_version(self):
+        for version in (None, '', 'unknown', 'synthetic-prefix-cache-20-2026-10-01-v1'):
+            with self.subTest(version=version):
+                evidence = fixture()
+                evidence['batch']['corpus_version'] = version
+                with self.assertRaises(ValueError):
+                    score(CORPUS, evidence)
+
     def test_complete_fixture(self):
         result = score(CORPUS, fixture())
         self.assertTrue(result['screening_only'])
         for row in result['results'].values():
             self.assertEqual(row['successes'], 20)
             self.assertEqual(row['unknown_cost_count'], 0)
+
+    def test_failed_outcomes_keep_missing_identities_but_not_reused_receipts(self):
+        evidence = fixture()
+        evidence['calls'][0].update(receipt_status='ambiguous', status='failed', run_id='', receipt_id=None)
+        row = score(CORPUS, evidence)['results']['minimax-m3']
+        self.assertEqual(row['successes'], 19)
+        self.assertEqual(row['denominator'], 20)
+        evidence['calls'][0]['receipt_id'] = evidence['calls'][1]['receipt_id']
+        with self.assertRaisesRegex(ValueError, 'Reused evaluation outcome identity'):
+            score(CORPUS, evidence)
+
+    def test_ambiguous_sealed_route_is_rejected(self):
+        evidence = fixture()
+        original = evidence['calls'][0]['sealed_routes_json']
+        evidence['calls'][0]['sealed_routes_json'] = '[{"provider":"unexpected",' + original[2:]
+        with self.assertRaisesRegex(ValueError, 'Duplicate evaluation JSON field'):
+            score(CORPUS, evidence)
+
+    def test_ambiguous_model_json_is_not_successful(self):
+        for answer in ('{"bug":false,"bug":true,"code":"missing_organization_authorization"}',
+                       '{"bug":false,"\\u0062ug":true,"code":"missing_organization_authorization"}',
+                       '{"metadata":{"value":1,"value":2}}',
+                       '{"value":NaN}', '{"value":Infinity}', '{"value":-Infinity}'):
+            with self.subTest(answer=answer):
+                evidence = fixture()
+                evidence['calls'][0]['final_answer'] = answer
+                row = score(CORPUS, evidence)['results']['minimax-m3']
+                self.assertEqual(row['valid_json_count'], 19)
+                self.assertEqual(row['successes'], 19)
+                self.assertEqual(row['denominator'], 20)
+                self.assertEqual(row['unknown_cost_count'], 0)
 
     def test_ambiguous_accounting(self):
         evidence = fixture()

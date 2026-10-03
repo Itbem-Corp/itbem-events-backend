@@ -1,6 +1,7 @@
 package automation
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"events-stocks/configuration"
 	"events-stocks/internal/authz"
 	"events-stocks/internal/automationagent"
+	"events-stocks/internal/evidencejson"
 	"events-stocks/internal/modelevaluation"
 	"events-stocks/models"
 	automationqueue "events-stocks/repositories/automationqueuerepository"
@@ -35,13 +37,8 @@ func CreateModelEvaluation(c echo.Context) error {
 	if cfg == nil || configuration.DB == nil || actor == "" || !automationqueue.IsConfigured() || strings.TrimSpace(cfg.AutomationInputBucket) == "" {
 		return utils.Error(c, http.StatusServiceUnavailable, "Evaluation unavailable", "")
 	}
-	var request struct {
-		ID            string `json:"id"`
-		CorpusVersion string `json:"corpus_version"`
-	}
-	decoder := json.NewDecoder(io.LimitReader(c.Request().Body, 2049))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&request); err != nil || decoder.Decode(&struct{}{}) != io.EOF || !modelevaluation.SupportedCorpus(request.CorpusVersion) {
+	request, err := decodeEvaluationAdmission(c.Request().Body)
+	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid evaluation request", "Only the published synthetic corpus is allowed")
 	}
 	id, err := uuid.FromString(request.ID)
@@ -70,9 +67,9 @@ func CreateModelEvaluation(c echo.Context) error {
 		overhead += len(message.Role) + len(message.Content) + 64
 	}
 	// Keep byte framing conservative, including the small placeholder prompt.
-	plan, err := modelevaluation.Compile(cases, instruction, overhead, pricingCatalog(cfg))
+	plan, err := modelevaluation.CompileForVersion(request.CorpusVersion, cases, instruction, overhead, pricingCatalog(cfg))
 	if err != nil {
-		return utils.Error(c, http.StatusConflict, "Evaluation budget admission rejected", "The existing price catalog must reserve all sixty calls within USD 1")
+		return utils.Error(c, http.StatusConflict, "Evaluation budget admission rejected", "The existing price catalog must reserve all planned calls within USD 1")
 	}
 	batch := models.AutomationModelEvaluation{ID: id, RequestedBy: actor, CorpusVersion: request.CorpusVersion, CorpusHash: corpusHash, BudgetMicros: modelevaluation.MaxBudgetMicros, ReservationMicros: plan.ReservationMicros, PricingJSON: pricingCatalog(cfg), Status: "active", CreatedAt: time.Now().UTC()}
 	err = configuration.DB.Transaction(func(tx *gorm.DB) error {
@@ -130,6 +127,31 @@ func CreateModelEvaluation(c echo.Context) error {
 	return utils.Success(c, http.StatusCreated, "Evaluation admitted; dispatch is explicit and sequential", batch)
 }
 
+type evaluationAdmission struct {
+	ID            string `json:"id"`
+	CorpusVersion string `json:"corpus_version"`
+}
+
+func decodeEvaluationAdmission(source io.Reader) (evaluationAdmission, error) {
+	var request evaluationAdmission
+	raw, err := io.ReadAll(io.LimitReader(source, 2049))
+	if err != nil || len(raw) > 2048 {
+		return request, errors.New("evaluation admission exceeds bounded input")
+	}
+	if err := evidencejson.Validate(raw); err != nil {
+		return request, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		return request, err
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF || !modelevaluation.SupportedCorpus(request.CorpusVersion) {
+		return request, errors.New("invalid evaluation admission")
+	}
+	return request, nil
+}
+
 // DispatchNextModelEvaluation queues exactly one task. Existing queued/running
 // work is returned as busy; a failed or ambiguous outcome halts the batch.
 func DispatchNextModelEvaluation(c echo.Context) error {
@@ -150,11 +172,15 @@ func DispatchNextModelEvaluation(c echo.Context) error {
 		if batch.Status != "active" {
 			return errEvaluationAdmission
 		}
+		expectedCalls, err := modelevaluation.ExpectedCalls(batch.CorpusVersion)
+		if err != nil {
+			return errEvaluationAdmission
+		}
 		var calls []models.AutomationModelEvaluationCall
-		if err := tx.Where("evaluation_id = ?", id).Order("sequence ASC").Limit(modelevaluation.MaxCalls + 1).Find(&calls).Error; err != nil {
+		if err := tx.Where("evaluation_id = ?", id).Order("sequence ASC").Limit(expectedCalls + 1).Find(&calls).Error; err != nil {
 			return err
 		}
-		if len(calls) != modelevaluation.MaxCalls {
+		if len(calls) != expectedCalls {
 			return errEvaluationAdmission
 		}
 		for _, call := range calls {
@@ -236,10 +262,15 @@ func GetModelEvaluation(c echo.Context) error {
 	if err := configuration.DB.First(&batch, "id = ?", id).Error; err != nil {
 		return utils.Error(c, http.StatusNotFound, "Evaluation not found", "")
 	}
+	expectedCalls, err := modelevaluation.ExpectedCalls(batch.CorpusVersion)
+	if err != nil {
+		return utils.Error(c, http.StatusServiceUnavailable, "Evaluation provenance unavailable", "Unknown corpus version")
+	}
 	type callView struct {
 		models.AutomationModelEvaluationCall
 		Status              string     `json:"status"`
 		RunID               string     `json:"run_id"`
+		ReceiptRunID        string     `json:"receipt_run_id"`
 		ReceiptID           *uuid.UUID `json:"receipt_id"`
 		ReceiptStatus       string     `json:"receipt_status"`
 		PolicyHash          string     `json:"policy_hash"`
@@ -254,6 +285,8 @@ func GetModelEvaluation(c echo.Context) error {
 		ActualModel         string     `json:"actual_model"`
 		InputTokens         int64      `json:"input_tokens"`
 		OutputTokens        int64      `json:"output_tokens"`
+		ResponseSHA256      *string    `json:"response_sha256"`
+		ResponseBytes       *int64     `json:"response_bytes"`
 		CachedInputTokens   *int64     `json:"cached_input_tokens"`
 		CacheWriteTokens    *int64     `json:"cache_write_tokens"`
 		ReasoningTokens     *int64     `json:"reasoning_tokens"`
@@ -266,7 +299,7 @@ func GetModelEvaluation(c echo.Context) error {
 	}
 	var calls []callView
 	err = configuration.DB.Table("automation_model_evaluation_calls AS evaluation_call").Select(`evaluation_call.*,
-		task.status, task.run_id, receipt.id AS receipt_id, COALESCE(receipt.status, '') AS receipt_status,
+		task.status, task.run_id, COALESCE(receipt.run_id, '') AS receipt_run_id, receipt.id AS receipt_id, COALESCE(receipt.status, '') AS receipt_status,
 		COALESCE(receipt.policy_snapshot_hash, '') AS policy_hash, COALESCE(policy.policy_revision, 0) AS policy_revision,
 		COALESCE(policy.routes_json::text, '[]') AS sealed_routes_json,
 		COALESCE(receipt.worker_id, '') AS worker_id, COALESCE(receipt.agent_key, '') AS agent_key, COALESCE(receipt.machine_id, '') AS machine_id,
@@ -282,12 +315,25 @@ func GetModelEvaluation(c echo.Context) error {
 		Joins("JOIN automation_tasks AS task ON task.id = evaluation_call.automation_task_id").
 		Joins("LEFT JOIN automation_inference_receipts AS receipt ON receipt.automation_task_id = task.id").
 		Joins("LEFT JOIN automation_inference_attempt_policies AS policy ON policy.automation_task_id = receipt.automation_task_id AND policy.run_id = receipt.run_id").
-		Where("evaluation_call.evaluation_id = ?", id).Order("evaluation_call.sequence ASC").Limit(modelevaluation.MaxCalls).Scan(&calls).Error
+		Where("evaluation_call.evaluation_id = ?", id).Order("evaluation_call.sequence ASC").Limit(expectedCalls + 1).Scan(&calls).Error
 	if err != nil {
 		return utils.Error(c, http.StatusServiceUnavailable, "Evaluation provenance unavailable", "")
 	}
+	// One extra row detects join expansion instead of silently dropping a task
+	// at the export boundary. Partial batches remain inspectable.
+	if len(calls) > expectedCalls {
+		return utils.Error(c, http.StatusServiceUnavailable, "Evaluation provenance ambiguous", "")
+	}
+	seenTasks := make(map[uuid.UUID]bool, len(calls))
+	for _, call := range calls {
+		if call.AutomationTaskID == uuid.Nil || seenTasks[call.AutomationTaskID] {
+			return utils.Error(c, http.StatusServiceUnavailable, "Evaluation provenance ambiguous", "")
+		}
+		seenTasks[call.AutomationTaskID] = true
+	}
 	for i := range calls {
 		calls[i].CachedInputTokens, calls[i].ReasoningTokens, calls[i].CacheWriteTokens = evaluationOptionalUsage(calls[i].ActualProvider, calls[i].ActualModel, calls[i].UsageJSON)
+		calls[i].ResponseSHA256, calls[i].ResponseBytes = recordedInferenceResponseBinding(calls[i].UsageJSON)
 	}
 	return utils.Success(c, http.StatusOK, "Evaluation provenance", map[string]any{"batch": batch, "calls": calls})
 }

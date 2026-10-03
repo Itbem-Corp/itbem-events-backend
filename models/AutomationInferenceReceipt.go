@@ -43,8 +43,8 @@ type AutomationInferenceReceipt struct {
 	Currency             string     `gorm:"type:char(3);not null;default:'USD'" json:"currency"`
 	PricingBasis         string     `gorm:"type:text;not null;default:'unpriced'" json:"pricing_basis"`
 	PricingSnapshotJSON  string     `gorm:"type:jsonb;not null;default:'{}'" json:"pricing_snapshot,omitempty"`
-	// UsageJSON is provider accounting metadata only; prompts and answers are
-	// never copied into this ledger.
+	// UsageJSON contains sanitized accounting metadata and a gateway-derived
+	// final-answer digest. Prompts and answer bodies are never copied here.
 	UsageJSON       string     `gorm:"type:jsonb;not null;default:'{}'" json:"-"`
 	DiagnosticsJSON string     `gorm:"type:jsonb;not null;default:'{}'" json:"-"`
 	CreatedAt       time.Time  `gorm:"not null;index" json:"created_at"`

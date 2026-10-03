@@ -6,22 +6,159 @@ on:
     paths:
       - .github/workflows/build-ai-agent.yml
       - cmd/itbem-ai-agent/**
+      - cmd/verify-test-evidence/**
+      - cmd/score-qa-grounding/**
+      - internal/qaevidence/**
+      - internal/evidencejson/**
+      - controllers/automation/**
+      - controllers/delivery/**
+      - internal/runtimeroute/**
+      - tools/stagehand-qa/**
       - docs/AI_AGENT_DISTRIBUTION.md
       - internal/agentcallbackauth/**
       - internal/automationagent/**
+      - internal/modelevaluation/**
       - internal/inferencecapability/**
       - models/**
       - services/automationcost/**
       - services/deliveryplansteps/**
       - services/deliveryworkflow/**
+      - scripts/*.py
+      - scripts/tests/**
+      - scripts/Test-AgentHarness.ps1
+      - scripts/Test-AgentHarnessIsolation.ps1
+      - scripts/Score-HarnessSemantics.ps1
+      - scripts/Test-HarnessSemantics.ps1
+      - scripts/Report-HarnessCosts.ps1
+      - scripts/Test-HarnessCosts.ps1
+      - go.mod
+      - go.sum
+  pull_request:
+    paths:
+      - .github/workflows/build-ai-agent.yml
+      - cmd/itbem-ai-agent/**
+      - cmd/verify-test-evidence/**
+      - cmd/score-qa-grounding/**
+      - internal/qaevidence/**
+      - internal/evidencejson/**
+      - controllers/automation/**
+      - controllers/delivery/**
+      - internal/runtimeroute/**
+      - tools/stagehand-qa/**
+      - docs/AI_AGENT_DISTRIBUTION.md
+      - internal/agentcallbackauth/**
+      - internal/automationagent/**
+      - internal/modelevaluation/**
+      - internal/inferencecapability/**
+      - models/**
+      - services/automationcost/**
+      - services/deliveryplansteps/**
+      - services/deliveryworkflow/**
+      - scripts/*.py
+      - scripts/tests/**
+      - scripts/Test-AgentHarness.ps1
+      - scripts/Test-AgentHarnessIsolation.ps1
+      - scripts/Score-HarnessSemantics.ps1
+      - scripts/Test-HarnessSemantics.ps1
+      - scripts/Report-HarnessCosts.ps1
+      - scripts/Test-HarnessCosts.ps1
       - go.mod
       - go.sum
 
 permissions:
   contents: read
 
+# Supersede obsolete PR verification without cancelling branch or manual builds.
+# Include the workflow name so this group cannot cancel other CI workflows.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  harness-isolation:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out source without persisting credentials
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - name: Verify offline isolation and result integrity with fake Go
+        shell: pwsh
+        run: ./scripts/Test-AgentHarnessIsolation.ps1
+      - name: Verify semantic scorer rejects unsupported evidence
+        shell: pwsh
+        run: ./scripts/Test-HarnessSemantics.ps1
+      - name: Verify cost coverage and unknown amounts
+        shell: pwsh
+        run: ./scripts/Test-HarnessCosts.ps1
+
+  localstack-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      localstack:
+        image: localstack/localstack:3.8@sha256:b279c01f4cfb8f985a482e4014cabc1e2697b9d7a6c8c8db2e40f4d9f93687c7
+        env:
+          SERVICES: s3,sqs
+          AWS_DEFAULT_REGION: us-east-1
+        ports:
+          - 4566:4566
+        options: >-
+          --health-cmd "curl -fsS http://localhost:4566/_localstack/health"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 30
+    steps:
+      - name: Check out source without persisting credentials
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Prove isolated transport and durable redelivery twice
+        env:
+          ITBEM_LOCALSTACK_E2E: '1'
+          ITBEM_LOCALSTACK_ENDPOINT: http://127.0.0.1:4566
+        shell: bash
+        run: |
+          set -o pipefail
+          go test ./internal/automationagent -run '^TestLocalStack' -count=2 -timeout 3m -json | tee localstack-integration.jsonl
+          go run ./cmd/verify-test-evidence -log localstack-integration.jsonl -repetitions 2 -package events-stocks/internal/automationagent -test TestLocalStackTransportRoundTrip -test TestLocalStackRedeliveryReusesDurableResultWithoutProviderRepeat
+      - name: Prepare pinned Docker sandbox image
+        run: docker pull golang:1.25-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d861346b9c6f8b36437
+      - name: Prove Docker isolation and reject symlink artifacts twice
+        env:
+          ITBEM_DOCKER_SANDBOX_E2E: '1'
+          ITBEM_REQUIRE_SYMLINK_PROOF: '1'
+          ITBEM_REQUIRE_POSIX_SUPERVISOR_PROOF: '1'
+        shell: bash
+        run: |
+          set -o pipefail
+          go test ./internal/automationagent -run '^(TestDockerSandboxRoundTrip|TestImplementationPilotOracleDockerRoundTrip|TestImplementationCandidateResponseDockerRoundTrip|TestReadSafeWorkspaceArtifactRejectsSymlink|TestSandboxWorktreeDigestMatchesPythonSupervisor)$' -count=2 -timeout 3m -json | tee sandbox-integration.jsonl
+          go run ./cmd/verify-test-evidence -log sandbox-integration.jsonl -repetitions 2 -package events-stocks/internal/automationagent -test TestDockerSandboxRoundTrip -test TestImplementationPilotOracleDockerRoundTrip -test TestImplementationCandidateResponseDockerRoundTrip -test TestReadSafeWorkspaceArtifactRejectsSymlink -test TestSandboxWorktreeDigestMatchesPythonSupervisor
+          python3 scripts/verify_implementation_sandbox.py --log sandbox-integration.jsonl --repetitions 2 --output implementation-sandbox.json
+          python3 scripts/verify_implementation_oracle.py --log sandbox-integration.jsonl --repetitions 2 --output implementation-oracle.json
+          python3 scripts/verify_implementation_candidate_execution.py --log sandbox-integration.jsonl --repetitions 2 --output implementation-candidate-execution.json
+      - name: Preserve integration evidence on success or failure
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ai-agent-runtime-integration-evidence
+          path: |
+            *-integration.jsonl
+            implementation-sandbox.json
+            implementation-oracle.json
+            implementation-candidate-execution.json
+          if-no-files-found: warn
+          retention-days: 7
+
   build:
+    needs: [harness-isolation, localstack-integration]
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -38,8 +175,36 @@ jobs:
           go-version-file: go.mod
           cache: false
 
+      - name: Set up pinned Node for QA fixtures
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22.23.1
+
+      - name: Validate offline Stagehand runner contracts
+        run: |
+          npm ci --ignore-scripts --prefix tools/stagehand-qa
+          node --check tools/stagehand-qa/run.mjs
+          node --test tools/stagehand-qa/run.test.mjs
+
+      - name: Verify multi-file implementation evaluator controls
+        run: python3 scripts/verify_implementation_benchmark.py --output implementation-controls.json
       - name: Test canonical Go worker and command
-        run: go test -count=1 -timeout 10m ./internal/automationagent ./cmd/itbem-ai-agent
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -shuffle=49207 -count=3 -timeout 10m ./internal/automationagent ./controllers/delivery ./controllers/automation ./services/automationcost ./services/deliveryworkflow ./internal/runtimeroute ./cmd/itbem-ai-agent ./cmd/verify-test-evidence ./internal/qaevidence ./internal/evidencejson ./cmd/score-qa-grounding ./internal/modelevaluation -json | tee agent-regression.jsonl
+          go run ./cmd/verify-test-evidence -log agent-regression.jsonl -repetitions 3 -allow-skips -package events-stocks/internal/automationagent -package events-stocks/controllers/delivery -package events-stocks/controllers/automation -package events-stocks/services/automationcost -package events-stocks/services/deliveryworkflow -package events-stocks/internal/runtimeroute -package events-stocks/cmd/itbem-ai-agent -package events-stocks/cmd/verify-test-evidence -package events-stocks/internal/qaevidence -package events-stocks/internal/evidencejson -package events-stocks/cmd/score-qa-grounding -package events-stocks/internal/modelevaluation -test TestInferenceResponseBindingRetainsExactBytesWithoutAnswerBody -test TestHistoricalOrInvalidResponseBindingRemainsUnavailable -test TestImplementationCandidateResponseRejectsAmbiguousOrForeignFiles -test TestImplementationPilotOracleRejectsUnboundExecution -test TestImplementationPilotReservesExactWorkerEnvelopeWithVersionedAdmission -test TestPublishedCorpusFitsFullWorkerEnvelopeBudget -test TestScorePublicationPreservesCompletedEvidence -test TestConcurrentScorePublicationHasOneCompleteWinner -test TestVersionedGroundingFixtures -test TestDecodeReportClaimsPreservesModelAssertions -test TestDecodeReportClaimsRejectsAmbiguousEnvelope -test TestQAReportGroundingRequiresObservedModelClaims -test TestQAWorkerPreservesReviewedManifestAndRejectsNewSourceBeforeInference -test TestValidateEvidenceJSON -test TestValidateEvidenceJSONPreservesValidUnicodeEscapes -test TestSummaryDecisionClaimsBindEachGate -test TestSummaryDecisionRenderingPreservesRecordedGatePairs -test TestSummaryWorkerGroundsDecisionClaimsAndPreservesRecovery -test TestCodeReviewRejectsAmbiguousJSONBeforeNormalization -test TestCodeReviewWorkerRejectsAmbiguousPrimaryAndRepair -test TestQARevocationStopsRunningCommandTree -test TestScoreRetainsGroundedAndFailedEvidence -test TestScoreRetainsGroundedAndFailedEvidence/malformed-observation-retains-input-hashes -test TestVersionedGroundingFixtures/grounded -test TestVersionedGroundingFixtures/invented -test TestVersionedGroundingFixtures/false-verdict -test TestVersionedGroundingFixtures/altered-security -test TestVersionedGroundingFixtures/omitted-security -test TestEvaluationGatewayBindsMessagesBudgetRouteAndCrossRunQuota -test TestEvaluationGatewayBindsMessagesBudgetRouteAndCrossRunQuota/pilot-valid -test TestEvaluationGatewayBindsMessagesBudgetRouteAndCrossRunQuota/pilot-excess-sequence -test TestEvaluationGatewayBindsMessagesBudgetRouteAndCrossRunQuota/pilot-wrong-case -test TestEvaluationGatewayBindsMessagesBudgetRouteAndCrossRunQuota/pilot-swapped-candidate -test TestEvaluationGatewayBindsMessagesBudgetRouteAndCrossRunQuota/unknown-corpus -test TestEvaluationGatewayBindsMessagesBudgetRouteAndCrossRunQuota/pilot-rebound-prompt -test TestEvaluationGatewayBindsMessagesBudgetRouteAndCrossRunQuota/pilot-wrong-corpus-hash -test TestEvaluationGatewayBindsMessagesBudgetRouteAndCrossRunQuota/pilot-wrong-prompt-hash -test TestEvaluationAdmissionRejectsAmbiguousAndOversizedJSON -test TestEvaluationExportRejectsAmbiguousJoinedOutcomes/pilot-full -test TestEvaluationExportRejectsAmbiguousJoinedOutcomes/pilot-overflow -test TestEvaluationExportRejectsAmbiguousJoinedOutcomes -test TestEvaluationExportRejectsAmbiguousJoinedOutcomes/partial -test TestEvaluationExportRejectsAmbiguousJoinedOutcomes/full -test TestEvaluationExportRejectsAmbiguousJoinedOutcomes/duplicate-task -test TestEvaluationExportRejectsAmbiguousJoinedOutcomes/overflow -test TestEvaluationExportRejectsAmbiguousJoinedOutcomes/recovery
+
+      - name: Preserve regression evidence on success or failure
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ai-agent-regression-evidence
+          path: |
+            agent-regression.jsonl
+            implementation-controls.json
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Cross-build Windows and Linux amd64 binaries
         shell: bash
@@ -69,4 +234,46 @@ jobs:
           name: itbem-ai-agent-linux-amd64
           path: dist/linux-amd64/
           if-no-files-found: error
+          retention-days: 7
+
+  artifact-replay:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Check out evaluator without persisting credentials
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - name: Set up pinned Go for evidence verifier
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Download this run's published artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVIDENCE_RUN_ID: ${{ github.run_id }}
+          EVIDENCE_REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh run download "$EVIDENCE_RUN_ID" --repo "$EVIDENCE_REPOSITORY" --name ai-agent-regression-evidence --dir artifact-replay/regression
+          gh run download "$EVIDENCE_RUN_ID" --repo "$EVIDENCE_REPOSITORY" --name ai-agent-runtime-integration-evidence --dir artifact-replay/runtime
+          gh run download "$EVIDENCE_RUN_ID" --repo "$EVIDENCE_REPOSITORY" --name itbem-ai-agent-windows-amd64 --name itbem-ai-agent-linux-amd64 --dir artifact-replay/binaries
+      - name: Independently replay published artifact contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/verify_agent_artifacts.py --revision "$(git rev-parse HEAD)" --regression artifact-replay/regression --runtime artifact-replay/runtime --binaries artifact-replay/binaries --output artifact-replay/report.json
+      - name: Preserve artifact replay report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ai-agent-artifact-replay-evidence
+          path: artifact-replay/report.json
+          if-no-files-found: warn
           retention-days: 7

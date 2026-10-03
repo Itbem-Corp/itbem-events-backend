@@ -1,5 +1,7 @@
 # ITBEM Go AI worker
 
+For current validation commands, evidence interpretation and review handoff, see [EVIDENCE_WORKFLOW.md](EVIDENCE_WORKFLOW.md). Historical evaluation rounds are recorded separately in [HARNESS_EVALUATION.md](HARNESS_EVALUATION.md).
+
 `cmd/itbem-ai-agent` is the local execution plane for ITBEM-only automation.
 It polls the private SQS queue, reads only task-scoped S3 inputs, calls the
 configured model provider, writes AES-256 encrypted output back to the private
@@ -186,10 +188,32 @@ endpoint overrides, provider selectors, and live-harness flags from that child
 environment; the parent process values are restored afterward and never
 printed. `scripts/Test-AgentHarnessIsolation.ps1` checks this boundary with
 synthetic sentinels and a fake Go command, without invoking the real test suite.
+The offline gate requires exactly one successful package completion and at least
+one passing test for each of its six requested packages. Empty or truncated
+streams fail even if the Go process exits zero; raw JSONL remains available for
+investigation. A parsed stream also produces `offline-summary.json` with the
+Go exit code, failing and skipped test identities, distinct passing tests,
+passing test executions, and package evidence gaps, including on failure.
+The explicit `passed` field includes exit status and evidence policy. Use
+`-RequireNoSkips` for an offline gate that requires every test to execute; any
+skip then records a failed verdict and returns a nonzero exit. This option
+does not enable integrations or change their environment prerequisites. Malformed streams retain the raw log and fail without a success summary.
+The three repetitions have a ten-minute per-package timeout; override with
+`-TestTimeoutSeconds` (30–1800 seconds) when diagnosing runtime issues. Do not
+reduce repetition count or treat timeout as success. The Windows CI isolation
+job exercises empty, truncated, duplicate, no-test, malformed, and failing
+streams on pushes and pull requests affecting the agent or harness. It also
+verifies restoration of the invoking process environment after success and
+failure, including variables that were originally absent.
 The old `-LiveMiniMax` and `-LiveProvider` modes were retired because they
 constructed provider clients in the test process and bypassed the central
 inference gateway; those selectors now fail before Go starts. `-ScoreReportPath`
-only replays an existing report and never triggers inference. Treat replay input
+only replays an existing report and never triggers inference. The scorer requires
+JSON objects for every present role and literal boolean execution outcomes.
+Missing roles may be skipped with its explicit `-AllowPartial` option, but empty
+reports and malformed present roles fail. `-AllowFailures` changes the exit code,
+not the recorded verdict. Run `scripts/Test-HarnessSemantics.ps1` for synthetic
+scorer regressions; these run in Windows CI alongside the isolation gate. Treat replay input
 and output as sensitive because reports can contain prompts and model responses.
 
 For a real model-quality evaluation, create and authorize a normal synthetic
@@ -331,3 +355,151 @@ silently falling back to the host process when Docker mode is selected.
 In deployed environments, invoke the Go binary directly and inject every
 setting through the runtime environment or secret manager. It never reads a
 `.env.ai.local` file itself.
+
+### Isolated runtime integration checks
+
+The LocalStack tests create unique task-owned buckets and queues, then remove
+those resources. They require a loopback HTTP endpoint and synthetic AWS
+credentials; they do not depend on pre-created development buckets. Use a
+dedicated LocalStack instance with S3 and SQS enabled:
+
+```powershell
+$env:ITBEM_LOCALSTACK_E2E = '1'
+$env:ITBEM_LOCALSTACK_ENDPOINT = 'http://127.0.0.1:<dedicated-port>'
+go test ./internal/automationagent -run '^TestLocalStack' -count=2 -timeout 3m -v
+```
+
+The agent CI workflow provides its own LocalStack service pinned by digest and
+runs both transport and durable-redelivery proofs twice. The latter deliberately
+fails the first terminal callback and asserts that recovery reuses the durable
+result without a second simulated provider call. Callbacks use the current
+run-scoped capability protocol and result references bind the claimed run.
+
+`ITBEM_LOCALSTACK_E2E=1` combined with `-short` fails rather than silently skipping
+the requested proof. Similarly, an explicitly enabled Docker sandbox integration
+fails when Docker is unavailable. For the Docker proof, enable
+`ITBEM_DOCKER_SANDBOX_E2E=1` and run `TestDockerSandboxRoundTrip`; the fixture
+requires its pinned Go image and verifies UID, capabilities, networking and
+filesystem permissions. Ordinary offline runs still skip opt-in integrations.
+
+The Linux integration CI job also preloads the pinned Go sandbox image and runs
+Docker isolation and symlink-artifact rejection twice. It sets
+`ITBEM_REQUIRE_SYMLINK_PROOF=1`, so a host unable to create a symlink fails that
+required proof instead of skipping. Local Windows runs may still skip it when
+that explicit requirement is absent. JSONL evidence from LocalStack and sandbox
+steps is uploaded for seven days on success or failure. A piped log cannot hide
+a test exit failure because both test steps enable shell `pipefail`.
+
+The binary build job depends on both Windows harness validation and Linux
+runtime integration. A failed, cancelled or skipped dependency prevents binary
+artifact creation. Its own regression step repeats all six harness packages and
+the agent command three times with shuffle seed 49207, preserving JSONL evidence
+even on failure. The workflow filters include delivery and automation controllers
+and runtime routes, so changes in those harness packages trigger the same gates.
+
+Before cross-building binaries, CI also pins Node 22.23.1 and validates the
+offline Stagehand runner's syntax and Node tests. Changes under
+`tools/stagehand-qa/` trigger the workflow alongside the Go harness packages.
+This gate uses synthetic HTTP fixtures and does not invoke browser inference.
+
+### Verify Go execution evidence
+
+`cmd/verify-test-evidence` reads `go test -json` output without executing tests
+or inference. CI calls it after each integration/regression pipeline. It requires
+one terminal pass per expected package, nonempty test execution, and the exact
+configured repetition count for every observed test. It rejects malformed logs,
+failures, events after package completion, missing proofs and skipped required
+tests. Integration gates use its default no-skip policy and explicitly name both
+required tests; the broad offline regression allows recorded optional skips.
+
+```powershell
+go run ./cmd/verify-test-evidence -log localstack-integration.jsonl -repetitions 2 -package events-stocks/internal/automationagent -test TestLocalStackTransportRoundTrip -test TestLocalStackRedeliveryReusesDurableResultWithoutProviderRepeat
+```
+
+The build regression also includes the verifier package itself. Updating a test
+filter alone cannot turn missing integration cases into a successful evidence
+gate: the required test names must still be observed passing twice. This validates
+execution completeness, not model quality or cryptographic source provenance.
+
+### Compare structured QA claims with runtime observations
+
+`go run ./cmd/score-qa-grounding -observation observation.json -claims claims.json -output score.json` compares a schema-2 `qaevidence.Observation` with separately supplied model claims. Claims schema 1 contains task_id, matrix_digest, preview_passed, verdict and a commands array. Each command requires reference, explicit index, phase, kind and explicit passed. It must match a recorded command, and all recorded commands must be covered exactly once. Command order may differ. Verdict is passed only if preview and every observed command passed; otherwise it must be failed.
+
+The command exits 0 for correspondence, 1 for invalid/mismatched input, and 2 for invocation/output errors. JSON retains failed verdicts and input SHA-256 hashes. The optional output file must be new: The command writes, syncs and closes a temporary file in the destination directory before publishing it with a hard link that cannot replace an existing path. This prevents partial final scores and protects prior evidence, input files and link aliases. The destination filesystem must support hard links; otherwise publication fails explicitly. Use a fresh score path per evaluation. Inputs are bounded to 64 KiB. Both QA observation and claims decoders reject duplicate object fields (including escaped names and case aliases), multiple documents and nesting beyond 64 levels before typed validation. Observations also require explicit preview results and explicit command index/result fields; omitted or null values cannot masquerade as observed false or zero. This evaluator checks supplied structured claims; it does not authenticate local files, judge prose, authorize a release or replace the runtime QA guard. Obtain observations from the trusted ledger. Standalone evaluation requires explicit structured claims; it never infers them from prose. No provider call is made.
+
+Build AI Agent now includes qaevidence and score-qa-grounding in its three-repetition JSONL regression gate, with both package completions required by verify-test-evidence.
+
+### Grounding the worker QA report
+
+When QA captures a ledger observation, the worker requests an explicit top-level
+`claims` object in the model report, using claims schema 1 above. The worker
+validates the original model JSON before persistence sanitization can erase
+ambiguous duplicate fields. It compares model-produced claims with the captured
+observation before promoting the narrative to `structured_result`. Missing,
+malformed, invented or mismatched claims withhold that structured report.
+
+The private result retains the sanitized model response, usage, independently
+observed execution and `qa_grounding` diagnostics: `score_kind` is
+`structured_qa_grounding`, and `status` is `passed`, `failed` or `unavailable`.
+The status records claims correspondence only. Separate `report_valid` and optional `report_error` fields record narrative acceptance; matching claims can have status passed while semantic/screenshot guards withhold the report. Historical contexts without a ledger remain unavailable for grounding; their
+ordinary narrative validation still applies. Grounding success is correspondence,
+not a passing QA verdict. Existing preview, semantic, screenshot, defect and
+coverage guards still apply. A rejected narrative does not erase completed QA,
+repeat a billable call, approve a gate or authorize release. Recovery reuses the
+saved result and canonical observation. These checks do not evaluate prose truth
+or certify model quality; deterministic worker fixtures use a fake provider.
+### Grounding summary decisions
+
+Delivery summaries include `technical.decision_claims`:
+`{"schema_version":1,"gates":[{"index":0,"gate_id":"recorded-id","kind":"plan","decision":"approved"}]}`.
+Every recorded gate must be covered exactly once using its zero-based index in
+the supplied snapshot, exact ID, kind and decision. A historical gate without an
+ID uses an empty gate_id and still requires its exact snapshot index. An empty
+gate snapshot permits absent claims or explicit empty claims; it cannot admit
+invented decisions. This changes the model response contract when gates exist:
+newly evaluated prose-only responses are rejected rather than certified by keyword matching. Recovery preserves previously stored results under their original contract; it does not retroactively certify historical prose as grounded.
+
+The worker validates original model JSON before sanitization, then checks claims
+against the captured context. Missing, swapped, invented or ambiguous claims
+retain a terminal private validation failure, response and usage. Correct claims
+produce decision labels in snapshot order with an explicit repair marker; the
+model's original decision prose remains in private content. This prevents prose
+negation or cross-gate keyword matches from becoming a displayed gate outcome.
+It does not verify executive prose, authenticate supplied local evidence, make a
+human decision or authorize release. Recovery reuses the recorded result without
+another inference call. Both QA and summary parsing share evidencejson's duplicate
+key, Unicode alias, nesting and single-document validation. Invalid UTF-8 bytes are rejected before Go can replace them during decoding; valid Unicode text remains accepted.
+### Reconcile recorded harness estimates
+
+From the repository root, point the reporter at a saved evaluation directory:
+
+~~~powershell
+./scripts/Report-HarnessCosts.ps1 -HarnessRoot ./saved-evaluations -OutputPath ./cost-report.md
+./scripts/Test-HarnessCosts.ps1
+~~~
+
+The reporter reads JSON records with an explicit calls array. A minimal synthetic
+record with known amounts is:
+
+~~~json
+{"model":"synthetic","synthetic_only":true,"reserved_upper_bound_microusd":1000000,"calls":[{"role":"delivery.qa","completion":"provider=fake model=synthetic","estimated_api_equivalent_microusd":0}]}
+~~~
+
+Amounts are nonnegative Int64 integers in millionths of a US dollar. Missing or
+null amounts remain Unknown; an explicit zero is a recorded zero. Negative,
+fractional, boolean or out-of-range amounts fail the report. Totals with missing
+amounts show the known subtotal and the number of records containing amounts.
+Empty source groups remain Unknown rather than implying a zero-cost evaluation.
+
+Read the coverage line before interpreting a total: it shows JSON files scanned,
+runs parsed, malformed files excluded and non-run files excluded. Any malformed
+file means the report lacks complete source coverage; totals cover parsed runs
+only. Provider/model labels come from saved completion metadata, not billing
+verification. Reserved bounds are admission limits, and API-equivalent amounts
+are estimates. This reporter does not query invoices or make inference requests.
+
+Retain the source files, report and evaluation commit together when comparing
+runs. Current offline Go JSONL results are non-run cost inputs; they do not
+contain the calls ledger required to establish provider spend. The Build AI Agent
+Windows job checks cost coverage and unknown-value behavior, including known
+zero, partial totals and invalid amounts.

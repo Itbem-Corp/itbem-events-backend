@@ -1,0 +1,15 @@
+{
+  "schema_version": 2,
+  "task_id": "a4a4b837-2e18-43af-9f58-6d59629db2bb",
+  "matrix_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "preview_passed": true,
+  "repository_execution_order": ["workspace://repo"],
+  "repositories": [{
+    "reference": "workspace://repo",
+    "branch": "itbem-agent/a4a4b837-2e18-43af-9f58-6d59629db2bb",
+    "commands": [
+      {"index": 0, "phase": "validation", "kind": "unit", "passed": true},
+      {"index": 1, "phase": "qa", "kind": "security", "passed": false}
+    ]
+  }]
+}

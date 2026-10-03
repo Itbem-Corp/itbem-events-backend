@@ -5,6 +5,7 @@ from pathlib import Path
 
 from build_cache_evaluation_corpus import VERSION, build
 from score_model_evaluation import CANDIDATES, score
+from evaluation_report import decode_json, publish_report, read_input
 
 def integer(value):
     return type(value) is int and value >= 0
@@ -16,7 +17,7 @@ def components(call):
     if not all(integer(call.get(key)) for key in ('input_tokens', 'output_tokens', 'total_cost_microusd')):
         return None
     try:
-        snapshot = json.loads(call['pricing_snapshot_json'])
+        snapshot = decode_json(call['pricing_snapshot_json'])
         rates = snapshot['rates_microusd_per_million']
     except (KeyError, TypeError, ValueError):
         return None
@@ -49,7 +50,7 @@ def analyze(corpus, evidence):
     result = {}
     for candidate in CANDIDATES:
         rows = [call for call in evidence['calls'] if call['candidate'] == candidate]
-        rate_snapshots = {json.dumps(json.loads(call['pricing_snapshot_json'])['rates_microusd_per_million'], sort_keys=True)
+        rate_snapshots = {json.dumps(decode_json(call['pricing_snapshot_json'])['rates_microusd_per_million'], sort_keys=True)
                           for call in rows if components(call) is not None}
         if len(rate_snapshots) > 1:
             raise ValueError('Experimental conditions have different historical rates.')
@@ -108,6 +109,8 @@ if __name__ == '__main__':
     parser.add_argument('--evidence', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
-    report = analyze(json.loads(args.corpus.read_text(encoding='utf-8-sig')),
-                     json.loads(args.evidence.read_text(encoding='utf-8-sig')))
-    args.output.write_text(json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False) + '\n', encoding='utf-8')
+    corpus, corpus_hash = read_input(args.corpus)
+    evidence, evidence_hash = read_input(args.evidence)
+    report = analyze(corpus, evidence)
+    report['input_sha256'] = {'corpus': corpus_hash, 'evidence': evidence_hash}
+    publish_report(args.output, report)

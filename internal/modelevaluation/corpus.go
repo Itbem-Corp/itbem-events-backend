@@ -16,7 +16,7 @@ var corpusJSON []byte
 var cacheCorpusJSON []byte
 
 func SupportedCorpus(version string) bool {
-	return version == CorpusVersion || version == CacheCorpusVersion
+	return version == CorpusVersion || version == CacheCorpusVersion || version == ImplementationPilotVersion
 }
 
 // Corpus returns a newly decoded copy of the versioned server-owned evidence.
@@ -32,6 +32,9 @@ func CorpusForVersion(version string) ([]Case, string, string, error) {
 		source = corpusJSON
 	case CacheCorpusVersion:
 		source = cacheCorpusJSON
+	case ImplementationPilotVersion:
+		value, err := readImplementationPilot()
+		return value.Cases, value.System, Digest(implementationPilotJSON), err
 	default:
 		return nil, "", "", fmt.Errorf("unsupported evaluation corpus %q", version)
 	}
