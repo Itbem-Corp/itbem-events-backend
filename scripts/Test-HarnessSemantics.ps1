@@ -11,7 +11,7 @@ $answers = [ordered]@{
     reviewer_seeded_auth_bypass = @{ verdict = 'request_changes'; findings = @(@{ file = 'auth.go'; category = 'security'; severity = 'high'; line_start = 3; line_end = 3; side = 'head'; evidence_quote = 'return true' }) }
     qa_observed_failure = @{ verdict = 'failed'; checks = @(@{ status = 'failed' }) }
     delivery_grounded_summary = @{ executive = @{ risks = @('Pending human review') }; technical = @{ evidence = @('Recorded test') } }
-    product_bounded_options = @{ directions = @(@{ risk = 'Risk A' }, @{ risk = 'Risk B' }); recommendation = @{ direction = 'A' } }
+    product_bounded_options = @{ directions = @(@{ name='A'; risk = 'Risk A' }, @{ name='B'; risk = 'Risk B' }); recommendation = @{ direction = 'A'; rationale='Smallest reversible slice'; first_experiment='Test with five operators' } }
     planner_missing_context = @{ context_gaps = @('Repository missing'); files_impacted = @() }
     implementer_executable_acceptance = @{ action = 'edit'; repository_ref = 'workspace://repo'; path = 'note.go'; content = 'package note' }
 }
@@ -35,6 +35,26 @@ function Assert-Score([string]$Name, $Report, [bool]$ExpectedPass, [string[]]$Op
 }
 try {
     Assert-Score 'valid' (New-Report) $true
+    foreach ($case in @('null-recommendation','scalar-recommendation','empty-recommendation','unknown-direction','missing-rationale','missing-experiment','duplicate-names','blank-name','missing-name','one-direction','four-directions')) {
+        $report = New-Report
+        $call = $report.calls | Where-Object role -eq 'product_bounded_options'
+        $answer = $call.completion.content | ConvertFrom-Json
+        switch ($case) {
+            'null-recommendation' { $answer.recommendation = $null }
+            'scalar-recommendation' { $answer.recommendation = 'A' }
+            'empty-recommendation' { $answer.recommendation = @{} }
+            'unknown-direction' { $answer.recommendation.direction = 'Invented' }
+            'missing-rationale' { $answer.recommendation.rationale = '' }
+            'missing-experiment' { $answer.recommendation.first_experiment = '' }
+            'duplicate-names' { $answer.directions[1].name = ' A ' }
+            'blank-name' { $answer.directions[0].name = ' ' }
+            'missing-name' { $answer.directions[0].PSObject.Properties.Remove('name') }
+            'one-direction' { $answer.directions = @($answer.directions[0]) }
+            'four-directions' { $answer.directions += @(@{name='C';risk='Risk C'},@{name='D';risk='Risk D'}) }
+        }
+        $call.completion.content = $answer | ConvertTo-Json -Depth 10 -Compress
+        Assert-Score ('product-' + $case) $report $false
+    }
     foreach ($field in @('evidence','risks','context_gaps','risk')) {
         foreach ($value in @($null, '', '   ', 1, @{fake='text'})) {
             $report = New-Report

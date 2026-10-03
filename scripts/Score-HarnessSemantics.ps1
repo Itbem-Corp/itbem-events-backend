@@ -140,8 +140,19 @@ if ($null -ne $summary) {
 $product = Require-Role 'product_bounded_options'
 if ($null -ne $product) {
     $directions = @($product.directions)
-    $hasRisks = $directions.Count -ge 2 -and @($directions | Where-Object { $_.risk -is [string] -and -not [string]::IsNullOrWhiteSpace($_.risk) }).Count -eq $directions.Count
-    Add-Check 'product_bounded_options' 'bounded_alternatives' ($hasRisks -and $null -ne $product.recommendation) 'Requires at least two directions, explicit risks and a recommendation.'
+    $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $validDirections = $product.directions -is [array] -and $directions.Count -in @(2,3)
+    foreach ($direction in $directions) {
+        if ($direction -isnot [pscustomobject] -or $direction.name -isnot [string] -or [string]::IsNullOrWhiteSpace($direction.name) -or $direction.risk -isnot [string] -or [string]::IsNullOrWhiteSpace($direction.risk)) { $validDirections = $false; continue }
+        if (-not $names.Add($direction.name.Trim())) { $validDirections = $false }
+    }
+    $recommendation = $product.recommendation
+    $validRecommendation = $recommendation -is [pscustomobject]
+    foreach ($field in @('direction','rationale','first_experiment')) {
+        if ($recommendation.$field -isnot [string] -or [string]::IsNullOrWhiteSpace($recommendation.$field)) { $validRecommendation = $false }
+    }
+    if ($validRecommendation) { $validRecommendation = $names.Contains($recommendation.direction.Trim()) }
+    Add-Check 'product_bounded_options' 'bounded_alternatives' ($validDirections -and $validRecommendation) 'Requires two or three uniquely named directions with explicit risks, plus a recommendation for a proposed direction with rationale and a first experiment.'
 }
 
 # Planner: missing context must block invention of implementation scope.

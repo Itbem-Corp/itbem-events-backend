@@ -510,3 +510,15 @@ comprobación determinista de estas fixtures; no demuestra calidad experta ni
 que los textos estén respaldados por evidencia independiente. El nuevo commit
 requiere ejecutar CI nuevamente; el head anterior 92140a1 tenía todos sus
 checks verdes y sus artefactos descargados/verificados.
+
+### Recomendaciones de producto revisables
+
+El scorer ahora comprueba dos o tres alternativas con nombres únicos y riesgos
+útiles. La recomendación debe nombrar una alternativa propuesta, incluir un
+rationale y un primer experimento. No basta con que el campo exista o contenga
+un objeto vacío. Once casos adversariales adicionales cubren esos límites;
+los 88 casos sintéticos pasaron. Las pruebas del parser real de producto también
+pasaron tres veces. La evaluación sigue siendo smoke estructural/semántico de
+fixtures, no revisión experta del valor de producto ni verificación de hechos.
+El commit previo 6f7d1f8 pasó aislamiento/scorer en CI; la nueva revisión requiere
+checks nuevamente.
