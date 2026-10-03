@@ -23,7 +23,7 @@ Una respuesta puede corresponder correctamente a una ejecución QA fallida. Una 
 ./scripts/Test-HarnessCosts.ps1
 ```
 
-El runner local repite sus seis paquetes canónicos y conserva omisiones. `-RequireNoSkips` exige un entorno capaz de ejecutar todas sus pruebas; una omisión no equivale a protección verificada. CI amplía la cobertura a once paquetes y exige pruebas críticas por nombre en cada repetición. La lista autoritativa y los comandos están en [build-ai-agent.yml](../../.github/workflows/build-ai-agent.yml).
+El runner local repite sus seis paquetes canónicos y conserva omisiones. `-RequireNoSkips` exige un entorno capaz de ejecutar todas sus pruebas; una omisión no equivale a protección verificada. CI amplía la cobertura a doce paquetes, incluido el planificador de evaluaciones, y exige pruebas críticas por nombre en cada repetición. La lista autoritativa y los comandos están en [build-ai-agent.yml](../../.github/workflows/build-ai-agent.yml).
 
 Antes de declarar un commit verificado, comprueba el SHA ejecutado, la conclusión de los checks y el contenido de los artefactos descargados. Usa `cmd/verify-test-evidence` con los paquetes, repeticiones y nombres exigidos por ese workflow. Comprueba también las dos repeticiones de las cinco pruebas de runtime sin omisiones y los SHA-256 de los binarios. Un resultado anterior no certifica el nuevo head.
 

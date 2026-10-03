@@ -65,11 +65,15 @@ type Plan struct {
 // Message overhead includes the worker role contract and serialization framing.
 // The normal ledger estimator uses UTF-8 bytes as a conservative token bound.
 func Compile(cases []Case, instruction string, messageOverheadBytes int, pricing string) (Plan, error) {
-	if len(cases) != MaxCases || strings.TrimSpace(instruction) == "" || messageOverheadBytes < 0 || messageOverheadBytes > 50000 {
+	return compile(cases, instruction, messageOverheadBytes, pricing, MaxCases)
+}
+
+func compile(cases []Case, instruction string, messageOverheadBytes int, pricing string, caseCount int) (Plan, error) {
+	if caseCount < 1 || caseCount > MaxCases || len(cases) != caseCount || strings.TrimSpace(instruction) == "" || messageOverheadBytes < 0 || messageOverheadBytes > 50000 {
 		return Plan{}, errors.New("invalid evaluation corpus bounds")
 	}
-	plan := Plan{Calls: make([]PlannedCall, 0, MaxCalls)}
-	seen := make(map[string]bool, MaxCases)
+	plan := Plan{Calls: make([]PlannedCall, 0, caseCount*3)}
+	seen := make(map[string]bool, caseCount)
 	for _, item := range cases {
 		if item.ID == "" || len(item.ID) > 64 || seen[item.ID] || strings.TrimSpace(item.Prompt) == "" {
 			return Plan{}, errors.New("invalid or duplicate evaluation case")
