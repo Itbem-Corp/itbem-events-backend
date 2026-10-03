@@ -189,6 +189,21 @@ func ProjectAutonomySnapshot(event models.DeliveryEvent) (AutonomySnapshot, erro
 	return result, nil
 }
 
+// ReadAutonomyAuthority is for server-side coordinators only. Unlike the
+// presentation projection it includes private frozen policy content, after
+// verifying exactly the same canonical envelope and seals. Never return it
+// from a browser endpoint or resolve a live policy in its place.
+func ReadAutonomyAuthority(event models.DeliveryEvent) (AutonomySnapshotInput, error) {
+	if _, err := ProjectAutonomySnapshot(event); err != nil {
+		return AutonomySnapshotInput{}, err
+	}
+	var payload autonomySnapshotPayload
+	if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
+		return AutonomySnapshotInput{}, err
+	}
+	return payload.Input, nil
+}
+
 func canonicalAutonomySnapshotInput(input AutonomySnapshotInput) (AutonomySnapshotInput, error) {
 	if input.ProjectID == uuid.Nil || strings.TrimSpace(input.ChangeSetID) == "" || len(input.Repositories) == 0 || len(input.Repositories) > 32 {
 		return AutonomySnapshotInput{}, fmt.Errorf("missing required autonomy snapshot scope")

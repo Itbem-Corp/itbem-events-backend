@@ -20,6 +20,14 @@ Las capacidades `commit:stage`, `branch:publish` y `pull_request:create` no
 se conceden por compatibilidad. Un workspace heredado únicamente recibe
 lectura, worktree aislado y aplicación de patch.
 
+El coordinador puede decidir QA cuando todos los repositorios afectados tienen
+autoridad delegada congelada y el mandato de la tarea no reserva `approve_qa`
+para una persona. Un mandato ausente conserva el valor humano por defecto.
+Exige observación sellada, fuentes y revisión independiente del SHA exacto;
+los fallos funcionales admiten como máximo tres correcciones dentro del mismo
+plan aprobado, con pasos nuevos y resultados anteriores conservados. Esta
+decisión no concede publicación, merge ni despliegue.
+
 ## Multi-repo
 
 Una tarea puede congelar varios repositorios. Para planificación, el agente

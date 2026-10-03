@@ -34,6 +34,12 @@ run "autonomy preparation rejects partial hosts and unqualified activation" \
 run "continuation recovery preserves phase evidence and current decision epoch" \
   go test ./controllers/delivery -run 'Test(CompletedQAContinuationReconcilesSignedCallbackSubmission|CompletedContinuationFromOldDecisionCannotAdvance|ContinuationInfrastructureWaitDoesNotConsumeCorrectionAttempts|ContinuationReconcilesOnlyCallbackSubmittedStates)$' -count=1
 
+run "delegated QA binds frozen authority, exact checkout and independent review" \
+  go test ./controllers/delivery -run 'Test(DelegatedQADecisionUsesObservedChecksAndFrozenCoverage|DelegatedQASourceReceiptRequiresExactCheckoutAndIndependentIdentity|DelegatedQAIndependentReviewCannotComeFromAnotherPRSHAOrAuthor|DelegatedCorrectionBudgetStopsUnchangedFailureAndExhaustion|DelegatedQARepositoryBoundariesCannotExpandFrozenScope)$' -count=1
+
+run "server authority reader verifies the immutable seal" \
+  go test ./internal/deliveryledger -run 'TestReadAutonomyAuthorityVerifiesSealAndReturnsIndependentFrozenContent$' -count=1
+
 run "doctor identity and publication authority readiness" \
   go test ./cmd/itbem-ai-agent -run 'Test(DoctorPublicationReadinessRequiresRoleSpecificGitHubAppConfiguration|DoctorReadinessRejectsMismatchedAndUnknownWorkerIdentities|DoctorGatewayReleaseObserverRequiresNoPublicationCredential)$' -count=1
 

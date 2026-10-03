@@ -15,8 +15,7 @@ func TestAutomationWorkspaceAttestationUsesStableGitHubRepositoryColumn(t *testi
 	field := parsed.LookUpField("GitHubRepository")
 	if field == nil {
 		t.Fatal("GitHubRepository field is missing from the schema")
-	}
-	if field.DBName != "github_repository" {
+	} else if field.DBName != "github_repository" {
 		t.Fatalf("GitHubRepository column = %q, want github_repository", field.DBName)
 	}
 }
