@@ -86,7 +86,7 @@ if ($failed) { exit 1 }
     [IO.File]::WriteAllText((Join-Path $scriptRoot 'Invoke-IsolationProbe.ps1'), $probeSource)
 
     $fixtureModule = 'harness-fixture'
-    Set-Content -LiteralPath (Join-Path $backendRoot 'go.mod') -Value ('module ' + $fixtureModule)
+    Set-Content -LiteralPath (Join-Path $backendRoot 'go.mod') -Value @(('module ' + $fixtureModule), 'go 1.25.0')
     $runnerSource = Get-Content -LiteralPath (Join-Path $scriptRoot 'Test-AgentHarness.ps1') -Raw
     $packageDeclaration = [regex]::Match($runnerSource, '\$testPackages\s*=\s*@\((?<packages>[^)]*)\)')
     $fixturePackages = @([regex]::Matches($packageDeclaration.Groups['packages'].Value, "'([^']+)'") | ForEach-Object { $_.Groups[1].Value -replace '^\./', '' })

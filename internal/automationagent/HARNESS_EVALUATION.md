@@ -487,3 +487,14 @@ Cuatro casos adversariales adicionales pasaron en tres repeticiones; go vet
 pasó. La evidencia real LocalStack (dos repeticiones) y la suite anterior de
 siete paquetes (tres repeticiones) siguen siendo aceptadas con esta validación.
 Estas comprobaciones prueban consistencia del log, no autenticidad criptográfica.
+
+### Selección de toolchain coherente con go.mod
+
+El runner offline obtiene la versión requerida desde go.mod en lugar de buscar
+Go 1.25.12 cuando el módulo ya exige 1.25.13. El workspace local también se
+alineó a 1.25.13. El fixture de aislamiento declara explícitamente su mínimo Go.
+La prueba con fake Go y con el binario real 1.25.13 pasó. La suite offline real,
+con GOTOOLCHAIN=local, terminó con seis paquetes y tres repeticiones: 5,430
+ ejecuciones aprobadas, 39 skips opcionales y cero fallos. El JSONL completo
+pasó el verificador de evidencia. Los artefactos locales quedan ignorados por
+Git; siguen disponibles para auditoría. El nuevo commit requiere checks de CI.

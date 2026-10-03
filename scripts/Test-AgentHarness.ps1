@@ -39,7 +39,10 @@ if ($AllowSemanticFailures -and -not ($ScoreSemantics -or $ScoreReportPath)) {
 if ($RequireNoSkips -and $ScoreReportPath) {
     throw '-RequireNoSkips applies to offline Go tests and cannot be combined with semantic replay.'
 }
-$goCandidate = Join-Path (Split-Path $repoRoot -Parent) '.local/toolchains/go1.25.12/bin/go.exe'
+$goVersionLine = @(Get-Content -LiteralPath (Join-Path $repoRoot 'go.mod') | Where-Object { $_ -match '^go\s+\d+\.\d+(\.\d+)?\s*$' })
+if ($goVersionLine.Count -ne 1) { throw 'Cannot determine the required Go toolchain from go.mod.' }
+$requiredGoVersion = ($goVersionLine[0] -split '\s+')[1]
+$goCandidate = Join-Path (Split-Path $repoRoot -Parent) ('.local/toolchains/go' + $requiredGoVersion + '/bin/go.exe')
 $goCommand = if (Test-Path -LiteralPath $goCandidate) { $goCandidate } else { (Get-Command go).Source }
 $reportDirectory = Join-Path $repoRoot ('.local/harness-evals/' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff'))
 $null = New-Item -ItemType Directory -Path $reportDirectory
