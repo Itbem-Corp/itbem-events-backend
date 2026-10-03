@@ -57,3 +57,14 @@ evaluator-owned files, requires exact published-package equality, and checks the
 directory inventory, regular-file 0644 modes and source digest. It reads files
 only. The sandbox must independently recheck its source binding at admission;
 this preflight is not an execution attestation or provider authentication.
+
+`automationagent.ExecuteImplementationPilotOracle` provides the fixed execution
+entry point for an authorized caller. It requires a task UUID, the qualified Go
+Docker image digest, network none, exactly four regular 0644 files, the embedded
+evaluator module/oracle bytes and the prepared source digest. It runs only
+`go test -json -count=1 ./...` with offline Go settings and retains output, exit
+code and the completed sandbox lease bound to task and source. It grants no task
+authorization and authenticates no provider response. CI executes this entry
+point twice with the defective fixture and reference, requiring rejection of
+the fixture and all eight reference oracle cases. Actual model candidates have
+not yet been executed through it.
