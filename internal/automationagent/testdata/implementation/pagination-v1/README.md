@@ -33,6 +33,10 @@ and reference through the existing pinned Docker sandbox, with networking and
 module downloads disabled. It requires the fixture's second-page failure and all
 eight reference cases to execute successfully. CI repeats this qualification;
 it validates the execution path without claiming that a model candidate ran.
+Its retained test output includes each control's inner Go JSONL, exit code and
+completed Docker lease. The lease must bind the pre-execution worktree digest
+and synthetic control task ID. This is execution evidence, not authentication
+of a model response or a central-gateway receipt.
 
 Prepare the model-facing input without running a model:
 python3 scripts/prepare_implementation_evaluation.py --output <new-input.json>

@@ -2,6 +2,7 @@ package automationagent
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -86,11 +87,30 @@ func TestDockerSandboxRoundTrip(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		result, err := runWorkspaceCommand(context.Background(), workspace, workspace.Root, 90*time.Second, "", map[string]string{
+		digest, err := sandboxWorktreeDigest(workspace.Root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := runWorkspaceCommand(withSandboxTaskID(context.Background(), "implementation-control-"+control), workspace, workspace.Root, 90*time.Second, "", map[string]string{
 			"GOTOOLCHAIN": "local", "GOWORK": "off", "GOPROXY": "off", "GOSUMDB": "off",
 		}, "go", "test", "-json", "-count=1", "./...")
+		evidence, marshalErr := json.Marshal(map[string]any{
+			"case": "pagination-v1", "control": control, "exit_code": result.ExitCode,
+			"output": result.Output, "sandbox_lease": result.SandboxLease,
+			"model_quality_measured": false,
+		})
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		t.Logf("implementation sandbox evidence: %s", evidence)
 		if err != nil {
 			t.Fatalf("sandbox implementation control %s: %v", control, err)
+		}
+		lease := result.SandboxLease
+		if lease["runtime"] != WorkspaceSandboxDocker || lease["isolation_mode"] != "docker_container" ||
+			lease["status"] != "completed" || lease["task_id"] != "implementation-control-"+control ||
+			lease["worktree_digest"] != "sha256:"+hex.EncodeToString(digest[:]) {
+			t.Fatalf("sandbox control must bind actual input and completed Docker execution: %#v", lease)
 		}
 		passed, failed := map[string]bool{}, map[string]bool{}
 		for _, line := range strings.Split(strings.TrimSpace(result.Output), "\n") {
