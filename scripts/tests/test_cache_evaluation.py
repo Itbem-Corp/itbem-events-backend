@@ -43,6 +43,10 @@ class CacheTests(unittest.TestCase):
 
     def test_paired_accounting_and_correct_answers(self):
         result = analyze(CORPUS, cache_fixture())
+        for row in result['screening']['results'].values():
+            self.assertEqual(set(row['by_category']), {'review_bug', 'review_clean'})
+            self.assertTrue(all(item['denominator'] == 10 and item['successes'] == 10
+                                for item in row['by_category'].values()))
         for row in result['results'].values():
             self.assertEqual(row['input_savings_microusd'], 13500)
             self.assertEqual(row['cache_read_gain_tokens'], 15000)

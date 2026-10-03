@@ -86,6 +86,7 @@ def score(corpus, evidence):
         tokens = {key: 0 for key in ('input_tokens', 'output_tokens', 'cached_input_tokens', 'cache_write_tokens', 'reasoning_tokens')}
         unknown_tokens = {key: 0 for key in tokens}
         scored = []
+        categories = {}
         failure_counts = {reason: 0 for reason in (
             'task_not_completed', 'receipt_not_accepted', 'unexpected_route',
             'truncated', 'result_error', 'invalid_json', 'answer_mismatch')}
@@ -126,6 +127,13 @@ def score(corpus, evidence):
                 failure_counts[reason] += 1
             success += matched
             errors += not outcome_ok
+            category = categories.setdefault(case['category'], {
+                'denominator': 0, 'successes': 0, 'valid_json_count': 0,
+                'errors_or_incomplete': 0})
+            category['denominator'] += 1
+            category['successes'] += int(bool(matched))
+            category['valid_json_count'] += int(format_ok)
+            category['errors_or_incomplete'] += int(not outcome_ok)
             if case['category'] == 'review_clean':
                 false_positive += format_ok and answer.get('bug') is True
                 invalid_clean += not outcome_ok or not format_ok
@@ -155,10 +163,14 @@ def score(corpus, evidence):
                     usage_verified = False
             if not usage_verified:
                 unknown_usage += 1
-            scored.append({'case_id': call['case_id'], 'task_id': call['task_id'], 'run_id': call.get('run_id'), 'receipt_id': call.get('receipt_id'), 'success': bool(matched), 'valid_json': format_ok, 'attributed': attributed, 'truncated': truncated, 'status': call.get('status'), 'failure_reasons': failure_reasons})
+            scored.append({'case_id': call['case_id'], 'category': case['category'], 'task_id': call['task_id'], 'run_id': call.get('run_id'), 'receipt_id': call.get('receipt_id'), 'success': bool(matched), 'valid_json': format_ok, 'attributed': attributed, 'truncated': truncated, 'status': call.get('status'), 'failure_reasons': failure_reasons})
         ordered = sorted(latencies)
+        for category in categories.values():
+            category['failures'] = category['denominator'] - category['successes']
+            category['success_rate'] = category['successes'] / category['denominator']
         summary[candidate] = {
             'successes': success, 'denominator': 20, 'success_rate': success / 20,
+            'by_category': categories,
             'failure_reason_counts': failure_counts,
             'valid_json_count': valid_json, 'valid_json_rate': valid_json / 20,
             'clean_false_positives': false_positive, 'clean_denominator': clean_denominator,

@@ -37,6 +37,25 @@ def fixture(corpus=CORPUS):
 
 
 class ScoringTests(unittest.TestCase):
+    def test_category_results_keep_all_cases_and_expose_weak_categories(self):
+        evidence = fixture()
+        for category in ('review_bug', 'qa_evidence', 'summary'):
+            index = next(i for i, case in enumerate(CORPUS['cases']) if case['category'] == category)
+            evidence['calls'][index]['final_answer'] = 'not-json' if category == 'review_bug' else '{"wrong":true}'
+        row = score(CORPUS, evidence)['results']['minimax-m3']
+        self.assertEqual(row['successes'], 17)
+        categories = row['by_category']
+        self.assertEqual(sum(item['denominator'] for item in categories.values()), 20)
+        self.assertEqual(sum(item['successes'] for item in categories.values()), 17)
+        self.assertEqual(categories['summary']['success_rate'], .5)
+        self.assertEqual(categories['planning']['denominator'], 3)
+        self.assertEqual(categories['planning']['successes'], 3)
+        self.assertEqual(categories['review_bug']['valid_json_count'], 4)
+        self.assertEqual(categories['review_clean']['successes'], 5)
+        self.assertEqual(sum(item['failures'] for item in categories.values()), 3)
+        for case in row['cases']:
+            self.assertEqual(case['category'], next(item['category'] for item in CORPUS['cases'] if item['id'] == case['case_id']))
+
     def test_completed_batch_cannot_hide_unfinished_outcomes(self):
         for status, receipt in (('running', 'accepted'), ('failed', 'accepted'),
                                 ('completed', 'ambiguous')):
