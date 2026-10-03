@@ -49,3 +49,11 @@ uses the same versioned byte manifest as the sandbox, with explicit non-executab
 associated with this package. Changes to candidate bytes, oracle bytes, execution
 bits or the file inventory change the binding. Preparation alone does not prove
 execution, authenticate a provider response or measure implementation correctness.
+
+Before sandbox admission, `scripts/verify_implementation_candidate.py --response
+response.json --package prepared.json --worktree candidate-directory --output
+binding.json` regenerates the package from the original response and current
+evaluator-owned files, requires exact published-package equality, and checks the
+directory inventory, regular-file 0644 modes and source digest. It reads files
+only. The sandbox must independently recheck its source binding at admission;
+this preflight is not an execution attestation or provider authentication.
