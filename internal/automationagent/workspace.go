@@ -44,10 +44,13 @@ type WorkspaceConfig struct {
 	// checkout synchronizer. They let one worker host maintain dedicated,
 	// reproducible base checkouts for many projects without letting a task pick
 	// a path, remote, or branch.
-	RepositoryURL      string     `json:"repository_url"`
-	BaseBranch         string     `json:"base_branch"`
-	Capabilities       []string   `json:"capabilities"`
-	ValidationCommands [][]string `json:"validation_commands"`
+	RepositoryURL string `json:"repository_url"`
+	// QA dependencies are operator-approved path/repository pairs. Gitmodule
+	// declarations and task input cannot grant additional repository access.
+	QASourceDependencies map[string]string `json:"qa_source_dependencies"`
+	BaseBranch           string            `json:"base_branch"`
+	Capabilities         []string          `json:"capabilities"`
+	ValidationCommands   [][]string        `json:"validation_commands"`
 	// Command kinds are operator-owned labels for the matching command. Agents
 	// may request an approved command, but cannot invent or rename the evidence.
 	ValidationCommandKinds []string `json:"validation_command_kinds"`
@@ -199,6 +202,14 @@ func loadWorkspaces(raw string, requireDirectory bool) (map[string]Workspace, er
 		}
 		if err := validateWorkspaceBase(config.RepositoryURL, config.BaseBranch); err != nil {
 			return nil, fmt.Errorf("workspace %s: %w", id, err)
+		}
+		if len(config.QASourceDependencies) > 16 {
+			return nil, fmt.Errorf("workspace %s QA dependency policy exceeds its boundary", id)
+		}
+		for path, repository := range config.QASourceDependencies {
+			if !safeQADependencyPath(path) || !githubRepositoryNamePattern.MatchString(strings.ToLower(repository)) {
+				return nil, fmt.Errorf("workspace %s QA dependency policy is invalid", id)
+			}
 		}
 		if len(config.Capabilities) == 0 {
 			// Compatibility default for existing local workspace registries. These

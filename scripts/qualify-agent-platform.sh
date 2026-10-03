@@ -58,6 +58,42 @@ run "QA revocation cancels in-flight commands and their descendants" \
 run "published QA binds the exact clean commit and frozen release matrix" \
   go test ./internal/automationagent -run 'TestPublishedQATargetRequiresExactCleanCommitAndRejectsUntrackedSource$' -count=1
 
+run "private QA source import preserves commit identity and rejects substituted or unsafe checkouts" \
+  go test ./internal/automationagent -run 'Test(QASourcePackMaterializesOriginalPublishedCommitOnIndependentHost|QASourcePackRejectsExpandedOversizeBeforeCheckout|QASourcePackCannotReuseCheckoutThroughSymlink|QASourcePackRejectsReusedCheckoutWithSubstitutedOrigin|QASourcePackRejectsCorruptionWrongCommitAndSymlinkParent|QASourcePackRejectsSymlinkBeforePublishingCheckout|QASourcePackCancelledImportLeavesNoCheckoutOrLock)$' -count=1
+
+run "QA source uses verified TLS, refuses redirects, and cancels pending Git transport" \
+  go test ./internal/automationagent -run 'Test(QASourceFetchTransfersExactCommitOverVerifiedTLSAndRefusesRedirect|QASourceFetchKeepsCredentialOutOfArgumentsAndRejectsUnboundCoordinates|QASourcePackRejectsExecutableLocalConfigurationBeforeReuse|QASourceProducerPreservesOriginalCommitAcrossIndependentCheckouts|QASourcePackOutputBoundAppliesToReaderFrom)$' -count=1
+
+run "QA source authorization requires the exact live instance and frozen revision matrix" \
+  go test ./controllers/automation -run 'Test(QASourceAdmissionRequiresExactLiveTaskAndSignedInstance|QASourceSelectionBindsFrozenMatrixAndRejectsAmbiguity)$' -count=1
+
+run "QA source acquisition requires bounded private tmpfs and real process resource limits" \
+  go test ./internal/automationagent -run 'TestQASourceResourceBoundaryRejectsUnboundedScratchAndAppliesRealLimits$' -count=1
+
+run "signed QA source client rejects substituted task run matrix repository commit and pack" \
+  go test ./internal/automationagent -run 'TestQASourceSignedClientImportsOnlyExactFrozenPack$' -count=1
+
+run "QA worker validates the complete frozen source matrix before acquisition" \
+  go test ./internal/automationagent -run 'TestQASourceWorkerValidatesEntireMatrixBeforeAnyAcquisition$' -count=1
+
+run "QA worker imports independent source executes tests and recovers without a new fetch or inference" \
+  go test ./internal/automationagent -run 'TestQAWorkerAcquiresIndependentSourceRunsTestsAndRecoversWithoutNewFetch$' -count=1
+
+run "QA pinned dependency discovery treats Gitmodule declarations as data and requires repository approval" \
+  go test ./internal/automationagent -run 'TestQASourceDependenciesRequireApprovedRepositoryAndOriginalGitlinkSHA$' -count=1
+
+run "QA source bundle publishes only after all approved original Gitlinks are verified" \
+  go test ./internal/automationagent -run 'TestQASourceBundlePublishesOnlyAfterPinnedChildVerification$' -count=1
+
+run "QA dependency policy rejects invalid paths and repositories before authentication" \
+  go test ./internal/automationagent -run 'TestQASourceBundleRejectsInvalidApprovalBeforeAuthentication$' -count=1
+
+run "QA source wire bundle binds its canonical manifest and every package" \
+  go test ./internal/automationagent -run 'TestQASourceBundleWireBindsManifestAndAllPackages$' -count=1
+
+run "QA server dependency policy grants only the configured parent repository" \
+  go test ./internal/automationagent -run 'TestQASourceDependencyPolicyGrantsOnlyConfiguredParent$' -count=1
+
 run "QA ledger observations preserve failures independently of model summaries" \
   go test ./internal/automationagent -run 'TestQALedgerObservationPreservesObservedFailuresAndRejectsMalformedEvidence$' -count=1
 

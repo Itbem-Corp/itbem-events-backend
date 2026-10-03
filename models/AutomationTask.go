@@ -34,7 +34,10 @@ type AutomationTask struct {
 	// EvidenceSubjectDigest binds deterministic gate tasks and review retries to
 	// the exact immutable evidence subject approved by the control plane.
 	EvidenceSubjectDigest string `gorm:"type:varchar(64);not null;default:'';index" json:"-"`
-	MaxCompletionTokens   int    `gorm:"not null;default:0" json:"max_completion_tokens"`
+	// Set only when creating new published QA tasks. Historical sealed tasks
+	// retain their original contract; retries copy this requirement unchanged.
+	QASourceReceiptRequired bool `gorm:"not null;default:false" json:"-"`
+	MaxCompletionTokens     int  `gorm:"not null;default:0" json:"max_completion_tokens"`
 	// AIActionRoutesJSON and its revision/hash freeze the operator-selected
 	// inference route for this execution. Provider settings may change while a
 	// queued/running task is alive; subsequent calls must keep using this exact

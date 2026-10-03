@@ -207,12 +207,13 @@ type WorkerConfig struct {
 }
 
 type Worker struct {
-	config          WorkerConfig
-	store           ObjectStore
-	callback        TaskCallback
-	provider        ProviderClient
-	releaseObserver func(context.Context, string, string, json.RawMessage) (map[string]any, error)
-	now             func() time.Time
+	config           WorkerConfig
+	store            ObjectStore
+	callback         TaskCallback
+	provider         ProviderClient
+	releaseObserver  func(context.Context, string, string, json.RawMessage) (map[string]any, error)
+	qaSourceAcquirer func(context.Context, string, string, string, json.RawMessage) (string, error)
+	now              func() time.Time
 }
 
 type identityTaskCallback struct {
@@ -271,6 +272,9 @@ func NewWorker(config WorkerConfig, store ObjectStore, callback TaskCallback, pr
 	worker := &Worker{config: config, store: store, callback: identityTaskCallback{inner: callback, identity: identity}, provider: provider, now: time.Now}
 	if signed, ok := callback.(*HTTPCallback); ok {
 		if gateway, ok := store.(*HTTPGateway); ok {
+			worker.qaSourceAcquirer = func(ctx context.Context, taskID, runID, reference string, delivery json.RawMessage) (string, error) {
+				return signed.AcquireQASource(ctx, gateway, taskID, runID, reference, delivery, os.Getenv)
+			}
 			worker.releaseObserver = func(ctx context.Context, taskID, runID string, delivery json.RawMessage) (map[string]any, error) {
 				return signed.ObserveRelease(ctx, gateway, taskID, runID, delivery)
 			}
@@ -552,6 +556,27 @@ func (w *Worker) Process(ctx context.Context, message TaskMessage) error {
 		}
 		if !accepted {
 			return nil
+		}
+		if w.qaSourceAcquirer != nil {
+			sourceErr := runQAStageWithAuthority(ctx, func(refreshCtx context.Context) (bool, error) {
+				return w.renewInferenceCapability(refreshCtx, message.Payload.TaskID, runID, "reading", 0)
+			}, func(sourceCtx context.Context) error {
+				return provisionPublishedQASources(sourceCtx, message.Payload.TaskID, runID, input.Delivery, w.qaSourceAcquirer)
+			})
+			if sourceErr != nil {
+				var authorityErr *qaCapabilityRefreshError
+				if errors.As(sourceErr, &authorityErr) {
+					if errors.Is(authorityErr.cause, errQACapabilityNotAccepted) {
+						return nil
+					}
+					return sourceErr
+				}
+				var retryable interface{ RetryDelay() time.Duration }
+				if (errors.As(sourceErr, &retryable) && retryable.RetryDelay() > 0) || errors.Is(sourceErr, context.Canceled) || errors.Is(sourceErr, context.DeadlineExceeded) {
+					return sourceErr
+				}
+				return w.fail(ctx, message.Payload.TaskID, runID, sourceErr)
+			}
 		}
 		qaResult, qaArtifacts, err = runQAWithCapabilityRefresh(ctx, message.Payload.TaskID, runID, input.Delivery, os.Getenv, func(refreshCtx context.Context) (bool, error) {
 			return w.renewInferenceCapability(refreshCtx, message.Payload.TaskID, runID, "validating", 0)
