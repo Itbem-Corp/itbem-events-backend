@@ -9,6 +9,7 @@ on:
       - cmd/verify-test-evidence/**
       - cmd/score-qa-grounding/**
       - internal/qaevidence/**
+      - internal/evidencejson/**
       - controllers/automation/**
       - controllers/delivery/**
       - internal/runtimeroute/**
@@ -34,6 +35,7 @@ on:
       - cmd/verify-test-evidence/**
       - cmd/score-qa-grounding/**
       - internal/qaevidence/**
+      - internal/evidencejson/**
       - controllers/automation/**
       - controllers/delivery/**
       - internal/runtimeroute/**
@@ -168,8 +170,8 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          go test -shuffle=49207 -count=3 -timeout 10m ./internal/automationagent ./controllers/delivery ./controllers/automation ./services/automationcost ./services/deliveryworkflow ./internal/runtimeroute ./cmd/itbem-ai-agent ./cmd/verify-test-evidence ./internal/qaevidence ./cmd/score-qa-grounding -json | tee agent-regression.jsonl
-          go run ./cmd/verify-test-evidence -log agent-regression.jsonl -repetitions 3 -allow-skips -package events-stocks/internal/automationagent -package events-stocks/controllers/delivery -package events-stocks/controllers/automation -package events-stocks/services/automationcost -package events-stocks/services/deliveryworkflow -package events-stocks/internal/runtimeroute -package events-stocks/cmd/itbem-ai-agent -package events-stocks/cmd/verify-test-evidence -package events-stocks/internal/qaevidence -package events-stocks/cmd/score-qa-grounding -test TestScorePublicationPreservesCompletedEvidence -test TestConcurrentScorePublicationHasOneCompleteWinner -test TestVersionedGroundingFixtures -test TestDecodeReportClaimsPreservesModelAssertions -test TestDecodeReportClaimsRejectsAmbiguousEnvelope -test TestQAReportGroundingRequiresObservedModelClaims -test TestQAWorkerPreservesReviewedManifestAndRejectsNewSourceBeforeInference
+          go test -shuffle=49207 -count=3 -timeout 10m ./internal/automationagent ./controllers/delivery ./controllers/automation ./services/automationcost ./services/deliveryworkflow ./internal/runtimeroute ./cmd/itbem-ai-agent ./cmd/verify-test-evidence ./internal/qaevidence ./internal/evidencejson ./cmd/score-qa-grounding -json | tee agent-regression.jsonl
+          go run ./cmd/verify-test-evidence -log agent-regression.jsonl -repetitions 3 -allow-skips -package events-stocks/internal/automationagent -package events-stocks/controllers/delivery -package events-stocks/controllers/automation -package events-stocks/services/automationcost -package events-stocks/services/deliveryworkflow -package events-stocks/internal/runtimeroute -package events-stocks/cmd/itbem-ai-agent -package events-stocks/cmd/verify-test-evidence -package events-stocks/internal/qaevidence -package events-stocks/internal/evidencejson -package events-stocks/cmd/score-qa-grounding -test TestScorePublicationPreservesCompletedEvidence -test TestConcurrentScorePublicationHasOneCompleteWinner -test TestVersionedGroundingFixtures -test TestDecodeReportClaimsPreservesModelAssertions -test TestDecodeReportClaimsRejectsAmbiguousEnvelope -test TestQAReportGroundingRequiresObservedModelClaims -test TestQAWorkerPreservesReviewedManifestAndRejectsNewSourceBeforeInference -test TestValidateEvidenceJSON -test TestSummaryDecisionClaimsBindEachGate -test TestSummaryDecisionRenderingPreservesRecordedGatePairs -test TestSummaryWorkerGroundsDecisionClaimsAndPreservesRecovery
 
       - name: Preserve regression evidence on success or failure
         if: always()

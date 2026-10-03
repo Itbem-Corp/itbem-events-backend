@@ -441,7 +441,7 @@ func TestParseDeliverySummaryRepairsStructuredEvidenceCitations(t *testing.T) {
 }
 
 func TestValidateDeliverySummaryGroundsHumanDecisions(t *testing.T) {
-	content := `{"executive":{"what_changed":"Delivery flow","why":"Reduce review friction","how_to_test":"Open the QA evidence","risks":["Human release gate remains required"]},"technical":{"decisions":["Plan gate approved by reviewer"],"evidence":["1e5c5eb5-38cb-46af-9e50-a196ad7fc333 — Synthetic authorization test"]}}`
+	content := `{"executive":{"what_changed":"Delivery flow","why":"Reduce review friction","how_to_test":"Open the QA evidence","risks":["Human release gate remains required"]},"technical":{"decisions":["Plan gate approved by reviewer"],"decision_claims":{"schema_version":1,"gates":[{"index":0,"gate_id":"","kind":"plan","decision":"approved"}]},"evidence":["1e5c5eb5-38cb-46af-9e50-a196ad7fc333 — Synthetic authorization test"]}}`
 	summary, err := ParseDeliverySummary(content)
 	if err != nil {
 		t.Fatal(err)

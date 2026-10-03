@@ -446,3 +446,24 @@ coverage guards still apply. A rejected narrative does not erase completed QA,
 repeat a billable call, approve a gate or authorize release. Recovery reuses the
 saved result and canonical observation. These checks do not evaluate prose truth
 or certify model quality; deterministic worker fixtures use a fake provider.
+### Grounding summary decisions
+
+Delivery summaries include `technical.decision_claims`:
+`{"schema_version":1,"gates":[{"index":0,"gate_id":"recorded-id","kind":"plan","decision":"approved"}]}`.
+Every recorded gate must be covered exactly once using its zero-based index in
+the supplied snapshot, exact ID, kind and decision. A historical gate without an
+ID uses an empty gate_id and still requires its exact snapshot index. An empty
+gate snapshot permits absent claims or explicit empty claims; it cannot admit
+invented decisions. This changes the model response contract when gates exist:
+newly evaluated prose-only responses are rejected rather than certified by keyword matching. Recovery preserves previously stored results under their original contract; it does not retroactively certify historical prose as grounded.
+
+The worker validates original model JSON before sanitization, then checks claims
+against the captured context. Missing, swapped, invented or ambiguous claims
+retain a terminal private validation failure, response and usage. Correct claims
+produce decision labels in snapshot order with an explicit repair marker; the
+model's original decision prose remains in private content. This prevents prose
+negation or cross-gate keyword matches from becoming a displayed gate outcome.
+It does not verify executive prose, authenticate supplied local evidence, make a
+human decision or authorize release. Recovery reuses the recorded result without
+another inference call. Both QA and summary parsing share evidencejson's duplicate
+key, Unicode alias, nesting and single-document validation.
