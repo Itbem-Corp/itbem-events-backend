@@ -146,9 +146,10 @@ func describeProjectPreparationWithRuntime(project models.DeliveryProject) proje
 		return preparation
 	}
 	planningWorkers, implementationWorkers := 0, 0
-	implementationWorkspaceReady := len(workspaceIDs) > 0
-	workspaceFound := make(map[string]bool, len(workspaceIDs))
 	for _, heartbeat := range heartbeats {
+		if heartbeat.Draining {
+			continue
+		}
 		var capabilities []string
 		_ = json.Unmarshal([]byte(heartbeat.CapabilitiesJSON), &capabilities)
 		if workerSupportsOperation(capabilities, "delivery.plan") {
@@ -157,36 +158,14 @@ func describeProjectPreparationWithRuntime(project models.DeliveryProject) proje
 		if !workerSupportsOperation(capabilities, "delivery.implementation") {
 			continue
 		}
-		var readiness []struct {
-			ID            string `json:"id"`
-			Ready         bool   `json:"ready"`
-			SandboxReady  bool   `json:"sandbox_ready"`
-			IsolationMode string `json:"isolation_mode"`
-		}
-		if json.Unmarshal([]byte(heartbeat.WorkspaceReadiness), &readiness) != nil {
-			continue
-		}
-		for _, workspace := range readiness {
-			for _, required := range workspaceIDs {
-				if workspace.ID != required {
-					continue
-				}
-				workspaceFound[required] = true
-				if implementationWorkspaceSandboxReady(workspace.Ready, workspace.SandboxReady, workspace.IsolationMode) {
-					implementationWorkers++
-				}
-			}
-		}
-	}
-	for _, workspaceID := range workspaceIDs {
-		if !workspaceFound[workspaceID] {
-			implementationWorkspaceReady = false
+		if implementationHeartbeatCoversWorkspaces(heartbeat, workspaceIDs) {
+			implementationWorkers++
 		}
 	}
 	checkState := "unknown"
 	detail := "No hay un heartbeat reciente que confirme capacidad de planificación o implementación. Se comprobará de nuevo al iniciar el encargo."
 	if planningWorkers > 0 {
-		if implementationWorkspaceReady && implementationWorkers > 0 {
+		if implementationWorkers > 0 {
 			checkState = "ready"
 			detail = "Planificación e implementación tienen workers vivos con el workspace y sandbox confirmados; el despacho volverá a comprobar permisos, lease y presupuesto."
 		} else if len(workspaceIDs) == 0 {
@@ -203,6 +182,36 @@ func describeProjectPreparationWithRuntime(project models.DeliveryProject) proje
 		}
 	}
 	return preparation
+}
+
+// A task runs on one worker. Combining partial readiness from several hosts
+// or counting an unready workspace as present would advertise a false preflight.
+func implementationHeartbeatCoversWorkspaces(heartbeat models.AutomationAgentHeartbeat, required []string) bool {
+	if heartbeat.Draining || len(required) == 0 {
+		return false
+	}
+	var readiness []struct {
+		ID            string `json:"id"`
+		Ready         bool   `json:"ready"`
+		SandboxReady  bool   `json:"sandbox_ready"`
+		IsolationMode string `json:"isolation_mode"`
+	}
+	if json.Unmarshal([]byte(heartbeat.WorkspaceReadiness), &readiness) != nil {
+		return false
+	}
+	available := map[string]bool{}
+	for _, workspace := range readiness {
+		if _, duplicate := available[workspace.ID]; duplicate {
+			return false
+		}
+		available[workspace.ID] = implementationWorkspaceSandboxReady(workspace.Ready, workspace.SandboxReady, workspace.IsolationMode)
+	}
+	for _, id := range required {
+		if !available[id] {
+			return false
+		}
+	}
+	return true
 }
 
 // implementationWorkspaceSandboxReady is deliberately stricter than generic

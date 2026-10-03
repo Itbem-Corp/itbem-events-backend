@@ -28,6 +28,12 @@ prepare_pinned_submodules() {
 
 run "pinned Git submodule checkout" prepare_pinned_submodules
 
+run "autonomy preparation rejects partial hosts and unqualified activation" \
+  go test ./controllers/delivery -run 'Test(ImplementationPreflightRequiresEveryWorkspaceOnOneWorker|AutonomyReadinessDoesNotConfusePolicyWithOperationalAutonomy|AutonomyReadinessNamesMissingConfigurationAndHumanPolicy)$' -count=1
+
+run "continuation recovery preserves phase evidence and current decision epoch" \
+  go test ./controllers/delivery -run 'Test(CompletedQAContinuationReconcilesSignedCallbackSubmission|CompletedContinuationFromOldDecisionCannotAdvance|ContinuationInfrastructureWaitDoesNotConsumeCorrectionAttempts|ContinuationReconcilesOnlyCallbackSubmittedStates)$' -count=1
+
 run "doctor identity and publication authority readiness" \
   go test ./cmd/itbem-ai-agent -run 'Test(DoctorPublicationReadinessRequiresRoleSpecificGitHubAppConfiguration|DoctorReadinessRejectsMismatchedAndUnknownWorkerIdentities|DoctorGatewayReleaseObserverRequiresNoPublicationCredential)$' -count=1
 

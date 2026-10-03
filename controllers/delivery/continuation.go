@@ -406,6 +406,12 @@ func dispatchContinuation(ctx context.Context, db *gorm.DB, cfg *models.Config) 
 			if reason := continuationBudgetBlock(recorder.Code, recorder.Body.Bytes()); reason != "" {
 				return finishContinuation(db, intent, "blocked", reason)
 			}
+			if transientContinuationAdmission(recorder.Code) {
+				if intent.CreatedAt.IsZero() || time.Since(intent.CreatedAt) >= 24*time.Hour {
+					return finishContinuation(db, intent, "blocked", "La infraestructura no permitió iniciar la fase dentro de 24 horas. Revisa disponibilidad y configuración; no se consumieron intentos de corrección ni se repitió inferencia.")
+				}
+				return db.Model(&intent).Where("status <> ?", "superseded").Updates(map[string]any{"status": "pending", "available_at": time.Now().UTC().Add(time.Minute)}).Error
+			}
 			intent.Attempts++
 			status := "pending"
 			if intent.Attempts >= 3 {
@@ -658,8 +664,13 @@ func completeContinuation(db *gorm.DB, intent models.DeliveryContinuation, task 
 			}
 		}
 		if action != "" {
-			if err := deliveryworkflow.Advance(&item, action, nil, time.Now().UTC()); err != nil {
-				return err
+			// A signed delegated callback may already have submitted this exact
+			// phase. Evidence above is still required; the epoch check prevents
+			// an old continuation from reconciling a later human decision.
+			if !continuationSubmissionAlreadyApplied(item.State, action) {
+				if err := deliveryworkflow.Advance(&item, action, nil, time.Now().UTC()); err != nil {
+					return err
+				}
 			}
 			item.AutomationEpoch++
 		}
@@ -673,6 +684,21 @@ func completeContinuation(db *gorm.DB, intent models.DeliveryContinuation, task 
 		}
 		return tx.Model(&intent).Update("status", "done").Error
 	})
+}
+
+func transientContinuationAdmission(status int) bool {
+	return status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= 500 && status <= 599
+}
+
+func continuationSubmissionAlreadyApplied(state string, action deliveryworkflow.Action) bool {
+	switch action {
+	case deliveryworkflow.ActionSubmitCodeReview:
+		return state == deliveryworkflow.StateCodeReview
+	case deliveryworkflow.ActionSubmitQA:
+		return state == deliveryworkflow.StateQAReview
+	default:
+		return false
+	}
 }
 
 // humanizeInformationalChatAnswer prevents an otherwise valid but raw model

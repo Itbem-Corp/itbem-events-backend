@@ -421,6 +421,7 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	protected.GET("/automation/projects/:id/activity", delivery.ListProjectActivity)
 	protected.PUT("/automation/projects/:id/budget", delivery.UpdateProjectBudget)
 	protected.GET("/automation/projects/:id/publication-readiness", delivery.PublicationReadiness)
+	protected.GET("/automation/projects/:id/autonomy-readiness", delivery.GetAutonomyReadiness)
 	protected.POST("/automation/projects/:id/publication-readiness/verify", delivery.VerifyPublicationReadiness)
 	protected.GET("/automation/projects/:id/members", delivery.ListMembers)
 	protected.PUT("/automation/projects/:id/members", delivery.UpsertMember)
