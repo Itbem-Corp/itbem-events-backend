@@ -167,3 +167,45 @@ func TestScorePublicationPreservesCompletedEvidence(t *testing.T) {
 		t.Fatal("publication leaked temporary scores")
 	}
 }
+
+func TestConcurrentScorePublicationHasOneCompleteWinner(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "score.json")
+	payloads := [][]byte{bytes.Repeat([]byte("first"), 10000), bytes.Repeat([]byte("second"), 10000)}
+	start := make(chan struct{})
+	type result struct {
+		index int
+		err   error
+	}
+	results := make(chan result, len(payloads))
+	for index, payload := range payloads {
+		go func(index int, payload []byte) {
+			<-start
+			results <- result{index, writeScore(path, payload)}
+		}(index, payload)
+	}
+	close(start)
+	winner := -1
+	for range payloads {
+		result := <-results
+		if result.err == nil {
+			if winner != -1 {
+				t.Fatal("multiple publishers succeeded")
+			}
+			winner = result.index
+		} else if !os.IsExist(result.err) {
+			t.Fatalf("unexpected publication failure: %v", result.err)
+		}
+	}
+	if winner == -1 {
+		t.Fatal("no publisher succeeded")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(data, payloads[winner]) {
+		t.Fatal("final evidence does not match the complete winning payload")
+	}
+	temps, err := filepath.Glob(filepath.Join(root, ".qa-score-*"))
+	if err != nil || len(temps) != 0 {
+		t.Fatal("concurrent publication leaked temporary scores")
+	}
+}
