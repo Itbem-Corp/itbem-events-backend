@@ -26,6 +26,8 @@ responses, verifies receipt identities, token usage and bounded costs, rejects
 altered prompts and repeated inference, and dispatches each next task until the
 batch completes. Synthetic responses do not contain implementation solutions;
 this qualification establishes accounting behavior, not model quality.
+The completed pilot export is checked against all three durable call bindings
+and receipts, including original run IDs, routes, policy hashes, tokens and costs.
 The gateway also rejects unknown corpus versions, a pilot sequence beyond three,
 a foreign pilot case and a candidate assigned to the wrong pilot sequence. Its
 existing message, route, budget and cross-run receipt checks still apply.

@@ -455,6 +455,47 @@ func testEvaluationAdmissionAndDispatch(t *testing.T, db *gorm.DB, version strin
 		var completed models.AutomationModelEvaluation
 		require.NoError(t, db.First(&completed, "id = ?", batchID).Error)
 		require.Equal(t, "completed", completed.Status)
+		exportedResponse := invoke(GetModelEvaluation, "")
+		require.Equal(t, http.StatusOK, exportedResponse.Code, exportedResponse.Body.String())
+		var exported struct {
+			Data struct {
+				Batch models.AutomationModelEvaluation `json:"batch"`
+				Calls []struct {
+					models.AutomationModelEvaluationCall
+					Status          string    `json:"status"`
+					ReceiptID       uuid.UUID `json:"receipt_id"`
+					ReceiptRunID    string    `json:"receipt_run_id"`
+					ReceiptStatus   string    `json:"receipt_status"`
+					ActualProvider  string    `json:"actual_provider"`
+					ActualModel     string    `json:"actual_model"`
+					InputTokens     int64     `json:"input_tokens"`
+					OutputTokens    int64     `json:"output_tokens"`
+					TotalCostMicros int64     `json:"total_cost_microusd"`
+					PolicyHash      string    `json:"policy_hash"`
+				} `json:"calls"`
+			} `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(exportedResponse.Body.Bytes(), &exported))
+		require.Equal(t, completed.ID, exported.Data.Batch.ID)
+		require.Equal(t, "completed", exported.Data.Batch.Status)
+		require.Len(t, exported.Data.Calls, expectedCalls)
+		for index, outcome := range exported.Data.Calls {
+			require.Equal(t, calls[index], outcome.AutomationModelEvaluationCall)
+			var receipt models.AutomationInferenceReceipt
+			require.NoError(t, db.Where("automation_task_id = ?", outcome.AutomationTaskID).First(&receipt).Error)
+			require.Equal(t, "completed", outcome.Status)
+			require.Equal(t, receipt.ID, outcome.ReceiptID)
+			require.Equal(t, receipt.RunID, outcome.ReceiptRunID)
+			require.Equal(t, receipt.Status, outcome.ReceiptStatus)
+			require.Equal(t, receipt.Provider, outcome.ActualProvider)
+			require.Equal(t, receipt.Model, outcome.ActualModel)
+			require.Equal(t, receipt.InputTokens, outcome.InputTokens)
+			require.Equal(t, receipt.OutputTokens, outcome.OutputTokens)
+			require.Equal(t, receipt.TotalCostMicros, outcome.TotalCostMicros)
+			require.Equal(t, receipt.PolicySnapshotHash, outcome.PolicyHash)
+		}
+		require.NotContains(t, exportedResponse.Body.String(), frozenPilotPrompt)
+		require.NotContains(t, exportedResponse.Body.String(), "must-not-be-read")
 		repeated := strings.Replace(request, batchID.String(), uuid.Must(uuid.NewV4()).String(), 1)
 		require.Equal(t, http.StatusConflict, invoke(CreateModelEvaluation, repeated).Code)
 		require.Equal(t, int32(expectedCalls), uploaded.Load())
