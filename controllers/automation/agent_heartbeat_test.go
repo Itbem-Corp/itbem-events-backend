@@ -170,3 +170,97 @@ func TestSafeWorkerProtocolsJSONFiltersUnrecognizedPersistedValues(t *testing.T)
 		}
 	}
 }
+
+func TestAgentHeartbeatAcceptsProviderlessRelease(t *testing.T) {
+	db, mock := automationCostLedgerTestDB(t)
+	previousDB := configuration.DB
+	configuration.DB = db
+	t.Cleanup(func() { configuration.DB = previousDB })
+
+	workerID := uuid.Must(uuid.NewV4()).String()
+	machineID := uuid.Must(uuid.NewV4()).String()
+	instanceID := uuid.Must(uuid.NewV4())
+	now := time.Now().UTC().Truncate(time.Second)
+	profileRows := sqlmock.NewRows([]string{"id", "agent_key", "name", "specialty", "description", "operations_json", "capabilities_json", "active", "created_at", "updated_at"}).
+		AddRow(uuid.Must(uuid.NewV4()), "generalist", "Generalist", "general", "test profile", `[]`, `[]`, true, now, now)
+	mock.ExpectQuery(`SELECT \* FROM "automation_agent_profiles" WHERE agent_key = \$1 AND active = \$2 ORDER BY "automation_agent_profiles"\."id" LIMIT \$3`).
+		WithArgs("generalist", true, 1).WillReturnRows(profileRows)
+	mock.ExpectBegin()
+	mock.ExpectQuery(`(?s)INSERT INTO "automation_agent_heartbeats".*protocols_json.*DO UPDATE SET.*protocols_json.*RETURNING "id"`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(uuid.Must(uuid.NewV4())))
+	mock.ExpectCommit()
+
+	var captured models.AutomationAgentHeartbeat
+	if err := db.Callback().Create().Before("gorm:create").Register("test:capture_protocol_agent_heartbeat", func(tx *gorm.DB) {
+		if heartbeat, ok := tx.Statement.Dest.(*models.AutomationAgentHeartbeat); ok {
+			captured = *heartbeat
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(map[string]any{
+		"worker_id": workerID, "agent_key": "generalist", "machine_id": machineID,
+		"provider": "", "model": "", "concurrency": 1, "role": "release_manager", "lane": "release",
+		"protocols":  []string{agentprotocol.ProtocolDeliveryPlanStepsV1},
+		"started_at": now.Format(time.RFC3339), "workspace_readiness": []any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPut, "/api/internal/automation/agents/heartbeat", bytes.NewReader(body))
+	request.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	ctx := echo.New().NewContext(request, response)
+	request.Header.Set("X-Agent-Role", "release_manager")
+	request.Header.Set("X-Agent-Lane", "release")
+	ctx.Set(agentCallbackIdentityContextKey, authenticatedAgentCallback{InstanceID: instanceID, AgentKey: "generalist", MachineID: machineID})
+	if err := AgentHeartbeat(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != http.StatusOK {
+		t.Fatalf("heartbeat status=%d, want 200: %s; SQL expectations: %v", response.Code, response.Body.String(), mock.ExpectationsWereMet())
+	}
+	if captured.ProtocolsJSON != `["delivery.plan_steps.v1"]` {
+		t.Fatalf("persisted protocols = %q", captured.ProtocolsJSON)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAgentHeartbeatRejectsInvalidProviderRoleContracts(t *testing.T) {
+	for _, tc := range []struct{ name, role, lane, provider, model string }{
+		{"engineering requires inference", "software_engineer", "engineering", "", ""},
+		{"legacy requires inference", "", "", "", ""},
+		{"release rejects inference", "release_manager", "release", "minimax", "MiniMax-M3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock := automationCostLedgerTestDB(t)
+			previousDB := configuration.DB
+			configuration.DB = db
+			t.Cleanup(func() { configuration.DB = previousDB })
+			mock.ExpectQuery(`SELECT \* FROM "automation_agent_profiles"`).WillReturnRows(sqlmock.NewRows([]string{"id", "agent_key", "active", "capabilities_json"}).AddRow(uuid.Must(uuid.NewV4()), "generalist", true, `[]`))
+			machineID := uuid.Must(uuid.NewV4()).String()
+			body, err := json.Marshal(map[string]any{"worker_id": uuid.Must(uuid.NewV4()).String(), "agent_key": "generalist", "machine_id": machineID, "role": tc.role, "lane": tc.lane, "provider": tc.provider, "model": tc.model, "concurrency": 1, "started_at": time.Now().UTC().Format(time.RFC3339)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			response := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPut, "/api/internal/automation/agents/heartbeat", bytes.NewReader(body))
+			request.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+			request.Header.Set("X-Agent-Role", tc.role)
+			request.Header.Set("X-Agent-Lane", tc.lane)
+			ctx := echo.New().NewContext(request, response)
+			ctx.Set(agentCallbackIdentityContextKey, authenticatedAgentCallback{InstanceID: uuid.Must(uuid.NewV4()), AgentKey: "generalist", MachineID: machineID})
+			if err := AgentHeartbeat(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d, want 400: %s", response.Code, response.Body.String())
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
