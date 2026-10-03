@@ -67,9 +67,9 @@ func CreateModelEvaluation(c echo.Context) error {
 		overhead += len(message.Role) + len(message.Content) + 64
 	}
 	// Keep byte framing conservative, including the small placeholder prompt.
-	plan, err := modelevaluation.Compile(cases, instruction, overhead, pricingCatalog(cfg))
+	plan, err := modelevaluation.CompileForVersion(request.CorpusVersion, cases, instruction, overhead, pricingCatalog(cfg))
 	if err != nil {
-		return utils.Error(c, http.StatusConflict, "Evaluation budget admission rejected", "The existing price catalog must reserve all sixty calls within USD 1")
+		return utils.Error(c, http.StatusConflict, "Evaluation budget admission rejected", "The existing price catalog must reserve all planned calls within USD 1")
 	}
 	batch := models.AutomationModelEvaluation{ID: id, RequestedBy: actor, CorpusVersion: request.CorpusVersion, CorpusHash: corpusHash, BudgetMicros: modelevaluation.MaxBudgetMicros, ReservationMicros: plan.ReservationMicros, PricingJSON: pricingCatalog(cfg), Status: "active", CreatedAt: time.Now().UTC()}
 	err = configuration.DB.Transaction(func(tx *gorm.DB) error {

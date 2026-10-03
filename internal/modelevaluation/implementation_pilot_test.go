@@ -6,7 +6,7 @@ import (
 	"events-stocks/internal/automationagent"
 )
 
-func TestImplementationPilotReservesExactWorkerEnvelopeWithoutAdmission(t *testing.T) {
+func TestImplementationPilotReservesExactWorkerEnvelopeWithVersionedAdmission(t *testing.T) {
 	for version, expected := range map[string]int{CorpusVersion: 60, CacheCorpusVersion: 60, ImplementationPilotVersion: 3} {
 		count, err := ExpectedCalls(version)
 		if err != nil || count != expected {
@@ -16,8 +16,8 @@ func TestImplementationPilotReservesExactWorkerEnvelopeWithoutAdmission(t *testi
 	if _, err := ExpectedCalls("unknown"); err == nil {
 		t.Fatal("unknown corpus cardinality accepted")
 	}
-	if SupportedCorpus(ImplementationPilotVersion) {
-		t.Fatal("prepared pilot must not silently enable central admission")
+	if !SupportedCorpus(ImplementationPilotVersion) {
+		t.Fatal("published pilot is missing versioned admission")
 	}
 	base, err := automationagent.SyntheticChatMessages("overhead")
 	if err != nil {
@@ -32,6 +32,20 @@ func TestImplementationPilotReservesExactWorkerEnvelopeWithoutAdmission(t *testi
 		t.Fatalf("pilot reservation invalid: %#v / %v", plan, err)
 	}
 	seen := map[Candidate]bool{}
+	cases, instruction, _, err := CorpusForVersion(ImplementationPilotVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admitted, err := CompileForVersion(ImplementationPilotVersion, cases, instruction, overhead, testPricing)
+	if err != nil || len(admitted.Calls) != 3 || admitted.ReservationMicros != plan.ReservationMicros {
+		t.Fatalf("versioned admission differs from prepared pilot: %v", err)
+	}
+	if _, err := CompileForVersion(ImplementationPilotVersion, append(cases, cases[0]), instruction, overhead, testPricing); err == nil {
+		t.Fatal("pilot accepted more than one case")
+	}
+	if _, err := CompileForVersion(CorpusVersion, cases, instruction, overhead, testPricing); err == nil {
+		t.Fatal("screening admitted a one-case corpus")
+	}
 	frozenPrompt, corpusHash, err := ImplementationPilotInput()
 	if err != nil || len(corpusHash) != 64 {
 		t.Fatalf("invalid frozen pilot input: %v", err)

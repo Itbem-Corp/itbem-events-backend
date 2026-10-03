@@ -258,7 +258,7 @@ func TestEvaluationRealGatewaySerializesAndAccounts(t *testing.T) {
 	require.NotContains(t, ambiguousRecorder.Body.String(), "receipt_id")
 	// Receipts remain durable; the disposable database retains this control.
 	require.NoError(t, db.Model(&batch).Update("status", "halted").Error)
-	for _, version := range []string{modelevaluation.CorpusVersion, modelevaluation.CacheCorpusVersion} {
+	for _, version := range []string{modelevaluation.CorpusVersion, modelevaluation.CacheCorpusVersion, modelevaluation.ImplementationPilotVersion} {
 		t.Run("normal admission and concurrent dispatch/"+version, func(t *testing.T) { testEvaluationAdmissionAndDispatch(t, db, version) })
 	}
 	t.Run("prepared pilot dispatch cardinality", func(t *testing.T) { testPreparedPilotDispatch(t, db) })
@@ -305,6 +305,13 @@ func testPreparedPilotDispatch(t *testing.T, db *gorm.DB) {
 }
 
 func testEvaluationAdmissionAndDispatch(t *testing.T, db *gorm.DB, version string) {
+	expectedCalls, err := modelevaluation.ExpectedCalls(version)
+	require.NoError(t, err)
+	frozenPilotPrompt := ""
+	if version == modelevaluation.ImplementationPilotVersion {
+		frozenPilotPrompt, _, err = modelevaluation.ImplementationPilotInput()
+		require.NoError(t, err)
+	}
 	var uploaded atomic.Int32
 	storage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPut || r.Header.Get("X-Amz-Server-Side-Encryption") != "AES256" {
@@ -314,6 +321,10 @@ func testEvaluationAdmissionAndDispatch(t *testing.T, db *gorm.DB, version strin
 		var input automationagent.TaskInput
 		if json.NewDecoder(r.Body).Decode(&input) != nil || input.Prompt == "" {
 			http.Error(w, "invalid input", 400)
+			return
+		}
+		if frozenPilotPrompt != "" && input.Prompt != frozenPilotPrompt {
+			http.Error(w, "pilot input differs from frozen corpus", 400)
 			return
 		}
 		uploaded.Add(1)
@@ -344,13 +355,36 @@ func testEvaluationAdmissionAndDispatch(t *testing.T, db *gorm.DB, version strin
 	require.Equal(t, http.StatusBadRequest, invoke(CreateModelEvaluation, strings.TrimSuffix(request, "}")+`,"routes":[]}`).Code)
 	created := invoke(CreateModelEvaluation, request)
 	require.Equal(t, http.StatusCreated, created.Code, created.Body.String())
-	require.Equal(t, int32(60), uploaded.Load())
+	require.Equal(t, int32(expectedCalls), uploaded.Load())
 	require.Equal(t, http.StatusOK, invoke(CreateModelEvaluation, request).Code)
-	require.Equal(t, int32(60), uploaded.Load(), "idempotent admission uploaded inputs again")
+	require.Equal(t, int32(expectedCalls), uploaded.Load(), "idempotent admission uploaded inputs again")
 	var calls []models.AutomationModelEvaluationCall
 	require.NoError(t, db.Where("evaluation_id = ?", batchID).Order("sequence").Find(&calls).Error)
-	require.Len(t, calls, 60)
-	for i := 0; i < 60; i += 3 {
+	require.Len(t, calls, expectedCalls)
+	if frozenPilotPrompt != "" {
+		_, corpusHash, err := modelevaluation.ImplementationPilotInput()
+		require.NoError(t, err)
+		var admitted models.AutomationModelEvaluation
+		require.NoError(t, db.First(&admitted, "id = ?", batchID).Error)
+		require.Equal(t, corpusHash, admitted.CorpusHash)
+		messages, err := automationagent.SyntheticChatMessages(frozenPilotPrompt)
+		require.NoError(t, err)
+		messageHash, err := modelevaluation.MessageDigest(messages)
+		require.NoError(t, err)
+		for index, candidate := range []modelevaluation.Candidate{modelevaluation.MiniMax, modelevaluation.DeepSeek, modelevaluation.Luna} {
+			require.Equal(t, index+1, calls[index].Sequence)
+			require.Equal(t, "pagination-v1", calls[index].CaseID)
+			require.Equal(t, string(candidate), calls[index].Candidate)
+			require.Equal(t, modelevaluation.Digest([]byte(frozenPilotPrompt)), calls[index].PromptHash)
+			require.Equal(t, messageHash, calls[index].MessagesHash)
+			route, err := modelevaluation.Route(candidate)
+			require.NoError(t, err)
+			_, routeHash, err := canonicalInferenceRoutes([]models.AutomationAIActionRoute{route})
+			require.NoError(t, err)
+			require.Equal(t, routeHash, calls[index].RouteHash)
+		}
+	}
+	for i := 0; i < expectedCalls; i += 3 {
 		require.Equal(t, calls[i].MessagesHash, calls[i+1].MessagesHash)
 		require.Equal(t, calls[i].MessagesHash, calls[i+2].MessagesHash)
 	}
@@ -379,11 +413,11 @@ func testEvaluationAdmissionAndDispatch(t *testing.T, db *gorm.DB, version strin
 	require.NoError(t, db.First(&batch, "id = ?", batchID).Error)
 	require.Equal(t, "halted", batch.Status)
 	require.Equal(t, http.StatusConflict, invoke(DispatchNextModelEvaluation, "").Code)
-	require.Equal(t, int32(60), uploaded.Load())
+	require.Equal(t, int32(expectedCalls), uploaded.Load())
 	// Completed or halted history cannot be retried under a fresh ID.
 	repeated := strings.Replace(request, batchID.String(), uuid.Must(uuid.NewV4()).String(), 1)
 	require.Equal(t, http.StatusConflict, invoke(CreateModelEvaluation, repeated).Code)
-	require.Equal(t, int32(60), uploaded.Load())
+	require.Equal(t, int32(expectedCalls), uploaded.Load())
 }
 
 const evaluationIntegrationPricing = `{"version":"synthetic","basis":"api_equivalent","models":{"minimax:minimax-m3":{"input_microusd_per_million":600000,"output_microusd_per_million":2400000},"deepseek:deepseek-flash":{"input_microusd_per_million":300000,"output_microusd_per_million":1200000},"openrouter:openai/gpt-6-luna":{"input_microusd_per_million":200000,"output_microusd_per_million":750000}}}`

@@ -7,8 +7,7 @@ import (
 	"strings"
 )
 
-// ImplementationPilotVersion is prepared offline; SupportedCorpus deliberately
-// excludes it until central admission and dispatch support the pilot cardinality.
+// ImplementationPilotVersion identifies the server-owned, one-case pilot.
 const ImplementationPilotVersion = "synthetic-implementation-pagination-2026-10-03-v1"
 
 //go:embed implementation_pilot_corpus.json

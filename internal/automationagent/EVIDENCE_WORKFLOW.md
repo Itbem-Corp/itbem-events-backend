@@ -55,6 +55,8 @@ QA y summaries nuevos requieren sus contratos explícitos de claims. Guarda el o
 
 Para screening y caché utiliza [scripts/EVALUATION.md](../../scripts/EVALUATION.md): incluye corpus congelado, versión de lote, recibos únicos, hashes de entradas, causas de fallo y publicación sin sobrescritura. Los motivos pueden solaparse; no sumes sus conteos como total de casos fallidos. Distingue costo conocido, cero registrado y costo desconocido.
 
+El [piloto de implementación](../modelevaluation/IMPLEMENTATION_PILOT.md) usa una versión distinta: un caso de paginación y tres llamadas, con admisión y despacho centrales calificados mediante PostgreSQL sintético. Sus respuestas requieren validación y ejecución del oracle en sandbox; los scorers de screening y caché no las califican. La admisión del lote no prueba que la implementación sea correcta.
+
 Una evaluación nueva de modelos reales requiere una tarea sintética autorizada mediante el worker y gateway centrales, con presupuesto y registro de uso. Los antiguos selectores directos `-LiveMiniMax` y `-LiveProvider` están retirados. Estos comandos offline no ejecutan esa evaluación ni habilitan un fallback directo.
 
 Al entregar una mejora para revisión, registra el commit, el cambio de comportamiento, comandos y resultados, omisiones y límites. Enlaza la evidencia vigente y conserva la anterior como historial. La descripción del PR debe explicar la implementación final; la cronología de pruebas pertenece a la auditoría. Un check verde no mide por sí solo mejora de calidad ni concede autoridad de publicación o despliegue.

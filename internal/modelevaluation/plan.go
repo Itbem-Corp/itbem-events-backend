@@ -68,6 +68,15 @@ func Compile(cases []Case, instruction string, messageOverheadBytes int, pricing
 	return compile(cases, instruction, messageOverheadBytes, pricing, MaxCases)
 }
 
+// CompileForVersion preserves each server-owned corpus's exact cardinality.
+func CompileForVersion(version string, cases []Case, instruction string, messageOverheadBytes int, pricing string) (Plan, error) {
+	calls, err := ExpectedCalls(version)
+	if err != nil {
+		return Plan{}, err
+	}
+	return compile(cases, instruction, messageOverheadBytes, pricing, calls/3)
+}
+
 func compile(cases []Case, instruction string, messageOverheadBytes int, pricing string, caseCount int) (Plan, error) {
 	if caseCount < 1 || caseCount > MaxCases || len(cases) != caseCount || strings.TrimSpace(instruction) == "" || messageOverheadBytes < 0 || messageOverheadBytes > 50000 {
 		return Plan{}, errors.New("invalid evaluation corpus bounds")
