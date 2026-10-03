@@ -7,6 +7,15 @@ import (
 )
 
 func TestImplementationPilotReservesExactWorkerEnvelopeWithoutAdmission(t *testing.T) {
+	for version, expected := range map[string]int{CorpusVersion: 60, CacheCorpusVersion: 60, ImplementationPilotVersion: 3} {
+		count, err := ExpectedCalls(version)
+		if err != nil || count != expected {
+			t.Fatalf("incorrect corpus cardinality: %s / %d / %v", version, count, err)
+		}
+	}
+	if _, err := ExpectedCalls("unknown"); err == nil {
+		t.Fatal("unknown corpus cardinality accepted")
+	}
 	if SupportedCorpus(ImplementationPilotVersion) {
 		t.Fatal("prepared pilot must not silently enable central admission")
 	}

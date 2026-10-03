@@ -261,6 +261,47 @@ func TestEvaluationRealGatewaySerializesAndAccounts(t *testing.T) {
 	for _, version := range []string{modelevaluation.CorpusVersion, modelevaluation.CacheCorpusVersion} {
 		t.Run("normal admission and concurrent dispatch/"+version, func(t *testing.T) { testEvaluationAdmissionAndDispatch(t, db, version) })
 	}
+	t.Run("prepared pilot dispatch cardinality", func(t *testing.T) { testPreparedPilotDispatch(t, db) })
+}
+
+// Seed only synthetic ledger rows: HTTP admission of the prepared pilot stays
+// disabled, and dispatch writes an outbox event without contacting a provider.
+func testPreparedPilotDispatch(t *testing.T, db *gorm.DB) {
+	configureAIActionPolicyTestRoot(t, models.RootLevelPrimary)
+	require.NoError(t, automationqueue.Init("us-east-1", "integration", "integration", "http://127.0.0.1:1/queue/evaluation", "", "", "", "http://127.0.0.1:1"))
+	for _, count := range []int{2, 3, 4} {
+		t.Run(fmt.Sprintf("calls-%d", count), func(t *testing.T) {
+			batchID := uuid.Must(uuid.NewV4())
+			batch := models.AutomationModelEvaluation{ID: batchID, RequestedBy: "synthetic-pilot", CorpusVersion: modelevaluation.ImplementationPilotVersion, BudgetMicros: modelevaluation.MaxBudgetMicros, ReservationMicros: 30000, PricingJSON: evaluationIntegrationPricing, Status: "active", CreatedAt: time.Now().UTC()}
+			require.NoError(t, db.Create(&batch).Error)
+			for index := 0; index < count; index++ {
+				taskID := uuid.Must(uuid.NewV4())
+				task := models.AutomationTask{ID: taskID, JobID: uuid.Must(uuid.NewV4()), ModelEvaluationID: &batchID, RequestedBy: "synthetic-pilot", CorrelationID: batchID.String(), Operation: "ai.chat", MaxCompletionTokens: modelevaluation.MaxCompletionTokens, InputRef: "s3://synthetic/pilot.json", Status: "pending"}
+				require.NoError(t, db.Create(&task).Error)
+				call := models.AutomationModelEvaluationCall{AutomationTaskID: taskID, EvaluationID: batchID, Sequence: index + 1, CaseID: "pagination-v1", Candidate: string(modelevaluation.MiniMax), ReservationMicros: 10000}
+				require.NoError(t, db.Create(&call).Error)
+			}
+			response := httptest.NewRecorder()
+			c := echo.New().NewContext(httptest.NewRequest(http.MethodPost, "/evaluation", nil), response)
+			c.Set("cognito_sub", "synthetic-pilot")
+			c.SetParamNames("id")
+			c.SetParamValues(batchID.String())
+			require.NoError(t, DispatchNextModelEvaluation(c))
+			expected := http.StatusConflict
+			if count == 3 {
+				expected = http.StatusAccepted
+			}
+			require.Equal(t, expected, response.Code, response.Body.String())
+			var outbox int64
+			require.NoError(t, db.Model(&models.OutboxEvent{}).Where("correlation_id = ?", batchID.String()).Count(&outbox).Error)
+			if count == 3 {
+				require.Equal(t, int64(1), outbox)
+			} else {
+				require.Zero(t, outbox)
+			}
+			require.NoError(t, db.Model(&batch).Update("status", "halted").Error)
+		})
+	}
 }
 
 func testEvaluationAdmissionAndDispatch(t *testing.T, db *gorm.DB, version string) {

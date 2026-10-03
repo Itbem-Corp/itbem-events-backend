@@ -172,11 +172,15 @@ func DispatchNextModelEvaluation(c echo.Context) error {
 		if batch.Status != "active" {
 			return errEvaluationAdmission
 		}
+		expectedCalls, err := modelevaluation.ExpectedCalls(batch.CorpusVersion)
+		if err != nil {
+			return errEvaluationAdmission
+		}
 		var calls []models.AutomationModelEvaluationCall
-		if err := tx.Where("evaluation_id = ?", id).Order("sequence ASC").Limit(modelevaluation.MaxCalls + 1).Find(&calls).Error; err != nil {
+		if err := tx.Where("evaluation_id = ?", id).Order("sequence ASC").Limit(expectedCalls + 1).Find(&calls).Error; err != nil {
 			return err
 		}
-		if len(calls) != modelevaluation.MaxCalls {
+		if len(calls) != expectedCalls {
 			return errEvaluationAdmission
 		}
 		for _, call := range calls {
@@ -258,6 +262,10 @@ func GetModelEvaluation(c echo.Context) error {
 	if err := configuration.DB.First(&batch, "id = ?", id).Error; err != nil {
 		return utils.Error(c, http.StatusNotFound, "Evaluation not found", "")
 	}
+	expectedCalls, err := modelevaluation.ExpectedCalls(batch.CorpusVersion)
+	if err != nil {
+		return utils.Error(c, http.StatusServiceUnavailable, "Evaluation provenance unavailable", "Unknown corpus version")
+	}
 	type callView struct {
 		models.AutomationModelEvaluationCall
 		Status              string     `json:"status"`
@@ -305,13 +313,13 @@ func GetModelEvaluation(c echo.Context) error {
 		Joins("JOIN automation_tasks AS task ON task.id = evaluation_call.automation_task_id").
 		Joins("LEFT JOIN automation_inference_receipts AS receipt ON receipt.automation_task_id = task.id").
 		Joins("LEFT JOIN automation_inference_attempt_policies AS policy ON policy.automation_task_id = receipt.automation_task_id AND policy.run_id = receipt.run_id").
-		Where("evaluation_call.evaluation_id = ?", id).Order("evaluation_call.sequence ASC").Limit(modelevaluation.MaxCalls + 1).Scan(&calls).Error
+		Where("evaluation_call.evaluation_id = ?", id).Order("evaluation_call.sequence ASC").Limit(expectedCalls + 1).Scan(&calls).Error
 	if err != nil {
 		return utils.Error(c, http.StatusServiceUnavailable, "Evaluation provenance unavailable", "")
 	}
 	// One extra row detects join expansion instead of silently dropping a task
 	// at the export boundary. Partial batches remain inspectable.
-	if len(calls) > modelevaluation.MaxCalls {
+	if len(calls) > expectedCalls {
 		return utils.Error(c, http.StatusServiceUnavailable, "Evaluation provenance ambiguous", "")
 	}
 	seenTasks := make(map[uuid.UUID]bool, len(calls))

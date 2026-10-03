@@ -13,9 +13,14 @@ maximum. Price tests use an explicitly synthetic catalog and do not certify live
 prices or incur provider usage. Existing screening/cache compilation still
 requires exactly 20 cases and prepares 60 calls.
 
-Before enabling central admission, implement version-specific dispatch/export
-cardinality, preserve message/route/receipt bindings and cross-run paid-call
-quotas, and qualify the flow through PostgreSQL with synthetic providers.
+Dispatch and export now bind their row limits to the corpus version: 60 for
+screening/cache and three for the prepared pilot. PostgreSQL qualification with
+synthetic ledger rows rejects two/four-call pilot batches and queues exactly one
+outbox event for three calls. This does not qualify HTTP admission of the pilot.
+
+Before enabling central admission, preserve message/route/receipt bindings and
+cross-run paid-call quotas and qualify the complete admission flow through
+PostgreSQL with synthetic providers.
 Then bind the actual response to evaluator-owned oracle execution in the
 authorized sandbox. A single case can describe a pilot result only; it cannot
 establish general software engineering model quality.
