@@ -1,17 +1,11 @@
 [Unit]
-Description=ITBEM AI agent role lane (%i)
+Description=ITBEM AI agent missing workspace provisioning (%i)
 After=network-online.target
-After=itbem-ai-agent-provision@%i.service
-Requires=itbem-ai-agent-provision@%i.service
 Wants=network-online.target
-# A gateway/DNS outage must not leave a 24/7 lane permanently failed after a
-# small burst of harmless preflight attempts.  Every retry still starts with
-# the authorized provisioning and preflights below; use a paced retry rather than a start-rate
-# lockout that needs an operator to reset it.
-StartLimitIntervalSec=0
 
 [Service]
-Type=simple
+Type=oneshot
+TimeoutStartSec=600s
 User=itbem-agent-%i
 Group=itbem-agent-%i
 UMask=0077
@@ -23,19 +17,10 @@ Environment=ITBEM_AI_STATE_DIR=/var/lib/itbem-ai-agent/%i
 Environment=GIT_OPTIONAL_LOCKS=0
 EnvironmentFile=/etc/itbem-ai-agent/common.env
 EnvironmentFile=/etc/itbem-ai-agent/roles/%i.env
+EnvironmentFile=-/etc/itbem-ai-agent/roles/%i.source.env
 ExecCondition=/usr/bin/test ! -e /etc/itbem-ai-agent/disabled/all
 ExecCondition=/usr/bin/test ! -e /etc/itbem-ai-agent/disabled/%i
-ExecStartPre=/opt/itbem-ai-agent/current/itbem-ai-agent --ensure-registered
-ExecStartPre=/opt/itbem-ai-agent/current/itbem-ai-agent --doctor
-ExecStartPre=/opt/itbem-ai-agent/current/itbem-ai-agent --runtime-auth-probe
-ExecStartPre=/opt/itbem-ai-agent/current/itbem-ai-agent --provider-auth-probe
-ExecStartPre=/opt/itbem-ai-agent/current/itbem-ai-agent --github-auth-probe
-ExecStart=/opt/itbem-ai-agent/current/itbem-ai-agent
-Restart=on-failure
-RestartSec=60s
-TimeoutStartSec=600s
-TimeoutStopSec=60s
-KillSignal=SIGTERM
+ExecStart=/opt/itbem-ai-agent/current/itbem-ai-agent --provision-workspaces
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
@@ -60,9 +45,6 @@ LockPersonality=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
 ReadWritePaths=/var/lib/itbem-ai-agent/%i /srv/itbem-agent-workspaces/%i
-TasksMax=512
+TasksMax=256
 LimitNOFILE=65536
-MemoryMax=4G
-
-[Install]
-WantedBy=multi-user.target
+MemoryMax=2G

@@ -7,9 +7,9 @@ repositories must never share a writable task tree.
 
 ## Implemented foundation
 
-- Systemd provisions missing checkouts from the existing trusted registry before
+- A dedicated deterministic systemd dependency provisions missing checkouts from the existing trusted registry before
   doctor runs. Existing local changes and task branches are preserved.
-- Delivery prepares selected registered repositories before inference, using the
+- Implementation prepares selected registered repositories before inference, using the
   dedicated contents-read Source App and frozen full commit SHAs.
 - Preparation can create missing managed bases without requiring unrelated,
   unselected checkouts to exist.
