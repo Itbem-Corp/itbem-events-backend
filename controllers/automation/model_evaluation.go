@@ -285,6 +285,8 @@ func GetModelEvaluation(c echo.Context) error {
 		ActualModel         string     `json:"actual_model"`
 		InputTokens         int64      `json:"input_tokens"`
 		OutputTokens        int64      `json:"output_tokens"`
+		ResponseSHA256      *string    `json:"response_sha256"`
+		ResponseBytes       *int64     `json:"response_bytes"`
 		CachedInputTokens   *int64     `json:"cached_input_tokens"`
 		CacheWriteTokens    *int64     `json:"cache_write_tokens"`
 		ReasoningTokens     *int64     `json:"reasoning_tokens"`
@@ -331,6 +333,7 @@ func GetModelEvaluation(c echo.Context) error {
 	}
 	for i := range calls {
 		calls[i].CachedInputTokens, calls[i].ReasoningTokens, calls[i].CacheWriteTokens = evaluationOptionalUsage(calls[i].ActualProvider, calls[i].ActualModel, calls[i].UsageJSON)
+		calls[i].ResponseSHA256, calls[i].ResponseBytes = recordedInferenceResponseBinding(calls[i].UsageJSON)
 	}
 	return utils.Success(c, http.StatusOK, "Evaluation provenance", map[string]any{"batch": batch, "calls": calls})
 }

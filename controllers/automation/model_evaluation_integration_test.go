@@ -442,6 +442,13 @@ func testEvaluationAdmissionAndDispatch(t *testing.T, db *gorm.DB, version strin
 			require.Equal(t, route.Model, receipt.Model)
 			require.Equal(t, int64(10), receipt.InputTokens)
 			require.Equal(t, int64(20), receipt.OutputTokens)
+			responseHash, responseBytes := recordedInferenceResponseBinding(receipt.UsageJSON)
+			require.NotNil(t, responseHash)
+			require.NotNil(t, responseBytes)
+			require.Equal(t, modelevaluation.Digest([]byte(`{"ok":true}`)), *responseHash)
+			require.Equal(t, int64(len(`{"ok":true}`)), *responseBytes)
+			require.NotContains(t, receipt.UsageJSON, `{"ok":true}`)
+			require.Error(t, db.Model(&receipt).Update("usage_json", `{}`).Error, "resolved response binding must remain immutable")
 			require.Positive(t, receipt.TotalCostMicros)
 			require.LessOrEqual(t, receipt.TotalCostMicros, binding.ReservationMicros)
 			require.NoError(t, db.Model(&task).Update("status", "completed").Error)
@@ -472,6 +479,8 @@ func testEvaluationAdmissionAndDispatch(t *testing.T, db *gorm.DB, version strin
 					OutputTokens    int64     `json:"output_tokens"`
 					TotalCostMicros int64     `json:"total_cost_microusd"`
 					PolicyHash      string    `json:"policy_hash"`
+					ResponseSHA256  *string   `json:"response_sha256"`
+					ResponseBytes   *int64    `json:"response_bytes"`
 				} `json:"calls"`
 			} `json:"data"`
 		}
@@ -498,6 +507,10 @@ func testEvaluationAdmissionAndDispatch(t *testing.T, db *gorm.DB, version strin
 			require.Equal(t, receipt.OutputTokens, outcome.OutputTokens)
 			require.Equal(t, receipt.TotalCostMicros, outcome.TotalCostMicros)
 			require.Equal(t, receipt.PolicySnapshotHash, outcome.PolicyHash)
+			require.NotNil(t, outcome.ResponseSHA256)
+			require.NotNil(t, outcome.ResponseBytes)
+			require.Equal(t, modelevaluation.Digest([]byte(`{"ok":true}`)), *outcome.ResponseSHA256)
+			require.Equal(t, int64(len(`{"ok":true}`)), *outcome.ResponseBytes)
 		}
 		require.NotContains(t, exportedResponse.Body.String(), frozenPilotPrompt)
 		require.NotContains(t, exportedResponse.Body.String(), "must-not-be-read")

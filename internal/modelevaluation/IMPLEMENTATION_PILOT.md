@@ -86,3 +86,13 @@ digest must match before Docker runs. It retains the raw response SHA-256 with
 the output and lease, and removes its temporary directory afterward. It does
 not modify the caller workspace or authorize a task. CI exercises synthetic
 fixture/reference responses; no actual provider response has been run yet.
+
+New observed gateway receipts retain `_itbem_response` metadata in the immutable
+usage ledger: version `utf8-final-answer-v1`, SHA-256 of the exact final-answer
+UTF-8 bytes, and byte length. The gateway computes this after discarding
+provider-supplied bindings; it never copies the answer body into the ledger.
+Evaluation export exposes nullable `response_sha256` and `response_bytes`.
+Historical, malformed or unavailable bindings stay null. Compare the retained
+response bytes and execution response hash with this digest before attributing
+an oracle outcome to a receipt. This digest identifies the gateway-observed
+answer, not the provider HTTP body or a normalized/reserialized patch.
