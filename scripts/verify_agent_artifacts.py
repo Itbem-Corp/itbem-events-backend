@@ -10,6 +10,7 @@ import subprocess
 from evaluation_report import decode_json, publish_report
 from verify_implementation_benchmark import SUBTESTS
 from verify_implementation_sandbox import verify as verify_sandbox, verify_inner
+from verify_implementation_oracle import verify as verify_oracle
 
 ROOT = Path(__file__).resolve().parents[1]
 CASE = 'internal/automationagent/testdata/implementation/pagination-v1/'
@@ -135,6 +136,11 @@ def verify(revision, regression, runtime, binaries, go):
     published = decode_json((runtime / 'implementation-sandbox.json').read_text())
     if published != sandbox:
         raise ValueError('Published inner sandbox report differs from independent replay.')
+    oracle = None
+    if b'python3 scripts/verify_implementation_oracle.py ' in workflow:
+        oracle = verify_oracle((runtime / 'sandbox-integration.jsonl').read_bytes(), count)
+        if decode_json((runtime / 'implementation-oracle.json').read_text()) != oracle:
+            raise ValueError('Published oracle execution report differs from independent replay.')
     return {'schema_version': 1, 'artifact_source_revision': revision,
             'evaluator_revision': git('rev-parse', 'HEAD').decode().strip(),
             'evaluator_worktree_clean': not bool(git('status', '--porcelain')),
@@ -143,7 +149,8 @@ def verify(revision, regression, runtime, binaries, go):
             'artifact_origin_authenticated': False, 'model_quality_measured': False,
             'workflow_sha256': hashlib.sha256(workflow).hexdigest(), 'logs': logs,
             'implementation_controls': verify_controls((regression / 'implementation-controls.json').read_bytes(), revision),
-            'sandbox_repetitions': count, 'binaries': verify_binaries(binaries)}
+            'sandbox_repetitions': count, 'oracle_execution_controls': oracle,
+            'binaries': verify_binaries(binaries)}
 
 
 if __name__ == '__main__':

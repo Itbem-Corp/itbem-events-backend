@@ -3,9 +3,12 @@ import argparse
 import hashlib
 from pathlib import Path
 import re
+import uuid
 
 from evaluation_report import decode_json, publish_report
 from verify_implementation_benchmark import SUBTESTS
+from prepare_implementation_candidate import package_worktree_digest
+from prepare_implementation_evaluation import CASE
 
 PACKAGE = 'events-stocks/internal/automationagent'
 TEST = 'TestDockerSandboxRoundTrip'
@@ -49,16 +52,18 @@ def verify_inner(events, expected):
         raise ValueError('Missing inner package completion.')
 
 
-def verify(raw, repetitions=2):
+def verify(raw, repetitions=2, *, oracle_entry=False):
     if type(repetitions) is not int or repetitions < 1:
         raise ValueError('Positive repetition count required.')
     output, completed, running = '', [], False
-    leases = set()
+    leases, tasks = set(), set()
+    test_name = 'TestImplementationPilotOracleDockerRoundTrip' if oracle_entry else TEST
+    marker = 'implementation oracle execution evidence: ' if oracle_entry else MARKER
     for line in raw.decode('utf-8').splitlines():
         event = decode_json(line)
         if not isinstance(event, dict):
             raise ValueError('Go evidence event must be an object.')
-        if event.get('Package') != PACKAGE or event.get('Test') != TEST:
+        if event.get('Package') != PACKAGE or event.get('Test') != test_name:
             continue
         action = event.get('Action')
         if action == 'run':
@@ -74,8 +79,8 @@ def verify(raw, repetitions=2):
                 raise ValueError('Sandbox test must complete without failure or skip.')
             controls = []
             for text in output.splitlines():
-                if MARKER in text:
-                    controls.append(decode_json(text.split(MARKER, 1)[1]))
+                if marker in text:
+                    controls.append(decode_json(text.split(marker, 1)[1]))
             if len(controls) != 2 or {c.get('control') for c in controls} != {'fixture', 'reference'}:
                 raise ValueError('Each repetition requires both implementation controls.')
             for control in controls:
@@ -83,7 +88,8 @@ def verify(raw, repetitions=2):
                 lease = control.get('sandbox_lease', {})
                 if (control.get('case') != 'pagination-v1' or control.get('model_quality_measured') is not False
                         or lease.get('runtime') != 'docker' or lease.get('isolation_mode') != 'docker_container'
-                        or lease.get('status') != 'completed' or lease.get('task_id') != 'implementation-control-' + name
+                        or lease.get('status') != 'completed'
+                        or (not oracle_entry and lease.get('task_id') != 'implementation-control-' + name)
                         or not re.fullmatch(r'sha256:[0-9a-f]{64}', lease.get('worktree_digest', ''))
                         or not lease.get('started_at') or not lease.get('finished_at')
                         or not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', lease.get('lease_id', ''))):
@@ -91,6 +97,21 @@ def verify(raw, repetitions=2):
                 if lease['lease_id'] in leases:
                     raise ValueError('Reused Docker control lease.')
                 leases.add(lease['lease_id'])
+                if oracle_entry:
+                    try:
+                        task = uuid.UUID(lease.get('task_id', ''))
+                    except (ValueError, AttributeError, TypeError):
+                        raise ValueError('Oracle execution requires a task UUID.') from None
+                    if task.int == 0 or uuid.UUID(lease['lease_id']).int == 0 or str(task) != lease['task_id'] or task in tasks:
+                        raise ValueError('Reused or invalid oracle task UUID.')
+                    tasks.add(task)
+                    sources = {'go.mod': 'fixture/go.mod', 'page.go': name + '/page.go',
+                               'store.go': name + '/store.go', 'page_test.go': 'oracle/page_test.go'}
+                    files = {path: (CASE / source).read_bytes().decode('utf-8').replace('\r\n', '\n')
+                             for path, source in sources.items()}
+                    if (lease['worktree_digest'] != package_worktree_digest(files)
+                            or control.get('provider_provenance_authenticated') is not False):
+                        raise ValueError('Oracle execution does not bind evaluator source bytes.')
                 inner = [decode_json(row) for row in control['output'].splitlines()]
                 verify_inner(inner, 'pass' if name == 'reference' else 'fail')
                 passed = [e.get('Test') for e in inner if e.get('Action') == 'pass']
@@ -107,10 +128,13 @@ def verify(raw, repetitions=2):
             running = False
     if running or len(completed) != repetitions:
         raise ValueError('Incomplete sandbox repetition evidence.')
-    return {'schema_version': 1, 'case': 'pagination-v1', 'sandbox_controls_verified': True,
+    report = {'schema_version': 1, 'case': 'pagination-v1', 'sandbox_controls_verified': True,
             'repetitions': repetitions, 'controls': completed,
             'input_sha256': hashlib.sha256(raw).hexdigest(), 'model_quality_measured': False,
             'provenance_authenticated': False}
+    if oracle_entry:
+        report['oracle_execution_entry_verified'] = True
+    return report
 
 
 if __name__ == '__main__':

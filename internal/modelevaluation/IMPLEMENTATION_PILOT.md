@@ -68,3 +68,12 @@ authorization and authenticates no provider response. CI executes this entry
 point twice with the defective fixture and reference, requiring rejection of
 the fixture and all eight reference oracle cases. Actual model candidates have
 not yet been executed through it.
+
+`scripts/verify_implementation_oracle.py` independently reconstructs the retained
+execution test output. Each repetition requires fixture and reference controls,
+unique nonzero task UUIDs and leases, exact source digests reconstructed from
+the benchmark, completed isolated Docker execution and ordered oracle outcomes.
+The reference must pass all eight cases and the fixture must fail its defect.
+CI publishes this report and artifact replay recomputes it from the downloaded
+log. The report continues to state that model quality and provider provenance
+are unverified.
