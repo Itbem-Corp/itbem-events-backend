@@ -26,6 +26,28 @@ type CommandClaim struct {
 	Passed    *bool  `json:"passed"`
 }
 
+// DecodeReportClaims extracts model-produced claims from the original narrative
+// report. Validate the complete envelope before extraction so duplicate fields
+// cannot disappear during normalization. Narrative fields are not scored here.
+func DecodeReportClaims(payload []byte) (Claims, error) {
+	if len(payload) == 0 || len(payload) > maxInputBytes {
+		return Claims{}, fmt.Errorf("QA report size is invalid")
+	}
+	if err := validateJSONIntegrity(payload); err != nil {
+		return Claims{}, err
+	}
+	var report struct {
+		Claims json.RawMessage `json:"claims"`
+	}
+	if err := json.Unmarshal(payload, &report); err != nil {
+		return Claims{}, fmt.Errorf("decode QA report claims: %w", err)
+	}
+	if len(report.Claims) == 0 || bytes.Equal(bytes.TrimSpace(report.Claims), []byte("null")) {
+		return Claims{}, fmt.Errorf("QA report requires explicit structured claims")
+	}
+	return DecodeClaims(report.Claims)
+}
+
 func DecodeClaims(payload []byte) (Claims, error) {
 	if len(payload) == 0 || len(payload) > maxInputBytes {
 		return Claims{}, fmt.Errorf("QA claims size is invalid")

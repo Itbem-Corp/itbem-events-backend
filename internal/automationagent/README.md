@@ -423,6 +423,26 @@ execution completeness, not model quality or cryptographic source provenance.
 
 `go run ./cmd/score-qa-grounding -observation observation.json -claims claims.json -output score.json` compares a schema-2 `qaevidence.Observation` with separately supplied model claims. Claims schema 1 contains task_id, matrix_digest, preview_passed, verdict and a commands array. Each command requires reference, explicit index, phase, kind and explicit passed. It must match a recorded command, and all recorded commands must be covered exactly once. Command order may differ. Verdict is passed only if preview and every observed command passed; otherwise it must be failed.
 
-The command exits 0 for correspondence, 1 for invalid/mismatched input, and 2 for invocation/output errors. JSON retains failed verdicts and input SHA-256 hashes. The optional output file must be new: The command writes, syncs and closes a temporary file in the destination directory before publishing it with a hard link that cannot replace an existing path. This prevents partial final scores and protects prior evidence, input files and link aliases. The destination filesystem must support hard links; otherwise publication fails explicitly. Use a fresh score path per evaluation. Inputs are bounded to 64 KiB. Both QA observation and claims decoders reject duplicate object fields (including escaped names and case aliases), multiple documents and nesting beyond 64 levels before typed validation. Observations also require explicit preview results and explicit command index/result fields; omitted or null values cannot masquerade as observed false or zero. This evaluator checks supplied structured claims; it does not authenticate local files, judge prose, authorize a release or replace the runtime QA guard. Obtain observations from the trusted ledger. Existing narrative QA responses need an explicit claims projection before they can be evaluated; they are not silently interpreted as this schema. No provider call is made.
+The command exits 0 for correspondence, 1 for invalid/mismatched input, and 2 for invocation/output errors. JSON retains failed verdicts and input SHA-256 hashes. The optional output file must be new: The command writes, syncs and closes a temporary file in the destination directory before publishing it with a hard link that cannot replace an existing path. This prevents partial final scores and protects prior evidence, input files and link aliases. The destination filesystem must support hard links; otherwise publication fails explicitly. Use a fresh score path per evaluation. Inputs are bounded to 64 KiB. Both QA observation and claims decoders reject duplicate object fields (including escaped names and case aliases), multiple documents and nesting beyond 64 levels before typed validation. Observations also require explicit preview results and explicit command index/result fields; omitted or null values cannot masquerade as observed false or zero. This evaluator checks supplied structured claims; it does not authenticate local files, judge prose, authorize a release or replace the runtime QA guard. Obtain observations from the trusted ledger. Standalone evaluation requires explicit structured claims; it never infers them from prose. No provider call is made.
 
 Build AI Agent now includes qaevidence and score-qa-grounding in its three-repetition JSONL regression gate, with both package completions required by verify-test-evidence.
+
+### Grounding the worker QA report
+
+When QA captures a ledger observation, the worker requests an explicit top-level
+`claims` object in the model report, using claims schema 1 above. The worker
+validates the original model JSON before persistence sanitization can erase
+ambiguous duplicate fields. It compares model-produced claims with the captured
+observation before promoting the narrative to `structured_result`. Missing,
+malformed, invented or mismatched claims withhold that structured report.
+
+The private result retains the sanitized model response, usage, independently
+observed execution and `qa_grounding` diagnostics: `score_kind` is
+`structured_qa_grounding`, and `status` is `passed`, `failed` or `unavailable`.
+Historical contexts without a ledger remain unavailable for grounding; their
+ordinary narrative validation still applies. Grounding success is correspondence,
+not a passing QA verdict. Existing preview, semantic, screenshot, defect and
+coverage guards still apply. A rejected narrative does not erase completed QA,
+repeat a billable call, approve a gate or authorize release. Recovery reuses the
+saved result and canonical observation. These checks do not evaluate prose truth
+or certify model quality; deterministic worker fixtures use a fake provider.
