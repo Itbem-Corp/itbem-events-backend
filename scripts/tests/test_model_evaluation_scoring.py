@@ -37,6 +37,12 @@ def fixture(corpus=CORPUS):
 
 
 class ScoringTests(unittest.TestCase):
+    def test_task_identity_cannot_hide_reuse_with_padding(self):
+        evidence = fixture()
+        evidence['calls'][1]['task_id'] = ' ' + evidence['calls'][0]['task_id'] + ' '
+        with self.assertRaisesRegex(ValueError, 'task identity'):
+            score(CORPUS, evidence)
+
     def test_receipt_run_identity_survives_recovery_and_legacy_remains_unknown(self):
         evidence = fixture()
         legacy = score(CORPUS, evidence)['results']['minimax-m3']

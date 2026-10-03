@@ -56,7 +56,7 @@ def score(corpus, evidence):
             raise ValueError('Unexpected or duplicate case/candidate binding.')
         seen.add(key)
         task_id = call.get('task_id')
-        if not isinstance(task_id, str) or not task_id.strip() or task_id in task_ids:
+        if not isinstance(task_id, str) or not task_id.strip() or task_id != task_id.strip() or task_id in task_ids:
             raise ValueError('Missing or duplicate task identity.')
         task_ids.add(task_id)
         for field, recorded in outcome_ids.items():
