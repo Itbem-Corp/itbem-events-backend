@@ -22,10 +22,11 @@ def evidence():
     return values
 
 
-def oracle_log(values):
-    output = ''.join('test.go:1: implementation oracle execution evidence: ' + json.dumps(value) + '\n'
+def oracle_log(values, test='TestImplementationPilotOracleDockerRoundTrip',
+               marker='implementation oracle execution evidence: '):
+    output = ''.join('test.go:1: ' + marker + json.dumps(value) + '\n'
                      for value in values)
-    identity = {'Package': PACKAGE, 'Test': 'TestImplementationPilotOracleDockerRoundTrip'}
+    identity = {'Package': PACKAGE, 'Test': test}
     events = [dict(identity, Action='run')]
     events += [dict(identity, Action='output', Output=output[index:index+31])
                for index in range(0, len(output), 31)]

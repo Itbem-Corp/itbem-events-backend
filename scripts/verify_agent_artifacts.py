@@ -11,6 +11,7 @@ from evaluation_report import decode_json, publish_report
 from verify_implementation_benchmark import SUBTESTS
 from verify_implementation_sandbox import verify as verify_sandbox, verify_inner
 from verify_implementation_oracle import verify as verify_oracle
+from verify_implementation_candidate_execution import verify as verify_candidate
 
 ROOT = Path(__file__).resolve().parents[1]
 CASE = 'internal/automationagent/testdata/implementation/pagination-v1/'
@@ -141,6 +142,11 @@ def verify(revision, regression, runtime, binaries, go):
         oracle = verify_oracle((runtime / 'sandbox-integration.jsonl').read_bytes(), count)
         if decode_json((runtime / 'implementation-oracle.json').read_text()) != oracle:
             raise ValueError('Published oracle execution report differs from independent replay.')
+    candidate = None
+    if b'python3 scripts/verify_implementation_candidate_execution.py ' in workflow:
+        candidate = verify_candidate((runtime / 'sandbox-integration.jsonl').read_bytes(), count)
+        if decode_json((runtime / 'implementation-candidate-execution.json').read_text()) != candidate:
+            raise ValueError('Published candidate execution report differs from independent replay.')
     return {'schema_version': 1, 'artifact_source_revision': revision,
             'evaluator_revision': git('rev-parse', 'HEAD').decode().strip(),
             'evaluator_worktree_clean': not bool(git('status', '--porcelain')),
@@ -150,6 +156,7 @@ def verify(revision, regression, runtime, binaries, go):
             'workflow_sha256': hashlib.sha256(workflow).hexdigest(), 'logs': logs,
             'implementation_controls': verify_controls((regression / 'implementation-controls.json').read_bytes(), revision),
             'sandbox_repetitions': count, 'oracle_execution_controls': oracle,
+            'candidate_execution_controls': candidate,
             'binaries': verify_binaries(binaries)}
 
 

@@ -26,6 +26,7 @@ on:
       - scripts/verify_implementation_benchmark.py
       - scripts/verify_implementation_sandbox.py
       - scripts/verify_implementation_oracle.py
+      - scripts/verify_implementation_candidate_execution.py
       - scripts/verify_agent_artifacts.py
       - scripts/evaluation_report.py
       - scripts/Test-AgentHarness.ps1
@@ -60,6 +61,7 @@ on:
       - scripts/verify_implementation_benchmark.py
       - scripts/verify_implementation_sandbox.py
       - scripts/verify_implementation_oracle.py
+      - scripts/verify_implementation_candidate_execution.py
       - scripts/verify_agent_artifacts.py
       - scripts/evaluation_report.py
       - scripts/Test-AgentHarness.ps1
@@ -149,6 +151,7 @@ jobs:
           go run ./cmd/verify-test-evidence -log sandbox-integration.jsonl -repetitions 2 -package events-stocks/internal/automationagent -test TestDockerSandboxRoundTrip -test TestImplementationPilotOracleDockerRoundTrip -test TestImplementationCandidateResponseDockerRoundTrip -test TestReadSafeWorkspaceArtifactRejectsSymlink -test TestSandboxWorktreeDigestMatchesPythonSupervisor
           python3 scripts/verify_implementation_sandbox.py --log sandbox-integration.jsonl --repetitions 2 --output implementation-sandbox.json
           python3 scripts/verify_implementation_oracle.py --log sandbox-integration.jsonl --repetitions 2 --output implementation-oracle.json
+          python3 scripts/verify_implementation_candidate_execution.py --log sandbox-integration.jsonl --repetitions 2 --output implementation-candidate-execution.json
       - name: Preserve integration evidence on success or failure
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -158,6 +161,7 @@ jobs:
             *-integration.jsonl
             implementation-sandbox.json
             implementation-oracle.json
+            implementation-candidate-execution.json
           if-no-files-found: warn
           retention-days: 7
 

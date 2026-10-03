@@ -96,3 +96,9 @@ Historical, malformed or unavailable bindings stay null. Compare the retained
 response bytes and execution response hash with this digest before attributing
 an oracle outcome to a receipt. This digest identifies the gateway-observed
 answer, not the provider HTTP body or a normalized/reserialized patch.
+
+### Candidate execution control replay
+
+CI retains `implementation-candidate-execution.json` and independently reconstructs it from the Go JSONL log during artifact replay. `scripts/verify_implementation_candidate_execution.py` requires both fixture and reference executions in every repetition, unique nonzero task/lease UUIDs, exact frozen source digests, and the SHA256 of the exact synthetic Go JSON response envelope (including Go HTML escaping). A substituted or absent response hash fails verification. The defective fixture must fail the oracle and the reference must pass every required case.
+
+These are controlled synthetic response executions. This report leaves model quality and provider provenance unmeasured; an actual model answer must still be retained and matched to its gateway receipt before its correctness or cost can be attributed to a model.
