@@ -33,7 +33,6 @@ func TestQAReportGroundingRequiresObservedModelClaims(t *testing.T) {
 		{"null ledger", base + `}`, map[string]any{"ledger_observation": nil}, false, "failed"},
 		{"historical", base + `}`, map[string]any{}, true, "unavailable"},
 		{"ambiguous", base + `,"claims":` + read("grounded-claims") + `,"CLAIMS":` + read("grounded-claims") + `}`, map[string]any{"ledger_observation": observation}, false, "failed"},
-		{"semantic failure", strings.Replace(base, `"verdict":"failed"`, `"verdict":"passed"`, 1) + `,"claims":` + read("grounded-claims") + `}`, map[string]any{"ledger_observation": observation, "semantic": map[string]any{"passed": false}}, false, "failed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			report, score := qaReportWithGrounding(tc.content, tc.execution)
@@ -42,6 +41,36 @@ func TestQAReportGroundingRequiresObservedModelClaims(t *testing.T) {
 			}
 			if report != nil && tc.status == "passed" && report["verdict"] != "failed" {
 				t.Fatal("grounding success changed failed QA verdict")
+			}
+		})
+	}
+	// All claims and narrative checks pass here. Each negative case must fail
+	// solely because the separate runtime semantic/screenshot evidence failed.
+	for _, repository := range observation["repositories"].([]any) {
+		for _, command := range repository.(map[string]any)["commands"].([]any) {
+			command.(map[string]any)["passed"] = true
+		}
+	}
+	passingClaims := strings.ReplaceAll(read("grounded-claims"), `"passed": false`, `"passed": true`)
+	passingClaims = strings.Replace(passingClaims, `"verdict": "failed"`, `"verdict": "passed"`, 1)
+	passingReport := strings.ReplaceAll(base, `"failed"`, `"passed"`) + `,"claims":` + passingClaims + `}`
+	for _, failure := range []string{"none", "semantic", "screenshot"} {
+		t.Run("runtime guard/"+failure, func(t *testing.T) {
+			execution := map[string]any{
+				"ledger_observation": observation,
+				"preview":            map[string]any{"passed": true},
+				"repository_runs":    []any{map[string]any{"commands": []any{map[string]any{"passed": true}}}},
+			}
+			if failure != "none" {
+				execution[failure] = map[string]any{"passed": false}
+			}
+			report, score := qaReportWithGrounding(passingReport, execution)
+			if failure == "none" {
+				if report == nil || score["status"] != "passed" {
+					t.Fatalf("valid control failed: %v", score)
+				}
+			} else if report != nil || score["status"] != "failed" {
+				t.Fatalf("grounded claims overrode %s failure: %v", failure, score)
 			}
 		})
 	}
