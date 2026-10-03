@@ -32,6 +32,10 @@ func TestVerifyExecutionEvidence(t *testing.T) {
 		{"required omission", run + pass + run + skip + done, 2, true, []string{"TestProof"}, false},
 		{"all omitted", run + skip + done, 1, true, nil, false},
 		{"pass without execution", pass + done, 1, false, nil, false},
+		{"result before execution with balanced totals", pass + run + done, 1, false, nil, false},
+		{"overlapping executions with balanced totals", run + run + pass + pass + done, 2, false, nil, false},
+		{"duplicate result before next execution", run + pass + pass + run + done, 2, false, nil, false},
+		{"skip before execution with balanced totals", skip + run + run + pass + done, 2, true, nil, false},
 		{"fail despite package pass", run + `{"Action":"fail","Package":"example/pkg","Test":"TestProof"}` + "\n" + done, 1, false, nil, false},
 		{"wrong package", strings.ReplaceAll(run+pass+done, "example/pkg", "other/pkg"), 1, false, nil, false},
 	} {

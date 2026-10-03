@@ -478,3 +478,12 @@ LASTEXITCODE=1 del último caso negativo. El script ahora establece cero solo
 al terminar todas las verificaciones y la limpieza; las excepciones continúan
 fallando. Se reprodujo el wrapper de Actions localmente y pasó con salida cero.
 La suite completa local sigue en curso; no se declara validación final.
+
+### Orden de ejecución en evidencia JSONL
+
+El verificador ahora rechaza resultados antes de ejecutar, ejecuciones
+superpuestas y resultados duplicados aunque los totales finales coincidan.
+Cuatro casos adversariales adicionales pasaron en tres repeticiones; go vet
+pasó. La evidencia real LocalStack (dos repeticiones) y la suite anterior de
+siete paquetes (tres repeticiones) siguen siendo aceptadas con esta validación.
+Estas comprobaciones prueban consistencia del log, no autenticidad criptográfica.

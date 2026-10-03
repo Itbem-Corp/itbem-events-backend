@@ -16,7 +16,10 @@ func (n *names) String() string         { return fmt.Sprint([]string(*n)) }
 func (n *names) Set(value string) error { *n = append(*n, value); return nil }
 
 type event struct{ Action, Package, Test string }
-type executions struct{ runs, passes, skips int }
+type executions struct {
+	runs, passes, skips int
+	active              bool
+}
 
 func verify(reader io.Reader, packages, requiredTests []string, repetitions int, allowSkips bool) error {
 	if repetitions < 1 || len(packages) == 0 {
@@ -69,10 +72,22 @@ func verify(reader io.Reader, packages, requiredTests []string, repetitions int,
 		state := tests[row.Package][row.Test]
 		switch row.Action {
 		case "run":
+			if state.active {
+				return fmt.Errorf("overlapping executions: %s %s", row.Package, row.Test)
+			}
+			state.active = true
 			state.runs++
 		case "pass":
+			if !state.active {
+				return fmt.Errorf("result without active execution: %s %s", row.Package, row.Test)
+			}
+			state.active = false
 			state.passes++
 		case "skip":
+			if !state.active {
+				return fmt.Errorf("result without active execution: %s %s", row.Package, row.Test)
+			}
+			state.active = false
 			state.skips++
 		}
 	}
