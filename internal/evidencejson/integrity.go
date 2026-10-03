@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // Validate rejects duplicate keys, Unicode case aliases, excess nesting and multiple documents.
@@ -14,6 +15,9 @@ import (
 // Go's struct decoder accepts repeated keys and case-insensitive field aliases.
 // Reject ambiguous objects before decoding either side of a comparison.
 func Validate(payload []byte) error {
+	if !utf8.Valid(payload) {
+		return fmt.Errorf("evidence JSON contains invalid UTF-8")
+	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	var value func(int) error
 	value = func(depth int) error {

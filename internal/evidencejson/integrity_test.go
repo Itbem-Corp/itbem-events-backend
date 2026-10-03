@@ -6,6 +6,17 @@ import (
 )
 
 func TestValidateEvidenceJSON(t *testing.T) {
+	for _, input := range [][]byte{
+		append([]byte("{\"kind\":\""), append([]byte{0xff}, []byte("\"}")...)...),
+		append([]byte("{\""), append([]byte{0xff}, []byte("\":true}")...)...),
+	} {
+		if err := Validate(input); err == nil {
+			t.Fatalf("invalid UTF-8 evidence accepted: %x", input)
+		}
+	}
+	if err := Validate([]byte("{\"text\":\"válido \\uFFFD\"}")); err != nil {
+		t.Fatalf("valid Unicode evidence rejected: %v", err)
+	}
 	for _, input := range []string{
 		`{"decision":"approved","decision":"rejected"}`,
 		`{"decision":"approved","DECISION":"rejected"}`,

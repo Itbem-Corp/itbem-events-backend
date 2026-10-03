@@ -466,4 +466,4 @@ negation or cross-gate keyword matches from becoming a displayed gate outcome.
 It does not verify executive prose, authenticate supplied local evidence, make a
 human decision or authorize release. Recovery reuses the recorded result without
 another inference call. Both QA and summary parsing share evidencejson's duplicate
-key, Unicode alias, nesting and single-document validation.
+key, Unicode alias, nesting and single-document validation. Invalid UTF-8 bytes are rejected before Go can replace them during decoding; valid Unicode text remains accepted.
