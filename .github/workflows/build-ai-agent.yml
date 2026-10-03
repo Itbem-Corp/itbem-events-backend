@@ -22,6 +22,8 @@ on:
       - services/automationcost/**
       - services/deliveryplansteps/**
       - services/deliveryworkflow/**
+      - scripts/verify_implementation_benchmark.py
+      - scripts/evaluation_report.py
       - scripts/Test-AgentHarness.ps1
       - scripts/Test-AgentHarnessIsolation.ps1
       - scripts/Score-HarnessSemantics.ps1
@@ -50,6 +52,8 @@ on:
       - services/automationcost/**
       - services/deliveryplansteps/**
       - services/deliveryworkflow/**
+      - scripts/verify_implementation_benchmark.py
+      - scripts/evaluation_report.py
       - scripts/Test-AgentHarness.ps1
       - scripts/Test-AgentHarnessIsolation.ps1
       - scripts/Score-HarnessSemantics.ps1
@@ -173,6 +177,8 @@ jobs:
           node --check tools/stagehand-qa/run.mjs
           node --test tools/stagehand-qa/run.test.mjs
 
+      - name: Verify multi-file implementation evaluator controls
+        run: python3 scripts/verify_implementation_benchmark.py --output implementation-controls.json
       - name: Test canonical Go worker and command
         shell: bash
         run: |
@@ -185,7 +191,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ai-agent-regression-evidence
-          path: agent-regression.jsonl
+          path: |
+            agent-regression.jsonl
+            implementation-controls.json
           if-no-files-found: warn
           retention-days: 7
 

@@ -21,3 +21,9 @@ A future model run must retain source revision, prompt, original patch, route,
 receipt, usage and costs. Execute candidate code only through the existing
 authorized isolated sandbox. Local fixture/reference controls validate the
 evaluator; they do not measure model quality or authorize production changes.
+Run evaluator controls with pinned Go 1.25.13:
+python3 scripts/verify_implementation_benchmark.py --output <new-report.json>
+The output parent must exist. Reports use exclusive publication and retain source
+hashes, actual logs and exits. CI runs these controls before canonical regression
+and preserves implementation-controls.json alongside regression evidence.
+The runner accepts no candidate path and makes no provider calls.
