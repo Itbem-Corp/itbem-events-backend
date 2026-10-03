@@ -418,3 +418,11 @@ The build regression also includes the verifier package itself. Updating a test
 filter alone cannot turn missing integration cases into a successful evidence
 gate: the required test names must still be observed passing twice. This validates
 execution completeness, not model quality or cryptographic source provenance.
+
+### Compare structured QA claims with runtime observations
+
+`go run ./cmd/score-qa-grounding -observation observation.json -claims claims.json -output score.json` compares a schema-2 `qaevidence.Observation` with separately supplied model claims. Claims schema 1 contains task_id, matrix_digest, preview_passed, verdict and a commands array. Each command requires reference, explicit index, phase, kind and explicit passed. It must match a recorded command, and all recorded commands must be covered exactly once. Command order may differ. Verdict is passed only if preview and every observed command passed; otherwise it must be failed.
+
+The command exits 0 for correspondence, 1 for invalid/mismatched input, and 2 for invocation/output errors. JSON retains failed verdicts and input SHA-256 hashes. Inputs are bounded to 64 KiB. This evaluator checks supplied structured claims; it does not authenticate local files, judge prose, authorize a release or replace the runtime QA guard. Obtain observations from the trusted ledger. Existing narrative QA responses need an explicit claims projection before they can be evaluated; they are not silently interpreted as this schema. No provider call is made.
+
+Build AI Agent now includes qaevidence and score-qa-grounding in its three-repetition JSONL regression gate, with both package completions required by verify-test-evidence.
