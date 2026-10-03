@@ -469,3 +469,12 @@ en curso al preparar este registro. Su log es
 `../../../.local/harness-main-final-validation.jsonl`; no se declara verde
 antes de terminar. Se prepara un PR borrador para obtener evidencia de CI
 remoto; no se autoriza merge, despliegue ni inferencia real.
+
+### Corrección del código de salida en GitHub Actions
+
+El PR borrador #259 obtuvo integración LocalStack y pruebas Docker/POSIX
+verdes en CI. Los 57 casos semánticos también pasaron, pero el paso heredó
+LASTEXITCODE=1 del último caso negativo. El script ahora establece cero solo
+al terminar todas las verificaciones y la limpieza; las excepciones continúan
+fallando. Se reprodujo el wrapper de Actions localmente y pasó con salida cero.
+La suite completa local sigue en curso; no se declara validación final.

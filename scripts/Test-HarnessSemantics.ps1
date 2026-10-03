@@ -76,3 +76,8 @@ try {
     if (-not $resolvedRoot.StartsWith($resolvedTemp, [StringComparison]::OrdinalIgnoreCase)) { throw 'Refusing cleanup outside the temporary directory.' }
     Remove-Item -LiteralPath $resolvedRoot -Recurse -Force
 }
+
+# GitHub Actions propagates LASTEXITCODE from native commands after a script
+# returns. Negative scorer cases deliberately set it to 1; reaching here means
+# every expected verdict and exit code was verified successfully.
+$global:LASTEXITCODE = 0
