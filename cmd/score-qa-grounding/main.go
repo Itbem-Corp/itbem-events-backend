@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"events-stocks/internal/qaevidence"
 )
@@ -27,6 +28,32 @@ func readInput(path string) ([]byte, error) {
 		return nil, fmt.Errorf("input size must be 1..65536 bytes")
 	}
 	return data, nil
+}
+
+// Publish only completed evidence. A hard link atomically creates the final
+// name without replacing an existing file; interrupted writes retain no final
+// score. Filesystems lacking hard-link support fail explicitly.
+func writeScore(path string, payload []byte) error {
+	file, err := os.CreateTemp(filepath.Dir(path), ".qa-score-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(file.Name())
+	defer file.Close()
+	n, err := file.Write(payload)
+	if err != nil {
+		return err
+	}
+	if n != len(payload) {
+		return io.ErrShortWrite
+	}
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return os.Link(file.Name(), path)
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -99,17 +126,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	encoded = append(encoded, '\n')
 	if *outputPath != "" {
-		// Evidence is write-once: exclusive creation also protects input paths,
-		// hard-link aliases and symlinks from being overwritten by a score.
-		file, err := os.OpenFile(*outputPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-		if err != nil {
+		if err := writeScore(*outputPath, encoded); err != nil {
 			fmt.Fprintln(stderr, err)
-			return 2
-		}
-		_, writeErr := file.Write(encoded)
-		closeErr := file.Close()
-		if writeErr != nil || closeErr != nil {
-			fmt.Fprintln(stderr, "score output could not be completed", writeErr, closeErr)
 			return 2
 		}
 	}

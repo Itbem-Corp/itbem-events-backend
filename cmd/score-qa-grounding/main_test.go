@@ -141,3 +141,29 @@ func TestVersionedGroundingFixtures(t *testing.T) {
 		})
 	}
 }
+
+func TestScorePublicationPreservesCompletedEvidence(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "score.json")
+	payload := []byte("{\"passed\":false}\n")
+	if err := writeScore(path, payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeScore(path, []byte("replacement")); err == nil {
+		t.Fatal("existing evidence replaced")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(data, payload) {
+		t.Fatal("completed score changed")
+	}
+	if err := writeScore(root, payload); err == nil {
+		t.Fatal("directory output accepted")
+	}
+	if err := writeScore(filepath.Join(root, "missing", "score.json"), payload); err == nil {
+		t.Fatal("missing destination parent accepted")
+	}
+	temps, err := filepath.Glob(filepath.Join(root, ".qa-score-*"))
+	if err != nil || len(temps) != 0 {
+		t.Fatal("publication leaked temporary scores")
+	}
+}
