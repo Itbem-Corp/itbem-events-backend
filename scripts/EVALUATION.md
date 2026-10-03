@@ -1,5 +1,7 @@
 # Offline model evaluation reports
 
+`run_id` identifies the current task attempt, while `receipt_run_id` identifies the immutable attempt that made the gateway inference. Recovery may legitimately make them different. The scorer preserves both and rejects reused provider-run identities when supplied. Historical exports without `receipt_run_id` retain a null case value and contribute to `unknown_receipt_run_count`; the scorer never copies the current task ID to fill the missing evidence. Accepted new exports must supply a valid receipt-run identity. This is provenance coverage, not another model-quality score.
+
 The root-scoped backend provenance endpoint retains partial batches for inspection, but rejects exports with duplicate task rows or more than 60 joined outcomes. It reads one extra row to detect receipt join expansion instead of truncating away another task. An ambiguous export is unavailable for scoring; this does not modify durable receipts or trigger another inference.
 
 Each candidate has `by_category` results with the frozen corpus category, denominator, successes, failures, JSON validity and execution errors. Each case also retains its category. Category totals reconcile with the overall totals; failures remain counted. Screening covers five categories with unequal sizes, while the cache corpus covers only defective and clean code review. Category rates describe these small synthetic samples, not general role competence or a statistically established ranking.

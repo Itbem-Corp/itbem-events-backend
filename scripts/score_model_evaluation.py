@@ -49,7 +49,7 @@ def score(corpus, evidence):
         raise ValueError('Unexpected number of clean review cases.')
     seen = set()
     task_ids = set()
-    outcome_ids = {'run_id': set(), 'receipt_id': set()}
+    outcome_ids = {'run_id': set(), 'receipt_id': set(), 'receipt_run_id': set()}
     for call in calls:
         key = (call['case_id'], call['candidate'])
         if key in seen or key[0] not in cases or key[1] not in CANDIDATES:
@@ -60,6 +60,8 @@ def score(corpus, evidence):
             raise ValueError('Missing or duplicate task identity.')
         task_ids.add(task_id)
         for field, recorded in outcome_ids.items():
+            if field == 'receipt_run_id' and field not in call:
+                continue  # Historical exports did not retain provider-run identity.
             identity = call.get(field)
             if identity is None or identity == '':
                 if call.get('receipt_status') == 'accepted':
@@ -163,7 +165,7 @@ def score(corpus, evidence):
                     usage_verified = False
             if not usage_verified:
                 unknown_usage += 1
-            scored.append({'case_id': call['case_id'], 'category': case['category'], 'task_id': call['task_id'], 'run_id': call.get('run_id'), 'receipt_id': call.get('receipt_id'), 'success': bool(matched), 'valid_json': format_ok, 'attributed': attributed, 'truncated': truncated, 'status': call.get('status'), 'failure_reasons': failure_reasons})
+            scored.append({'case_id': call['case_id'], 'category': case['category'], 'task_id': call['task_id'], 'run_id': call.get('run_id'), 'receipt_run_id': call.get('receipt_run_id') or None, 'receipt_id': call.get('receipt_id'), 'success': bool(matched), 'valid_json': format_ok, 'attributed': attributed, 'truncated': truncated, 'status': call.get('status'), 'failure_reasons': failure_reasons})
         ordered = sorted(latencies)
         for category in categories.values():
             category['failures'] = category['denominator'] - category['successes']
@@ -171,6 +173,7 @@ def score(corpus, evidence):
         summary[candidate] = {
             'successes': success, 'denominator': 20, 'success_rate': success / 20,
             'by_category': categories,
+            'unknown_receipt_run_count': sum(not call.get('receipt_run_id') for call in group),
             'failure_reason_counts': failure_counts,
             'valid_json_count': valid_json, 'valid_json_rate': valid_json / 20,
             'clean_false_positives': false_positive, 'clean_denominator': clean_denominator,

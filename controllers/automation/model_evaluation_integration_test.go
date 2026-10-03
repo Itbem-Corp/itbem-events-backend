@@ -211,6 +211,7 @@ func TestEvaluationRealGatewaySerializesAndAccounts(t *testing.T) {
 	require.Error(t, db.Model(&batch).Update("budget_micros", 2000000).Error)
 	require.Error(t, db.Model(&models.AutomationModelEvaluationCall{}).Where("automation_task_id = ?", tasks[0].ID).Update("candidate", "luna-medium").Error)
 	// The normal root-only provenance query must work on real PostgreSQL.
+	require.NoError(t, db.Model(&tasks[0]).Update("run_id", "synthetic-recovery-run").Error)
 	configureAIActionPolicyTestRoot(t, models.RootLevelPrimary)
 	recorder := httptest.NewRecorder()
 	c := echo.New().NewContext(httptest.NewRequest(http.MethodGet, "/evaluation", nil), recorder)
@@ -221,6 +222,25 @@ func TestEvaluationRealGatewaySerializesAndAccounts(t *testing.T) {
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	require.NotContains(t, recorder.Body.String(), "Return synthetic")
 	require.NotContains(t, recorder.Body.String(), "must-not-be-read")
+	var exported struct {
+		Data struct {
+			Calls []struct {
+				TaskID       uuid.UUID `json:"task_id"`
+				RunID        string    `json:"run_id"`
+				ReceiptRunID string    `json:"receipt_run_id"`
+			} `json:"calls"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &exported))
+	recoveredExportFound := false
+	for _, call := range exported.Data.Calls {
+		if call.TaskID == tasks[0].ID {
+			require.Equal(t, "synthetic-recovery-run", call.RunID)
+			require.Equal(t, "synthetic-run", call.ReceiptRunID)
+			recoveredExportFound = true
+		}
+	}
+	require.True(t, recoveredExportFound)
 	// Multiple receipts must not expand one task into multiple exported outcomes.
 	var duplicateReceipt models.AutomationInferenceReceipt
 	require.NoError(t, db.Where("automation_task_id = ?", tasks[0].ID).First(&duplicateReceipt).Error)

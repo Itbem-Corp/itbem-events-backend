@@ -1,6 +1,7 @@
 package automation
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -14,7 +15,7 @@ import (
 )
 
 func TestEvaluationExportRejectsAmbiguousJoinedOutcomes(t *testing.T) {
-	for _, scenario := range []string{"partial", "full", "duplicate-task", "overflow"} {
+	for _, scenario := range []string{"partial", "full", "recovery", "duplicate-task", "overflow"} {
 		t.Run(scenario, func(t *testing.T) {
 			configureAIActionPolicyTestRoot(t, models.RootLevelPrimary)
 			mockPtr, restore := configureAIActionPolicyRevisionTestDB(t)
@@ -30,14 +31,14 @@ func TestEvaluationExportRejectsAmbiguousJoinedOutcomes(t *testing.T) {
 			if scenario == "overflow" {
 				count = modelevaluation.MaxCalls + 1
 			}
-			rows := sqlmock.NewRows([]string{"automation_task_id", "evaluation_id", "sequence", "status"})
+			rows := sqlmock.NewRows([]string{"automation_task_id", "evaluation_id", "sequence", "status", "run_id", "receipt_run_id"})
 			for index := 0; index < count; index++ {
 				identity := index
 				if scenario == "duplicate-task" && index == count-1 {
 					identity = 0
 				}
 				taskID := uuid.NewV5(uuid.NamespaceURL, fmt.Sprintf("synthetic-export-task-%d", identity))
-				rows.AddRow(taskID, batchID, index+1, "pending")
+				rows.AddRow(taskID, batchID, index+1, "pending", "recovery-run", "original-provider-run")
 			}
 			mock.ExpectQuery(`SELECT evaluation_call\.\*,`).WithArgs(batchID, modelevaluation.MaxCalls+1).WillReturnRows(rows)
 			response := httptest.NewRecorder()
@@ -49,11 +50,27 @@ func TestEvaluationExportRejectsAmbiguousJoinedOutcomes(t *testing.T) {
 				t.Fatal(err)
 			}
 			expected := http.StatusServiceUnavailable
-			if scenario == "partial" || scenario == "full" {
+			if scenario == "partial" || scenario == "full" || scenario == "recovery" {
 				expected = http.StatusOK
 			}
 			if response.Code != expected {
 				t.Fatalf("status=%d expected=%d", response.Code, expected)
+			}
+			if scenario == "recovery" {
+				var result struct {
+					Data struct {
+						Calls []struct {
+							RunID        string `json:"run_id"`
+							ReceiptRunID string `json:"receipt_run_id"`
+						} `json:"calls"`
+					} `json:"data"`
+				}
+				if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+					t.Fatal(err)
+				}
+				if len(result.Data.Calls) != count || result.Data.Calls[0].RunID != "recovery-run" || result.Data.Calls[0].ReceiptRunID != "original-provider-run" {
+					t.Fatal("export lost original provider-run identity")
+				}
 			}
 			if err := mock.ExpectationsWereMet(); err != nil {
 				t.Fatal(err)

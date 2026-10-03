@@ -240,6 +240,7 @@ func GetModelEvaluation(c echo.Context) error {
 		models.AutomationModelEvaluationCall
 		Status              string     `json:"status"`
 		RunID               string     `json:"run_id"`
+		ReceiptRunID        string     `json:"receipt_run_id"`
 		ReceiptID           *uuid.UUID `json:"receipt_id"`
 		ReceiptStatus       string     `json:"receipt_status"`
 		PolicyHash          string     `json:"policy_hash"`
@@ -266,7 +267,7 @@ func GetModelEvaluation(c echo.Context) error {
 	}
 	var calls []callView
 	err = configuration.DB.Table("automation_model_evaluation_calls AS evaluation_call").Select(`evaluation_call.*,
-		task.status, task.run_id, receipt.id AS receipt_id, COALESCE(receipt.status, '') AS receipt_status,
+		task.status, task.run_id, COALESCE(receipt.run_id, '') AS receipt_run_id, receipt.id AS receipt_id, COALESCE(receipt.status, '') AS receipt_status,
 		COALESCE(receipt.policy_snapshot_hash, '') AS policy_hash, COALESCE(policy.policy_revision, 0) AS policy_revision,
 		COALESCE(policy.routes_json::text, '[]') AS sealed_routes_json,
 		COALESCE(receipt.worker_id, '') AS worker_id, COALESCE(receipt.agent_key, '') AS agent_key, COALESCE(receipt.machine_id, '') AS machine_id,

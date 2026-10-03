@@ -37,6 +37,30 @@ def fixture(corpus=CORPUS):
 
 
 class ScoringTests(unittest.TestCase):
+    def test_receipt_run_identity_survives_recovery_and_legacy_remains_unknown(self):
+        evidence = fixture()
+        legacy = score(CORPUS, evidence)['results']['minimax-m3']
+        self.assertEqual(legacy['unknown_receipt_run_count'], 20)
+        self.assertIsNone(legacy['cases'][0]['receipt_run_id'])
+        for call in evidence['calls']:
+            call['receipt_run_id'] = call['run_id'] + '-original'
+        row = score(CORPUS, evidence)['results']['minimax-m3']
+        self.assertEqual(row['unknown_receipt_run_count'], 0)
+        self.assertEqual(row['cases'][0]['receipt_run_id'], evidence['calls'][0]['receipt_run_id'])
+        self.assertNotEqual(row['cases'][0]['receipt_run_id'], row['cases'][0]['run_id'])
+        self.assertEqual(row['successes'], 20)
+        evidence['calls'][1]['receipt_run_id'] = evidence['calls'][0]['receipt_run_id']
+        with self.assertRaisesRegex(ValueError, 'Reused evaluation outcome identity'):
+            score(CORPUS, evidence)
+
+    def test_supplied_accepted_receipt_run_identity_must_be_valid(self):
+        for value in (None, '', True, ' ', ' padded '):
+            with self.subTest(value=value):
+                evidence = fixture()
+                evidence['calls'][0]['receipt_run_id'] = value
+                with self.assertRaises(ValueError):
+                    score(CORPUS, evidence)
+
     def test_category_results_keep_all_cases_and_expose_weak_categories(self):
         evidence = fixture()
         for category in ('review_bug', 'qa_evidence', 'summary'):
