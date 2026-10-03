@@ -27,3 +27,10 @@ The output parent must exist. Reports use exclusive publication and retain sourc
 hashes, actual logs and exits. CI runs these controls before canonical regression
 and preserves implementation-controls.json alongside regression evidence.
 The runner accepts no candidate path and makes no provider calls.
+
+Prepare the model-facing input without running a model:
+python3 scripts/prepare_implementation_evaluation.py --output <new-input.json>
+Send only the prompt field to the authorized model task. The other fields retain
+provenance for evaluation; private_oracle_sha256 is not model input. The prompt
+contains only the fixture and task, never the reference or oracle. Preparation
+does not authorize provider spend, execute a candidate, or measure model quality.
