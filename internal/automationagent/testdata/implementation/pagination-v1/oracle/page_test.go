@@ -12,12 +12,15 @@ func TestPaginationContract(t *testing.T) {
 		page, size int
 		want       []string
 	}{
+
 		{"first", 1, 2, []string{"a", "b"}},
 		{"second", 2, 2, []string{"c", "d"}},
 		{"partial-tail", 3, 2, []string{"e"}},
 		{"past-tail", 4, 2, []string{}},
 		{"invalid-defaults", 0, 0, []string{"a", "b"}},
 		{"oversized-limit", 1, 99, []string{"a", "b", "c", "d", "e"}},
+		{"overflow-offset", int(^uint(0) >> 1), 2, []string{}},
+		{"maximum-size", 1, int(^uint(0) >> 1), []string{"a", "b", "c", "d", "e"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			items := []string{"a", "b", "c", "d", "e"}

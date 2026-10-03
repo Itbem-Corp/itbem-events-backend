@@ -11,7 +11,7 @@ from evaluation_report import decode_json, publish_report
 
 ROOT = Path(__file__).resolve().parents[1]
 CASE = ROOT / 'internal/automationagent/testdata/implementation/pagination-v1'
-SUBTESTS = {'first', 'second', 'partial-tail', 'past-tail', 'invalid-defaults', 'oversized-limit'}
+SUBTESTS = {'first', 'second', 'partial-tail', 'past-tail', 'invalid-defaults', 'oversized-limit', 'overflow-offset', 'maximum-size'}
 
 
 def verify(go='go'):

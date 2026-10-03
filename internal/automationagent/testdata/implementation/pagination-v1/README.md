@@ -3,7 +3,7 @@
 Prepared synthetic benchmark; no model has been evaluated on this case.
 
 Repair the supplied Go package so pages are one-based, page < 1 defaults to 1,
-size < 1 defaults to 2, offset advances by page size, the final page is bounded
+size < 1 defaults to 2, offset advances by page size without integer overflow, the final page is bounded
 by the available records, and a page beyond the end returns an empty slice.
 Returned pages must own their storage so callers cannot mutate the source.
 
@@ -13,7 +13,7 @@ go.mod and the evaluator-owned oracle are fixed; candidate tests cannot replace
 the oracle. Both fixture and reference are separate standard-library Go modules,
 outside the application build.
 
-Validation so far: baseline fails, reference passes six cases, each single-file
+Validation so far: baseline fails, reference passes eight cases, each single-file
 repair fails, and a reference variant returning a source slice fails.
 The oracle uses independent input per subtest to prevent cascading failures.
 
