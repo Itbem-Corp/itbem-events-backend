@@ -3,11 +3,13 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 type names []string
@@ -16,6 +18,43 @@ func (n *names) String() string         { return fmt.Sprint([]string(*n)) }
 func (n *names) Set(value string) error { *n = append(*n, value); return nil }
 
 type event struct{ Action, Package, Test string }
+
+func decodeEvent(data []byte) (event, error) {
+	var row event
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return row, fmt.Errorf("event must be a JSON object")
+	}
+	var keys []string
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return row, err
+		}
+		key, ok := token.(string)
+		if !ok {
+			return row, fmt.Errorf("invalid event key")
+		}
+		for _, previous := range keys {
+			if strings.EqualFold(key, previous) {
+				return row, fmt.Errorf("duplicate or aliased event field: %q", key)
+			}
+		}
+		keys = append(keys, key)
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return row, err
+		}
+	}
+	// Unmarshal enforces the closing delimiter, single-document boundary and
+	// field types while retaining Go test's additional metadata fields.
+	if err := json.Unmarshal(data, &row); err != nil {
+		return row, err
+	}
+	return row, nil
+}
+
 type executions struct {
 	runs, passes, skips int
 	active              bool
@@ -37,8 +76,8 @@ func verify(reader io.Reader, packages, requiredTests []string, repetitions int,
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 4096), 1024*1024)
 	for scanner.Scan() {
-		var row event
-		if err := json.Unmarshal(scanner.Bytes(), &row); err != nil {
+		row, err := decodeEvent(scanner.Bytes())
+		if err != nil {
 			return fmt.Errorf("invalid JSONL evidence: %w", err)
 		}
 		if !wanted[row.Package] {

@@ -18,6 +18,9 @@ func TestVerifyExecutionEvidence(t *testing.T) {
 		wantPass    bool
 	}{
 		{"complete", run + pass + run + pass + done, 2, false, []string{"TestProof"}, true},
+		{"duplicate action hides failure", run + `{"Action":"fail","Action":"pass","Package":"example/pkg","Test":"TestProof"}` + "\n" + done, 1, false, nil, false},
+		{"aliased action hides failure", run + `{"Action":"fail","action":"pass","Package":"example/pkg","Test":"TestProof"}` + "\n" + done, 1, false, nil, false},
+		{"escaped action hides failure", run + `{"Action":"fail","\u0041ction":"pass","Package":"example/pkg","Test":"TestProof"}` + "\n" + done, 1, false, nil, false},
 		{"empty", "", 2, false, nil, false},
 		{"no tests", done, 2, false, nil, false},
 		{"truncated", run + pass, 1, false, nil, false},
