@@ -1,6 +1,7 @@
 package automation
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"events-stocks/configuration"
 	"events-stocks/internal/authz"
 	"events-stocks/internal/automationagent"
+	"events-stocks/internal/evidencejson"
 	"events-stocks/internal/modelevaluation"
 	"events-stocks/models"
 	automationqueue "events-stocks/repositories/automationqueuerepository"
@@ -35,13 +37,8 @@ func CreateModelEvaluation(c echo.Context) error {
 	if cfg == nil || configuration.DB == nil || actor == "" || !automationqueue.IsConfigured() || strings.TrimSpace(cfg.AutomationInputBucket) == "" {
 		return utils.Error(c, http.StatusServiceUnavailable, "Evaluation unavailable", "")
 	}
-	var request struct {
-		ID            string `json:"id"`
-		CorpusVersion string `json:"corpus_version"`
-	}
-	decoder := json.NewDecoder(io.LimitReader(c.Request().Body, 2049))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&request); err != nil || decoder.Decode(&struct{}{}) != io.EOF || !modelevaluation.SupportedCorpus(request.CorpusVersion) {
+	request, err := decodeEvaluationAdmission(c.Request().Body)
+	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid evaluation request", "Only the published synthetic corpus is allowed")
 	}
 	id, err := uuid.FromString(request.ID)
@@ -128,6 +125,31 @@ func CreateModelEvaluation(c echo.Context) error {
 		return utils.Error(c, http.StatusConflict, "Evaluation admission failed", "No provider call was dispatched")
 	}
 	return utils.Success(c, http.StatusCreated, "Evaluation admitted; dispatch is explicit and sequential", batch)
+}
+
+type evaluationAdmission struct {
+	ID            string `json:"id"`
+	CorpusVersion string `json:"corpus_version"`
+}
+
+func decodeEvaluationAdmission(source io.Reader) (evaluationAdmission, error) {
+	var request evaluationAdmission
+	raw, err := io.ReadAll(io.LimitReader(source, 2049))
+	if err != nil || len(raw) > 2048 {
+		return request, errors.New("evaluation admission exceeds bounded input")
+	}
+	if err := evidencejson.Validate(raw); err != nil {
+		return request, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		return request, err
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF || !modelevaluation.SupportedCorpus(request.CorpusVersion) {
+		return request, errors.New("invalid evaluation admission")
+	}
+	return request, nil
 }
 
 // DispatchNextModelEvaluation queues exactly one task. Existing queued/running
