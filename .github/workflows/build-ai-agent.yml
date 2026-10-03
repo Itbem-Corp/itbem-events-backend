@@ -27,6 +27,8 @@ on:
       - scripts/verify_implementation_sandbox.py
       - scripts/verify_implementation_oracle.py
       - scripts/verify_implementation_candidate_execution.py
+      - scripts/verify_inference_response_binding.py
+      - scripts/tests/**
       - scripts/verify_agent_artifacts.py
       - scripts/evaluation_report.py
       - scripts/Test-AgentHarness.ps1
@@ -62,6 +64,8 @@ on:
       - scripts/verify_implementation_sandbox.py
       - scripts/verify_implementation_oracle.py
       - scripts/verify_implementation_candidate_execution.py
+      - scripts/verify_inference_response_binding.py
+      - scripts/tests/**
       - scripts/verify_agent_artifacts.py
       - scripts/evaluation_report.py
       - scripts/Test-AgentHarness.ps1
