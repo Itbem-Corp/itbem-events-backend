@@ -200,6 +200,27 @@ func TestDelegatedQACoordinatorPostgresTransactions(t *testing.T) {
 		require.NoError(t, db.Model(&models.DeliveryGate{}).Where("work_item_id = ? AND kind = ?", item.ID, deliveryworkflow.GateQAReview).Count(&count).Error)
 		require.Zero(t, count)
 	})
+	for _, explicit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("human mandate remains manual explicit=%t", explicit), func(t *testing.T) {
+			f, _ := seed(t, false, func(f *coordinatorFixture) {
+				f.item.MandateJSON = ""
+				if explicit {
+					mandate := defaultDeliveryMandate(f.item, []string{"workspace://api"})
+					var err error
+					f.item.MandateJSON, err = marshalDeliveryMandate(mandate)
+					require.NoError(t, err)
+				}
+			})
+			require.NoError(t, completeContinuation(db, f.intent, f.task, map[string]any{"structured_result": map[string]any{"verdict": "passed"}}))
+			var item models.DeliveryWorkItem
+			require.NoError(t, db.First(&item, f.item.ID).Error)
+			require.Equal(t, deliveryworkflow.StateQAReview, item.State)
+			require.Equal(t, "waiting_for_user", item.AgentProgress)
+			var count int64
+			require.NoError(t, db.Model(&models.DeliveryGate{}).Where("work_item_id = ? AND kind = ?", item.ID, deliveryworkflow.GateQAReview).Count(&count).Error)
+			require.Zero(t, count)
+		})
+	}
 	for _, test := range []struct {
 		name   string
 		mutate func(*coordinatorFixture)

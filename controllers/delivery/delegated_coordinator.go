@@ -54,6 +54,15 @@ func coordinateDelegatedQA(tx *gorm.DB, item *models.DeliveryWorkItem, intent mo
 	if !snapshot.Delegated {
 		return false, nil
 	}
+	mandate, err := resolveDeliveryMandate(*item, nil)
+	if err != nil {
+		return false, err
+	}
+	for _, action := range mandate.HumanActions {
+		if action == "approve_qa" {
+			return false, nil
+		}
+	}
 	if item.AutomationEpoch != intent.Epoch || (item.State != deliveryworkflow.StateQARunning && item.State != deliveryworkflow.StateQAReview) || task.Operation != "delivery.qa" || task.Status != "completed" || task.ID == uuid.Nil || task.DeliveryWorkItemID == nil || *task.DeliveryWorkItemID != item.ID || task.ContinuationID == nil || *task.ContinuationID != intent.ID || task.AgentInstanceID == nil || *task.AgentInstanceID == uuid.Nil || task.CompletedAt == nil || task.CreatedAt.IsZero() || task.OutputRef == "" {
 		return false, fmt.Errorf("delegated QA requires the current completed signed continuation")
 	}

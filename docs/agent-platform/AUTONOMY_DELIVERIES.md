@@ -72,7 +72,9 @@ components only; they do not satisfy the live V1 acceptance contract.
 ## Delegated QA increment
 
 Only signed, source-receipt-bound QA tasks admitted under the frozen delegated
-policy can decide QA automatically. The coordinator rechecks the sealed event,
+policy can decide QA automatically, and only when their work-item mandate does
+not reserve `approve_qa` for a human. Missing mandates retain the existing human
+default. The coordinator rechecks the sealed event,
 task lifetime, current preview, changed repositories and target branches,
 operator test identities, independent source receipts and the latest independent
 `Bema Review / exact-sha` publication for the exact repository, PR and commit.

@@ -49,6 +49,12 @@ func newCoordinatorFixture(t *testing.T) coordinatorFixture {
 		t.Fatal(err)
 	}
 	f.item.PlanJSON = string(encodedPlan)
+	mandate := defaultDeliveryMandate(f.item, []string{"workspace://api"})
+	mandate.HumanActions = []string{"approve_plan", "approve_code_review", "approve_release", "authorize_publication", "resolve_blocker"}
+	f.item.MandateJSON, err = marshalDeliveryMandate(mandate)
+	if err != nil {
+		t.Fatal(err)
+	}
 	f.intent = models.DeliveryContinuation{ID: intentID, WorkItemID: itemID, Epoch: 3, Phase: "qa", RequestedBy: "synthetic-owner", Status: "dispatched", AvailableAt: f.now, CreatedAt: f.now.Add(-3 * time.Minute)}
 	completed := f.now.Add(-time.Second)
 	f.task = models.AutomationTask{ID: taskID, JobID: uuid.Must(uuid.NewV4()), Operation: "delivery.qa", Status: "completed", DeliveryWorkItemID: &itemID, ContinuationID: &intentID, AgentInstanceID: &instanceID, QASourceReceiptRequired: true, CreatedAt: f.now.Add(-3 * time.Minute), CompletedAt: &completed, OutputRef: "s3://synthetic-private/result.json"}
