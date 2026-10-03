@@ -385,6 +385,7 @@ func (w *Worker) processSegmentedCodeReview(ctx context.Context, message TaskMes
 			return w.failWithProviderResult(ctx, message.Payload.TaskID, runID, requestRef, message.Payload.Operation, audit, publishErr)
 		}
 		execution = CodeReviewPublicationHandoff(publication)
+		execution["review_result"] = aggregate
 	}
 	completion, err := aggregateCodeReviewCompletions(completions, aggregate)
 	if err != nil {

@@ -231,10 +231,24 @@ func TestCodeReviewPublicationForTaskRequiresExactIndependentGitHubEvidence(t *t
 		}
 	}
 	execution := newExecution()
+	execution.ReviewResult = json.RawMessage(`{"summary":"The reviewed change is covered.","verdict":"approve","review_scope":["approved handler"],"findings":[],"test_plan":["Run the handler unit test."],"coverage_gaps":[]}`)
 	raw, _ := json.Marshal(execution)
 	publication, err := codeReviewPublicationForTask(task, raw)
 	if err != nil || publication.AutomationTaskID != uuid.Nil || publication.ReviewerActor != "reviewer-bot[bot]" {
 		t.Fatalf("valid review publication rejected: %#v / %v", publication, err)
+	}
+	if publication.ReviewResultSHA256 == "" || !strings.Contains(publication.ReviewResultJSON, "handler unit test") {
+		t.Fatal("validated private review context was lost")
+	}
+	publicJSON, _ := json.Marshal(publication)
+	if strings.Contains(string(publicJSON), "handler unit test") || strings.Contains(string(publicJSON), "review_result") {
+		t.Fatal("private review findings leaked through generic JSON")
+	}
+	contradictory := execution
+	contradictory.ReviewResult = json.RawMessage(`{"summary":"Incomplete evidence.","verdict":"blocked","review_scope":["approved handler"],"findings":[],"test_plan":[],"coverage_gaps":["Missing exact input."]}`)
+	contradictoryRaw, _ := json.Marshal(contradictory)
+	if _, err := codeReviewPublicationForTask(task, contradictoryRaw); err == nil {
+		t.Fatal("private review verdict contradicted the independent publication")
 	}
 	nonBlockingComment := newExecution()
 	nonBlockingComment.Verdict, nonBlockingComment.Event = "comment", "COMMENT"

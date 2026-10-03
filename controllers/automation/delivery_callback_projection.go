@@ -1,6 +1,7 @@
 package automation
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -186,7 +187,20 @@ func codeReviewPublicationForTask(task *models.AutomationTask, raw json.RawMessa
 		return models.AutomationCodeReviewPublication{}, fmt.Errorf("code review event is invalid")
 	}
 	checkRunID, checkRunURL := execution.CheckRunID, strings.TrimSpace(execution.CheckRunURL)
+	resultJSON, resultDigest := "{}", ""
+	if len(execution.ReviewResult) > 0 {
+		result, err := automationagent.ParseCodeReview(string(execution.ReviewResult))
+		if err != nil || result["verdict"] != verdict {
+			return models.AutomationCodeReviewPublication{}, fmt.Errorf("signed review findings contradict publication")
+		}
+		canonical, err := json.Marshal(result)
+		if err != nil {
+			return models.AutomationCodeReviewPublication{}, err
+		}
+		resultJSON, resultDigest = string(canonical), fmt.Sprintf("%x", sha256.Sum256(canonical))
+	}
 	return models.AutomationCodeReviewPublication{
+		ReviewResultJSON: resultJSON, ReviewResultSHA256: resultDigest,
 		Repository: repository, PullRequest: execution.PullRequest, HeadSHA: strings.ToLower(execution.HeadSHA), PatchSHA256: strings.ToLower(execution.PatchSHA256),
 		SubjectSHA256: strings.ToLower(execution.SubjectSHA256), PayloadSHA256: strings.ToLower(execution.PayloadSHA256), Verdict: verdict, Event: event, ReviewGatePassed: execution.ReviewGatePassed,
 		ReviewID: execution.ReviewID, ReviewURL: strings.TrimSpace(execution.ReviewURL), ReviewerActor: actor, AuthorActor: author, PublishedAt: execution.PublishedAt,

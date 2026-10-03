@@ -3176,6 +3176,11 @@ func Complete(c echo.Context) error {
 	rowsAffected := int64(0)
 	callbackContext := configuration.WithConfig(c.Request().Context(), cfg)
 	err = configuration.DB.WithContext(callbackContext).Transaction(func(tx *gorm.DB) error {
+		if request.Status == "running" && task.Operation == "delivery.publish" && task.EvidenceSubjectDigest != "" {
+			if err := validateDelegatedPublicationRuntimeAuthority(tx, task, time.Now().UTC()); err != nil {
+				return err
+			}
+		}
 		result := tx.Model(&models.AutomationTask{}).Where(where, args...).Updates(updates)
 		if result.Error != nil {
 			return result.Error
@@ -4671,18 +4676,19 @@ func implementationChangeSetFromHandoff(task *models.AutomationTask, handoff imp
 }
 
 type publicationExecutionHandoff struct {
-	GrantID            string `json:"grant_id"`
-	Workspace          string `json:"workspace"`
-	Worktree           string `json:"worktree"`
-	RepositoryRef      string `json:"repository_ref"`
-	Branch             string `json:"branch"`
-	TargetBranch       string `json:"target_branch"`
-	BaseSHA            string `json:"base_sha"`
-	CommitSHA          string `json:"commit_sha"`
-	RemoteRepository   string `json:"remote_repository"`
-	BranchPublished    bool   `json:"branch_published"`
-	PullRequestURL     string `json:"pull_request_url"`
-	PullRequestCreated bool   `json:"pull_request_created"`
+	SecurityChecks     []string `json:"security_checks"`
+	GrantID            string   `json:"grant_id"`
+	Workspace          string   `json:"workspace"`
+	Worktree           string   `json:"worktree"`
+	RepositoryRef      string   `json:"repository_ref"`
+	Branch             string   `json:"branch"`
+	TargetBranch       string   `json:"target_branch"`
+	BaseSHA            string   `json:"base_sha"`
+	CommitSHA          string   `json:"commit_sha"`
+	RemoteRepository   string   `json:"remote_repository"`
+	BranchPublished    bool     `json:"branch_published"`
+	PullRequestURL     string   `json:"pull_request_url"`
+	PullRequestCreated bool     `json:"pull_request_created"`
 }
 
 // persistPublicationChangeSet revalidates the grant in the control plane
@@ -4709,7 +4715,7 @@ func persistPublicationChangeSet(tx *gorm.DB, task *models.AutomationTask, raw j
 	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id", "state").First(&workItem, *task.DeliveryWorkItemID).Error; err != nil {
 		return err
 	}
-	if workItem.State != "preview_pending" {
+	if workItem.State != "code_review" && workItem.State != "preview_pending" {
 		return fmt.Errorf("publication result arrived after the approved preview window closed")
 	}
 	var grant models.DeliveryPublicationGrant
@@ -4722,6 +4728,37 @@ func persistPublicationChangeSet(tx *gorm.DB, task *models.AutomationTask, raw j
 	if grant.RepositoryRef != handoff.RepositoryRef || grant.Branch != handoff.Branch || strings.ToLower(grant.BaseSHA) != handoff.BaseSHA || !strings.EqualFold(grant.GitHubRepository, handoff.RemoteRepository) {
 		return fmt.Errorf("publication execution does not match its grant")
 	}
+	if grant.GrantedBy == "delivery-gatekeeper" {
+		var reason struct {
+			AllowedTargetBranches []string `json:"allowed_target_branches"`
+		}
+		if json.Unmarshal([]byte(grant.Reason), &reason) != nil || !containsCapability(reason.AllowedTargetBranches, handoff.TargetBranch) {
+			return fmt.Errorf("delegated publication target exceeds frozen scope")
+		}
+		if task.EvidenceSubjectDigest != grant.ReviewDiffSHA256 {
+			return fmt.Errorf("delegated publication task is not bound to its diff")
+		}
+		if err := validateDelegatedPublicationRuntimeAuthority(tx, *task, createdAt); err != nil {
+			return err
+		}
+		if len(handoff.SecurityChecks) != 2 || handoff.SecurityChecks[0] != "security:secrets" || handoff.SecurityChecks[1] != "security:high-critical" {
+			return fmt.Errorf("delegated publication lacks pre-publication security checks")
+		}
+		if task.ContinuationID == nil {
+			return fmt.Errorf("delegated publication lacks its durable intent")
+		}
+		var intent models.DeliveryContinuation
+		if err := tx.First(&intent, *task.ContinuationID).Error; err != nil {
+			return err
+		}
+		var item models.DeliveryWorkItem
+		if err := tx.First(&item, *task.DeliveryWorkItemID).Error; err != nil {
+			return err
+		}
+		if intent.WorkItemID != item.ID || intent.Epoch != item.AutomationEpoch || intent.Phase != "publish" || intent.PublicationGrantID != grant.ID.String() || intent.Status == "superseded" || intent.Status == "done" {
+			return fmt.Errorf("delegated publication intent is stale or outside grant scope")
+		}
+	}
 	var capabilities []string
 	if err := json.Unmarshal([]byte(grant.CapabilitiesJSON), &capabilities); err != nil || !containsCapability(capabilities, "branch:publish") || !containsCapability(capabilities, "commit:stage") {
 		return fmt.Errorf("publication grant capabilities are invalid")
@@ -4730,6 +4767,8 @@ func persistPublicationChangeSet(tx *gorm.DB, task *models.AutomationTask, raw j
 		return fmt.Errorf("publication pull request is outside grant scope")
 	}
 	metadata, err := json.Marshal(map[string]any{
+		"review_diff_sha256": grant.ReviewDiffSHA256,
+		"security_checks":    handoff.SecurityChecks,
 		"automation_task_id": task.ID.String(), "publication_grant_id": grant.ID.String(), "base_sha": handoff.BaseSHA,
 		"remote_repository": strings.TrimSpace(handoff.RemoteRepository), "target_branch": handoff.TargetBranch,
 		"branch_published": true, "pull_request_created": handoff.PullRequestCreated,

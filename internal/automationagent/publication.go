@@ -33,14 +33,16 @@ type publicationInput struct {
 }
 
 type publicationAuthorization struct {
-	GrantID          string   `json:"grant_id"`
-	RepositoryRef    string   `json:"repository_ref"`
-	BaseSHA          string   `json:"base_sha"`
-	GitHubRepository string   `json:"github_repository"`
-	ReviewDiffSHA256 string   `json:"review_diff_sha256"`
-	Branch           string   `json:"branch"`
-	Capabilities     []string `json:"capabilities"`
-	ExpiresAt        string   `json:"expires_at"`
+	AllowedTargetBranches []string `json:"allowed_target_branches,omitempty"`
+	GateAuthority         string   `json:"gate_authority,omitempty"`
+	GrantID               string   `json:"grant_id"`
+	RepositoryRef         string   `json:"repository_ref"`
+	BaseSHA               string   `json:"base_sha"`
+	GitHubRepository      string   `json:"github_repository"`
+	ReviewDiffSHA256      string   `json:"review_diff_sha256"`
+	Branch                string   `json:"branch"`
+	Capabilities          []string `json:"capabilities"`
+	ExpiresAt             string   `json:"expires_at"`
 }
 
 type githubRepository struct {
@@ -77,6 +79,10 @@ func validatePublicationRemoteBase(checkpoint GitHubRepositorySnapshot, remote g
 // worktree authorized by the control plane. It never merges, deploys, reads a
 // personal Git credential or converts a review grant into broader access.
 func RunPublication(ctx context.Context, delivery json.RawMessage, lookup func(string) string) (map[string]any, error) {
+	return runPublicationWithAuthority(ctx, delivery, lookup, nil)
+}
+
+func runPublicationWithAuthority(ctx context.Context, delivery json.RawMessage, lookup func(string) string, refresh func(context.Context) (bool, error)) (map[string]any, error) {
 	var input publicationInput
 	if err := json.Unmarshal(delivery, &input); err != nil || input.Publication == nil {
 		return nil, fmt.Errorf("publication input must contain a human authorization")
@@ -95,6 +101,34 @@ func RunPublication(ctx context.Context, delivery json.RawMessage, lookup func(s
 		if err := workspace.RequireCapability(capability); err != nil {
 			return nil, err
 		}
+	}
+	securityChecks := []string{}
+	if auth.GateAuthority == "delegated" {
+		worktree, err := reviewedWorktree(workspace, auth.Branch)
+		if err != nil {
+			return nil, err
+		}
+		if err := verifyReviewedWorktree(ctx, worktree, auth); err != nil {
+			return nil, err
+		}
+		commands, err := delegatedPublicationSecurityCommands(workspace.Config)
+		if err != nil {
+			return nil, err
+		}
+		for _, check := range commands {
+			result, err := runWorkspaceCommand(ctx, workspace, worktree, 5*time.Minute, "", nil, check.Command[0], check.Command[1:]...)
+			if err != nil || result.ExitCode != 0 {
+				return nil, fmt.Errorf("delegated publication security check failed: %s", check.Kind)
+			}
+			securityChecks = append(securityChecks, check.Kind)
+		}
+		// Scanners cannot mutate the authorized diff and then publish it.
+		if err := verifyReviewedWorktree(ctx, worktree, auth); err != nil {
+			return nil, err
+		}
+	}
+	if err := refreshPublicationAuthority(ctx, auth, refresh); err != nil {
+		return nil, err
 	}
 	config, err := LoadGitHubAppConfig(lookup)
 	if err != nil {
@@ -131,26 +165,97 @@ func RunPublication(ctx context.Context, delivery json.RawMessage, lookup func(s
 	if err := validatePublicationRemoteBase(checkpoint, remote, auth); err != nil {
 		return nil, err
 	}
+	if auth.GateAuthority == "delegated" && !hasPublicationCapability(auth.AllowedTargetBranches, checkpoint.DefaultBranch) {
+		return nil, fmt.Errorf("publication target branch exceeds delegated authority")
+	}
+	if err := refreshPublicationAuthority(ctx, auth, refresh); err != nil {
+		return nil, err
+	}
 	commitSHA, committed, err := stageAndCommitPublication(ctx, worktree, auth, input.WorkItem.Title)
 	if err != nil {
+		return nil, err
+	}
+	if err := refreshPublicationAuthority(ctx, auth, refresh); err != nil {
 		return nil, err
 	}
 	if err := pushGitHubBranch(ctx, worktree, remote, auth.Branch, token.Token); err != nil {
 		return nil, err
 	}
 	result := map[string]any{
-		"grant_id": auth.GrantID, "workspace": "workspace://" + workspace.ID, "worktree": "workspace://" + workspace.ID + "#" + auth.Branch,
+		"security_checks": securityChecks,
+		"grant_id":        auth.GrantID, "workspace": "workspace://" + workspace.ID, "worktree": "workspace://" + workspace.ID + "#" + auth.Branch,
 		"repository_ref": auth.RepositoryRef, "branch": auth.Branch, "target_branch": checkpoint.DefaultBranch,
 		"base_sha": strings.ToLower(auth.BaseSHA), "commit_sha": commitSHA,
 		"remote_repository": remote.Owner + "/" + remote.Name, "branch_published": true, "commit_created": committed,
 		"deployment": "not attempted; a human preview/release workflow remains required",
 	}
 	if hasPublicationCapability(auth.Capabilities, WorkspaceCapabilityCreatePullReq) {
+		if err := refreshPublicationAuthority(ctx, auth, refresh); err != nil {
+			return nil, &PublicationEffectError{Partial: result, Cause: err}
+		}
 		prURL, created, err := createGitHubPullRequest(ctx, config, token.Token, remote, auth.Branch, input.WorkItem.Title)
 		if err != nil {
-			return nil, err
+			return nil, &PublicationEffectError{Partial: result, Cause: err}
 		}
 		result["pull_request_url"], result["pull_request_created"] = prURL, created
+	}
+	return result, nil
+}
+
+func refreshPublicationAuthority(ctx context.Context, auth *publicationAuthorization, refresh func(context.Context) (bool, error)) error {
+	if err := validatePublicationAuthorization(auth); err != nil {
+		return err
+	}
+	if refresh == nil {
+		if auth.GateAuthority == "delegated" {
+			return fmt.Errorf("delegated publication requires live control-plane authority")
+		}
+		return nil
+	}
+	accepted, err := refresh(ctx)
+	if err != nil {
+		return err
+	}
+	if !accepted {
+		return fmt.Errorf("publication authority was revoked")
+	}
+	return nil
+}
+
+type publicationSecurityCommand struct {
+	Kind    string
+	Command []string
+}
+
+// These identities and commands come exclusively from the operator registry.
+// Delegated publication requires isolation and both checks before any token
+// minting, commit or remote write. Historical human grants keep their contract.
+func delegatedPublicationSecurityCommands(config WorkspaceConfig) ([]publicationSecurityCommand, error) {
+	if config.SandboxRuntime != WorkspaceSandboxDocker && config.SandboxRuntime != WorkspaceSandboxFirecracker {
+		return nil, fmt.Errorf("delegated publication requires sandbox security checks")
+	}
+	commands := map[string][]string{}
+	for _, group := range []struct {
+		commands [][]string
+		kinds    []string
+	}{{config.ValidationCommands, config.ValidationCommandKinds}, {config.QACommands, config.QACommandKinds}} {
+		for index, command := range group.commands {
+			kind := configuredCommandKind(group.kinds, index)
+			if kind != "security:secrets" && kind != "security:high-critical" {
+				continue
+			}
+			if len(command) == 0 || commands[kind] != nil {
+				return nil, fmt.Errorf("publication security command identity is ambiguous")
+			}
+			commands[kind] = append([]string(nil), command...)
+		}
+	}
+	result := []publicationSecurityCommand{}
+	for _, kind := range []string{"security:secrets", "security:high-critical"} {
+		if len(commands[kind]) == 0 {
+			return nil, fmt.Errorf("delegated publication lacks operator check %s", kind)
+		}
+		result = append(result, publicationSecurityCommand{Kind: kind, Command: commands[kind]})
 	}
 	return result, nil
 }
@@ -158,6 +263,12 @@ func RunPublication(ctx context.Context, delivery json.RawMessage, lookup func(s
 func validatePublicationAuthorization(auth *publicationAuthorization) error {
 	if auth == nil || !taskIDPattern.MatchString(strings.ToLower(strings.TrimSpace(auth.GrantID))) || !gitCommitPattern.MatchString(strings.ToLower(strings.TrimSpace(auth.BaseSHA))) || !githubRepositoryPattern.MatchString(strings.ToLower(strings.TrimSpace(auth.GitHubRepository))) || !sha256DigestPattern.MatchString(strings.ToLower(strings.TrimSpace(auth.ReviewDiffSHA256))) || !agentPublicationBranch(auth.Branch) || !strings.HasPrefix(strings.TrimSpace(auth.RepositoryRef), "workspace://") {
 		return fmt.Errorf("publication authorization is invalid")
+	}
+	if auth.GateAuthority != "" && auth.GateAuthority != "delegated" {
+		return fmt.Errorf("publication authority mode is invalid")
+	}
+	if auth.GateAuthority == "delegated" && (len(auth.AllowedTargetBranches) == 0 || len(auth.AllowedTargetBranches) > 32) {
+		return fmt.Errorf("delegated publication lacks bounded target branches")
 	}
 	expiresAt, err := time.Parse(time.RFC3339, strings.TrimSpace(auth.ExpiresAt))
 	if err != nil || !expiresAt.After(time.Now().UTC()) {
