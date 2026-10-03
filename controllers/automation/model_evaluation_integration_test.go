@@ -163,8 +163,8 @@ func TestEvaluationRealGatewaySerializesAndAccounts(t *testing.T) {
 		encoded, _ := json.Marshal(map[string]any{"id": "synthetic-response", "model": model, "choices": []any{map[string]any{"finish_reason": "stop", "message": map[string]any{"role": "assistant", "content": `{"ok":true}`}}}, "usage": map[string]any{"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}})
 		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(encoded))}, nil
 	})}
-	call := func(task models.AutomationTask, changed bool) *httptest.ResponseRecorder {
-		request := inferenceRequest{CallID: uuid.Must(uuid.NewV4()).String(), Provider: "minimax", Model: "gateway-managed", TaskID: task.ID.String(), RunID: task.RunID, Operation: "ai.chat", MaxCompletionTokens: 4096, Messages: append([]automationagent.Message(nil), messages...)}
+	call := func(task models.AutomationTask, changed bool, inputMessages []automationagent.Message) *httptest.ResponseRecorder {
+		request := inferenceRequest{CallID: uuid.Must(uuid.NewV4()).String(), Provider: "minimax", Model: "gateway-managed", TaskID: task.ID.String(), RunID: task.RunID, Operation: "ai.chat", MaxCompletionTokens: 4096, Messages: append([]automationagent.Message(nil), inputMessages...)}
 		if changed {
 			request.Messages[1].Content = "unauthorized modified prompt"
 		}
@@ -179,22 +179,22 @@ func TestEvaluationRealGatewaySerializesAndAccounts(t *testing.T) {
 		require.NoError(t, Infer(c))
 		return recorder
 	}
-	require.Equal(t, http.StatusConflict, call(tasks[0], true).Code)
+	require.Equal(t, http.StatusConflict, call(tasks[0], true, messages).Code)
 	first := make(chan *httptest.ResponseRecorder, 1)
-	go func() { first <- call(tasks[0], false) }()
+	go func() { first <- call(tasks[0], false, messages) }()
 	select {
 	case <-entered:
 	case <-time.After(10 * time.Second):
 		t.Fatal("first fake provider call did not start")
 	}
-	require.Equal(t, http.StatusConflict, call(tasks[1], false).Code)
+	require.Equal(t, http.StatusConflict, call(tasks[1], false, messages).Code)
 	require.Equal(t, int32(1), providerCalls.Load(), "concurrent admission reached a provider")
 	close(release)
 	firstResult := <-first
 	require.Equal(t, http.StatusOK, firstResult.Code, firstResult.Body.String())
-	require.Equal(t, http.StatusConflict, call(tasks[0], false).Code, "second call for a task must be rejected")
+	require.Equal(t, http.StatusConflict, call(tasks[0], false, messages).Code, "second call for a task must be rejected")
 	for _, task := range tasks[1:] {
-		result := call(task, false)
+		result := call(task, false, messages)
 		require.Equal(t, http.StatusOK, result.Code, result.Body.String())
 	}
 	var receipts []models.AutomationInferenceReceipt
@@ -259,13 +259,17 @@ func TestEvaluationRealGatewaySerializesAndAccounts(t *testing.T) {
 	// Receipts remain durable; the disposable database retains this control.
 	require.NoError(t, db.Model(&batch).Update("status", "halted").Error)
 	for _, version := range []string{modelevaluation.CorpusVersion, modelevaluation.CacheCorpusVersion, modelevaluation.ImplementationPilotVersion} {
-		t.Run("normal admission and concurrent dispatch/"+version, func(t *testing.T) { testEvaluationAdmissionAndDispatch(t, db, version) })
+		t.Run("normal admission and concurrent dispatch/"+version, func(t *testing.T) {
+			testEvaluationAdmissionAndDispatch(t, db, version, func(task models.AutomationTask, input []automationagent.Message, changed bool) *httptest.ResponseRecorder {
+				return call(task, changed, input)
+			}, providerCalls.Load)
+		})
 	}
 	t.Run("prepared pilot dispatch cardinality", func(t *testing.T) { testPreparedPilotDispatch(t, db) })
 }
 
-// Seed only synthetic ledger rows: HTTP admission of the prepared pilot stays
-// disabled, and dispatch writes an outbox event without contacting a provider.
+// Seed synthetic ledger rows to isolate cardinality guards. Dispatch writes an
+// outbox event without contacting a provider.
 func testPreparedPilotDispatch(t *testing.T, db *gorm.DB) {
 	configureAIActionPolicyTestRoot(t, models.RootLevelPrimary)
 	require.NoError(t, automationqueue.Init("us-east-1", "integration", "integration", "http://127.0.0.1:1/queue/evaluation", "", "", "", "http://127.0.0.1:1"))
@@ -304,7 +308,7 @@ func testPreparedPilotDispatch(t *testing.T, db *gorm.DB) {
 	}
 }
 
-func testEvaluationAdmissionAndDispatch(t *testing.T, db *gorm.DB, version string) {
+func testEvaluationAdmissionAndDispatch(t *testing.T, db *gorm.DB, version string, infer func(models.AutomationTask, []automationagent.Message, bool) *httptest.ResponseRecorder, providerCount func() int32) {
 	expectedCalls, err := modelevaluation.ExpectedCalls(version)
 	require.NoError(t, err)
 	frozenPilotPrompt := ""
@@ -407,6 +411,55 @@ func testEvaluationAdmissionAndDispatch(t *testing.T, db *gorm.DB, version strin
 	require.NoError(t, db.Model(&models.OutboxEvent{}).Where("correlation_id = ?", batchID.String()).Count(&outbox).Error)
 	require.Equal(t, int64(1), queued)
 	require.Equal(t, int64(1), outbox)
+	if frozenPilotPrompt != "" {
+		messages, err := automationagent.SyntheticChatMessages(frozenPilotPrompt)
+		require.NoError(t, err)
+		before := providerCount()
+		for index, binding := range calls {
+			var task models.AutomationTask
+			require.NoError(t, db.First(&task, "id = ?", binding.AutomationTaskID).Error)
+			require.Equal(t, "queued", task.Status)
+			expires := time.Now().UTC().Add(time.Hour)
+			task.Status, task.RunID = "running", fmt.Sprintf("synthetic-pilot-run-%d", index)
+			task.WorkerID, task.AgentKey, task.MachineID = uuid.Must(uuid.NewV4()).String(), "generalist", uuid.Must(uuid.NewV4()).String()
+			task.LeaseExpiresAt, task.BudgetReservationExpiresAt = &expires, &expires
+			require.NoError(t, db.Save(&task).Error)
+			_, err := freezeAutomationInferenceAttemptPolicy(db, task, task.RunID, time.Now().UTC())
+			require.NoError(t, err)
+			require.Equal(t, http.StatusConflict, infer(task, messages, true).Code)
+			require.Equal(t, before+int32(index), providerCount(), "altered pilot prompt reached provider")
+			result := infer(task, messages, false)
+			require.Equal(t, http.StatusOK, result.Code, result.Body.String())
+			require.Equal(t, http.StatusConflict, infer(task, messages, false).Code, "pilot receipt permitted repeated inference")
+			require.Equal(t, before+int32(index)+1, providerCount())
+			var receipt models.AutomationInferenceReceipt
+			require.NoError(t, db.Where("automation_task_id = ?", task.ID).First(&receipt).Error)
+			route, err := modelevaluation.Route(modelevaluation.Candidate(binding.Candidate))
+			require.NoError(t, err)
+			require.Equal(t, "accepted", receipt.Status)
+			require.Equal(t, task.RunID, receipt.RunID)
+			require.Equal(t, route.Provider, receipt.Provider)
+			require.Equal(t, route.Model, receipt.Model)
+			require.Equal(t, int64(10), receipt.InputTokens)
+			require.Equal(t, int64(20), receipt.OutputTokens)
+			require.Positive(t, receipt.TotalCostMicros)
+			require.LessOrEqual(t, receipt.TotalCostMicros, binding.ReservationMicros)
+			require.NoError(t, db.Model(&task).Update("status", "completed").Error)
+			dispatched := invoke(DispatchNextModelEvaluation, "")
+			if index+1 < len(calls) {
+				require.Equal(t, http.StatusAccepted, dispatched.Code, dispatched.Body.String())
+			} else {
+				require.Equal(t, http.StatusOK, dispatched.Code, dispatched.Body.String())
+			}
+		}
+		var completed models.AutomationModelEvaluation
+		require.NoError(t, db.First(&completed, "id = ?", batchID).Error)
+		require.Equal(t, "completed", completed.Status)
+		repeated := strings.Replace(request, batchID.String(), uuid.Must(uuid.NewV4()).String(), 1)
+		require.Equal(t, http.StatusConflict, invoke(CreateModelEvaluation, repeated).Code)
+		require.Equal(t, int32(expectedCalls), uploaded.Load())
+		return
+	}
 	require.NoError(t, db.Model(&models.AutomationTask{}).Where("id = ?", calls[0].AutomationTaskID).Update("status", "failed").Error)
 	require.Equal(t, http.StatusConflict, invoke(DispatchNextModelEvaluation, "").Code)
 	var batch models.AutomationModelEvaluation

@@ -20,7 +20,12 @@ screening/cache and three for the pilot. PostgreSQL qualification with
 synthetic ledger rows rejects two/four-call pilot batches and queues exactly one
 outbox event for three calls. The normal HTTP admission test also qualifies three
 encrypted inputs, idempotent admission, frozen prompt/message/route bindings,
-concurrent dispatch and rejection of a new batch ID after halted history.
+concurrent dispatch and rejection of a new batch ID after completed history.
+It then runs all three routes through the real gateway with synthetic HTTP
+responses, verifies receipt identities, token usage and bounded costs, rejects
+altered prompts and repeated inference, and dispatches each next task until the
+batch completes. Synthetic responses do not contain implementation solutions;
+this qualification establishes accounting behavior, not model quality.
 The gateway also rejects unknown corpus versions, a pilot sequence beyond three,
 a foreign pilot case and a candidate assigned to the wrong pilot sequence. Its
 existing message, route, budget and cross-run receipt checks still apply.
