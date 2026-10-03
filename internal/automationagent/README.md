@@ -467,3 +467,37 @@ It does not verify executive prose, authenticate supplied local evidence, make a
 human decision or authorize release. Recovery reuses the recorded result without
 another inference call. Both QA and summary parsing share evidencejson's duplicate
 key, Unicode alias, nesting and single-document validation. Invalid UTF-8 bytes are rejected before Go can replace them during decoding; valid Unicode text remains accepted.
+### Reconcile recorded harness estimates
+
+From the repository root, point the reporter at a saved evaluation directory:
+
+~~~powershell
+./scripts/Report-HarnessCosts.ps1 -HarnessRoot ./saved-evaluations -OutputPath ./cost-report.md
+./scripts/Test-HarnessCosts.ps1
+~~~
+
+The reporter reads JSON records with an explicit calls array. A minimal synthetic
+record with known amounts is:
+
+~~~json
+{"model":"synthetic","synthetic_only":true,"reserved_upper_bound_microusd":1000000,"calls":[{"role":"delivery.qa","completion":"provider=fake model=synthetic","estimated_api_equivalent_microusd":0}]}
+~~~
+
+Amounts are nonnegative Int64 integers in millionths of a US dollar. Missing or
+null amounts remain Unknown; an explicit zero is a recorded zero. Negative,
+fractional, boolean or out-of-range amounts fail the report. Totals with missing
+amounts show the known subtotal and the number of records containing amounts.
+Empty source groups remain Unknown rather than implying a zero-cost evaluation.
+
+Read the coverage line before interpreting a total: it shows JSON files scanned,
+runs parsed, malformed files excluded and non-run files excluded. Any malformed
+file means the report lacks complete source coverage; totals cover parsed runs
+only. Provider/model labels come from saved completion metadata, not billing
+verification. Reserved bounds are admission limits, and API-equivalent amounts
+are estimates. This reporter does not query invoices or make inference requests.
+
+Retain the source files, report and evaluation commit together when comparing
+runs. Current offline Go JSONL results are non-run cost inputs; they do not
+contain the calls ledger required to establish provider spend. The Build AI Agent
+Windows job checks cost coverage and unknown-value behavior, including known
+zero, partial totals and invalid amounts.
