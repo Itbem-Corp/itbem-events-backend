@@ -22,6 +22,8 @@ func TestImplementationCandidateResponseRejectsAmbiguousOrForeignFiles(t *testin
 		[]byte(`{"changes":[{"path":"../page.go","content":"x"},{"path":"store.go","content":"x"}]}`),
 		[]byte(`{"changes":[{"path":"page.go","content":"\u0000"},{"path":"store.go","content":"x"}]}`),
 		[]byte(`{"changes":[{"path":"page.go","content":null},{"path":"store.go","content":"x"}]}`),
+		[]byte(`{"changes":[{"path":"page.go","content":"\ud800"},{"path":"store.go","content":"x"}]}`),
+		[]byte(`{"changes":[{"path":"page.go","content":"\udc00"},{"path":"store.go","content":"x"}]}`),
 		bytes.Repeat([]byte("x"), 65537),
 	} {
 		if _, err := implementationCandidateFiles(response); err == nil {

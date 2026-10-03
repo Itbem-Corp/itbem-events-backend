@@ -14,7 +14,7 @@ func TestValidateEvidenceJSON(t *testing.T) {
 			t.Fatalf("invalid UTF-8 evidence accepted: %x", input)
 		}
 	}
-	if err := Validate([]byte("{\"text\":\"válido \\uFFFD\"}")); err != nil {
+	if err := Validate([]byte("{\"text\":\"vÃ¡lido \\uFFFD\"}")); err != nil {
 		t.Fatalf("valid Unicode evidence rejected: %v", err)
 	}
 	for _, input := range []string{
@@ -24,6 +24,10 @@ func TestValidateEvidenceJSON(t *testing.T) {
 		`{"kind":"plan","\u212aind":"release"}`,
 		`{"claims":[{"index":0,"\u0069ndex":1}]}`,
 		`{} {}`, `{"claims":`,
+		`{"content":"\ud800"}`, `{"content":"\udfff"}`,
+		`{"\ud800":true}`, `{"content":"\ud800x\udc00"}`,
+		`{"content":"\ud800\ud800"}`, `{"content":"\ud800\u0041"}`,
+		`{"content":"\udc00\ud800"}`, `{"content":"\uD800\uDC0z"}`,
 		strings.Repeat("[", 66) + "0" + strings.Repeat("]", 66),
 	} {
 		if err := Validate([]byte(input)); err == nil {
@@ -32,5 +36,19 @@ func TestValidateEvidenceJSON(t *testing.T) {
 	}
 	if err := Validate([]byte(`{"claims":[{"index":0},{"index":1}],"passed":false}`)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestValidateEvidenceJSONPreservesValidUnicodeEscapes(t *testing.T) {
+	for _, input := range []string{
+		`{"content":"\ud83d\ude00"}`,
+		`{"content":"\uD83D\uDE00\ufffd"}`,
+		`{"content":"\\ud800"}`,
+		`{"content":"escaped quote \" then \\ud800"}`,
+		`{"\ud83d\ude00":"válido"}`,
+	} {
+		if err := Validate([]byte(input)); err != nil {
+			t.Fatalf("valid Unicode escape rejected: %s: %v", input, err)
+		}
 	}
 }
