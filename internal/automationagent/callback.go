@@ -183,6 +183,8 @@ func (err *HeartbeatRejectionError) Error() string {
 // workspace readiness projection contains only safe booleans and counts, so
 // operators can see whether a live worker can actually run Delivery work.
 type AgentHeartbeat struct {
+	Role               string               `json:"role,omitempty"`
+	Lane               string               `json:"lane,omitempty"`
 	WorkerID           string               `json:"worker_id"`
 	AgentKey           string               `json:"agent_key"`
 	MachineID          string               `json:"machine_id,omitempty"`

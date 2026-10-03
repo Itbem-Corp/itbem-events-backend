@@ -337,6 +337,8 @@ func TestHTTPCallbackHeartbeatSendsOnlyWorkerLivenessMetadata(t *testing.T) {
 			t.Fatalf("decode liveness metadata: %v", err)
 		}
 		delete(body, "worker_id")
+		delete(body, "role")
+		delete(body, "lane")
 		delete(body, "agent_key")
 		delete(body, "machine_id")
 		delete(body, "provider")
@@ -352,11 +354,13 @@ func TestHTTPCallbackHeartbeatSendsOnlyWorkerLivenessMetadata(t *testing.T) {
 
 	callback := newTestCallbackWithIdentity(t, server, identity, instanceID)
 	heartbeat := AgentHeartbeat{
+		Role:        "release_manager",
+		Lane:        "release",
 		WorkerID:    "a69b7f51-58b9-4f0e-aef3-1fbc23f79826",
 		AgentKey:    "generalist",
 		MachineID:   "a69b7f51-58b9-4f0e-aef3-1fbc23f79827",
-		Provider:    "minimax",
-		Model:       "MiniMax-M3",
+		Provider:    "",
+		Model:       "",
 		Concurrency: 2,
 		Protocols:   []string{agentprotocol.ProtocolDeliveryPlanStepsV1},
 		StartedAt:   "2026-08-09T12:00:00Z",
