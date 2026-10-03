@@ -74,3 +74,27 @@ func preparationCheckByKey(preparation projectPreparation, key string) preparati
 	}
 	return preparationCheck{Key: key, State: "missing", Detail: "not found"}
 }
+
+func TestImplementationPreflightRequiresEveryWorkspaceOnOneWorker(t *testing.T) {
+	ready := `{"id":"api","ready":true,"sandbox_ready":true,"isolation_mode":"docker_container"}`
+	other := `{"id":"dashboard","ready":true,"sandbox_ready":true,"isolation_mode":"docker_container"}`
+	for _, test := range []struct {
+		name, raw      string
+		draining, want bool
+	}{
+		{"complete", "[" + ready + "," + other + "]", false, true},
+		{"partial host", "[" + ready + "]", false, false},
+		{"other host", "[" + other + "]", false, false},
+		{"unready", "[" + ready + `,{"id":"dashboard","ready":true,"sandbox_ready":false,"isolation_mode":"docker_container"}]`, false, false},
+		{"duplicate", "[" + ready + "," + ready + "," + other + "]", false, false},
+		{"malformed", "invalid", false, false},
+		{"draining", "[" + ready + "," + other + "]", true, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			worker := models.AutomationAgentHeartbeat{WorkspaceReadiness: test.raw, Draining: test.draining}
+			if got := implementationHeartbeatCoversWorkspaces(worker, []string{"api", "dashboard"}); got != test.want {
+				t.Fatalf("got %v, want %v", got, test.want)
+			}
+		})
+	}
+}
