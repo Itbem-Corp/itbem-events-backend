@@ -940,6 +940,9 @@ func TestReadSafeWorkspaceArtifactRejectsSymlink(t *testing.T) {
 	}
 	link := filepath.Join(root, "evidence.txt")
 	if err := os.Symlink(outside, link); err != nil {
+		if os.Getenv("ITBEM_REQUIRE_SYMLINK_PROOF") == "1" {
+			t.Fatalf("symlink proof explicitly required but unavailable: %v", err)
+		}
 		t.Skip("symlinks unavailable in this environment")
 	}
 	if _, err := readSafeWorkspaceArtifact(root, link); err == nil {

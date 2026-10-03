@@ -186,10 +186,32 @@ endpoint overrides, provider selectors, and live-harness flags from that child
 environment; the parent process values are restored afterward and never
 printed. `scripts/Test-AgentHarnessIsolation.ps1` checks this boundary with
 synthetic sentinels and a fake Go command, without invoking the real test suite.
+The offline gate requires exactly one successful package completion and at least
+one passing test for each of its six requested packages. Empty or truncated
+streams fail even if the Go process exits zero; raw JSONL remains available for
+investigation. A parsed stream also produces `offline-summary.json` with the
+Go exit code, failing and skipped test identities, distinct passing tests,
+passing test executions, and package evidence gaps, including on failure.
+The explicit `passed` field includes exit status and evidence policy. Use
+`-RequireNoSkips` for an offline gate that requires every test to execute; any
+skip then records a failed verdict and returns a nonzero exit. This option
+does not enable integrations or change their environment prerequisites. Malformed streams retain the raw log and fail without a success summary.
+The three repetitions have a ten-minute per-package timeout; override with
+`-TestTimeoutSeconds` (30–1800 seconds) when diagnosing runtime issues. Do not
+reduce repetition count or treat timeout as success. The Windows CI isolation
+job exercises empty, truncated, duplicate, no-test, malformed, and failing
+streams on pushes and pull requests affecting the agent or harness. It also
+verifies restoration of the invoking process environment after success and
+failure, including variables that were originally absent.
 The old `-LiveMiniMax` and `-LiveProvider` modes were retired because they
 constructed provider clients in the test process and bypassed the central
 inference gateway; those selectors now fail before Go starts. `-ScoreReportPath`
-only replays an existing report and never triggers inference. Treat replay input
+only replays an existing report and never triggers inference. The scorer requires
+JSON objects for every present role and literal boolean execution outcomes.
+Missing roles may be skipped with its explicit `-AllowPartial` option, but empty
+reports and malformed present roles fail. `-AllowFailures` changes the exit code,
+not the recorded verdict. Run `scripts/Test-HarnessSemantics.ps1` for synthetic
+scorer regressions; these run in Windows CI alongside the isolation gate. Treat replay input
 and output as sensitive because reports can contain prompts and model responses.
 
 For a real model-quality evaluation, create and authorize a normal synthetic
@@ -331,3 +353,68 @@ silently falling back to the host process when Docker mode is selected.
 In deployed environments, invoke the Go binary directly and inject every
 setting through the runtime environment or secret manager. It never reads a
 `.env.ai.local` file itself.
+
+### Isolated runtime integration checks
+
+The LocalStack tests create unique task-owned buckets and queues, then remove
+those resources. They require a loopback HTTP endpoint and synthetic AWS
+credentials; they do not depend on pre-created development buckets. Use a
+dedicated LocalStack instance with S3 and SQS enabled:
+
+```powershell
+$env:ITBEM_LOCALSTACK_E2E = '1'
+$env:ITBEM_LOCALSTACK_ENDPOINT = 'http://127.0.0.1:<dedicated-port>'
+go test ./internal/automationagent -run '^TestLocalStack' -count=2 -timeout 3m -v
+```
+
+The agent CI workflow provides its own LocalStack service pinned by digest and
+runs both transport and durable-redelivery proofs twice. The latter deliberately
+fails the first terminal callback and asserts that recovery reuses the durable
+result without a second simulated provider call. Callbacks use the current
+run-scoped capability protocol and result references bind the claimed run.
+
+`ITBEM_LOCALSTACK_E2E=1` combined with `-short` fails rather than silently skipping
+the requested proof. Similarly, an explicitly enabled Docker sandbox integration
+fails when Docker is unavailable. For the Docker proof, enable
+`ITBEM_DOCKER_SANDBOX_E2E=1` and run `TestDockerSandboxRoundTrip`; the fixture
+requires its pinned Go image and verifies UID, capabilities, networking and
+filesystem permissions. Ordinary offline runs still skip opt-in integrations.
+
+The Linux integration CI job also preloads the pinned Go sandbox image and runs
+Docker isolation and symlink-artifact rejection twice. It sets
+`ITBEM_REQUIRE_SYMLINK_PROOF=1`, so a host unable to create a symlink fails that
+required proof instead of skipping. Local Windows runs may still skip it when
+that explicit requirement is absent. JSONL evidence from LocalStack and sandbox
+steps is uploaded for seven days on success or failure. A piped log cannot hide
+a test exit failure because both test steps enable shell `pipefail`.
+
+The binary build job depends on both Windows harness validation and Linux
+runtime integration. A failed, cancelled or skipped dependency prevents binary
+artifact creation. Its own regression step repeats all six harness packages and
+the agent command three times with shuffle seed 49207, preserving JSONL evidence
+even on failure. The workflow filters include delivery and automation controllers
+and runtime routes, so changes in those harness packages trigger the same gates.
+
+Before cross-building binaries, CI also pins Node 22.23.1 and validates the
+offline Stagehand runner's syntax and Node tests. Changes under
+`tools/stagehand-qa/` trigger the workflow alongside the Go harness packages.
+This gate uses synthetic HTTP fixtures and does not invoke browser inference.
+
+### Verify Go execution evidence
+
+`cmd/verify-test-evidence` reads `go test -json` output without executing tests
+or inference. CI calls it after each integration/regression pipeline. It requires
+one terminal pass per expected package, nonempty test execution, and the exact
+configured repetition count for every observed test. It rejects malformed logs,
+failures, events after package completion, missing proofs and skipped required
+tests. Integration gates use its default no-skip policy and explicitly name both
+required tests; the broad offline regression allows recorded optional skips.
+
+```powershell
+go run ./cmd/verify-test-evidence -log localstack-integration.jsonl -repetitions 2 -package events-stocks/internal/automationagent -test TestLocalStackTransportRoundTrip -test TestLocalStackRedeliveryReusesDurableResultWithoutProviderRepeat
+```
+
+The build regression also includes the verifier package itself. Updating a test
+filter alone cannot turn missing integration cases into a successful evidence
+gate: the required test names must still be observed passing twice. This validates
+execution completeness, not model quality or cryptographic source provenance.

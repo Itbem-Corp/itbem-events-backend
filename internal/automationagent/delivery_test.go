@@ -686,7 +686,7 @@ func TestRunImplementationUsesIsolatedWorktree(t *testing.T) {
 
 func TestIsolatedWorktreeAtRejectsInvalidAndUnavailableFrozenRevisions(t *testing.T) {
 	root := t.TempDir()
-	for _, command := range [][]string{{"git", "init"}, {"git", "config", "user.email", "test@example.invalid"}, {"git", "config", "user.name", "ITBEM Test"}} {
+	for _, command := range [][]string{{"git", "init"}, {"git", "config", "core.autocrlf", "false"}, {"git", "config", "user.email", "test@example.invalid"}, {"git", "config", "user.name", "ITBEM Test"}} {
 		result, err := runLocal(context.Background(), root, commandTimeout, "", command[0], command[1:]...)
 		if err != nil || result.ExitCode != 0 {
 			t.Fatalf("git setup failed: %#v / %v", result, err)
@@ -832,7 +832,7 @@ func setupImplementationRepository(t *testing.T) string {
 	if err := os.MkdirAll(root, 0700); err != nil {
 		t.Fatal(err)
 	}
-	for _, command := range [][]string{{"git", "init"}, {"git", "config", "user.email", "test@example.invalid"}, {"git", "config", "user.name", "ITBEM Test"}} {
+	for _, command := range [][]string{{"git", "init"}, {"git", "config", "core.autocrlf", "false"}, {"git", "config", "user.email", "test@example.invalid"}, {"git", "config", "user.name", "ITBEM Test"}} {
 		result, err := runLocal(context.Background(), root, commandTimeout, "", command[0], command[1:]...)
 		if err != nil || result.ExitCode != 0 {
 			t.Fatalf("git setup failed: %#v, %v", result, err)

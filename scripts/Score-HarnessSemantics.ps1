@@ -14,7 +14,7 @@ if (-not (Test-Path -LiteralPath $ReportPath -PathType Leaf)) {
 }
 
 $report = Get-Content -LiteralPath $ReportPath -Raw | ConvertFrom-Json
-if ($report.synthetic_only -ne $true) {
+if ($report.synthetic_only -isnot [bool] -or $report.synthetic_only -ne $true) {
     throw 'Semantic scorer only accepts synthetic harness reports.'
 }
 
@@ -53,7 +53,7 @@ function Read-Completion {
         return $null
     }
     $content = [string]$Call.completion.content
-    if ([string]::IsNullOrWhiteSpace($content)) {
+    if ([string]::IsNullOrWhiteSpace($content) -or -not $content.TrimStart().StartsWith('{')) {
         return $null
     }
     try {
@@ -73,7 +73,12 @@ function Require-Role {
         }
         return $null
     }
-    return (Read-Completion $latestByRole[$Role])
+    $completion = Read-Completion $latestByRole[$Role]
+    if ($null -eq $completion -or $completion -isnot [pscustomobject]) {
+        Add-Check $Role 'completion_valid' $false 'The latest role response must be a nonempty JSON object.'
+        return $null
+    }
+    return $completion
 }
 
 function Get-Outcome {
@@ -85,7 +90,7 @@ function Get-Outcome {
     if ($null -eq $property) {
         return $false
     }
-    return [bool]$property.Value
+    return ($property.Value -is [bool] -and $property.Value -eq $true)
 }
 
 # Reviewer: independent of ParseCodeReview. The evaluator checks the security
@@ -148,6 +153,9 @@ if ($null -ne $implementer) {
     Add-Check 'implementer_executable_acceptance' 'durable_execution_outcome' (Get-Outcome 'implementer_executable_acceptance') 'The independent semantic action must also have a durable completed execution outcome.'
 }
 
+if (@($checks | Where-Object { -not $_.skipped }).Count -eq 0) {
+    Add-Check 'report' 'evaluable_response_present' $false 'An empty partial report cannot demonstrate semantic success.'
+}
 $failed = @($checks | Where-Object { (-not $_.passed) -and (-not $_.skipped) })
 $checkArray = $checks.ToArray()
 $result = [ordered]@{
