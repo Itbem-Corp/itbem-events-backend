@@ -18,5 +18,15 @@ with `passed=false` and an unknown-command identity diagnostic. `go run` may als
 print `exit status 1` to stderr for the expected negative case.
 
 To retain evidence add `-output <new-score-path>`; existing files are protected.
-CLI regression tests replay both fixtures, including the precise rejection reason.
+CLI regression tests replay all fixtures, including the precise rejection reason.
 No credentials, inference requests, application execution or release are involved.
+
+Additional frozen adversarial cases retain the same observation:
+- false-verdict-claims.json changes the global verdict to passed; rejected for the observed-result verdict mismatch.
+- altered-security-claims.json keeps the global failed verdict but changes the failed security command to passed; rejected for the command result mismatch.
+- omitted-security-claims.json keeps the global failed verdict but omits the failed security command; rejected for incomplete command coverage.
+
+Each exits 1 with passed=false. These cases distinguish global verdict agreement
+from complete per-command correspondence. Run them with the same observation
+and the corresponding claims filename above. They are synthetic regression
+fixtures; they are not captured model responses or measured model-quality results.

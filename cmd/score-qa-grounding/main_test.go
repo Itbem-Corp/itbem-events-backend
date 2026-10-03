@@ -135,9 +135,15 @@ func TestScoreRetainsGroundedAndFailedEvidence(t *testing.T) {
 func TestVersionedGroundingFixtures(t *testing.T) {
 	fixture := filepath.Join("..", "..", "internal", "qaevidence", "testdata", "grounding")
 	for _, test := range []struct {
-		name string
-		exit int
-	}{{"grounded", 0}, {"invented", 1}} {
+		name, verdict, diagnostic string
+		exit                      int
+	}{
+		{"grounded", "failed", "", 0},
+		{"invented", "failed", "unknown or duplicated", 1},
+		{"false-verdict", "passed", "verdict differs", 1},
+		{"altered-security", "failed", "phase, kind or result", 1},
+		{"omitted-security", "failed", "complete observed command coverage", 1},
+	} {
 		t.Run(test.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			exit := run([]string{"-observation", filepath.Join(fixture, "observation.json"), "-claims", filepath.Join(fixture, test.name+"-claims.json")}, &stdout, &stderr)
@@ -157,11 +163,11 @@ func TestVersionedGroundingFixtures(t *testing.T) {
 			if score.Passed != (test.exit == 0) {
 				t.Fatal("fixture score changed")
 			}
-			if score.Kind != "structured_qa_grounding" || score.ObservedVerdict != "failed" || score.ClaimedVerdict != "failed" {
+			if score.Kind != "structured_qa_grounding" || score.ObservedVerdict != "failed" || score.ClaimedVerdict != test.verdict {
 				t.Fatal("grounding success confused with observed QA success")
 			}
-			if test.name == "invented" && (len(score.Errors) != 1 || !strings.Contains(score.Errors[0], "unknown or duplicated")) {
-				t.Fatal("invented fixture failed for an unrelated reason")
+			if test.diagnostic != "" && (len(score.Errors) != 1 || !strings.Contains(score.Errors[0], test.diagnostic)) {
+				t.Fatal("fixture failed for an unrelated reason")
 			}
 		})
 	}
