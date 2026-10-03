@@ -34,3 +34,11 @@ Send only the prompt field to the authorized model task. The other fields retain
 provenance for evaluation; private_oracle_sha256 is not model input. The prompt
 contains only the fixture and task, never the reference or oracle. Preparation
 does not authorize provider spend, execute a candidate, or measure model quality.
+
+Validate response structure without executing or writing candidate source:
+python3 scripts/validate_implementation_response.py --response <response.json> --output <new-report.json>
+The raw response is limited to 64 KiB, uses strict JSON and contains exactly one
+replacement for each editable file. Other paths, duplicate fields, empty content,
+NUL and invalid UTF-8 are rejected. The report hashes the response and replacement
+contents. response_contract_valid does not mean the Go package compiles or meets
+the task: candidate_executed remains false and implementation_correctness null.
