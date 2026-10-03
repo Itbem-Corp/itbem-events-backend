@@ -94,8 +94,9 @@ type WorkspaceConfig struct {
 
 const (
 	WorkspaceCapabilityReadRepository = "repository:read"
-	// WorkspaceCapabilityFetchRemote permits a human-triggered `git fetch`
-	// only. It never permits pull, checkout, merge, rebase or a worktree write.
+	// WorkspaceCapabilityFetchRemote permits managed source synchronization
+	// against the registered remote. It never grants arbitrary remotes, rebase,
+	// task-tree mutation or publication.
 	WorkspaceCapabilityFetchRemote    = "repository:fetch"
 	WorkspaceCapabilityCreateWorktree = "worktree:create"
 	WorkspaceCapabilityApplyPatch     = "patch:apply"
@@ -503,13 +504,16 @@ func RegisteredWorkspace(reference string, lookup func(string) string) (Workspac
 	if id == "" || strings.ContainsAny(id, "#/\\") {
 		return Workspace{}, fmt.Errorf("workspace reference is invalid")
 	}
-	workspaces, err := LoadWorkspaces(lookup("ITBEM_AI_WORKSPACES_JSON"))
+	workspaces, err := LoadWorkspaceRegistry(lookup("ITBEM_AI_WORKSPACES_JSON"))
 	if err != nil {
 		return Workspace{}, err
 	}
 	workspace, ok := workspaces[id]
 	if !ok {
 		return Workspace{}, fmt.Errorf("workspace is not registered locally: %s", id)
+	}
+	if info, err := os.Stat(workspace.Root); err != nil || !info.IsDir() {
+		return Workspace{}, fmt.Errorf("configured workspace is not a directory: %s", id)
 	}
 	return workspace, nil
 }
@@ -1052,8 +1056,8 @@ func FetchWorkspaceRemote(ctx context.Context, workspace Workspace) (WorkspaceGi
 }
 
 // SyncManagedWorkspace makes an operator-owned checkout ready to become a
-// Delivery checkpoint. It is intentionally a maintenance action, not part of
-// task execution: a task always uses a revision frozen before planning.
+// Delivery checkpoint. Startup and task preparation may invoke it against the
+// trusted registry; a task still uses the revision frozen before planning.
 //
 // A missing directory is cloned only from repository_url in the local registry.
 // An existing directory must be clean; the synchronizer fetches origin, safely
@@ -1102,6 +1106,11 @@ func syncManagedWorkspace(ctx context.Context, workspace Workspace, authenticate
 	if err := workspace.RequireCapability(WorkspaceCapabilityFetchRemote); err != nil {
 		return WorkspaceGitState{}, err
 	}
+	release, err := lockManagedWorkspace(ctx, workspace.Root)
+	if err != nil {
+		return WorkspaceGitState{}, err
+	}
+	defer release()
 	remoteURL := strings.TrimSpace(workspace.Config.RepositoryURL)
 	if remoteURL == "" {
 		return WorkspaceGitState{}, fmt.Errorf("workspace %s has no repository_url for managed synchronization", workspace.ID)

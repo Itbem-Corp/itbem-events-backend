@@ -266,6 +266,11 @@ func isolatedWorktreeAt(ctx context.Context, workspace Workspace, taskID, expect
 	if err := workspace.RequireCapability(WorkspaceCapabilityCreateWorktree); err != nil {
 		return "", "", err
 	}
+	release, err := lockManagedWorkspace(ctx, workspace.Root)
+	if err != nil {
+		return "", "", err
+	}
+	defer release()
 	branch := "itbem-agent/" + taskID
 	directory := filepath.Join(workspace.Root, ".itbem-agent-worktrees", taskID)
 	revision := expectedRevision
@@ -367,6 +372,10 @@ func PrepareDeliveryWorkspaces(ctx context.Context, delivery json.RawMessage, lo
 		return fmt.Errorf("delivery input must be a JSON object")
 	}
 	seen := make(map[string]struct{}, len(value.ContextSources))
+	registry, err := LoadWorkspaceRegistry(lookup("ITBEM_AI_WORKSPACES_JSON"))
+	if err != nil {
+		return err
+	}
 	for _, source := range value.ContextSources {
 		if source.Kind != "repository" || !strings.HasPrefix(strings.TrimSpace(source.Reference), "workspace://") {
 			continue
@@ -376,10 +385,12 @@ func PrepareDeliveryWorkspaces(ctx context.Context, delivery json.RawMessage, lo
 			continue
 		}
 		seen[reference] = struct{}{}
-		workspace, err := RegisteredWorkspace(reference, lookup)
-		if err != nil {
-			return err
+		id := strings.TrimPrefix(reference, "workspace://")
+		workspace, registered := registry[id]
+		if !registered {
+			return fmt.Errorf("workspace is not registered locally: %s", id)
 		}
+		var err error
 		expected := strings.ToLower(strings.TrimSpace(source.Revision))
 		if expected != "" && !gitCommitPattern.MatchString(expected) {
 			return fmt.Errorf("workspace %s managed Delivery source has an invalid immutable revision", workspace.ID)

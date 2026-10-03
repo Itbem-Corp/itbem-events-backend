@@ -33,6 +33,7 @@ func main() {
 	githubAuthProbe := flag.Bool("github-auth-probe", false, "verify the role-specific GitHub App installation with bounded read-only access")
 	doctor := flag.Bool("doctor", false, "validate the local workspace registry without calling a provider")
 	syncWorkspaces := flag.Bool("sync-workspaces", false, "clone or fast-forward operator-managed workspace base checkouts")
+	provisionWorkspaces := flag.Bool("provision-workspaces", false, "provision missing authorized checkouts without modifying existing bases")
 	showMachineIdentity := flag.Bool("show-machine-identity", false, "display the local machine ID and public key for administrator registration")
 	ensureRegistered := flag.Bool("ensure-registered", false, "automatically register this machine using its role/lane gateway token")
 	flag.Parse()
@@ -54,6 +55,13 @@ func main() {
 			status = "not_required_for_aws_transport"
 		}
 		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"ready": true, "status": status, "instance_id": instanceID})
+		return
+	}
+	if *provisionWorkspaces {
+		if err := automationagent.ProvisionRegisteredWorkspaces(context.Background(), os.Getenv); err != nil {
+			fail(err)
+		}
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"ready": true, "status": "registered_workspaces_provisioned", "provider_billable": false})
 		return
 	}
 	if *syncWorkspaces {

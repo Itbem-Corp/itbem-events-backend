@@ -495,6 +495,11 @@ func (w *Worker) Process(ctx context.Context, message TaskMessage) error {
 	if err := json.Unmarshal(raw, &input); err != nil {
 		return w.fail(ctx, message.Payload.TaskID, runID, fmt.Errorf("automation input must be UTF-8 JSON"))
 	}
+	if strings.HasPrefix(message.Payload.Operation, "delivery.") && len(input.Delivery) > 0 && message.Payload.Operation != "delivery.release_gate" && message.Payload.Operation != agentwork.OperationDeliveryOnboardingProbe {
+		if err := PrepareDeliveryWorkspaces(ctx, input.Delivery, os.Getenv); err != nil {
+			return w.fail(ctx, message.Payload.TaskID, runID, fmt.Errorf("prepare registered Delivery workspaces before inference: %w", err))
+		}
+	}
 	if message.Payload.Operation == "delivery.release_gate" {
 		return w.processReleaseObservation(ctx, message.Payload.TaskID, runID, input)
 	}

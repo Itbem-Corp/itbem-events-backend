@@ -4,7 +4,7 @@ After=network-online.target
 Wants=network-online.target
 # A gateway/DNS outage must not leave a 24/7 lane permanently failed after a
 # small burst of harmless preflight attempts.  Every retry still starts with
-# the non-mutating preflights below; use a paced retry rather than a start-rate
+# the authorized provisioning and preflights below; use a paced retry rather than a start-rate
 # lockout that needs an operator to reset it.
 StartLimitIntervalSec=0
 
@@ -24,6 +24,7 @@ EnvironmentFile=/etc/itbem-ai-agent/roles/%i.env
 ExecCondition=/usr/bin/test ! -e /etc/itbem-ai-agent/disabled/all
 ExecCondition=/usr/bin/test ! -e /etc/itbem-ai-agent/disabled/%i
 ExecStartPre=/opt/itbem-ai-agent/current/itbem-ai-agent --ensure-registered
+ExecStartPre=/opt/itbem-ai-agent/current/itbem-ai-agent --provision-workspaces
 ExecStartPre=/opt/itbem-ai-agent/current/itbem-ai-agent --doctor
 ExecStartPre=/opt/itbem-ai-agent/current/itbem-ai-agent --runtime-auth-probe
 ExecStartPre=/opt/itbem-ai-agent/current/itbem-ai-agent --provider-auth-probe
@@ -31,7 +32,7 @@ ExecStartPre=/opt/itbem-ai-agent/current/itbem-ai-agent --github-auth-probe
 ExecStart=/opt/itbem-ai-agent/current/itbem-ai-agent
 Restart=on-failure
 RestartSec=60s
-TimeoutStartSec=90s
+TimeoutStartSec=600s
 TimeoutStopSec=60s
 KillSignal=SIGTERM
 NoNewPrivileges=yes
