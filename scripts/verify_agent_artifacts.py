@@ -96,6 +96,18 @@ def verify_binaries(directory):
     return result
 
 
+def summarize_log(raw):
+    events = [decode_json(line) for line in raw.decode('utf-8').splitlines()]
+    tests = [event for event in events if event.get('Test')]
+    skips = [{'package': event['Package'], 'test': event['Test']}
+             for event in tests if event.get('Action') == 'skip']
+    return {'passed_tests': sum(event.get('Action') == 'pass' for event in tests),
+            'skipped_tests': len(skips), 'skips': skips,
+            'failed_events': sum(event.get('Action') == 'fail' for event in events),
+            'completed_packages': sorted({event['Package'] for event in events
+                                          if event.get('Action') == 'pass' and not event.get('Test')})}
+
+
 def verify(revision, regression, runtime, binaries, go):
     if not re.fullmatch(r'[0-9a-f]{40}', revision):
         raise ValueError('Full canonical Git revision required.')
@@ -114,7 +126,9 @@ def verify(revision, regression, runtime, binaries, go):
                              capture_output=True, text=True, timeout=90, env=environment)
         if run.returncode != 0:
             raise ValueError('Go evidence verification failed for ' + name + ': ' + run.stderr)
-        logs[name] = {'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'scope': args}
+        raw = path.read_bytes()
+        logs[name] = {'sha256': hashlib.sha256(raw).hexdigest(), 'scope': args,
+                      'summary': summarize_log(raw)}
     sandbox_args = scopes['sandbox-integration.jsonl']
     count = int(sandbox_args[sandbox_args.index('-repetitions') + 1])
     sandbox = verify_sandbox((runtime / 'sandbox-integration.jsonl').read_bytes(), count)
