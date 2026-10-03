@@ -87,6 +87,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return fmt.Errorf("observation input: %w", err)
 		}
 		result.ObservationHash = hash(raw)
+		claimsRaw, claimsErr := readInput(*claimsPath)
+		if claimsErr == nil {
+			result.ClaimsHash = hash(claimsRaw)
+		}
 		observation, err := qaevidence.Decode(raw)
 		if err != nil {
 			return err
@@ -102,12 +106,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 				}
 			}
 		}
-		raw, err = readInput(*claimsPath)
-		if err != nil {
-			return fmt.Errorf("claims input: %w", err)
+		if claimsErr != nil {
+			return fmt.Errorf("claims input: %w", claimsErr)
 		}
-		result.ClaimsHash = hash(raw)
-		claims, err := qaevidence.DecodeClaims(raw)
+		claims, err := qaevidence.DecodeClaims(claimsRaw)
 		if err != nil {
 			return err
 		}

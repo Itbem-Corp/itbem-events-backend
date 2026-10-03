@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -64,6 +66,29 @@ func TestScoreRetainsGroundedAndFailedEvidence(t *testing.T) {
 			}
 		})
 	}
+	t.Run("malformed-observation-retains-input-hashes", func(t *testing.T) {
+		badObservation := filepath.Join(root, "invalid-observation.json")
+		raw := []byte("not-json")
+		if err := os.WriteFile(badObservation, raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(claims, []byte(valid), 0600); err != nil {
+			t.Fatal(err)
+		}
+		var stdout, stderr bytes.Buffer
+		if run([]string{"-observation", badObservation, "-claims", claims}, &stdout, &stderr) != 1 {
+			t.Fatal("malformed observation accepted")
+		}
+		var score map[string]any
+		if err := json.Unmarshal(stdout.Bytes(), &score); err != nil {
+			t.Fatal(err)
+		}
+		observationDigest := sha256.Sum256(raw)
+		claimsDigest := sha256.Sum256([]byte(valid))
+		if score["passed"] != false || score["observation_sha256"] != hex.EncodeToString(observationDigest[:]) || score["claims_sha256"] != hex.EncodeToString(claimsDigest[:]) {
+			t.Fatal("failed evaluation lost original input hashes")
+		}
+	})
 	var stdout, stderr bytes.Buffer
 	if run([]string{"-observation", observation, "-claims", claims, "-output", observation}, &stdout, &stderr) != 2 {
 		t.Fatal("score overwrote observation input")
