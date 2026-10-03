@@ -1,5 +1,7 @@
 # Offline model evaluation reports
 
+Every supplied run and receipt identity must be a nonblank string without surrounding whitespace, and may occur only once per export. Accepted outcomes require both identities. Failed outcomes may omit identities that were never assigned and remain in the denominator; reused identities are rejected even on failed rows. This prevents counting an exported receipt more than once, but does not authenticate the receipt itself.
+
 Score exported gateway outcomes against the frozen screening corpus:
 
 ```sh

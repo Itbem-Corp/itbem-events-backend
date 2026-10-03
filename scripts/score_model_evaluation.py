@@ -49,6 +49,7 @@ def score(corpus, evidence):
         raise ValueError('Unexpected number of clean review cases.')
     seen = set()
     task_ids = set()
+    outcome_ids = {'run_id': set(), 'receipt_id': set()}
     for call in calls:
         key = (call['case_id'], call['candidate'])
         if key in seen or key[0] not in cases or key[1] not in CANDIDATES:
@@ -58,8 +59,17 @@ def score(corpus, evidence):
         if not isinstance(task_id, str) or not task_id.strip() or task_id in task_ids:
             raise ValueError('Missing or duplicate task identity.')
         task_ids.add(task_id)
-        if call.get('receipt_status') == 'accepted' and (not call.get('run_id') or not call.get('receipt_id')):
-            raise ValueError('Accepted result requires run and receipt identity.')
+        for field, recorded in outcome_ids.items():
+            identity = call.get(field)
+            if identity is None or identity == '':
+                if call.get('receipt_status') == 'accepted':
+                    raise ValueError('Accepted result requires run and receipt identity.')
+                continue
+            if not isinstance(identity, str) or not identity.strip() or identity != identity.strip():
+                raise ValueError('Invalid evaluation outcome identity.')
+            if identity in recorded:
+                raise ValueError('Reused evaluation outcome identity.')
+            recorded.add(identity)
         prompt = corpus['system'].strip() + '\n\n' + cases[key[0]]['prompt'].strip()
         if call['prompt_sha256'] != hashlib.sha256(prompt.encode('utf-8')).hexdigest():
             raise ValueError('Prompt hash does not match the reviewed corpus.')

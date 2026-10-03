@@ -37,6 +37,23 @@ def fixture(corpus=CORPUS):
 
 
 class ScoringTests(unittest.TestCase):
+    def test_reused_receipt_or_run_cannot_count_as_new_outcome(self):
+        for field in ('receipt_id', 'run_id'):
+            with self.subTest(field=field):
+                evidence = fixture()
+                evidence['calls'][1][field] = evidence['calls'][0][field]
+                with self.assertRaises(ValueError):
+                    score(CORPUS, evidence)
+
+    def test_accepted_identities_must_be_nonblank_strings(self):
+        for field in ('run_id', 'receipt_id'):
+            for value in (True, 123, ['identity'], ' ', ' padded '):
+                with self.subTest(field=field, value=value):
+                    evidence = fixture()
+                    evidence['calls'][0][field] = value
+                    with self.assertRaises(ValueError):
+                        score(CORPUS, evidence)
+
     def test_modified_corpus_cannot_redefine_success(self):
         for mutation in ('expected', 'duplicate', 'type', 'version'):
             with self.subTest(mutation=mutation):
@@ -66,6 +83,16 @@ class ScoringTests(unittest.TestCase):
         for row in result['results'].values():
             self.assertEqual(row['successes'], 20)
             self.assertEqual(row['unknown_cost_count'], 0)
+
+    def test_failed_outcomes_keep_missing_identities_but_not_reused_receipts(self):
+        evidence = fixture()
+        evidence['calls'][0].update(receipt_status='ambiguous', status='failed', run_id='', receipt_id=None)
+        row = score(CORPUS, evidence)['results']['minimax-m3']
+        self.assertEqual(row['successes'], 19)
+        self.assertEqual(row['denominator'], 20)
+        evidence['calls'][0]['receipt_id'] = evidence['calls'][1]['receipt_id']
+        with self.assertRaisesRegex(ValueError, 'Reused evaluation outcome identity'):
+            score(CORPUS, evidence)
 
     def test_ambiguous_sealed_route_is_rejected(self):
         evidence = fixture()
