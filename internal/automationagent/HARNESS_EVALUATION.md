@@ -498,3 +498,15 @@ con GOTOOLCHAIN=local, terminó con seis paquetes y tres repeticiones: 5,430
  ejecuciones aprobadas, 39 skips opcionales y cero fallos. El JSONL completo
 pasó el verificador de evidencia. Los artefactos locales quedan ignorados por
 Git; siguen disponibles para auditoría. El nuevo commit requiere checks de CI.
+
+### Rechazo de evidencia semántica vacía o mal tipada
+
+El scorer aceptaba listas con placeholders nulos/vacíos como riesgos, evidencia
+o huecos de contexto, y podía convertir riesgos numéricos u objetos a texto.
+Ahora exige arrays no vacíos de strings útiles para resumen/planner y riesgos
+string no vacíos en cada alternativa de producto. Veinte casos adversariales
+nuevos pasaron junto a los anteriores: 77 casos sintéticos en total. Es una
+comprobación determinista de estas fixtures; no demuestra calidad experta ni
+que los textos estén respaldados por evidencia independiente. El nuevo commit
+requiere ejecutar CI nuevamente; el head anterior 92140a1 tenía todos sus
+checks verdes y sus artefactos descargados/verificados.

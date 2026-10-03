@@ -35,6 +35,21 @@ function Assert-Score([string]$Name, $Report, [bool]$ExpectedPass, [string[]]$Op
 }
 try {
     Assert-Score 'valid' (New-Report) $true
+    foreach ($field in @('evidence','risks','context_gaps','risk')) {
+        foreach ($value in @($null, '', '   ', 1, @{fake='text'})) {
+            $report = New-Report
+            $role = if ($field -in @('evidence','risks')) { 'delivery_grounded_summary' } elseif ($field -eq 'risk') { 'product_bounded_options' } else { 'planner_missing_context' }
+            $answer = ($report.calls | Where-Object role -eq $role).completion.content | ConvertFrom-Json
+            switch ($field) {
+                'evidence' { $answer.technical.evidence = @($value) }
+                'risks' { $answer.executive.risks = @($value) }
+                'context_gaps' { $answer.context_gaps = @($value) }
+                'risk' { $answer.directions[0].risk = $value }
+            }
+            ($report.calls | Where-Object role -eq $role).completion.content = $answer | ConvertTo-Json -Depth 10 -Compress
+            Assert-Score ($field + '-' + [guid]::NewGuid().ToString('N')) $report $false
+        }
+    }
     foreach ($marker in @('true', 1, $false, $null)) {
         $report = New-Report
         $report.synthetic_only = $marker

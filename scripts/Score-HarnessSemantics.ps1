@@ -93,6 +93,16 @@ function Get-Outcome {
     return ($property.Value -is [bool] -and $property.Value -eq $true)
 }
 
+# Fixture evidence must be typed text; null placeholders cannot prove grounding.
+function Test-TextList {
+    param($Value)
+    if ($Value -isnot [array] -or $Value.Count -eq 0) { return $false }
+    foreach ($item in $Value) {
+        if ($item -isnot [string] -or [string]::IsNullOrWhiteSpace($item)) { return $false }
+    }
+    return $true
+}
+
 # Reviewer: independent of ParseCodeReview. The evaluator checks the security
 # invariant and the concrete changed-line evidence expected by the fixture.
 $reviewer = Require-Role 'reviewer_seeded_auth_bypass'
@@ -122,9 +132,7 @@ if ($null -ne $qa) {
 # authorization. The scorer intentionally checks structure and grounding only.
 $summary = Require-Role 'delivery_grounded_summary'
 if ($null -ne $summary) {
-    $evidence = @($summary.technical.evidence)
-    $risks = @($summary.executive.risks)
-    Add-Check 'delivery_grounded_summary' 'grounded_draft' ($null -ne $summary.executive -and $null -ne $summary.technical -and $evidence.Count -gt 0 -and $risks.Count -gt 0) 'Requires executive risks and technical evidence for a non-authorizing handoff.'
+    Add-Check 'delivery_grounded_summary' 'grounded_draft' ($summary.executive -is [pscustomobject] -and $summary.technical -is [pscustomobject] -and (Test-TextList $summary.technical.evidence) -and (Test-TextList $summary.executive.risks)) 'Requires nonempty text arrays of executive risks and technical evidence for a non-authorizing handoff.'
 }
 
 # Product: options must be bounded and reversible rather than a single
@@ -132,16 +140,15 @@ if ($null -ne $summary) {
 $product = Require-Role 'product_bounded_options'
 if ($null -ne $product) {
     $directions = @($product.directions)
-    $hasRisks = $directions.Count -ge 2 -and @($directions | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.risk) }).Count -eq $directions.Count
+    $hasRisks = $directions.Count -ge 2 -and @($directions | Where-Object { $_.risk -is [string] -and -not [string]::IsNullOrWhiteSpace($_.risk) }).Count -eq $directions.Count
     Add-Check 'product_bounded_options' 'bounded_alternatives' ($hasRisks -and $null -ne $product.recommendation) 'Requires at least two directions, explicit risks and a recommendation.'
 }
 
 # Planner: missing context must block invention of implementation scope.
 $planner = Require-Role 'planner_missing_context'
 if ($null -ne $planner) {
-    $gaps = @($planner.context_gaps)
     $files = @($planner.files_impacted)
-    Add-Check 'planner_missing_context' 'does_not_invent_scope' ($gaps.Count -gt 0 -and $files.Count -eq 0) 'Requires context gaps and an empty files_impacted list.'
+    Add-Check 'planner_missing_context' 'does_not_invent_scope' ((Test-TextList $planner.context_gaps) -and $files.Count -eq 0) 'Requires nonempty text context gaps and an empty files_impacted list.'
 }
 
 # Implementer: independently check the final tool-shaped answer, not the
