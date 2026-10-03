@@ -27,6 +27,16 @@ El runner local repite sus seis paquetes canónicos y conserva omisiones. `-Requ
 
 Antes de declarar un commit verificado, comprueba el SHA ejecutado, la conclusión de los checks y el contenido de los artefactos descargados. Usa `cmd/verify-test-evidence` con los paquetes, repeticiones y nombres exigidos por ese workflow. Comprueba también las dos repeticiones de las cinco pruebas de runtime sin omisiones y los SHA-256 de los binarios. Un resultado anterior no certifica el nuevo head.
 
+Para cotejar los artefactos descargados con una revisión concreta, usa:
+
+```sh
+python scripts/verify_agent_artifacts.py --revision <SHA-completo> --regression <directorio-regresion> --runtime <directorio-runtime> --binaries <directorio-binarios> --go <Go-1.25.13> --output <reporte-nuevo.json>
+```
+
+Los directorios de regresión y runtime contienen sus archivos originales. El directorio de binarios contiene las carpetas `itbem-ai-agent-windows-amd64` e `itbem-ai-agent-linux-amd64` creadas al descargar ambos artefactos con `gh run download`. El verificador deriva el alcance del workflow guardado en Git para ese SHA, ejecuta el verificador Go, coteja los controles de implementación contra los blobs de esa revisión, reproduce el reporte interno de Docker y compara ambos manifiestos. Requiere los artefactos del benchmark de implementación; no sirve para revisiones anteriores que no los publicaban.
+
+Este comando no consulta GitHub ni autentica el origen de los archivos. Comprueba por separado el SHA y los checks del run que descargaste. El reporte identifica también la revisión y el hash del evaluador local y si su checkout tenía cambios; revisar artefactos históricos con un evaluador posterior no ejecuta de nuevo el backend histórico. El destino debe ser nuevo y su directorio debe existir.
+
 ## Replay de correspondencia QA
 
 Este ejemplo usa exclusivamente fixtures sintéticas. El directorio de salida debe existir y el archivo de salida debe ser nuevo:
