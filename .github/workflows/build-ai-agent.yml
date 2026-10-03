@@ -23,6 +23,7 @@ on:
       - services/deliveryplansteps/**
       - services/deliveryworkflow/**
       - scripts/verify_implementation_benchmark.py
+      - scripts/verify_implementation_sandbox.py
       - scripts/evaluation_report.py
       - scripts/Test-AgentHarness.ps1
       - scripts/Test-AgentHarnessIsolation.ps1
@@ -53,6 +54,7 @@ on:
       - services/deliveryplansteps/**
       - services/deliveryworkflow/**
       - scripts/verify_implementation_benchmark.py
+      - scripts/verify_implementation_sandbox.py
       - scripts/evaluation_report.py
       - scripts/Test-AgentHarness.ps1
       - scripts/Test-AgentHarnessIsolation.ps1
@@ -139,12 +141,15 @@ jobs:
           set -o pipefail
           go test ./internal/automationagent -run '^(TestDockerSandboxRoundTrip|TestReadSafeWorkspaceArtifactRejectsSymlink|TestSandboxWorktreeDigestMatchesPythonSupervisor)$' -count=2 -timeout 3m -json | tee sandbox-integration.jsonl
           go run ./cmd/verify-test-evidence -log sandbox-integration.jsonl -repetitions 2 -package events-stocks/internal/automationagent -test TestDockerSandboxRoundTrip -test TestReadSafeWorkspaceArtifactRejectsSymlink -test TestSandboxWorktreeDigestMatchesPythonSupervisor
+          python3 scripts/verify_implementation_sandbox.py --log sandbox-integration.jsonl --repetitions 2 --output implementation-sandbox.json
       - name: Preserve integration evidence on success or failure
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ai-agent-runtime-integration-evidence
-          path: '*-integration.jsonl'
+          path: |
+            *-integration.jsonl
+            implementation-sandbox.json
           if-no-files-found: warn
           retention-days: 7
 
