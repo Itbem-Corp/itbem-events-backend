@@ -20,6 +20,9 @@ def verify(response, exported_call, execution_raw, task_id, receipt_id):
     prepared = package(response)
     if not prepared['candidate_package_prepared']:
         raise ValueError('Response does not satisfy the implementation contract.')
+    call = decode_json(exported_call.decode('utf-8'))
+    if call.get('case_id') != 'pagination-v1' or call.get('prompt_sha256') != prepared['prepared_prompt_sha256']:
+        raise ValueError('Receipt call does not bind the frozen implementation case and prompt.')
     execution = decode_json(execution_raw.decode('utf-8'))
     if not isinstance(execution, dict) or execution.get('case') != 'pagination-v1':
         raise ValueError('Expected pagination implementation execution evidence.')
@@ -56,6 +59,7 @@ def verify(response, exported_call, execution_raw, task_id, receipt_id):
             'exported_call_sha256': binding['exported_call_sha256'],
             'execution_sha256': hashlib.sha256(execution_raw).hexdigest(),
             'worktree_digest': prepared['expected_worktree_digest'], 'lease_id': lease['lease_id'],
+            'prepared_prompt_sha256': prepared['prepared_prompt_sha256'],
             'observed_oracle_passed': exit_code == 0, 'failed_oracle_cases': failures,
             'provider_provenance_authenticated': False, 'model_quality_measured': False,
             'cost_verified': False}

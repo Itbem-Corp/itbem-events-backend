@@ -18,7 +18,9 @@ def inputs():
     execution['sandbox_lease']['task_id'] = TASK
     execution['sandbox_lease']['worktree_digest'] = package(response)['expected_worktree_digest']
     execution['response_sha256'] = hashlib.sha256(response).hexdigest()
-    return response, exported(response), execution
+    call = exported(response)
+    call.update(case_id='pagination-v1', prompt_sha256=package(response)['prepared_prompt_sha256'])
+    return response, call, execution
 
 
 class ImplementationExecutionTests(unittest.TestCase):
@@ -67,3 +69,12 @@ class ImplementationExecutionTests(unittest.TestCase):
         execution['exit_code'] = 1
         with self.assertRaises(ValueError):
             verify(response, raw(call), raw(execution), TASK, RECEIPT)
+
+    def test_foreign_case_missing_or_rebound_prompt_rejected(self):
+        response, original, execution = inputs()
+        for field, value in [('case_id', 'screening-v1'), ('case_id', None),
+                             ('prompt_sha256', None), ('prompt_sha256', 'a' * 64)]:
+            call = dict(original)
+            call[field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                verify(response, raw(call), raw(execution), TASK, RECEIPT)
