@@ -92,6 +92,12 @@ func TestImplementationPilotOracleDockerRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		result["control"] = control
+		evidence, err := json.Marshal(result)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("implementation oracle execution evidence: %s", evidence)
 		lease := result["sandbox_lease"].(map[string]any)
 		if lease["task_id"] != task || lease["worktree_digest"] != digest || lease["status"] != "completed" {
 			t.Fatalf("missing execution binding: %#v", result)
