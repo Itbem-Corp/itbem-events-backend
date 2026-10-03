@@ -9,10 +9,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
+
+	"events-stocks/internal/evidencejson"
 )
 
 const (
-	maxCodeReviewChangedFiles = 300
+	maxCodeReviewChangedFiles  = 300
+	maxCodeReviewResponseBytes = 1 << 20
 	// The worker never sends this complete boundary to the provider. It first
 	// partitions it into independently validated file-diff segments. Keep the
 	// ingress cap below the private 10 MiB transport limit while allowing a
@@ -798,7 +802,10 @@ func isLowercaseHex(character rune) bool {
 // changes a pull request. Its structure makes an eventual GitHub/PR surface
 // deterministic instead of relying on free-form prose.
 func ParseCodeReview(content string) (map[string]any, error) {
-	review, ok := decodeJSONObject(content)
+	if len(content) == 0 || len(content) > maxCodeReviewResponseBytes || !utf8.ValidString(content) {
+		return nil, fmt.Errorf("code review JSON size or UTF-8 is invalid")
+	}
+	review, ok := decodeJSONObjectWithValidation(content, evidencejson.Validate)
 	if !ok {
 		return nil, fmt.Errorf("code review must be a JSON object")
 	}

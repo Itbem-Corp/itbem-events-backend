@@ -889,6 +889,10 @@ func stringAny(value any) string {
 // validate the object strictly below; prose alone, arrays and malformed JSON
 // remain rejected so no ambiguous plan can be presented for human review.
 func decodeJSONObject(content string) (map[string]any, bool) {
+	return decodeJSONObjectWithValidation(content, nil)
+}
+
+func decodeJSONObjectWithValidation(content string, validate func([]byte) error) (map[string]any, bool) {
 	trimmed := strings.TrimSpace(content)
 	if trimmed == "" {
 		return nil, false
@@ -899,6 +903,9 @@ func decodeJSONObject(content string) (map[string]any, bool) {
 	// arrays and prose are rejected below.
 	var wrapped string
 	if json.Unmarshal([]byte(trimmed), &wrapped) == nil && strings.TrimSpace(wrapped) != "" {
+		if validate != nil && validate([]byte(trimmed)) != nil {
+			return nil, false
+		}
 		trimmed = strings.TrimSpace(wrapped)
 	}
 	for offset := 0; offset < len(trimmed); {
@@ -912,6 +919,10 @@ func decodeJSONObject(content string) (map[string]any, bool) {
 			return nil, false
 		}
 		var value map[string]any
+		candidate := []byte(trimmed[start : start+end])
+		if validate != nil && json.Valid(candidate) && validate(candidate) != nil {
+			return nil, false
+		}
 		if err := json.Unmarshal([]byte(trimmed[start:start+end]), &value); err == nil && value != nil {
 			return value, true
 		}
@@ -923,6 +934,9 @@ func decodeJSONObject(content string) (map[string]any, bool) {
 		// still rejected rather than mining a nested object as if it were a plan.
 		if strings.TrimSpace(trimmed[start+end:]) == "" {
 			if repaired, ok := repairSingleTrailingArrayClosure(trimmed[start : start+end]); ok {
+				if validate != nil && validate([]byte(repaired)) != nil {
+					return nil, false
+				}
 				if err := json.Unmarshal([]byte(repaired), &value); err == nil && value != nil {
 					return value, true
 				}
