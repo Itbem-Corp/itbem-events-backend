@@ -28,6 +28,12 @@ hashes, actual logs and exits. CI runs these controls before canonical regressio
 and preserves implementation-controls.json alongside regression evidence.
 The runner accepts no candidate path and makes no provider calls.
 
+The opt-in TestDockerSandboxRoundTrip also runs the checked-in defective fixture
+and reference through the existing pinned Docker sandbox, with networking and
+module downloads disabled. It requires the fixture's second-page failure and all
+eight reference cases to execute successfully. CI repeats this qualification;
+it validates the execution path without claiming that a model candidate ran.
+
 Prepare the model-facing input without running a model:
 python3 scripts/prepare_implementation_evaluation.py --output <new-input.json>
 Send only the prompt field to the authorized model task. The other fields retain
