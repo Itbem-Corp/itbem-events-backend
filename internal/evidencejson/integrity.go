@@ -18,7 +18,7 @@ func Validate(payload []byte) error {
 	var value func(int) error
 	value = func(depth int) error {
 		if depth > 64 {
-			return fmt.Errorf("Evidence JSON nesting exceeds limit")
+			return fmt.Errorf("evidence JSON nesting exceeds limit")
 		}
 		token, err := decoder.Token()
 		if err != nil {
@@ -38,7 +38,7 @@ func Validate(payload []byte) error {
 				}
 				key, ok := token.(string)
 				if !ok {
-					return fmt.Errorf("Evidence JSON object key is invalid")
+					return fmt.Errorf("evidence JSON object key is invalid")
 				}
 				// Lowercasing misses Unicode aliases such as long s and Kelvin K.
 				// Canonicalize the complete SimpleFold cycle, matching EqualFold.
@@ -52,7 +52,7 @@ func Validate(payload []byte) error {
 					return minimum
 				}, key)
 				if seen[normalized] {
-					return fmt.Errorf("Evidence JSON object contains a duplicate or case-aliased field")
+					return fmt.Errorf("evidence JSON object contains a duplicate or case-aliased field")
 				}
 				seen[normalized] = true
 				if err := value(depth + 1); err != nil {
@@ -66,7 +66,7 @@ func Validate(payload []byte) error {
 				}
 			}
 		default:
-			return fmt.Errorf("Evidence JSON delimiter is invalid")
+			return fmt.Errorf("evidence JSON delimiter is invalid")
 		}
 		_, err = decoder.Token()
 		return err
@@ -75,7 +75,7 @@ func Validate(payload []byte) error {
 		return err
 	}
 	if _, err := decoder.Token(); err != io.EOF {
-		return fmt.Errorf("Evidence JSON must contain one document")
+		return fmt.Errorf("evidence JSON must contain one document")
 	}
 	return nil
 }
