@@ -480,7 +480,12 @@ func testEvaluationAdmissionAndDispatch(t *testing.T, db *gorm.DB, version strin
 		require.Equal(t, "completed", exported.Data.Batch.Status)
 		require.Len(t, exported.Data.Calls, expectedCalls)
 		for index, outcome := range exported.Data.Calls {
-			require.Equal(t, calls[index], outcome.AutomationModelEvaluationCall)
+			// PostgreSQL may return time.Local while JSON uses time.UTC for the
+			// same instant. Normalize locations without dropping timestamp checks.
+			expectedBinding := calls[index]
+			expectedBinding.CreatedAt = expectedBinding.CreatedAt.UTC()
+			outcome.CreatedAt = outcome.CreatedAt.UTC()
+			require.Equal(t, expectedBinding, outcome.AutomationModelEvaluationCall)
 			var receipt models.AutomationInferenceReceipt
 			require.NoError(t, db.Where("automation_task_id = ?", outcome.AutomationTaskID).First(&receipt).Error)
 			require.Equal(t, "completed", outcome.Status)
