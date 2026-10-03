@@ -37,6 +37,25 @@ def fixture(corpus=CORPUS):
 
 
 class ScoringTests(unittest.TestCase):
+    def test_failure_diagnostics_distinguish_answer_and_execution(self):
+        evidence = fixture()
+        evidence['calls'][0]['final_answer'] = 'not-json'
+        evidence['calls'][1]['final_answer'] = '{"wrong":true}'
+        evidence['calls'][2].update(status='failed', receipt_status='ambiguous',
+                                  actual_model='unexpected', finish_reason='length',
+                                  result_error='synthetic failure', final_answer='not-json')
+        row = score(CORPUS, evidence)['results']['minimax-m3']
+        self.assertEqual(row['successes'], 17)
+        self.assertEqual(row['denominator'], 20)
+        self.assertEqual(row['cases'][0]['failure_reasons'], ['invalid_json'])
+        self.assertEqual(row['cases'][1]['failure_reasons'], ['answer_mismatch'])
+        self.assertEqual(set(row['cases'][2]['failure_reasons']), {
+            'task_not_completed', 'receipt_not_accepted', 'unexpected_route',
+            'truncated', 'result_error', 'invalid_json'})
+        self.assertEqual(row['failure_reason_counts']['invalid_json'], 2)
+        self.assertEqual(row['failure_reason_counts']['answer_mismatch'], 1)
+        self.assertTrue(all(not case['failure_reasons'] for case in row['cases'][3:]))
+
     def test_reused_receipt_or_run_cannot_count_as_new_outcome(self):
         for field in ('receipt_id', 'run_id'):
             with self.subTest(field=field):

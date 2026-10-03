@@ -86,6 +86,9 @@ def score(corpus, evidence):
         tokens = {key: 0 for key in ('input_tokens', 'output_tokens', 'cached_input_tokens', 'cache_write_tokens', 'reasoning_tokens')}
         unknown_tokens = {key: 0 for key in tokens}
         scored = []
+        failure_counts = {reason: 0 for reason in (
+            'task_not_completed', 'receipt_not_accepted', 'unexpected_route',
+            'truncated', 'result_error', 'invalid_json', 'answer_mismatch')}
         for call in group:
             case = cases[call['case_id']]
             answer = None
@@ -107,7 +110,20 @@ def score(corpus, evidence):
             truncated = call.get('finish_reason') in ('length', 'max_tokens', 'max_output_tokens')
             truncations += truncated
             outcome_ok = call.get('status') == 'completed' and receipt_ok and attributed and not truncated and not call.get('result_error')
-            matched = outcome_ok and format_ok and canonical(answer) == canonical(case['expected'])
+            answer_matches = format_ok and canonical(answer) == canonical(case['expected'])
+            matched = outcome_ok and answer_matches
+            failure_flags = {
+                'task_not_completed': call.get('status') != 'completed',
+                'receipt_not_accepted': not receipt_ok,
+                'unexpected_route': not attributed,
+                'truncated': truncated,
+                'result_error': bool(call.get('result_error')),
+                'invalid_json': not format_ok,
+                'answer_mismatch': format_ok and not answer_matches,
+            }
+            failure_reasons = [reason for reason, failed in failure_flags.items() if failed]
+            for reason in failure_reasons:
+                failure_counts[reason] += 1
             success += matched
             errors += not outcome_ok
             if case['category'] == 'review_clean':
@@ -139,10 +155,11 @@ def score(corpus, evidence):
                     usage_verified = False
             if not usage_verified:
                 unknown_usage += 1
-            scored.append({'case_id': call['case_id'], 'task_id': call['task_id'], 'run_id': call.get('run_id'), 'receipt_id': call.get('receipt_id'), 'success': bool(matched), 'valid_json': format_ok, 'attributed': attributed, 'truncated': truncated, 'status': call.get('status')})
+            scored.append({'case_id': call['case_id'], 'task_id': call['task_id'], 'run_id': call.get('run_id'), 'receipt_id': call.get('receipt_id'), 'success': bool(matched), 'valid_json': format_ok, 'attributed': attributed, 'truncated': truncated, 'status': call.get('status'), 'failure_reasons': failure_reasons})
         ordered = sorted(latencies)
         summary[candidate] = {
             'successes': success, 'denominator': 20, 'success_rate': success / 20,
+            'failure_reason_counts': failure_counts,
             'valid_json_count': valid_json, 'valid_json_rate': valid_json / 20,
             'clean_false_positives': false_positive, 'clean_denominator': clean_denominator,
             'clean_false_positive_rate': false_positive / clean_denominator, 'clean_missing_or_invalid': invalid_clean,
