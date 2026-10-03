@@ -2,7 +2,7 @@ import hashlib
 import json
 import unittest
 
-from validate_implementation_response import MAX_RESPONSE_BYTES, validate
+from validate_implementation_response import MAX_RESPONSE_BYTES, assess, validate
 
 
 def response():
@@ -11,6 +11,25 @@ def response():
 
 
 class ImplementationResponseTests(unittest.TestCase):
+    def test_invalid_response_is_retained_as_failure_with_complete_hash(self):
+        for raw in (b'{}', b'\xff', b'{"changes":[],"changes":[]}'):
+            with self.subTest(raw=raw):
+                report = assess(raw)
+                self.assertFalse(report['response_contract_valid'])
+                self.assertFalse(report['candidate_executed'])
+                self.assertIsNone(report['implementation_correctness'])
+                self.assertEqual(report['response_sha256'], hashlib.sha256(raw).hexdigest())
+                self.assertTrue(report['response_read_complete'])
+                self.assertEqual(report['files'], {})
+                self.assertTrue(report['validation_error'])
+
+    def test_oversized_response_does_not_claim_a_complete_input_hash(self):
+        report = assess(b'x' * (MAX_RESPONSE_BYTES + 1))
+        self.assertFalse(report['response_contract_valid'])
+        self.assertFalse(report['response_read_complete'])
+        self.assertIsNone(report['response_sha256'])
+        self.assertEqual(report['response_bytes_observed'], MAX_RESPONSE_BYTES + 1)
+
     def test_contract_success_is_not_correctness_or_execution(self):
         raw = json.dumps(response()).encode()
         report = validate(raw)

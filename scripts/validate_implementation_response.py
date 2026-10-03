@@ -38,6 +38,21 @@ def validate(raw):
             'files': files}
 
 
+def assess(raw):
+    try:
+        return validate(raw)
+    except ValueError as error:
+        # A bounded read of an oversized response does not identify the entire
+        # input. Retain an explicit unavailable hash instead of hashing a prefix.
+        complete = len(raw) <= MAX_RESPONSE_BYTES
+        return {'schema_version': 1, 'case_version': 'pagination-v1',
+                'response_contract_valid': False, 'candidate_executed': False,
+                'implementation_correctness': None, 'validation_error': str(error),
+                'response_sha256': hashlib.sha256(raw).hexdigest() if complete else None,
+                'response_bytes_observed': len(raw), 'response_read_complete': complete,
+                'files': {}}
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--response', required=True, type=Path)
@@ -45,4 +60,6 @@ if __name__ == '__main__':
     args = parser.parse_args()
     with args.response.open('rb') as source:
         raw = source.read(MAX_RESPONSE_BYTES + 1)
-    publish_report(args.output, validate(raw))
+    report = assess(raw)
+    publish_report(args.output, report)
+    raise SystemExit(0 if report['response_contract_valid'] else 1)

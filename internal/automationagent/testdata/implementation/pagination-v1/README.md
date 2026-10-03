@@ -47,3 +47,10 @@ Model-facing fixture text uses LF line endings so Windows CRLF and Linux LF
 checkouts produce the same prompt. fixture_sha256 hashes normalized model input;
 fixture_raw_sha256 separately identifies the original checkout bytes. This is
 line-ending normalization only, not rewriting candidate answers or the oracle.
+
+Invalid responses now publish an explicit failed validation report and return
+exit 1, so failed attempts remain inspectable. Complete inputs retain their exact
+response hash. Oversized inputs are read only to 64 KiB + 1; their report records
+the observed byte count, response_read_complete=false and response_sha256=null.
+Publication still refuses existing destinations. No failed response files are
+promoted as replacements, and no candidate code is executed.
