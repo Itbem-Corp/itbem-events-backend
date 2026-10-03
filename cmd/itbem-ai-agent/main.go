@@ -457,7 +457,7 @@ func run() {
 		fail(err)
 	}
 	startedAt := time.Now().UTC()
-	heartbeat := automationagent.AgentHeartbeat{WorkerID: workerID, AgentKey: runtimeConfig.AgentKey, MachineID: runtimeConfig.MachineID, Provider: string(providerConfig.provider), Model: providerConfig.model, Concurrency: runtimeConfig.Concurrency, Capabilities: runtimeConfig.AllowedOperations, Protocols: supportedRuntimeProtocols(), StartedAt: startedAt.Format(time.RFC3339)}
+	heartbeat := automationagent.AgentHeartbeat{Role: string(runtimeConfig.Role), Lane: string(runtimeConfig.Lane), WorkerID: workerID, AgentKey: runtimeConfig.AgentKey, MachineID: runtimeConfig.MachineID, Provider: string(providerConfig.provider), Model: providerConfig.model, Concurrency: runtimeConfig.Concurrency, Capabilities: runtimeConfig.AllowedOperations, Protocols: supportedRuntimeProtocols(), StartedAt: startedAt.Format(time.RFC3339)}
 	if err := runQueueAfterEnrollment(ctx, callback, heartbeat, os.Getenv, func() error {
 		slog.Info(
 			"ITBEM Go AI agent started",
