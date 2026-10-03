@@ -12,6 +12,43 @@ TEST = 'TestDockerSandboxRoundTrip'
 MARKER = 'implementation sandbox evidence: '
 
 
+def verify_inner(events, expected):
+    started, finished = False, False
+    running, outcomes = set(), {}
+    for event in events:
+        if not isinstance(event, dict) or event.get('Package') != 'synthetic-pagination':
+            raise ValueError('Unexpected inner test package.')
+        action, test = event.get('Action'), event.get('Test')
+        if finished:
+            raise ValueError('Inner evidence continues after package completion.')
+        if action == 'start' and not test:
+            if started:
+                raise ValueError('Duplicate inner package start.')
+            started = True
+        elif not started:
+            raise ValueError('Inner evidence precedes package start.')
+        elif action == 'run' and test:
+            if test in running or test in outcomes:
+                raise ValueError('Repeated inner test.')
+            running.add(test)
+        elif action in ('pass', 'fail') and test:
+            if test not in running:
+                raise ValueError('Inner test outcome without execution.')
+            running.remove(test)
+            outcomes[test] = action
+        elif action in ('pass', 'fail') and not test:
+            if running or action != expected or outcomes.get('TestPaginationContract') != expected:
+                raise ValueError('Incomplete or contradictory inner package result.')
+            finished = True
+        elif action == 'output':
+            if test and test not in running:
+                raise ValueError('Inner test output outside execution.')
+        else:
+            raise ValueError('Unsupported inner evidence action.')
+    if not finished:
+        raise ValueError('Missing inner package completion.')
+
+
 def verify(raw, repetitions=2):
     if type(repetitions) is not int or repetitions < 1:
         raise ValueError('Positive repetition count required.')
@@ -55,8 +92,7 @@ def verify(raw, repetitions=2):
                     raise ValueError('Reused Docker control lease.')
                 leases.add(lease['lease_id'])
                 inner = [decode_json(row) for row in control['output'].splitlines()]
-                if any(not isinstance(e, dict) or e.get('Package') != 'synthetic-pagination' for e in inner):
-                    raise ValueError('Unexpected inner test package.')
+                verify_inner(inner, 'pass' if name == 'reference' else 'fail')
                 passed = [e.get('Test') for e in inner if e.get('Action') == 'pass']
                 failed = [e.get('Test') for e in inner if e.get('Action') == 'fail']
                 if any(e.get('Action') == 'skip' for e in inner):

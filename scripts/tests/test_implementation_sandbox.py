@@ -13,6 +13,15 @@ def controls():
         if name == 'fixture':
             events = [{'Package': 'synthetic-pagination', 'Action': 'fail',
                        'Test': 'TestPaginationContract/second'}]
+        ordered = [{'Package': 'synthetic-pagination', 'Action': 'start'},
+                   {'Package': 'synthetic-pagination', 'Action': 'run', 'Test': 'TestPaginationContract'}]
+        for event in events:
+            ordered.append(dict(event, Action='run'))
+            ordered.append(event)
+        terminal = 'fail' if name == 'fixture' else 'pass'
+        ordered += [{'Package': 'synthetic-pagination', 'Action': terminal, 'Test': 'TestPaginationContract'},
+                    {'Package': 'synthetic-pagination', 'Action': terminal}]
+        events = ordered
         result.append({'case': 'pagination-v1', 'control': name, 'model_quality_measured': False,
                        'exit_code': 1 if name == 'fixture' else 0,
                        'output': '\n'.join(json.dumps(e) for e in events),
@@ -34,6 +43,20 @@ def log(values, end='pass'):
 
 
 class SandboxEvidenceTests(unittest.TestCase):
+    def test_outcomes_require_runs_and_package_completion(self):
+        for mode in ('missing-run', 'missing-terminal', 'contradictory-terminal'):
+            values = controls()
+            events = [json.loads(row) for row in values[1]['output'].splitlines()]
+            if mode == 'missing-run':
+                events = [event for event in events if event['Action'] != 'run']
+            elif mode == 'missing-terminal':
+                events.pop()
+            else:
+                events[-1]['Action'] = 'fail'
+            values[1]['output'] = '\n'.join(json.dumps(event) for event in events)
+            with self.assertRaises(ValueError):
+                verify(log(values), 1)
+
     def test_fragmented_output_reassembles_without_model_quality_claim(self):
         report = verify(log(controls()), 1)
         self.assertTrue(report['sandbox_controls_verified'])
