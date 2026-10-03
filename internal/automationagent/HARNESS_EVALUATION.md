@@ -522,3 +522,13 @@ pasaron tres veces. La evaluación sigue siendo smoke estructural/semántico de
 fixtures, no revisión experta del valor de producto ni verificación de hechos.
 El commit previo 6f7d1f8 pasó aislamiento/scorer en CI; la nueva revisión requiere
 checks nuevamente.
+
+### Sustitución de verificaciones obsoletas del PR
+
+Build AI Agent agrupa solo ejecuciones pull_request de la misma referencia y
+workflow para cancelar una verificación anterior cuando llega otra. Push y
+workflow_dispatch usan run_id como grupo único; no se cancelan mutuamente ni
+se reduce su cobertura. Se mantiene la prueba del HEAD y del merge simulado.
+La sintaxis y las expresiones pasaron actionlint. Esto configura la política;
+no se declara aún una cancelación observada ni ahorro medido. La siguiente
+revisión debe pasar CI normalmente.

@@ -52,6 +52,12 @@ on:
 permissions:
   contents: read
 
+# Supersede obsolete PR verification without cancelling branch or manual builds.
+# Include the workflow name so this group cannot cancel other CI workflows.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   harness-isolation:
     runs-on: windows-latest
