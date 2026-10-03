@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -43,7 +44,9 @@ func TestQARevocationStopsRunningCommandTree(t *testing.T) {
 	deadline := time.Now().Add(time.Second)
 	for {
 		stat, statErr := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
-		if os.IsNotExist(statErr) {
+		// procfs can open the entry before exit and then report ESRCH on
+		// read. Both ENOENT and ESRCH mean this child no longer exists.
+		if os.IsNotExist(statErr) || errors.Is(statErr, syscall.ESRCH) {
 			break
 		}
 		if statErr != nil {
