@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import statistics
+from evaluation_report import publish_report, read_input
 
 CANDIDATES = {
     'minimax-m3': ('minimax', 'MiniMax-M3'),
@@ -159,5 +160,8 @@ if __name__ == '__main__':
     parser.add_argument('--evidence', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
     args = parser.parse_args()
-    report = score(json.loads(args.corpus.read_text(encoding='utf-8-sig')), json.loads(args.evidence.read_text(encoding='utf-8-sig')))
-    args.output.write_text(json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False), encoding='utf-8')
+    corpus, corpus_hash = read_input(args.corpus)
+    evidence, evidence_hash = read_input(args.evidence)
+    report = score(corpus, evidence)
+    report['input_sha256'] = {'corpus': corpus_hash, 'evidence': evidence_hash}
+    publish_report(args.output, report)

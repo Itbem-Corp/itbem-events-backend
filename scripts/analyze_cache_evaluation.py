@@ -5,6 +5,7 @@ from pathlib import Path
 
 from build_cache_evaluation_corpus import VERSION, build
 from score_model_evaluation import CANDIDATES, score
+from evaluation_report import publish_report, read_input
 
 def integer(value):
     return type(value) is int and value >= 0
@@ -108,6 +109,8 @@ if __name__ == '__main__':
     parser.add_argument('--evidence', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
-    report = analyze(json.loads(args.corpus.read_text(encoding='utf-8-sig')),
-                     json.loads(args.evidence.read_text(encoding='utf-8-sig')))
-    args.output.write_text(json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False) + '\n', encoding='utf-8')
+    corpus, corpus_hash = read_input(args.corpus)
+    evidence, evidence_hash = read_input(args.evidence)
+    report = analyze(corpus, evidence)
+    report['input_sha256'] = {'corpus': corpus_hash, 'evidence': evidence_hash}
+    publish_report(args.output, report)
