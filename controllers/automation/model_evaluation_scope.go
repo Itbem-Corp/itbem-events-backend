@@ -44,6 +44,16 @@ func validateEvaluationInference(tx *gorm.DB, task models.AutomationTask, reques
 	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&batch, "id = ?", *task.ModelEvaluationID).Error; err != nil {
 		return err
 	}
+	expectedCalls, err := modelevaluation.ExpectedCalls(batch.CorpusVersion)
+	if err != nil || call.Sequence > expectedCalls {
+		return errEvaluationAdmission
+	}
+	if batch.CorpusVersion == modelevaluation.ImplementationPilotVersion {
+		candidates := []modelevaluation.Candidate{modelevaluation.MiniMax, modelevaluation.DeepSeek, modelevaluation.Luna}
+		if call.CaseID != "pagination-v1" || call.Candidate != string(candidates[call.Sequence-1]) {
+			return errEvaluationAdmission
+		}
+	}
 	if batch.Status != "active" || batch.BudgetMicros <= 0 || batch.BudgetMicros > modelevaluation.MaxBudgetMicros || batch.ReservationMicros <= 0 || batch.ReservationMicros > batch.BudgetMicros || task.BudgetReservationExpiresAt == nil || !task.BudgetReservationExpiresAt.After(time.Now().UTC()) {
 		return errEvaluationAdmission
 	}

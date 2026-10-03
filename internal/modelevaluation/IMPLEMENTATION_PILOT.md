@@ -17,6 +17,9 @@ Dispatch and export now bind their row limits to the corpus version: 60 for
 screening/cache and three for the prepared pilot. PostgreSQL qualification with
 synthetic ledger rows rejects two/four-call pilot batches and queues exactly one
 outbox event for three calls. This does not qualify HTTP admission of the pilot.
+The gateway also rejects unknown corpus versions, a pilot sequence beyond three,
+a foreign pilot case and a candidate assigned to the wrong pilot sequence. Its
+existing message, route, budget and cross-run receipt checks still apply.
 
 Before enabling central admission, preserve message/route/receipt bindings and
 cross-run paid-call quotas and qualify the complete admission flow through
