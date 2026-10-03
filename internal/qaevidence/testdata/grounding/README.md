@@ -13,7 +13,7 @@ go run ./cmd/score-qa-grounding -observation internal/qaevidence/testdata/ground
 ```
 
 The first exits 0 with `passed=true`: the claims match the evidence, including
-its failed security result. This does **not** mean QA passed. The second exits 1
+its failed security result. This does **not** mean QA passed. The JSON identifies `score_kind=structured_qa_grounding` and independently shows `observed_qa_verdict=failed` and `claimed_qa_verdict=failed`. The second exits 1
 with `passed=false` and an unknown-command identity diagnostic. `go run` may also
 print `exit status 1` to stderr for the expected negative case.
 

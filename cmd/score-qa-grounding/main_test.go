@@ -119,14 +119,20 @@ func TestVersionedGroundingFixtures(t *testing.T) {
 				t.Fatalf("exit=%d, stderr=%s", exit, stderr.String())
 			}
 			var score struct {
-				Passed bool     `json:"passed"`
-				Errors []string `json:"errors"`
+				Passed          bool     `json:"passed"`
+				Errors          []string `json:"errors"`
+				Kind            string   `json:"score_kind"`
+				ObservedVerdict string   `json:"observed_qa_verdict"`
+				ClaimedVerdict  string   `json:"claimed_qa_verdict"`
 			}
 			if err := json.Unmarshal(stdout.Bytes(), &score); err != nil {
 				t.Fatal(err)
 			}
 			if score.Passed != (test.exit == 0) {
 				t.Fatal("fixture score changed")
+			}
+			if score.Kind != "structured_qa_grounding" || score.ObservedVerdict != "failed" || score.ClaimedVerdict != "failed" {
+				t.Fatal("grounding success confused with observed QA success")
 			}
 			if test.name == "invented" && (len(score.Errors) != 1 || !strings.Contains(score.Errors[0], "unknown or duplicated")) {
 				t.Fatal("invented fixture failed for an unrelated reason")

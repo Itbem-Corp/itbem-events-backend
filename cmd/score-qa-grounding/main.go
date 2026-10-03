@@ -45,11 +45,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 	result := struct {
 		SchemaVersion   int      `json:"schema_version"`
 		Passed          bool     `json:"passed"`
+		ScoreKind       string   `json:"score_kind"`
+		ObservedVerdict string   `json:"observed_qa_verdict,omitempty"`
+		ClaimedVerdict  string   `json:"claimed_qa_verdict,omitempty"`
 		ObservationHash string   `json:"observation_sha256,omitempty"`
 		ClaimsHash      string   `json:"claims_sha256,omitempty"`
 		Errors          []string `json:"errors"`
 		Limitations     []string `json:"limitations"`
-	}{SchemaVersion: 1, Errors: []string{}, Limitations: []string{"Checks supplied structured claims against supplied observations; does not authenticate their source.", "Does not score free-form prose, model quality or authorize release."}}
+	}{SchemaVersion: 1, ScoreKind: "structured_qa_grounding", Errors: []string{}, Limitations: []string{"Checks supplied structured claims against supplied observations; does not authenticate their source.", "Does not score free-form prose, model quality or authorize release."}}
 	hash := func(data []byte) string { digest := sha256.Sum256(data); return hex.EncodeToString(digest[:]) }
 	evaluate := func() error {
 		raw, err := readInput(*observationPath)
@@ -61,6 +64,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 		if err != nil {
 			return err
 		}
+		result.ObservedVerdict = "passed"
+		if !observation.PreviewPassed {
+			result.ObservedVerdict = "failed"
+		}
+		for _, repository := range observation.Repositories {
+			for _, command := range repository.Commands {
+				if !command.Passed {
+					result.ObservedVerdict = "failed"
+				}
+			}
+		}
 		raw, err = readInput(*claimsPath)
 		if err != nil {
 			return fmt.Errorf("claims input: %w", err)
@@ -70,6 +84,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		if err != nil {
 			return err
 		}
+		result.ClaimedVerdict = claims.Verdict
 		return qaevidence.ValidateGrounding(observation, claims)
 	}
 	if err := evaluate(); err != nil {
