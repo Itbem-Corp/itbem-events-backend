@@ -221,6 +221,22 @@ func TestEvaluationRealGatewaySerializesAndAccounts(t *testing.T) {
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	require.NotContains(t, recorder.Body.String(), "Return synthetic")
 	require.NotContains(t, recorder.Body.String(), "must-not-be-read")
+	// Multiple receipts must not expand one task into multiple exported outcomes.
+	var duplicateReceipt models.AutomationInferenceReceipt
+	require.NoError(t, db.Where("automation_task_id = ?", tasks[0].ID).First(&duplicateReceipt).Error)
+	duplicateReceipt.ID = uuid.Must(uuid.NewV4())
+	duplicateReceipt.CallID = uuid.Must(uuid.NewV4())
+	duplicateReceipt.RunID = "synthetic-export-duplicate-run"
+	require.NoError(t, db.Create(&duplicateReceipt).Error)
+	ambiguousRecorder := httptest.NewRecorder()
+	ambiguousContext := echo.New().NewContext(httptest.NewRequest(http.MethodGet, "/evaluation", nil), ambiguousRecorder)
+	ambiguousContext.Set("cognito_sub", "synthetic")
+	ambiguousContext.SetParamNames("id")
+	ambiguousContext.SetParamValues(batchID.String())
+	require.NoError(t, GetModelEvaluation(ambiguousContext))
+	require.Equal(t, http.StatusServiceUnavailable, ambiguousRecorder.Code)
+	require.NotContains(t, ambiguousRecorder.Body.String(), "receipt_id")
+	// Receipts remain durable; the disposable database retains this control.
 	require.NoError(t, db.Model(&batch).Update("status", "halted").Error)
 	for _, version := range []string{modelevaluation.CorpusVersion, modelevaluation.CacheCorpusVersion} {
 		t.Run("normal admission and concurrent dispatch/"+version, func(t *testing.T) { testEvaluationAdmissionAndDispatch(t, db, version) })

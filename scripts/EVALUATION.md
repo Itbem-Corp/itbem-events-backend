@@ -1,5 +1,7 @@
 # Offline model evaluation reports
 
+The root-scoped backend provenance endpoint retains partial batches for inspection, but rejects exports with duplicate task rows or more than 60 joined outcomes. It reads one extra row to detect receipt join expansion instead of truncating away another task. An ambiguous export is unavailable for scoring; this does not modify durable receipts or trigger another inference.
+
 Each candidate has `by_category` results with the frozen corpus category, denominator, successes, failures, JSON validity and execution errors. Each case also retains its category. Category totals reconcile with the overall totals; failures remain counted. Screening covers five categories with unequal sizes, while the cache corpus covers only defective and clean code review. Category rates describe these small synthetic samples, not general role competence or a statistically established ranking.
 
 `reported_complete` preserves whether the batch declares completion. `complete` also requires all 60 recorded tasks to be completed with accepted receipts; `incomplete_outcome_count` discloses contradictory unfinished/unaccepted rows. A completed run may still contain wrong or invalid model answers, so completion does not mean quality success. An active batch is never promoted to complete solely because its rows appear completed. Cache qualification uses the checked `complete` value.

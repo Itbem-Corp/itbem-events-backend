@@ -282,9 +282,21 @@ func GetModelEvaluation(c echo.Context) error {
 		Joins("JOIN automation_tasks AS task ON task.id = evaluation_call.automation_task_id").
 		Joins("LEFT JOIN automation_inference_receipts AS receipt ON receipt.automation_task_id = task.id").
 		Joins("LEFT JOIN automation_inference_attempt_policies AS policy ON policy.automation_task_id = receipt.automation_task_id AND policy.run_id = receipt.run_id").
-		Where("evaluation_call.evaluation_id = ?", id).Order("evaluation_call.sequence ASC").Limit(modelevaluation.MaxCalls).Scan(&calls).Error
+		Where("evaluation_call.evaluation_id = ?", id).Order("evaluation_call.sequence ASC").Limit(modelevaluation.MaxCalls + 1).Scan(&calls).Error
 	if err != nil {
 		return utils.Error(c, http.StatusServiceUnavailable, "Evaluation provenance unavailable", "")
+	}
+	// One extra row detects join expansion instead of silently dropping a task
+	// at the export boundary. Partial batches remain inspectable.
+	if len(calls) > modelevaluation.MaxCalls {
+		return utils.Error(c, http.StatusServiceUnavailable, "Evaluation provenance ambiguous", "")
+	}
+	seenTasks := make(map[uuid.UUID]bool, len(calls))
+	for _, call := range calls {
+		if call.AutomationTaskID == uuid.Nil || seenTasks[call.AutomationTaskID] {
+			return utils.Error(c, http.StatusServiceUnavailable, "Evaluation provenance ambiguous", "")
+		}
+		seenTasks[call.AutomationTaskID] = true
 	}
 	for i := range calls {
 		calls[i].CachedInputTokens, calls[i].ReasoningTokens, calls[i].CacheWriteTokens = evaluationOptionalUsage(calls[i].ActualProvider, calls[i].ActualModel, calls[i].UsageJSON)
