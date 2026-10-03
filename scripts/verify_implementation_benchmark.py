@@ -48,20 +48,20 @@ def verify(go='go'):
             failed = {e.get('Test') for e in events if e.get('Action') == 'fail'}
             if control == 'reference':
                 required = {'TestPaginationContract/' + name for name in SUBTESTS}
-                if run.returncode or not required <= passed or failed:
-                    raise ValueError('Reference must pass every oracle subtest.')
+                control_verified = run.returncode == 0 and required <= passed and not failed
             else:
                 required = {'fixture': 'second', 'offset-only': 'partial-tail',
                             'tail-only': 'second', 'aliases-source': 'first'}[control]
-                if run.returncode != 1 or 'TestPaginationContract/' + required not in failed:
-                    raise ValueError('Defective control did not fail its required oracle test.')
+                control_verified = run.returncode == 1 and 'TestPaginationContract/' + required in failed
             results.append({'control': control, 'exit_code': run.returncode,
+                            'control_verified': bool(control_verified),
                             'stdout': run.stdout, 'stderr': run.stderr,
                             'stdout_sha256': hashlib.sha256(run.stdout.encode()).hexdigest()})
     if any((CASE / name).read_bytes() != raw for name, raw in files.items()):
         raise ValueError('Checked-in benchmark changed during verification.')
     return {'schema_version': 1, 'case': 'pagination-v1', 'go_version': version,
-            'evaluator_controls_verified': True, 'model_quality_measured': False,
+            'evaluator_controls_verified': all(row['control_verified'] for row in results),
+            'model_quality_measured': False,
             'provider_calls': 0, 'results': results,
             'source_sha256': {name: hashlib.sha256(raw).hexdigest() for name, raw in files.items()}}
 
@@ -71,4 +71,6 @@ if __name__ == '__main__':
     parser.add_argument('--go', default=shutil.which('go') or 'go')
     parser.add_argument('--output', required=True, type=Path)
     args = parser.parse_args()
-    publish_report(args.output, verify(args.go))
+    report = verify(args.go)
+    publish_report(args.output, report)
+    raise SystemExit(0 if report['evaluator_controls_verified'] else 1)
