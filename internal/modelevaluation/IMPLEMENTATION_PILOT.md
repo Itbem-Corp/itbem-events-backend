@@ -77,3 +77,12 @@ The reference must pass all eight cases and the fixture must fail its defect.
 CI publishes this report and artifact replay recomputes it from the downloaded
 log. The report continues to state that model quality and provider provenance
 are unverified.
+
+`automationagent.ExecuteImplementationPilotResponse` connects a bounded response
+to the executor. It rejects ambiguous JSON, foreign/duplicate paths, extra fields,
+NUL and empty content, then creates an owned temporary directory containing only
+the two replacement files and embedded evaluator module/oracle. The prepared
+digest must match before Docker runs. It retains the raw response SHA-256 with
+the output and lease, and removes its temporary directory afterward. It does
+not modify the caller workspace or authorize a task. CI exercises synthetic
+fixture/reference responses; no actual provider response has been run yet.
