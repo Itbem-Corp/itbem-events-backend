@@ -249,14 +249,6 @@ func isolatedWorktreeAt(ctx context.Context, workspace Workspace, taskID, expect
 	if !taskIDPattern.MatchString(strings.ToLower(strings.TrimSpace(taskID))) {
 		return "", "", fmt.Errorf("isolated worktree task ID is invalid")
 	}
-	if err := workspace.RequireCapability(WorkspaceCapabilityCreateWorktree); err != nil {
-		return "", "", err
-	}
-	release, err := lockManagedWorkspace(ctx, workspace.Root)
-	if err != nil {
-		return "", "", err
-	}
-	defer release()
 	inside, err := runLocal(ctx, workspace.Root, 20*time.Second, "", "git", "rev-parse", "--is-inside-work-tree")
 	if err != nil || inside.ExitCode != 0 || strings.TrimSpace(inside.Output) != "true" {
 		return "", "", fmt.Errorf("registered workspace must be a Git worktree")
@@ -271,6 +263,14 @@ func isolatedWorktreeAt(ctx context.Context, workspace Workspace, taskID, expect
 			return "", "", fmt.Errorf("isolated worktree expected revision is unavailable locally")
 		}
 	}
+	if err := workspace.RequireCapability(WorkspaceCapabilityCreateWorktree); err != nil {
+		return "", "", err
+	}
+	release, err := lockManagedWorkspace(ctx, workspace.Root)
+	if err != nil {
+		return "", "", err
+	}
+	defer release()
 	branch := "itbem-agent/" + taskID
 	directory := filepath.Join(workspace.Root, ".itbem-agent-worktrees", taskID)
 	revision := expectedRevision
