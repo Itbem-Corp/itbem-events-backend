@@ -24,6 +24,7 @@ on:
       - services/deliveryworkflow/**
       - scripts/verify_implementation_benchmark.py
       - scripts/verify_implementation_sandbox.py
+      - scripts/verify_agent_artifacts.py
       - scripts/evaluation_report.py
       - scripts/Test-AgentHarness.ps1
       - scripts/Test-AgentHarnessIsolation.ps1
@@ -55,6 +56,7 @@ on:
       - services/deliveryworkflow/**
       - scripts/verify_implementation_benchmark.py
       - scripts/verify_implementation_sandbox.py
+      - scripts/verify_agent_artifacts.py
       - scripts/evaluation_report.py
       - scripts/Test-AgentHarness.ps1
       - scripts/Test-AgentHarnessIsolation.ps1
@@ -230,4 +232,46 @@ jobs:
           name: itbem-ai-agent-linux-amd64
           path: dist/linux-amd64/
           if-no-files-found: error
+          retention-days: 7
+
+  artifact-replay:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Check out evaluator without persisting credentials
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - name: Set up pinned Go for evidence verifier
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Download this run's published artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVIDENCE_RUN_ID: ${{ github.run_id }}
+          EVIDENCE_REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh run download "$EVIDENCE_RUN_ID" --repo "$EVIDENCE_REPOSITORY" --name ai-agent-regression-evidence --dir artifact-replay/regression
+          gh run download "$EVIDENCE_RUN_ID" --repo "$EVIDENCE_REPOSITORY" --name ai-agent-runtime-integration-evidence --dir artifact-replay/runtime
+          gh run download "$EVIDENCE_RUN_ID" --repo "$EVIDENCE_REPOSITORY" --name itbem-ai-agent-windows-amd64 --name itbem-ai-agent-linux-amd64 --dir artifact-replay/binaries
+      - name: Independently replay published artifact contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/verify_agent_artifacts.py --revision "$(git rev-parse HEAD)" --regression artifact-replay/regression --runtime artifact-replay/runtime --binaries artifact-replay/binaries --output artifact-replay/report.json
+      - name: Preserve artifact replay report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ai-agent-artifact-replay-evidence
+          path: artifact-replay/report.json
+          if-no-files-found: warn
           retention-days: 7

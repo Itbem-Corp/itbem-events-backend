@@ -37,6 +37,8 @@ Los directorios de regresión y runtime contienen sus archivos originales. El di
 
 Este comando no consulta GitHub ni autentica el origen de los archivos. Comprueba por separado el SHA y los checks del run que descargaste. El reporte identifica también la revisión y el hash del evaluador local y si su checkout tenía cambios; revisar artefactos históricos con un evaluador posterior no ejecuta de nuevo el backend histórico. El destino debe ser nuevo y su directorio debe existir.
 
+CI ejecuta este cotejo en el job `artifact-replay`, después de publicar los binarios. Descarga los cuatro artefactos de ese mismo run con un token de sólo lectura y conserva `ai-agent-artifact-replay-evidence`. Su reporte incluye totales por log y la identidad de cada prueba omitida. El job comprueba el contenido publicado; el estado final del workflow se verifica después de que todos sus jobs terminen.
+
 ## Replay de correspondencia QA
 
 Este ejemplo usa exclusivamente fixtures sintéticas. El directorio de salida debe existir y el archivo de salida debe ser nuevo:
