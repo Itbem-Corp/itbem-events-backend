@@ -3,6 +3,7 @@ Description=ITBEM AI agent role lane (%i)
 After=network-online.target
 After=itbem-ai-agent-provision@%i.service
 Requires=itbem-ai-agent-provision@%i.service
+Wants=itbem-ai-agent-provision@%i.timer
 Wants=network-online.target
 # A gateway/DNS outage must not leave a 24/7 lane permanently failed after a
 # small burst of harmless preflight attempts.  Every retry still starts with

@@ -447,6 +447,9 @@ func (w *Worker) Process(ctx context.Context, message TaskMessage) error {
 	if err := ValidateMessage(message, w.config.InputBucket); err != nil {
 		return err
 	}
+	if strings.HasPrefix(message.Payload.Operation, "delivery.") && message.Payload.Operation != "delivery.release_gate" && strings.EqualFold(os.Getenv("ITBEM_AI_WORKSPACE_CATALOG_ENABLED"), "true") && !json.Valid([]byte(ConfiguredWorkspaceRegistry(os.Getenv))) {
+		return &RetryableError{Message: "workspace catalog is unavailable; task remains queued before inference", RetryAfter: time.Minute}
+	}
 	if len(w.config.AllowedTaskIDs) != 0 {
 		selected := false
 		for _, taskID := range w.config.AllowedTaskIDs {

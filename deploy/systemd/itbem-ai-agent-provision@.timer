@@ -1,0 +1,11 @@
+[Unit]
+Description=ITBEM authorized workspace catalog reconciliation (%i)
+
+[Timer]
+OnActiveSec=60s
+OnUnitInactiveSec=60s
+RandomizedDelaySec=10s
+Unit=itbem-ai-agent-provision@%i.service
+
+[Install]
+WantedBy=timers.target

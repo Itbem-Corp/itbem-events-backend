@@ -504,11 +504,20 @@ func RegisteredWorkspace(reference string, lookup func(string) string) (Workspac
 	if id == "" || strings.ContainsAny(id, "#/\\") {
 		return Workspace{}, fmt.Errorf("workspace reference is invalid")
 	}
+	// Static capability rejection must precede catalog/network/authentication
+	// configuration access. Only unresolved references consult dynamic policy.
 	workspaces, err := LoadWorkspaceRegistry(lookup("ITBEM_AI_WORKSPACES_JSON"))
 	if err != nil {
 		return Workspace{}, err
 	}
 	workspace, ok := workspaces[id]
+	if !ok {
+		workspaces, err = LoadWorkspaceRegistry(ConfiguredWorkspaceRegistry(lookup))
+		if err != nil {
+			return Workspace{}, err
+		}
+		workspace, ok = workspaces[id]
+	}
 	if !ok {
 		return Workspace{}, fmt.Errorf("workspace is not registered locally: %s", id)
 	}
@@ -1354,7 +1363,7 @@ func capabilityPresent(capabilities []string, capability string) bool {
 // network request or reading workspace source. It is used by the worker's
 // doctor command before a human allows an agent to begin a delivery.
 func DiagnoseWorkspaces(lookup func(string) string) ([]WorkspaceDiagnostic, error) {
-	workspaces, err := LoadWorkspaces(lookup("ITBEM_AI_WORKSPACES_JSON"))
+	workspaces, err := LoadWorkspaces(ConfiguredWorkspaceRegistry(lookup))
 	if err != nil {
 		return nil, err
 	}

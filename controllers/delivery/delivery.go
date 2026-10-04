@@ -1059,6 +1059,12 @@ func taskContextSnapshots(workItemID uuid.UUID, sources []models.DeliveryContext
 			return nil, fmt.Errorf("%w: primary_repository_source_id must be a selected local repository UUID", errInvalidTaskPrimaryRepository)
 		}
 		selectedPrimary = parsed
+		for _, source := range sources {
+			if catalogLinkedSource(source) == parsed.String() {
+				selectedPrimary = source.ID
+				break
+			}
+		}
 	}
 	foundPrimary := false
 	snapshots := make([]models.DeliveryContextSnapshot, 0, len(sources))
@@ -1098,6 +1104,18 @@ func appendMandatoryProjectContext(selected, operational []models.DeliveryContex
 		seen[source.ID] = struct{}{}
 	}
 	for _, source := range operational {
+		if catalogLinkedSource(source) != "" {
+			matched := false
+			for _, original := range selected {
+				if original.ID.String() == catalogLinkedSource(source) && original.ProjectID == source.ProjectID && original.Revision == source.Revision {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
 		if _, exists := seen[source.ID]; exists {
 			continue
 		}
@@ -1108,8 +1126,25 @@ func appendMandatoryProjectContext(selected, operational []models.DeliveryContex
 }
 
 func mandatoryProjectContextSource(source models.DeliveryContextSource) bool {
-	return strings.EqualFold(source.Kind, "environment") ||
+	return catalogLinkedSource(source) != "" || strings.EqualFold(source.Kind, "environment") ||
 		(strings.EqualFold(source.Kind, "runbook") && strings.HasPrefix(source.Reference, "workflow://"))
+}
+
+func catalogLinkedSource(source models.DeliveryContextSource) string {
+	if source.Kind != "repository" || !strings.HasPrefix(source.Reference, "workspace://catalog-") {
+		return ""
+	}
+	var metadata struct {
+		Managed bool   `json:"catalog_managed"`
+		Linked  string `json:"linked_source_id"`
+	}
+	if json.Unmarshal([]byte(source.MetadataJSON), &metadata) != nil || !metadata.Managed {
+		return ""
+	}
+	if id, err := uuid.FromString(metadata.Linked); err != nil || id == uuid.Nil || source.Reference != "workspace://"+automationagent.CatalogWorkspaceID(id.String()) {
+		return ""
+	}
+	return metadata.Linked
 }
 
 func GetWorkItem(c echo.Context) error {

@@ -11,7 +11,7 @@ import (
 // absent managed checkouts are created. Existing source, task branches and local
 // edits are left intact; task preparation later verifies its frozen revision.
 func ProvisionRegisteredWorkspaces(ctx context.Context, lookup func(string) string) error {
-	registry, err := LoadWorkspaceRegistry(lookup("ITBEM_AI_WORKSPACES_JSON"))
+	registry, err := LoadWorkspaceRegistry(ConfiguredWorkspaceRegistry(lookup))
 	if err != nil {
 		return err
 	}
