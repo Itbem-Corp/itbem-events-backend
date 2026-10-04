@@ -111,16 +111,18 @@ func validateCommandKinds(validationCommands [][]string, validationKinds []strin
 			return fmt.Errorf("%s must be empty or contain one identity per command", pair.name)
 		}
 	}
-	seen := make(map[string]struct{}, len(validationKinds)+len(qaKinds))
-	for _, kind := range append(append([]string(nil), validationKinds...), qaKinds...) {
-		if kind != strings.TrimSpace(kind) || !workspaceTestKind.MatchString(kind) {
-			return fmt.Errorf("test command identity %q is invalid", kind)
+	seen := make(map[string]struct{})
+	for _, kinds := range [][]string{validationKinds, qaKinds} {
+		for _, kind := range kinds {
+			if kind != strings.TrimSpace(kind) || !workspaceTestKind.MatchString(kind) {
+				return fmt.Errorf("test command identity %q is invalid", kind)
+			}
+			key := strings.ToLower(kind)
+			if _, duplicate := seen[key]; duplicate {
+				return fmt.Errorf("test command identity %q is duplicated", kind)
+			}
+			seen[key] = struct{}{}
 		}
-		key := strings.ToLower(kind)
-		if _, duplicate := seen[key]; duplicate {
-			return fmt.Errorf("test command identity %q is duplicated", kind)
-		}
-		seen[key] = struct{}{}
 	}
 	return nil
 }
