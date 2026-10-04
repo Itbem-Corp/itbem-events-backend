@@ -100,7 +100,7 @@ jobs:
       - name: Test deployment safety gates
         run: |
           bash scripts/deploy/deploy-ec2-candidate_test.sh
-          python3 -m unittest scripts/deploy/test_render_docker_env.py
+          python3 -m unittest scripts/deploy/test_render_docker_env.py scripts/tests/test_rds_recovery.py
 
       - name: Test fail-closed alert verifier
         env:
@@ -493,39 +493,10 @@ jobs:
             --optional AUTOMATION_BUDGET_MODEL \
             --required SNS_WORKER_TOPIC_ARN
 
-      - name: Snapshot database before startup migrations
-        id: database_snapshot
+      - name: Verify existing automated database recovery coverage
         env:
           DB_INSTANCE_ID: ${{ vars.BACKEND_DB_INSTANCE_ID }}
-          REVISION: ${{ needs.validate.outputs.revision }}
-        run: |
-          set -euo pipefail
-          test -n "$DB_INSTANCE_ID" || { echo "BACKEND_DB_INSTANCE_ID is required"; exit 1; }
-
-          # Each automatic release takes a rollback snapshot. Keep the bounded
-          # predeploy namespace for seven days so normal delivery cadence cannot
-          # turn manual RDS snapshots into unbounded storage cost.
-          CUTOFF="$(date --utc --date='7 days ago' +%Y-%m-%dT%H:%M:%SZ)"
-          while IFS= read -r snapshot; do
-            [[ "$snapshot" == eventiapp-predeploy-* ]] || {
-              echo "Refusing to delete an unexpected snapshot identifier" >&2
-              exit 1
-            }
-            aws rds delete-db-snapshot --db-snapshot-identifier "$snapshot"
-          done < <(aws rds describe-db-snapshots \
-            --db-instance-identifier "$DB_INSTANCE_ID" \
-            --snapshot-type manual \
-            --query "DBSnapshots[?starts_with(DBSnapshotIdentifier, 'eventiapp-predeploy-') && SnapshotCreateTime<=\`${CUTOFF}\`].DBSnapshotIdentifier" \
-            --output json | jq -r '.[]')
-
-          SNAPSHOT_ID="eventiapp-predeploy-${REVISION:0:12}-${GITHUB_RUN_ID}"
-          aws rds create-db-snapshot \
-            --db-instance-identifier "$DB_INSTANCE_ID" \
-            --db-snapshot-identifier "$SNAPSHOT_ID" \
-            --tags Key=Application,Value=EventiApp Key=Purpose,Value=predeploy-rollback Key=Revision,Value="$REVISION"
-          aws rds wait db-snapshot-available --db-snapshot-identifier "$SNAPSHOT_ID"
-          echo "snapshot_id=$SNAPSHOT_ID" >> "$GITHUB_OUTPUT"
-          echo "Database rollback snapshot: \`$SNAPSHOT_ID\`" >> "$GITHUB_STEP_SUMMARY"
+        run: python3 scripts/deploy/verify_rds_recovery.py --db-instance-id "$DB_INSTANCE_ID" --region us-east-2
 
       - name: Deploy through SSM, health-gate promotion, and rollback on failure
         env:

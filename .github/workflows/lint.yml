@@ -22,7 +22,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.25.13'
-          cache: false
+          cache: true
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.13'
@@ -49,25 +49,18 @@ jobs:
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
       - name: Detect Go data races
         run: go test -race ./... -count=1 -timeout 180s
-      - name: Verify isolated evaluation admission against PostgreSQL
-        run: go test -race -tags=integration ./controllers/automation -run '^TestEvaluationRealGatewaySerializesAndAccounts$' -count=1 -timeout 120s
-      - name: Verify immutable QA observations against PostgreSQL
-        run: go test -race -tags=integration ./controllers/automation -run '^TestQAObservationProjectionPersistsExactSubjectAndRejectsChangedRecovery$' -count=1 -timeout 180s
-      - name: Verify signed release admission and replay rejection
-        run: go test -race -tags=integration ./controllers/automation -run '^TestReleaseObserverSignedAdmissionRejectsCancelledTaskAndReplayedNonce$' -count=1 -timeout 180s
-
-      - name: Verify signed QA source authority and independent checkout against PostgreSQL
-        run: go test -race -tags=integration ./controllers/automation -run '^TestQASourceSignedGatewayBindsPostgresAuthorityAndIndependentCheckout$' -count=1 -timeout 180s
-      - name: Verify release transaction rollback and signed worker recovery
-        run: go test -race -tags=integration ./controllers/automation -run '^TestReleaseProjectionRollsBackEvidenceWhenCurrentPolicyIsMissing$' -count=1 -timeout 180s
+      - name: Verify signed automation authority and recovery against PostgreSQL
+        run: >-
+          go test -race -tags=integration ./controllers/automation
+          -run '^(TestEvaluationRealGatewaySerializesAndAccounts|TestQAObservationProjectionPersistsExactSubjectAndRejectsChangedRecovery|TestReleaseObserverSignedAdmissionRejectsCancelledTaskAndReplayedNonce|TestQASourceSignedGatewayBindsPostgresAuthorityAndIndependentCheckout|TestReleaseProjectionRollsBackEvidenceWhenCurrentPolicyIsMissing|TestDelegatedPublicationPostgresFencesAndReceipts|TestWorkspaceCatalogSignedPostgresRegistrationAndRevocation)$'
+          -count=1 -timeout 300s
       - name: Verify release ledger projections after JSONB storage
         run: go test -race -tags=integration ./internal/deliveryledger -run '^TestLedgerProjectionsSurvivePostgreSQLJSONBAndRejectTampering$' -count=1 -timeout 180s
-      - name: Verify delegated QA decisions and correction rollback against PostgreSQL
-        run: go test -race -tags=integration ./controllers/delivery -run '^TestDelegatedQACoordinatorPostgresTransactions$' -count=1 -timeout 180s
-      - name: Verify delegated code decisions and publication continuity against PostgreSQL
-        run: go test -race -tags=integration ./controllers/delivery -run '^TestDelegatedCodePublicationPostgresContinuation$' -count=1 -timeout 180s
-      - name: Verify delegated publication revocation and source receipts against PostgreSQL
-        run: go test -race -tags=integration ./controllers/automation -run '^TestDelegatedPublicationPostgresFencesAndReceipts$' -count=1 -timeout 180s
+      - name: Verify delegated delivery transactions against PostgreSQL
+        run: >-
+          go test -race -tags=integration ./controllers/delivery
+          -run '^(TestDelegatedQACoordinatorPostgresTransactions|TestDelegatedCodePublicationPostgresContinuation)$'
+          -count=1 -timeout 300s
       - name: Qualify isolated AWS transport and role lanes
         env:
           ITBEM_AWS_EMULATOR_PORT: "14567"
