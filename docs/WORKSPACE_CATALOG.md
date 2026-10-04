@@ -36,6 +36,11 @@ fail-closed check and normal service restart retries continue.
 
 Set `AUTOMATION_WORKSPACE_CATALOG_POLICY_JSON` in the trusted backend environment:
 
+For production GitHub deployments, set the repository/environment variable with
+that same name. The deployment renderer passes it to the container as an optional
+runtime setting. An unset variable leaves the catalog disabled; setting a GitHub
+variable alone takes effect only on the next reviewed deployment.
+
 ```json
 {
   "version": 1,

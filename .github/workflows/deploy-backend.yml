@@ -425,6 +425,7 @@ jobs:
           AUTOMATION_PROVIDER_CATALOG_SYNC_HOURS: ${{ vars.AUTOMATION_PROVIDER_CATALOG_SYNC_HOURS }}
           AUTOMATION_BUDGET_PROVIDER: ${{ vars.AUTOMATION_BUDGET_PROVIDER }}
           AUTOMATION_BUDGET_MODEL: ${{ vars.AUTOMATION_BUDGET_MODEL }}
+          AUTOMATION_WORKSPACE_CATALOG_POLICY_JSON: ${{ vars.AUTOMATION_WORKSPACE_CATALOG_POLICY_JSON }}
         run: |
           set -euo pipefail
           if [[ -n "$SQS_AUTOMATION_QUEUE_URL" && -z "$AI_PROVIDER_CREDENTIALS_SECRET_ID" ]]; then
@@ -491,6 +492,7 @@ jobs:
             --optional AUTOMATION_PROVIDER_CATALOG_SYNC_HOURS \
             --optional AUTOMATION_BUDGET_PROVIDER \
             --optional AUTOMATION_BUDGET_MODEL \
+            --optional AUTOMATION_WORKSPACE_CATALOG_POLICY_JSON \
             --required SNS_WORKER_TOPIC_ARN
 
       - name: Verify existing automated database recovery coverage
