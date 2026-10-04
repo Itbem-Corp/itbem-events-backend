@@ -143,6 +143,11 @@ class RenderDockerEnvTests(unittest.TestCase):
             "AI_PROVIDER_CREDENTIALS_SECRET_ID: ${{ secrets.", workflow
         )
 
+    def test_workspace_catalog_policy_reaches_the_runtime_environment(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("AUTOMATION_WORKSPACE_CATALOG_POLICY_JSON: ${{ vars.AUTOMATION_WORKSPACE_CATALOG_POLICY_JSON }}", workflow)
+        self.assertIn("--optional AUTOMATION_WORKSPACE_CATALOG_POLICY_JSON", workflow)
+
     def test_automatic_promotion_uses_existing_recovery_without_snapshot_mutations(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("github.event_name == 'push'", workflow)
