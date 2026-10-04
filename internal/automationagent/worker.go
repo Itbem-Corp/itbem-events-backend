@@ -495,7 +495,9 @@ func (w *Worker) Process(ctx context.Context, message TaskMessage) error {
 	if err := json.Unmarshal(raw, &input); err != nil {
 		return w.fail(ctx, message.Payload.TaskID, runID, fmt.Errorf("automation input must be UTF-8 JSON"))
 	}
-	if strings.HasPrefix(message.Payload.Operation, "delivery.") && len(input.Delivery) > 0 && message.Payload.Operation != "delivery.release_gate" && message.Payload.Operation != agentwork.OperationDeliveryOnboardingProbe {
+	// Planning/review consume frozen read-only context. Only implementation
+	// prepares mutable bases here; QA and publication own their source contracts.
+	if message.Payload.Operation == "delivery.implementation" && len(input.Delivery) > 0 {
 		if err := PrepareDeliveryWorkspaces(ctx, input.Delivery, os.Getenv); err != nil {
 			return w.fail(ctx, message.Payload.TaskID, runID, fmt.Errorf("prepare registered Delivery workspaces before inference: %w", err))
 		}

@@ -125,3 +125,38 @@ func TestProvisionRegisteredWorkspacesPreservesExistingChanges(t *testing.T) {
 		t.Fatalf("startup altered existing work: %q / %v", content, err)
 	}
 }
+
+func TestPlannerConsumesFrozenWorkspaceWithoutWriteOrFetchCapability(t *testing.T) {
+	root := setupImplementationRepository(t)
+	revision, err := runLocal(context.Background(), root, commandTimeout, "", "git", "rev-parse", "HEAD")
+	if err != nil || revision.ExitCode != 0 {
+		t.Fatalf("revision: %v / %#v", err, revision)
+	}
+	registry, err := json.Marshal(map[string]WorkspaceConfig{"repo": {Path: root, RepositoryURL: root, BaseBranch: "main", Capabilities: []string{WorkspaceCapabilityReadRepository}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ITBEM_AI_WORKSPACES_JSON", string(registry))
+	delivery, err := json.Marshal(map[string]any{"work_item": map[string]string{"id": "task"}, "context_sources": []map[string]string{{"kind": "repository", "reference": "workspace://repo", "revision": strings.TrimSpace(revision.Output)}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err := json.Marshal(TaskInput{Prompt: "Plan from read-only source", Delivery: delivery})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := &countingProvider{completion: Completion{Provider: ProviderMiniMax, Model: "MiniMax-M2.7", Content: `{}`}}
+	worker, err := NewWorker(WorkerConfig{InputBucket: "itbem-ai-inputs-local", OutputBucket: "itbem-ai-outputs-local"}, &fakeStore{input: input}, &fakeCallback{}, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Response validation may reject this synthetic empty plan; the boundary
+	// under test is that read-only source reaches inference without preparation.
+	_ = worker.Process(context.Background(), validMessage())
+	if provider.calls != 1 {
+		t.Fatalf("planner attempted mutable workspace preparation before inference; calls=%d", provider.calls)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(root), "."+filepath.Base(root)+".itbem-managed.lock")); !os.IsNotExist(err) {
+		t.Fatalf("planner created a preparation lock: %v", err)
+	}
+}
