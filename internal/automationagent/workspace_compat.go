@@ -372,7 +372,7 @@ func PrepareDeliveryWorkspaces(ctx context.Context, delivery json.RawMessage, lo
 		return fmt.Errorf("delivery input must be a JSON object")
 	}
 	seen := make(map[string]struct{}, len(value.ContextSources))
-	registry, err := LoadWorkspaceRegistry(lookup("ITBEM_AI_WORKSPACES_JSON"))
+	registry, err := LoadWorkspaceRegistry(ConfiguredWorkspaceRegistry(lookup))
 	if err != nil {
 		return err
 	}
@@ -413,6 +413,11 @@ func PrepareDeliveryWorkspaces(ctx context.Context, delivery json.RawMessage, lo
 		if err := verifyDeliveryWorkspaceBinding(workspace, state, source.Metadata); err != nil {
 			return err
 		}
+		if managed, _ := source.Metadata["catalog_managed"].(bool); managed {
+			if err := verifyCatalogProfileBinding(workspace.ID, source.Metadata, lookup); err != nil {
+				return err
+			}
+		}
 		if expected != "" {
 			known, knownErr := runLocal(ctx, workspace.Root, 20*time.Second, "", "git", "rev-parse", "--verify", "--quiet", expected+"^{commit}")
 			if knownErr != nil || known.ExitCode != 0 || !strings.EqualFold(strings.TrimSpace(known.Output), expected) {
@@ -427,7 +432,7 @@ func PrepareDeliveryWorkspaces(ctx context.Context, delivery json.RawMessage, lo
 }
 
 func GitHubSourceAccessRequired(lookup func(string) string) (bool, error) {
-	workspaces, err := LoadWorkspaceRegistry(lookup("ITBEM_AI_WORKSPACES_JSON"))
+	workspaces, err := LoadWorkspaceRegistry(ConfiguredWorkspaceRegistry(lookup))
 	if err != nil {
 		return false, err
 	}

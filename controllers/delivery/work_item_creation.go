@@ -207,7 +207,7 @@ func createWorkItemInTransaction(tx *gorm.DB, input normalizedWorkItemRequest, n
 	// recurring template omit current project-level policy.
 	var operationalSources []models.DeliveryContextSource
 	if err := tx.Where(
-		"project_id = ? AND status = ? AND (kind = ? OR (kind = ? AND reference LIKE ?))",
+		"project_id = ? AND status = ? AND (kind = ? OR (kind = ? AND reference LIKE ?) OR (kind = 'repository' AND metadata_json ->> 'catalog_managed' = 'true'))",
 		input.ProjectID, "ready", "environment", "runbook", "workflow://%",
 	).Order("kind ASC, reference ASC").Find(&operationalSources).Error; err != nil {
 		return models.DeliveryWorkItem{}, err

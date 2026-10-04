@@ -58,6 +58,16 @@ func main() {
 		return
 	}
 	if *provisionWorkspaces {
+		if err := automationagent.SyncCentralWorkspaceCatalog(context.Background(), os.Getenv); err != nil {
+			// A failed dependency job is not retried by Restart=on-failure on the
+			// main unit. Keep the dependency successful and let its doctor fail
+			// closed/retry when there is no still-fresh authorized cache.
+			if !json.Valid([]byte(automationagent.ConfiguredWorkspaceRegistry(os.Getenv))) {
+				_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"ready": false, "status": "workspace_catalog_pending", "provider_billable": false})
+				return
+			}
+			slog.Warn("Workspace catalog reconciliation deferred; retaining fresh authorized cache")
+		}
 		if err := automationagent.ProvisionRegisteredWorkspaces(context.Background(), os.Getenv); err != nil {
 			fail(err)
 		}
@@ -245,7 +255,7 @@ func machineIdentityReport(lookup func(string) string) (map[string]string, error
 // runs before the queue worker starts, so no task can change a project checkout
 // or silently invalidate a frozen Delivery context.
 func syncWorkspaceReport(ctx context.Context, lookup func(string) string) (map[string]any, error) {
-	workspaces, err := automationagent.LoadWorkspaceRegistry(lookup("ITBEM_AI_WORKSPACES_JSON"))
+	workspaces, err := automationagent.LoadWorkspaceRegistry(automationagent.ConfiguredWorkspaceRegistry(lookup))
 	if err != nil {
 		return nil, err
 	}
@@ -275,6 +285,9 @@ func doctorReport(lookup func(string) string) (map[string]any, bool, error) {
 		return nil, false, err
 	}
 	workspacesReady := len(diagnostics) > 0
+	if strings.EqualFold(lookup("ITBEM_AI_WORKSPACE_CATALOG_ENABLED"), "true") && json.Valid([]byte(automationagent.ConfiguredWorkspaceRegistry(lookup))) {
+		workspacesReady = true
+	}
 	for _, diagnostic := range diagnostics {
 		workspacesReady = workspacesReady && diagnostic.Ready
 	}

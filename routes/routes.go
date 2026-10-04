@@ -314,6 +314,8 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	workerCallbacks.POST("/gateway/release-observation", automation.GatewayReleaseObservation)
 	workerCallbacks.POST("/gateway/qa-source", automation.GatewayQASource)
 	workerCallbacks.PUT("/agents/heartbeat", automation.AgentHeartbeat)
+	workerCallbacks.GET("/workspace-catalog", automation.WorkspaceCatalog)
+	workerCallbacks.POST("/workspace-catalog/ready", automation.WorkspaceCatalogReady)
 	workerCallbacks.PUT("/tasks/:id", automation.Complete)
 	workerCallbacks.POST("/steps/claim", automation.ClaimDeliveryPlanStep)
 	workerCallbacks.PUT("/steps/:id/lease", automation.RenewDeliveryPlanStepLease)

@@ -19,8 +19,9 @@ repositories must never share a writable task tree.
 - Task input cannot choose filesystem paths, credential sources or executable
   commands. Existing approved-plan repository-impact and validation checks remain.
 
-This does not yet replace the local registry with a fleet project catalog, add
-autoscaling, impose disk quotas, or garbage-collect completed task evidence.
+The opt-in [central catalog](WORKSPACE_CATALOG.md) now discovers and reconciles
+authorized project checkpoints using reusable host profiles. Autoscaling, disk
+quotas and garbage collection of completed task evidence remain unimplemented.
 
 ## Next implementation contracts
 
