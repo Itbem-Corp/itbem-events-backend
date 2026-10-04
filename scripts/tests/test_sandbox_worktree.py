@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 import subprocess
-import sysconfig
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from sandbox_worktree import snapshot_worktree
@@ -26,9 +25,9 @@ class WorktreeSnapshotTests(unittest.TestCase):
                     # setup-python installs a shared-library interpreter. Keep
                     # its own library directory while excluding host credentials.
                     environment = {'PATH': os.defpath, 'HOME': '/tmp'}
-                    library_dir = sysconfig.get_config_var('LIBDIR')
-                    if library_dir:
-                        environment['LD_LIBRARY_PATH'] = library_dir
+                    # The relocated Actions runtime retains build-time LIBDIR
+                    # in sysconfig; resolve lib relative to the active prefix.
+                    environment['LD_LIBRARY_PATH'] = str(pathlib.Path(sys.base_prefix) / 'lib')
                     observed = subprocess.run([sys.executable,str(scripts/supervisor)], input=json.dumps(request), text=True, capture_output=True, timeout=5, env=environment)
                     self.assertEqual(observed.returncode, 1, observed.stderr)
                     response = json.loads(observed.stdout)
