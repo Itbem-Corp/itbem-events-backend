@@ -13,7 +13,6 @@ class RecoveryTests(unittest.TestCase):
         self.now = datetime(2026, 10, 4, tzinfo=timezone.utc)
         self.instance = {"DBInstanceIdentifier": "production", "DBInstanceStatus": "available",
                          "BackupRetentionPeriod": 7,
-                         "EarliestRestorableTime": (self.now - timedelta(days=6)).isoformat(),
                          "LatestRestorableTime": (self.now - timedelta(minutes=5)).isoformat()}
 
     def test_current_automated_backup_is_sufficient(self):
@@ -22,10 +21,9 @@ class RecoveryTests(unittest.TestCase):
     def test_unrecoverable_or_wrong_database_is_rejected(self):
         changes = [{"BackupRetentionPeriod": 0}, {"BackupRetentionPeriod": 6},
                    {"PendingModifiedValues": {"BackupRetentionPeriod": 0}},
-                   {"LatestRestorableTime": None}, {"EarliestRestorableTime": ""},
+                   {"LatestRestorableTime": None}, {"LatestRestorableTime": ""},
                    {"LatestRestorableTime": (self.now - timedelta(minutes=31)).isoformat()},
                    {"LatestRestorableTime": (self.now + timedelta(minutes=6)).isoformat()},
-                   {"EarliestRestorableTime": self.now.isoformat()},
                    {"DBInstanceIdentifier": "other"}, {"DBInstanceStatus": "modifying"}]
         for change in changes:
             with self.subTest(change=change), self.assertRaises((ValueError, AttributeError)):

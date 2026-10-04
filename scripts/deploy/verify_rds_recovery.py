@@ -7,6 +7,8 @@ import subprocess
 
 
 def timestamp(value):
+    if not isinstance(value, str) or not value:
+        raise ValueError("Latest recovery timestamp is missing")
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
         raise ValueError("Recovery timestamps must include a timezone")
@@ -22,10 +24,9 @@ def verify(instance, expected_id, now):
     pending = instance.get("PendingModifiedValues", {}).get("BackupRetentionPeriod")
     if not isinstance(retention, int) or retention < 7 or (pending is not None and pending < 7):
         raise ValueError("Automated backup retention must be at least seven days")
-    earliest = timestamp(instance.get("EarliestRestorableTime", ""))
     latest = timestamp(instance.get("LatestRestorableTime", ""))
     lag = (now - latest).total_seconds()
-    if earliest > latest or lag < -300 or lag > 1800:
+    if lag < -300 or lag > 1800:
         raise ValueError("Automated recovery coverage is missing or more than 30 minutes behind")
     return f"RDS automated recovery verified: retention={retention} days, latest={latest.isoformat()}; no deploy snapshot created"
 

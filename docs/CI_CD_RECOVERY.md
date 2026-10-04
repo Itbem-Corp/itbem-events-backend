@@ -4,7 +4,7 @@ Ordinary production deployment does not create, wait for, or delete manual RDS
 snapshots. AWS manages automated backups and point-in-time recovery independently
 of delivery. Before candidate startup, a read-only check requires the exact DB to
 be available, automated retention of at least seven days (including pending
-changes), and an ordered recovery window whose latest point is at most 30 minutes
+changes), and a latest restorable point at most 30 minutes
 behind. Missing permissions or coverage blocks promotion; the workflow never
 changes database settings to make this check pass.
 
@@ -13,9 +13,10 @@ changes database settings to make this check pass.
 Apply the updated `infra/github-oidc-backend-role.yml` stack **before merging the
 workflow change**. The production OIDC role needs `rds:DescribeDBInstances` on the
 configured database. Its former snapshot create/delete/tag permissions are removed.
-Check `BackupRetentionPeriod`, `EarliestRestorableTime`, `LatestRestorableTime`
-and `PendingModifiedValues` with an authorized operator. Local agent credentials
-could not read production RDS, so live retention has not been confirmed here.
+Check `BackupRetentionPeriod`, `LatestRestorableTime`
+and `PendingModifiedValues` with an authorized operator. Live RDS verification confirmed seven-day retention and a recent restorable point
+after the operator added the local read permission. `DescribeDBInstances` does not
+return the earliest restorable time; inspect that separately in Automated backups.
 If automated backups are disabled, enabling them is a separate database operation
 that may interrupt service and must be scheduled accordingly.
 
