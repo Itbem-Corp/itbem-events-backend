@@ -63,7 +63,7 @@ jobs:
           -count=1 -timeout 300s
       - name: Qualify isolated AWS transport and role lanes
         env:
-          ITBEM_AWS_EMULATOR_PORT: "14567"
+          ITBEM_AWS_EMULATOR_PORT: ${{ runner.name == 'bema-private-ci-linux-2' && '14568' || '14567' }}
         run: sh scripts/qualify-agent-platform-live-aws.sh
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
