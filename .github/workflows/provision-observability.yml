@@ -31,7 +31,7 @@ concurrency:
 
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || fromJSON('["self-hosted","Linux","X64","itbem-wsl-ci"]') }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -53,7 +53,7 @@ jobs:
   provision:
     needs: validate
     if: inputs.confirm == true && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || fromJSON('["self-hosted","Linux","X64","itbem-wsl-ci"]') }}
     # Backend production secrets are protected in the existing `production`
     # environment; resource names still use the shorter `prod` suffix.
     environment: ${{ inputs.environment == 'prod' && 'production' || inputs.environment }}
