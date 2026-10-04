@@ -20,7 +20,7 @@ Parameters:
   BackendDbInstanceId:
     Type: String
     AllowedPattern: '^[a-zA-Z][a-zA-Z0-9-]{0,62}$'
-    Description: Exact RDS DB instance identifier snapshotted by the workflow.
+    Description: Exact RDS DB instance whose automated recovery coverage is verified.
   BackendEc2InstanceId:
     Type: AWS::EC2::Instance::Id
     Description: Exact EC2 instance that accepts the ephemeral Instance Connect key.
@@ -61,24 +61,10 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              - Sid: ManageBoundedPredeploySnapshots
+              - Sid: ReadAutomatedDatabaseRecoveryCoverage
                 Effect: Allow
-                Action:
-                  - rds:CreateDBSnapshot
-                  - rds:DeleteDBSnapshot
-                Resource:
-                  - !Sub 'arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:db:${BackendDbInstanceId}'
-                  - !Sub 'arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:snapshot:eventiapp-predeploy-*'
-              - Sid: TagPredeploySnapshot
-                Effect: Allow
-                Action:
-                  - rds:AddTagsToResource
-                Resource: !Sub 'arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:snapshot:eventiapp-predeploy-*'
-              - Sid: WaitForPredeploySnapshot
-                Effect: Allow
-                Action:
-                  - rds:DescribeDBSnapshots
-                Resource: '*'
+                Action: rds:DescribeDBInstances
+                Resource: !Sub 'arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:db:${BackendDbInstanceId}'
               - Sid: PushOnlyBackendRelease
                 Effect: Allow
                 Action:

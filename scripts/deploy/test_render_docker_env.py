@@ -91,11 +91,11 @@ class RenderDockerEnvTests(unittest.TestCase):
         self.assertIn("--optional REDIS_PASSWORD", workflow)
         self.assertNotIn("--required REDIS_PASSWORD", workflow)
 
-    def test_runtime_environment_is_validated_before_database_snapshot(self) -> None:
+    def test_runtime_environment_is_validated_before_database_recovery_check(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         self.assertLess(
             workflow.index("- name: Render runtime environment"),
-            workflow.index("- name: Snapshot database"),
+            workflow.index("- name: Verify existing automated database recovery coverage"),
         )
 
     def test_production_requires_github_review_and_automation_secrets(self) -> None:
@@ -143,11 +143,15 @@ class RenderDockerEnvTests(unittest.TestCase):
             "AI_PROVIDER_CREDENTIALS_SECRET_ID: ${{ secrets.", workflow
         )
 
-    def test_automatic_promotion_keeps_rollback_snapshots_bounded(self) -> None:
+    def test_automatic_promotion_uses_existing_recovery_without_snapshot_mutations(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("github.event_name == 'push'", workflow)
-        self.assertIn("date='7 days ago'", workflow)
-        self.assertIn("rds delete-db-snapshot", workflow)
+        self.assertIn("scripts/deploy/verify_rds_recovery.py", workflow)
+        self.assertNotIn("rds delete-db-snapshot", workflow)
+        self.assertNotIn("rds create-db-snapshot", workflow)
+        self.assertNotIn("db-snapshot-available", workflow)
+        self.assertLess(workflow.index("- name: Verify existing automated database recovery coverage"),
+                        workflow.index("- name: Deploy through SSM"))
 
     def test_deploy_verifies_github_webhook_after_exact_revision_promotion(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")

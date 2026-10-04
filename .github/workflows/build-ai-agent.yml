@@ -3,6 +3,7 @@ name: Build AI Agent
 on:
   workflow_dispatch:
   push:
+    branches: [main]
     paths:
       - .github/workflows/build-ai-agent.yml
       - cmd/itbem-ai-agent/**
