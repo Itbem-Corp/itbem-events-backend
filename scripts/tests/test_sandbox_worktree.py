@@ -22,7 +22,14 @@ class WorktreeSnapshotTests(unittest.TestCase):
             for supervisor in ('firecracker-supervisor.py', 'firecracker-supervisor-vsock.py'):
                 for digest in ('sha256:'+hashlib.sha256(str(root).encode()).hexdigest(), approved):
                     request = {'protocol_version': 1, 'operation': 'execute', 'lease_id': 'synthetic-lease', 'task_id': 'synthetic-task', 'workspace_id': 'synthetic-workspace', 'workspace_path': str(root), 'worktree_digest': digest}
-                    observed = subprocess.run([sys.executable,str(scripts/supervisor)], input=json.dumps(request), text=True, capture_output=True, timeout=5, env={'PATH':os.defpath,'HOME':'/tmp'})
+                    # setup-python installs a shared-library interpreter. Keep
+                    # its own library directory while excluding host credentials.
+                    environment = {'PATH': os.defpath, 'HOME': '/tmp'}
+                    # The relocated Actions runtime retains build-time LIBDIR
+                    # in sysconfig; resolve lib relative to the active prefix.
+                    environment['LD_LIBRARY_PATH'] = str(pathlib.Path(sys.base_prefix) / 'lib')
+                    observed = subprocess.run([sys.executable,str(scripts/supervisor)], input=json.dumps(request), text=True, capture_output=True, timeout=5, env=environment)
+                    self.assertEqual(observed.returncode, 1, observed.stderr)
                     response = json.loads(observed.stdout)
                     self.assertFalse(response['ok'])
                     self.assertIn('bound source content', response['error'])

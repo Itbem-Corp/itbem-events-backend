@@ -95,7 +95,7 @@ jobs:
         run: ./scripts/Test-HarnessCosts.ps1
 
   localstack-integration:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || fromJSON('["self-hosted","Linux","X64","itbem-wsl-ci"]') }}
     timeout-minutes: 10
     services:
       localstack:
@@ -104,7 +104,7 @@ jobs:
           SERVICES: s3,sqs
           AWS_DEFAULT_REGION: us-east-1
         ports:
-          - 4566:4566
+          - 4566
         options: >-
           --health-cmd "curl -fsS http://localhost:4566/_localstack/health"
           --health-interval 5s
@@ -124,7 +124,7 @@ jobs:
       - name: Prove isolated transport and durable redelivery twice
         env:
           ITBEM_LOCALSTACK_E2E: '1'
-          ITBEM_LOCALSTACK_ENDPOINT: http://127.0.0.1:4566
+          ITBEM_LOCALSTACK_ENDPOINT: http://127.0.0.1:${{ job.services.localstack.ports[4566] }}
         shell: bash
         run: |
           set -o pipefail
@@ -160,7 +160,7 @@ jobs:
 
   build:
     needs: [harness-isolation, localstack-integration]
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || fromJSON('["self-hosted","Linux","X64","itbem-wsl-ci"]') }}
     timeout-minutes: 30
 
     steps:
@@ -239,7 +239,7 @@ jobs:
 
   artifact-replay:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || fromJSON('["self-hosted","Linux","X64","itbem-wsl-ci"]') }}
     timeout-minutes: 15
     permissions:
       contents: read
