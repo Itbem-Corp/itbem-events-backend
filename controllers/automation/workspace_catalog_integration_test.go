@@ -70,7 +70,13 @@ func TestWorkspaceCatalogSignedPostgresRegistrationAndRevocation(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, catalog.Entries, 1)
 	entry := catalog.Entries[0]
-	ready := automationagent.WorkspaceCatalogReadyRequest{Digest: catalog.Digest, Ready: []automationagent.CatalogReadyWorkspace{{ID: entry.ID, Revision: entry.Revision, Readiness: automationagent.WorkspaceReadiness{ID: entry.ID, Ready: true, SandboxReady: true, IsolationMode: "docker"}, Capabilities: []string{"repository:read", "repository:fetch", "worktree:create", "patch:apply"}}}}
+	ready := automationagent.WorkspaceCatalogReadyRequest{Digest: catalog.Digest, Ready: []automationagent.CatalogReadyWorkspace{{ID: entry.ID, Revision: entry.Revision, Readiness: automationagent.WorkspaceReadiness{ID: entry.ID, Ready: true, SandboxReady: true, IsolationMode: "docker_container"}, Capabilities: []string{"repository:read", "repository:fetch", "worktree:create", "patch:apply"}}}}
+	for _, mode := range []string{"docker", "firecracker", "host_process", ""} {
+		invalid := ready
+		invalid.Ready = append([]automationagent.CatalogReadyWorkspace(nil), ready.Ready...)
+		invalid.Ready[0].Readiness.IsolationMode = mode
+		require.Error(t, callback.ReportWorkspaceCatalogReady(ctx, config, invalid), "unsupported isolation mode %q registered", mode)
+	}
 	require.NoError(t, callback.ReportWorkspaceCatalogReady(ctx, config, ready))
 	require.NoError(t, callback.ReportWorkspaceCatalogReady(ctx, config, ready))
 	var count int64
