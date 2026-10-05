@@ -48,4 +48,5 @@ jobs:
         run: |
           free -m
           cat /proc/pressure/memory
-          cat /sys/fs/cgroup/itbem-runners.slice/memory.events
+          group=$(systemctl show itbem-runners.slice --property=ControlGroup --value)
+          cat "/sys/fs/cgroup${group}/memory.events"
