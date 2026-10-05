@@ -1,0 +1,52 @@
+name: Lightsail small runner qualification
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/lightsail-small-runner-qualification]
+    paths:
+      - .github/workflows/lightsail-runner-qualification.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lightsail-small-qualification-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compile:
+    name: Small host backend build (${{ matrix.runner }})
+    runs-on: [self-hosted, Linux, X64, "itbem-lightsail-1gb-${{ matrix.runner }}"]
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [1, 2]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.25.13'
+          cache: false
+      - name: Verify the small host execution budget
+        run: |
+          test "$GOMAXPROCS" = 2
+          test "$GOMEMLIMIT" = 256MiB
+          test "$GOFLAGS" = -p=1
+          test "$(swapon --show --noheadings | wc -l)" -ge 1
+          free -m
+          df -h /
+          docker version --format '{{.Server.Version}}'
+      - name: Measure the real backend build
+        run: /usr/bin/time -v go build ./...
+      - name: Record host memory after compilation
+        if: always()
+        run: |
+          free -m
+          cat /proc/pressure/memory
+          group=$(systemctl show itbem-runners.slice --property=ControlGroup --value)
+          cat "/sys/fs/cgroup${group}/memory.events"
