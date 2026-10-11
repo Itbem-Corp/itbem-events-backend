@@ -57,7 +57,7 @@ requires an explicit HTTP(S) preview URL before QA can start.
 
 | File | Purpose |
 |------|---------|
-| `GuestService.go` | CRUD + bulk operations for guests |
+| `GuestService.go` | CRUD + bulk operations for guests. `CreateGuestsWithInvitations` inserts guests with `Omit(clause.Associations)` (a nested table or status object never creates rows); `UpdateGuest` syncs `max_guests` to the guest's stored invitation only, never one named by the caller. |
 | `GuestStatusService.go` | Catalog CRUD for guest statuses |
 
 ### Invitations Domain (`services/invitations/`)
@@ -102,7 +102,7 @@ requires an explicit HTTP(S) preview URL before QA can start.
 | File | Purpose |
 |------|---------|
 | `services/templates/DesignTemplateService.go` | Design template CRUD |
-| `services/moments/MomentService.go` | Event moment CRUD + async media job enqueue |
+| `services/moments/MomentService.go` | Event moment CRUD + async media job enqueue. `GetMomentsByIDs` loads a bulk request's moments in one query so the bulk handlers authorize once per event. |
 | `services/moments/MomentTypeService.go` | Moment type catalog |
 
 ### Colors Domain (`services/colors/`)
