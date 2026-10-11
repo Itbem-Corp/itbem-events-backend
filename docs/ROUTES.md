@@ -181,6 +181,7 @@ Legacy v1/v2 events remain auditable but cannot authorize a v3 action.
 - `GET /api/clients/members` → `clients.ListClientMembers`
 - `PUT /api/clients/members/:user_id` → `clients.UpdateMemberRole` (?client_id=...)
 - `DELETE /api/clients/members/:user_id` → `clients.RemoveMember` (?client_id=...)
+- Member writes (`InviteUser`, `CreateClientMember`, `UpdateMemberRole`, `RemoveMember`): only a primary root (`IsPrimaryRoot()`: level 1 or a legacy `is_root` account without a level) takes the root path, which works in any organization but can never assign, change or remove an Owner. Everyone else, including Root 2 and a legacy `is_root=true` account whose `root_level` is 2, must hold Owner/Admin (direct or inherited) in that organization and can only manage roles below its own; Root 2 also cannot target platform-root accounts.
 
 ### Users (self + admin)
 - `GET /api/users` → `users.GetUser` (my profile)

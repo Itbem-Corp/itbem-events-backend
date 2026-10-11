@@ -302,13 +302,13 @@ func InviteUser(c echo.Context) error {
 		return utils.Error(c, http.StatusBadRequest, "Invalid data", "role_id is required")
 	}
 
-	if !requester.IsRoot {
+	if !requester.IsPrimaryRoot() {
 		if err := clientSvc.CanManageClientMembers(req.ClientID, requester.ID); err != nil {
 			return utils.Error(c, http.StatusForbidden, "Permission Denied", "You cannot add members to this client")
 		}
 	}
 	var rolePermissionErr error
-	if requester.IsRoot {
+	if requester.IsPrimaryRoot() {
 		rolePermissionErr = clientSvc.CanAssignClientRoleAsRoot(req.RoleID)
 	} else {
 		rolePermissionErr = clientSvc.CanAssignClientRole(req.ClientID, requester.ID, req.RoleID)
@@ -403,13 +403,13 @@ func CreateClientMember(c echo.Context) error {
 		return utils.Error(c, http.StatusBadRequest, "Invalid data", err.Error())
 	}
 
-	if !requester.IsRoot {
+	if !requester.IsPrimaryRoot() {
 		if err := clientSvc.CanManageClientMembers(req.ClientID, requester.ID); err != nil {
 			return utils.Error(c, http.StatusForbidden, "Permission Denied", "You cannot add members to this client")
 		}
 	}
 	var rolePermissionErr error
-	if requester.IsRoot {
+	if requester.IsPrimaryRoot() {
 		rolePermissionErr = clientSvc.CanAssignClientRoleAsRoot(req.RoleID)
 	} else {
 		rolePermissionErr = clientSvc.CanAssignClientRole(req.ClientID, requester.ID, req.RoleID)
@@ -521,7 +521,7 @@ func RemoveMember(c echo.Context) error {
 	}
 
 	var removeErr error
-	if requester.IsRoot {
+	if requester.IsPrimaryRoot() {
 		removeErr = clientSvc.RemoveClientMemberAsRoot(clientID, targetUserID)
 	} else {
 		removeErr = clientSvc.RemoveClientMember(clientID, requester.ID, targetUserID)
@@ -570,7 +570,7 @@ func UpdateMemberRole(c echo.Context) error {
 	}
 
 	var updateErr error
-	if requester.IsRoot {
+	if requester.IsPrimaryRoot() {
 		updateErr = clientSvc.UpdateClientMemberRoleAsRoot(clientID, targetUserID, req.NewRoleID)
 	} else {
 		updateErr = clientSvc.UpdateClientMemberRole(clientID, requester.ID, targetUserID, req.NewRoleID)
