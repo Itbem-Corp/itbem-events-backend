@@ -31,6 +31,10 @@ var errAttendeeServiceUnavailable = errors.New("attendee service unavailable")
 // so it can be checked against the guest's event; tests replace it.
 var guestTableByID = eventtablerepository.GetEventTableByID
 
+// guestStatusByID resolves the catalog status named by a bulk status change so
+// a check-in-only caller can be limited to the confirmed status; tests replace it.
+var guestStatusByID = guestService.GetGuestStatusByID
+
 const maxGuestCSVRows = 250000
 
 // maxBulkGuestIDs bounds DELETE /guests/bulk (same limit as bulk/status).
@@ -995,6 +999,26 @@ func BulkDeleteGuests(c echo.Context) error {
 	return utils.Success(c, http.StatusOK, "Guests deleted", nil)
 }
 
+const bulkCheckinOnlyDetail = "Without guest:manage only check-in is allowed: rsvp_status confirmed with the confirmed guest status"
+
+// isBulkCheckinTransition reports whether a bulk status change is the door
+// check-in: rsvp_status confirmed through the catalog status whose code is
+// confirmed (rsvp_method is already forced to host). Check-in has no column of
+// its own, so an undo to pending or a decline cannot be told apart from
+// rewriting the guest's own RSVP; those need guest:manage.
+func isBulkCheckinTransition(statusID uuid.UUID, rsvpStatus string) (bool, error) {
+	if rsvpStatus != "confirmed" {
+		return false, nil
+	}
+	status, err := guestStatusByID(statusID)
+	if err != nil {
+		return false, err
+	}
+	return status != nil && strings.EqualFold(strings.TrimSpace(status.Code), "confirmed"), nil
+}
+
+// PATCH /guests/bulk/status — checkin:run on event_id. Callers that also hold
+// guest:manage may set any status; checkin:run alone may only check guests in.
 func BulkUpdateGuestStatus(c echo.Context) error {
 	var body struct {
 		EventID       string   `json:"event_id"`
@@ -1048,6 +1072,22 @@ func BulkUpdateGuestStatus(c echo.Context) error {
 		}
 		seen[id] = struct{}{}
 		ids = append(ids, id)
+	}
+	checkin, err := isBulkCheckinTransition(statusID, rsvpStatus)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return utils.Error(c, http.StatusBadRequest, "Invalid status_id", "guest status does not exist")
+		}
+		return utils.Error(c, http.StatusInternalServerError, "Error loading guest status", err.Error())
+	}
+	if !checkin {
+		if _, _, authErr := authz.RequireEventCapability(c, eventID, authz.CapabilityGuestManage); authErr != nil {
+			var failure *authz.Failure
+			if errors.As(authErr, &failure) && failure.Status == http.StatusForbidden {
+				return utils.Error(c, http.StatusForbidden, "Access denied", bulkCheckinOnlyDetail)
+			}
+			return authz.Respond(c, authErr)
+		}
 	}
 	if err := guestSvc.BulkUpdateGuestStatus(eventID, ids, statusID, rsvpStatus, rsvpMethod); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Error updating guest statuses", err.Error())

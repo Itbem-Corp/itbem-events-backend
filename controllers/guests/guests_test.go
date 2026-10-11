@@ -1039,7 +1039,9 @@ func TestCreateGuests_ValidBody_Returns201(t *testing.T) {
 
 func TestBulkUpdateGuestStatus_UpdatesSelectionInOneServiceCall(t *testing.T) {
 	eventID := uuid.Must(uuid.NewV4())
-	statusID := uuid.Must(uuid.NewV4())
+	catalog := newBulkStatusCatalog()
+	stubGuestStatusLookup(t, catalog)
+	statusID := catalog.confirmed.ID
 	guestIDs := []uuid.UUID{uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())}
 	var capturedIDs []uuid.UUID
 	repo := &mockGuestRepo{
