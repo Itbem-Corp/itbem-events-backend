@@ -128,11 +128,21 @@ Legacy v1/v2 events remain auditable but cannot authorize a v3 action.
 - `POST /api/events/:identifier/performance` → `events.TrackPerformance` — Public aggregate-only RUM ingestion with anonymous five-minute operational histograms retained for 48 hours.
 - `GET /api/events/:id/analytics` → `events.GetEventAnalytics` — GetEventAnalytics — returns EventAnalytics for the event
 
-- `GET /api/events/:id/detail` -> `events.GetEvent` - protected event detail by UUID for dashboard pages
+- `GET /api/events/:id/detail` -> `events.GetEvent` - protected event detail by UUID for dashboard pages. Requires event view access. Fields are redacted by capability: without `event:manage`, `event_config.auth_password_preview` and `config.auth_password_preview` are `""` (`is_auth_preview` stays); without `guest:manage`, `guest_share_summary.first_pending` (guest email + invitation pretty token) is omitted while the share counts stay. A failed capability lookup redacts (fails closed).
+- `GET /api/events/:id/capabilities` → `eventmembers.Capabilities` — Requires event view access; returns the caller's own capability booleans (`event:manage`, `event:delete`, `guest:manage`, `checkin:run`, `analytics:view`, `members:manage`) after event-assignment narrowing.
 
 ### Event Config (1:1 with Event, same ID)
-- `GET /api/events/:id/config` → `eventconfig.GetEventConfig`
-- `PUT /api/events/:id/config` → `eventconfig.UpdateEventConfig` — validates public availability: `active_until` must be strictly after `active_from` when both are set; blank `active_until` is allowed.
+- `GET /api/events/:id/config` → `eventconfig.GetEventConfig` — Requires `event:manage` (the config includes the plaintext `auth_password_preview`).
+- `PUT /api/events/:id/config` → `eventconfig.UpdateEventConfig` — Requires `event:manage`. Validates public availability: `active_until` must be strictly after `active_from` when both are set; blank `active_until` is allowed.
+- `GET /api/events/:id/studio-workspace` → `eventconfig.GetStudioWorkspace` — Requires `event:manage`. Returns `{event, config, sections}` for Studio's first paint; `config` is the same full payload as `GET /config`, including `auth_password_preview`.
+
+### Tables / Seating
+- `GET /api/events/:id/tables` → `eventtables.ListTables` — Requires event view access; returns table id, name, capacity and sort order only (no guest data).
+- `GET /api/events/:id/seating-workspace` → `eventtables.GetSeatingWorkspace` — Requires `guest:manage`. Returns `{tables, guests}` where each guest carries name, email, table and RSVP status (same projection as `GET /guests/seating:<id>`).
+- `POST /api/events/:id/tables`, `PUT /api/events/:id/tables/assign`, `PUT /api/events/:id/tables/plan`, `PUT /api/tables/:id`, `DELETE /api/tables/:id` → `eventtables.*` — Require `guest:manage`.
+
+### Check-in
+- `GET /api/events/:id/checkin-workspace` → `guests.GetCheckinWorkspace` — Requires `checkin:run`.
 
 ### Event Sections
 - `GET /api/events/:id/sections` → `eventsection.ListSectionsByEvent`
