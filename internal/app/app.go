@@ -453,6 +453,7 @@ func wireDependencies(cfg *models.Config) {
 		GetEventByIDRaw:       eventsRepo.GetEventByIDRaw,
 		GetEventSectionByID:   eventSectionRepo.GetEventSectionByID,
 		GetMomentByID:         momentRepo.GetMomentByID,
+		GetMomentsByIDs:       momentRepo.GetMomentsByIDs,
 		GetGuestByID:          guestRepo.GetGuestByID,
 		GetInvitationByIDLite: invitationRepo.GetInvitationByIDLite,
 		GetResourceByID:       resourceRepo.GetResourceByID,

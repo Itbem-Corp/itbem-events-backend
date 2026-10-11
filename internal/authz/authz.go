@@ -23,7 +23,8 @@ type Hooks struct {
 	GetEventByIDRaw       func(eventID uuid.UUID) (*models.Event, error)
 	GetEventSectionByID   func(sectionID uuid.UUID) (*models.EventSection, error)
 	GetMomentByID         func(momentID uuid.UUID) (*models.Moment, error)
-	GetGuestByID          func(guestID uuid.UUID) (*models.Guest, error)
+	GetMomentsByIDs       func(momentIDs []uuid.UUID) ([]models.Moment, error)
+	GetGuestByID        func(guestID uuid.UUID) (*models.Guest, error)
 	GetInvitationByIDLite func(invitationID uuid.UUID) (*models.Invitation, error)
 	GetResourceByID       func(resourceID uuid.UUID) (*models.Resource, error)
 	GetEventMemberRole    func(eventID, userID uuid.UUID) (role string, found bool, err error)
@@ -54,6 +55,9 @@ func ReplaceHooksForTest(replacement Hooks) func() {
 	}
 	if replacement.GetMomentByID != nil {
 		hooks.GetMomentByID = replacement.GetMomentByID
+	}
+	if replacement.GetMomentsByIDs != nil {
+		hooks.GetMomentsByIDs = replacement.GetMomentsByIDs
 	}
 	if replacement.GetGuestByID != nil {
 		hooks.GetGuestByID = replacement.GetGuestByID
@@ -573,6 +577,48 @@ func RequireMomentCapability(c echo.Context, momentID uuid.UUID, capability Capa
 		return nil, nil, err
 	}
 	return user, moment, nil
+}
+
+// RequireMomentsCapability authorizes a whole batch of moments with a query
+// count that does not grow with len(momentIDs): one user sync, one moment
+// lookup, then one event-level check per distinct event. Callers must pass
+// deduplicated ids; any id that does not resolve fails the whole batch with 404
+// so a partial batch is never applied.
+func RequireMomentsCapability(c echo.Context, momentIDs []uuid.UUID, capability Capability) (*models.User, []models.Moment, error) {
+	user, err := CurrentUser(c)
+	if err != nil {
+		return nil, nil, err
+	}
+	if hooks.GetMomentsByIDs == nil {
+		return nil, nil, dependencyFailure("GetMomentsByIDs")
+	}
+	moments, err := hooks.GetMomentsByIDs(momentIDs)
+	if err != nil {
+		return nil, nil, lookupFailure("Moment", err)
+	}
+	if len(moments) != len(momentIDs) {
+		return nil, nil, &Failure{Status: http.StatusNotFound, Message: "Moment not found", Detail: "One or more moments do not exist"}
+	}
+	if user.IsPlatformAdmin() {
+		if platformHasCapability(user, capability) {
+			return user, moments, nil
+		}
+		return nil, nil, &Failure{Status: http.StatusForbidden, Message: "Access denied", Detail: "Your platform administrator level cannot perform this action"}
+	}
+	checked := make(map[uuid.UUID]struct{}, 1)
+	for _, moment := range moments {
+		if moment.EventID == nil {
+			return nil, nil, &Failure{Status: http.StatusForbidden, Message: "Access denied", Detail: "Moment is not linked to an event"}
+		}
+		if _, done := checked[*moment.EventID]; done {
+			continue
+		}
+		if _, _, err := RequireEventCapability(c, *moment.EventID, capability); err != nil {
+			return nil, nil, err
+		}
+		checked[*moment.EventID] = struct{}{}
+	}
+	return user, moments, nil
 }
 
 func EnsureMomentAccess(user *models.User, momentID uuid.UUID) (*models.Moment, error) {
