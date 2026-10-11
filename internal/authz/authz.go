@@ -24,7 +24,7 @@ type Hooks struct {
 	GetEventSectionByID   func(sectionID uuid.UUID) (*models.EventSection, error)
 	GetMomentByID         func(momentID uuid.UUID) (*models.Moment, error)
 	GetMomentsByIDs       func(momentIDs []uuid.UUID) ([]models.Moment, error)
-	GetGuestByID        func(guestID uuid.UUID) (*models.Guest, error)
+	GetGuestByID          func(guestID uuid.UUID) (*models.Guest, error)
 	GetInvitationByIDLite func(invitationID uuid.UUID) (*models.Invitation, error)
 	GetResourceByID       func(resourceID uuid.UUID) (*models.Resource, error)
 	GetEventMemberRole    func(eventID, userID uuid.UUID) (role string, found bool, err error)
