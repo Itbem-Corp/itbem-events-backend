@@ -54,6 +54,13 @@ func setRootAuth(t *testing.T, c echo.Context) {
 		GetMomentByID: func(id uuid.UUID) (*models.Moment, error) {
 			return &models.Moment{ID: id}, nil
 		},
+		GetMomentsByIDs: func(ids []uuid.UUID) ([]models.Moment, error) {
+			list := make([]models.Moment, 0, len(ids))
+			for _, id := range ids {
+				list = append(list, models.Moment{ID: id})
+			}
+			return list, nil
+		},
 	})
 	t.Cleanup(restore)
 }
@@ -3644,6 +3651,155 @@ func TestBulkApproveRejectMomentsAcceptsIsApprovedCamelAlias(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, []uuid.UUID{id}, capturedIDs)
 	assert.True(t, capturedApproved)
+}
+
+func bulkIDsJSON(ids []uuid.UUID) string {
+	quoted := make([]string, len(ids))
+	for i, id := range ids {
+		quoted[i] = `"` + id.String() + `"`
+	}
+	return strings.Join(quoted, ",")
+}
+
+func newBulkIDs(n int) []uuid.UUID {
+	ids := make([]uuid.UUID, n)
+	for i := range ids {
+		ids[i] = uuid.Must(uuid.NewV4())
+	}
+	return ids
+}
+
+func TestBulkMomentActions_RejectListsOverCap(t *testing.T) {
+	ids := newBulkIDs(maxBulkMomentIDs + 1)
+	handlers := map[string]func(echo.Context) error{
+		"delete":  BulkDeleteMoments,
+		"approve": BulkApproveRejectMoments,
+	}
+	for name, handler := range handlers {
+		t.Run(name, func(t *testing.T) {
+			c, rec := newEchoCtx(http.MethodPost, "/moments/bulk", `{"ids":[`+bulkIDsJSON(ids)+`]}`)
+			setRootAuth(t, c)
+			require.NoError(t, handler(c))
+			assert.Equal(t, http.StatusBadRequest, rec.Code)
+		})
+	}
+
+	var reorder []string
+	for _, id := range newBulkIDs(maxReorderMomentIDs + 1) {
+		reorder = append(reorder, `{"id":"`+id.String()+`","order":1}`)
+	}
+	c, rec := newEchoCtx(http.MethodPut, "/moments/reorder", `[`+strings.Join(reorder, ",")+`]`)
+	setRootAuth(t, c)
+	require.NoError(t, ReorderMoments(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestBulkApproveRejectMoments_DeduplicatesIDs(t *testing.T) {
+	id := uuid.Must(uuid.NewV4())
+	other := uuid.Must(uuid.NewV4())
+	var capturedIDs []uuid.UUID
+	svc := momentsService.NewMomentService(&mockMomentRepo{
+		BulkUpdateApprovalFunc: func(ids []uuid.UUID, _ bool) error {
+			capturedIDs = append([]uuid.UUID(nil), ids...)
+			return nil
+		},
+	}, &mockCacheRepo{})
+	orig := momentSvc
+	momentSvc = svc
+	defer func() { momentSvc = orig }()
+
+	c, rec := newEchoCtx(http.MethodPost, "/moments/bulk-approve",
+		`{"ids":["`+id.String()+`","`+other.String()+`","`+id.String()+`"],"is_approved":true}`)
+	setRootAuth(t, c)
+	require.NoError(t, BulkApproveRejectMoments(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, []uuid.UUID{id, other}, capturedIDs)
+}
+
+func TestReorderMoments_ConflictingDuplicateOrderReturns400(t *testing.T) {
+	id := uuid.Must(uuid.NewV4())
+	c, rec := newEchoCtx(http.MethodPut, "/moments/reorder",
+		`[{"id":"`+id.String()+`","order":1},{"id":"`+id.String()+`","order":2}]`)
+	setRootAuth(t, c)
+	require.NoError(t, ReorderMoments(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// countBulkAuthQueries installs counting authz hooks for one organization and
+// returns the total number of data lookups a bulk request performed.
+func countBulkAuthQueries(t *testing.T, root bool, n int, allowed bool) (int, int) {
+	t.Helper()
+	eventID := uuid.Must(uuid.NewV4())
+	clientID := uuid.Must(uuid.NewV4())
+	calls := 0
+	restore := authz.ReplaceHooksForTest(authz.Hooks{
+		SyncUser: func(string) (*models.User, error) {
+			calls++
+			user := &models.User{ID: uuid.Must(uuid.NewV4())}
+			if root {
+				user.IsRoot = true
+				user.RootLevel = models.RootLevelPrimary
+			}
+			return user, nil
+		},
+		GetMomentsByIDs: func(ids []uuid.UUID) ([]models.Moment, error) {
+			calls++
+			list := make([]models.Moment, len(ids))
+			for i, id := range ids {
+				list[i] = models.Moment{ID: id, EventID: &eventID}
+			}
+			return list, nil
+		},
+		GetEventByIDRaw: func(id uuid.UUID) (*models.Event, error) {
+			calls++
+			return &models.Event{ID: id, ClientID: &clientID}, nil
+		},
+		CheckAccessRecursive: func(_, _ uuid.UUID) (bool, string) {
+			calls++
+			if allowed {
+				return true, "EVENT_MANAGER"
+			}
+			return false, ""
+		},
+		GetEventMemberRole: func(_, _ uuid.UUID) (string, bool, error) {
+			calls++
+			return "", false, nil
+		},
+	})
+	t.Cleanup(restore)
+
+	ids := newBulkIDs(n)
+	svc := momentsService.NewMomentService(&mockMomentRepo{}, &mockCacheRepo{})
+	orig := momentSvc
+	momentSvc = svc
+	t.Cleanup(func() { momentSvc = orig })
+
+	c, rec := newEchoCtx(http.MethodDelete, "/moments/bulk", `{"ids":[`+bulkIDsJSON(ids)+`]}`)
+	c.Set("cognito_sub", "test-sub")
+	require.NoError(t, BulkDeleteMoments(c))
+	return calls, rec.Code
+}
+
+func TestBulkAuthorization_QueryCountIsConstantInBatchSize(t *testing.T) {
+	for _, root := range []bool{true, false} {
+		name := "non-admin"
+		if root {
+			name = "admin"
+		}
+		t.Run(name, func(t *testing.T) {
+			small, smallCode := countBulkAuthQueries(t, root, 5, true)
+			large, largeCode := countBulkAuthQueries(t, root, 380, true)
+			assert.Equal(t, http.StatusOK, smallCode)
+			assert.Equal(t, http.StatusOK, largeCode)
+			assert.Equal(t, small, large, "lookups must not grow with the number of ids")
+			t.Logf("%s: %d lookups for 5 ids, %d for 380 ids", name, small, large)
+		})
+	}
+}
+
+func TestBulkAuthorization_KeepsOrganizationPermissions(t *testing.T) {
+	_, code := countBulkAuthQueries(t, false, 380, false)
+	assert.Equal(t, http.StatusForbidden, code)
 }
 
 func TestListMoments_Returns200(t *testing.T) {
