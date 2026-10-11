@@ -607,6 +607,139 @@ func TestUpdateEventConfigRejectsUnknownField(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "unknown event config field")
 }
 
+// studioAuth describes the caller seen by the authz hooks: an organization
+// role, an optional event assignment that may narrow it, or a platform level.
+type studioAuth struct {
+	orgRole   string
+	eventRole string
+	rootLevel int
+}
+
+func setStudioAuth(t *testing.T, c echo.Context, auth studioAuth) {
+	t.Helper()
+	userID := uuid.Must(uuid.NewV4())
+	clientID := uuid.Must(uuid.NewV4())
+	c.Set("cognito_sub", "test-sub")
+	restore := authz.ReplaceHooksForTest(authz.Hooks{
+		SyncUser: func(string) (*models.User, error) {
+			return &models.User{ID: userID, RootLevel: auth.rootLevel}, nil
+		},
+		GetEventByIDRaw: func(id uuid.UUID) (*models.Event, error) {
+			return &models.Event{ID: id, ClientID: &clientID}, nil
+		},
+		CheckAccessRecursive: func(gotUserID, gotClientID uuid.UUID) (bool, string) {
+			if gotUserID != userID || gotClientID != clientID || auth.orgRole == "" {
+				return false, ""
+			}
+			return true, auth.orgRole
+		},
+		GetEventMemberRole: func(uuid.UUID, uuid.UUID) (string, bool, error) {
+			return auth.eventRole, auth.eventRole != "", nil
+		},
+	})
+	t.Cleanup(restore)
+}
+
+type studioSectionRepo struct{}
+
+func (m *studioSectionRepo) CreateEventSection(*models.EventSection) error { return nil }
+func (m *studioSectionRepo) UpdateEventSection(*models.EventSection) error { return nil }
+func (m *studioSectionRepo) DeleteEventSection(uuid.UUID) error            { return nil }
+func (m *studioSectionRepo) BulkUpdateSectionOrder(uuid.UUID, map[uuid.UUID]int) error {
+	return nil
+}
+func (m *studioSectionRepo) GetEventSectionByID(id uuid.UUID) (*models.EventSection, error) {
+	return &models.EventSection{ID: id}, nil
+}
+func (m *studioSectionRepo) ListEventSections() ([]models.EventSection, error) { return nil, nil }
+func (m *studioSectionRepo) ListByEventID(eventID uuid.UUID) ([]models.EventSection, error) {
+	return []models.EventSection{{ID: uuid.Must(uuid.NewV4()), EventID: eventID, Title: "Portada"}}, nil
+}
+func (m *studioSectionRepo) ListByEventIDForSpec(uuid.UUID) ([]models.EventSection, error) {
+	return nil, nil
+}
+
+var _ ports.EventSectionRepository = (*studioSectionRepo)(nil)
+
+func runStudioWorkspace(t *testing.T, auth studioAuth) (*httptest.ResponseRecorder, *mockEventConfigRepo) {
+	t.Helper()
+	previousSvc := eventConfigSvc
+	t.Cleanup(func() {
+		eventConfigSvc = previousSvc
+		eventsService.SetDefaultEventSectionService(nil)
+	})
+
+	eventID := uuid.Must(uuid.NewV4())
+	repo := &mockEventConfigRepo{
+		configs: []*models.EventConfig{{ID: eventID, IsAuthPreview: true, AuthPasswordPreview: "secreto"}},
+	}
+	InitEventConfigController(eventsService.NewEventConfigService(repo, &mockCacheRepo{}))
+	eventsService.SetDefaultEventSectionService(eventsService.NewEventSectionService(&studioSectionRepo{}, &mockCacheRepo{}))
+
+	c, rec := newEchoCtx(http.MethodGet, "/events/"+eventID.String()+"/studio-workspace", "")
+	c.SetParamNames("id")
+	c.SetParamValues(eventID.String())
+	setStudioAuth(t, c, auth)
+
+	require.NoError(t, GetStudioWorkspace(c))
+	return rec, repo
+}
+
+// The Studio workspace embeds the full event config, including the plaintext
+// password that verify-access compares against, so it needs the same
+// event:manage capability as GET /events/:id/config.
+func TestGetStudioWorkspaceRejectsCallersWithoutEventManage(t *testing.T) {
+	cases := map[string]studioAuth{
+		"viewer org role":               {orgRole: "Guest"},
+		"analyst org role":              {orgRole: "ANALYST"},
+		"check-in org role":             {orgRole: "CHECKIN"},
+		"member org role":               {orgRole: "Member"},
+		"editor narrowed to viewer":     {orgRole: "EDITOR", eventRole: "VIEWER"},
+		"editor narrowed to analyst":    {orgRole: "EDITOR", eventRole: "ANALYST"},
+		"operational platform root (2)": {rootLevel: models.RootLevelOperational},
+		"caller outside the org":        {},
+	}
+	for name, auth := range cases {
+		t.Run(name, func(t *testing.T) {
+			rec, repo := runStudioWorkspace(t, auth)
+
+			assert.Equal(t, http.StatusForbidden, rec.Code)
+			assert.Equal(t, 0, repo.gets, "config must not be loaded for a denied caller")
+			assert.NotContains(t, rec.Body.String(), "secreto")
+			assert.NotContains(t, rec.Body.String(), "auth_password_preview")
+		})
+	}
+}
+
+func TestGetStudioWorkspaceReturnsConfigToEventManagers(t *testing.T) {
+	cases := map[string]studioAuth{
+		"editor org role":           {orgRole: "EDITOR"},
+		"event manager org role":    {orgRole: "EVENT_MANAGER"},
+		"owner org role":            {orgRole: "Owner"},
+		"editor with editor event":  {orgRole: "EDITOR", eventRole: "EDITOR"},
+		"primary platform root (1)": {rootLevel: models.RootLevelPrimary},
+		"admin with manager event":  {orgRole: "Admin", eventRole: "EVENT_MANAGER"},
+	}
+	for name, auth := range cases {
+		t.Run(name, func(t *testing.T) {
+			rec, repo := runStudioWorkspace(t, auth)
+
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			assert.Equal(t, 1, repo.gets)
+			var body struct {
+				Data struct {
+					Config   map[string]interface{}   `json:"config"`
+					Sections []map[string]interface{} `json:"sections"`
+				} `json:"data"`
+			}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			assert.Equal(t, "secreto", body.Data.Config["auth_password_preview"])
+			assert.Equal(t, true, body.Data.Config["is_auth_preview"])
+			assert.Len(t, body.Data.Sections, 1)
+		})
+	}
+}
+
 func TestUpdateEventConfigRejectsInvalidActiveRange(t *testing.T) {
 	previousSvc := eventConfigSvc
 	t.Cleanup(func() { eventConfigSvc = previousSvc })

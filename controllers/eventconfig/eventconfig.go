@@ -82,12 +82,14 @@ func eventConfigResponse(config *models.EventConfig, eventID uuid.UUID) dtos.Eve
 
 // GetStudioWorkspace composes the resources required for Studio's first
 // interactive paint while preserving their independent mutation endpoints.
+// It embeds the full event config, including the access password, so it uses
+// the same event:manage gate as GET /events/:id/config.
 func GetStudioWorkspace(c echo.Context) error {
 	id, err := uuid.FromString(c.Param("id"))
 	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid UUID", err.Error())
 	}
-	_, event, authErr := authz.RequireEventAccess(c, id)
+	_, event, authErr := authz.RequireEventCapability(c, id, authz.CapabilityEventManage)
 	if authErr != nil {
 		return authz.Respond(c, authErr)
 	}
