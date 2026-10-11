@@ -49,6 +49,34 @@ func guestCSVTable(guest models.Guest) string {
 	return "Mesa " + table
 }
 
+// csvSafeCell neutralizes spreadsheet formula injection (CWE-1236): a cell whose
+// first character after leading spaces is = + - @ TAB or CR is evaluated as a
+// formula by Excel, LibreOffice and Google Sheets, so it gets a leading quote.
+// Guest names, contact fields, notes and RSVP free text reach this export from
+// the dashboard and from anonymous RSVP submissions.
+func csvSafeCell(value string) string {
+	trimmed := strings.TrimLeft(value, " ")
+	if trimmed == "" {
+		return value
+	}
+	switch trimmed[0] {
+	case '=', '+', '-', '@', '\t', '\r':
+		return "'" + value
+	}
+	return value
+}
+
+// writeGuestCSVRow writes one data row with every cell passed through
+// csvSafeCell. Write errors are sticky and surface through writer.Error()
+// after Flush, which ExportGuestsCSV checks.
+func writeGuestCSVRow(writer *csv.Writer, cells ...string) {
+	safe := make([]string, len(cells))
+	for i, cell := range cells {
+		safe[i] = csvSafeCell(cell)
+	}
+	_ = writer.Write(safe)
+}
+
 func ExportGuestsCSV(c echo.Context) error {
 	eventID, err := uuid.FromString(c.Param("id"))
 	if err != nil {
@@ -97,24 +125,24 @@ func ExportGuestsCSV(c echo.Context) error {
 			} else if !strings.EqualFold(guestCSVStatus(guest), "PENDING") && !guest.UpdatedAt.IsZero() {
 				respondedAt = guest.UpdatedAt.UTC().Format(time.RFC3339)
 			}
-			_ = writer.Write([]string{
-				strings.TrimSpace(guest.FirstName + " " + guest.LastName), guest.Email, guest.Phone, guestCSVStatus(guest),
+			writeGuestCSVRow(writer,
+				strings.TrimSpace(guest.FirstName+" "+guest.LastName), guest.Email, guest.Phone, guestCSVStatus(guest),
 				guest.RSVPMethod, strconv.Itoa(max(partySize-1, 0)), respondedAt, guest.CreatedAt.UTC().Format(time.RFC3339),
-			})
+			)
 		} else if invitationView {
 			respondedAt := ""
 			if guest.RSVPAt != nil {
 				respondedAt = guest.RSVPAt.UTC().Format(time.RFC3339)
 			}
-			_ = writer.Write([]string{
-				strings.TrimSpace(guest.FirstName + " " + guest.LastName), guest.Email, guest.Phone, guestCSVStatus(guest),
+			writeGuestCSVRow(writer,
+				strings.TrimSpace(guest.FirstName+" "+guest.LastName), guest.Email, guest.Phone, guestCSVStatus(guest),
 				respondedAt, guest.RSVPMethod, strconv.Itoa(max(partySize-1, 0)),
-			})
+			)
 		} else {
-			_ = writer.Write([]string{
+			writeGuestCSVRow(writer,
 				guest.FirstName, guest.LastName, guest.Email, guest.Phone, guestCSVTable(guest), strconv.Itoa(partySize),
 				strconv.Itoa(max(partySize-1, 0)), guestCSVStatus(guest), guest.DietaryRestrictions, guest.RSVPNotes, guest.Notes,
-			})
+			)
 		}
 	}
 	writer.Flush()

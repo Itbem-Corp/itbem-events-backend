@@ -238,7 +238,7 @@ func TestExportGuestsCSV_InvitationViewIncludesRSVPColumns(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Header().Get(echo.HeaderContentDisposition), "invitaciones.csv")
 	assert.Contains(t, rec.Body.String(), "Estado RSVP,Fecha respuesta,Método,Acompañantes")
-	assert.Contains(t, rec.Body.String(), "Ana López,ana@example.com,+52 555,CONFIRMED,2026-07-12T00:30:00Z,web,1")
+	assert.Contains(t, rec.Body.String(), "Ana López,ana@example.com,'+52 555,CONFIRMED,2026-07-12T00:30:00Z,web,1")
 }
 
 func TestExportGuestsCSV_RSVPViewIncludesCompleteAuditColumns(t *testing.T) {
