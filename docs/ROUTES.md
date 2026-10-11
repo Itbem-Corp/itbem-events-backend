@@ -199,9 +199,10 @@ Legacy v1/v2 events remain auditable but cannot authorize a v3 action.
 - `POST /api/users/avatar` → `users.UploadAvatar`
 - `DELETE /api/users/avatar` → `users.DeleteAvatar`
 
-### Cache Utilities (protected — root only)
-- `GET /api/cache/flush/:key` → `cache.FlushKey`
-- `GET /api/cache/flush-all` → `cache.FlushAll`
+### Cache Utilities (protected — primary root only)
+- `GET /api/cache/flush/:key` → `cache.FlushKey` — `authz.RequirePrimaryRoot`; Root 2 gets `403`.
+- `GET /api/cache/flush-all` → `cache.FlushAll` — `authz.RequirePrimaryRoot`; Root 2 gets `403`.
+- Known gap: these state-changing routes use `GET`, so `middleware/audit` (which records only `POST`/`PUT`/`PATCH`/`DELETE`) writes no audit row for a flush. No client calls them (the dashboard path helpers are unused); the planned fix is a `DELETE` alias sharing the same handlers, then retiring `GET` once ops confirms no script depends on it.
 
 ### Catalogs
 - `GET /api/catalogs/client-types` → `clienttypes.ListClientTypes`
