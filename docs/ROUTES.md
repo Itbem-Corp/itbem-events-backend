@@ -122,9 +122,9 @@ Legacy v1/v2 events remain auditable but cannot authorize a v3 action.
 - `DELETE /api/events/:id` → `events.DeleteEvent`
 - `POST /api/events/:id/cover` → `events.UploadEventCover` — Stores a validated source, returns `202` plus a signed pending preview, and queues responsive processing. The previous public cover remains active until a generation-matched terminal callback succeeds. Local environments without SQS retain a synchronous fallback.
 - `DELETE /api/events/:id/cover` → `events.DeleteEventCover` — Clears `cover_image_url` and best-effort deletes the old S3 object.
-- `POST /api/events/covers/backfill` → `events.BackfillEventCovers` — Root-only bounded/idempotent backfill for legacy covers without responsive variants.
+- `POST /api/events/covers/backfill` → `events.BackfillEventCovers` — Primary-root-only (level 1; Root 2, standard users and other-product sessions get `403`) bounded/idempotent backfill for legacy covers without responsive variants. The candidate scan is global across tenants.
 - `PUT /api/events/:id/cover/content` → `events.UpdateEventCoverContent` — Internal authenticated media callback; rejects stale generations with `409`.
-- `POST /api/moments/backfill` → `moments.BackfillMomentVariants` — Root-only bounded/idempotent discovery and requeue of legacy image moments without variants.
+- `POST /api/moments/backfill` → `moments.BackfillMomentVariants` — Primary-root-only (level 1; Root 2, standard users and other-product sessions get `403`) bounded/idempotent discovery and requeue of legacy image moments without variants. The candidate scan is global across tenants.
 - `POST /api/events/:identifier/performance` → `events.TrackPerformance` — Public aggregate-only RUM ingestion with anonymous five-minute operational histograms retained for 48 hours.
 - `GET /api/events/:id/analytics` → `events.GetEventAnalytics` — GetEventAnalytics — returns EventAnalytics for the event
 
