@@ -124,6 +124,15 @@ func (s *MomentService) GetMomentByID(id uuid.UUID) (*models.Moment, error) {
 	return s.repo.GetMomentByID(id)
 }
 
+// GetMomentsByIDs loads several moments in one query; ids that do not exist are
+// simply absent from the result.
+func (s *MomentService) GetMomentsByIDs(ids []uuid.UUID) ([]models.Moment, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	return s.repo.GetMomentsByIDs(ids)
+}
+
 func (s *MomentService) GetMomentByEventIDAndContentURL(eventID uuid.UUID, contentURL string) (*models.Moment, error) {
 	return s.repo.GetMomentByEventIDAndContentURL(eventID, strings.TrimSpace(contentURL))
 }

@@ -341,6 +341,73 @@ func ListMomentActivity(c echo.Context) error {
 	})
 }
 
+// maxBulkMomentIDs bounds bulk-approve, bulk delete and reorder. The dashboard
+// sends whole-event lists without chunking, so the cap sits well above
+// realistic per-event counts; batch reoptimize keeps its own cap of 200.
+const maxBulkMomentIDs = 5000
+
+// parseBulkMomentIDs validates the size of a bulk moment id list and returns
+// its distinct ids in request order. A non-empty message means 400.
+func parseBulkMomentIDs(raw []string) (ids []uuid.UUID, message string, detail string) {
+	if len(raw) == 0 {
+		return nil, "No IDs provided", ""
+	}
+	if len(raw) > maxBulkMomentIDs {
+		return nil, "Too many IDs", "max " + strconv.Itoa(maxBulkMomentIDs)
+	}
+	ids = make([]uuid.UUID, 0, len(raw))
+	seen := make(map[uuid.UUID]struct{}, len(raw))
+	for _, idStr := range raw {
+		id, err := uuid.FromString(idStr)
+		if err != nil {
+			return nil, "Invalid UUID: " + idStr, ""
+		}
+		if _, duplicate := seen[id]; duplicate {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	return ids, "", ""
+}
+
+// authorizeBulkMoments checks capability on every moment of a bulk request with
+// one batch lookup and one event check per distinct event, instead of a full
+// authz chain per moment. A moment the batch lookup does not return, or one
+// without an event, falls back to RequireMomentCapability, so a missing id
+// still answers 404 and an unlinked moment keeps its per-moment rule.
+func authorizeBulkMoments(c echo.Context, ids []uuid.UUID, capability authz.Capability) error {
+	if momentSvc == nil {
+		return &authz.Failure{Status: http.StatusInternalServerError, Message: "Moment service unavailable"}
+	}
+	moments, err := momentSvc.GetMomentsByIDs(ids)
+	if err != nil {
+		return &authz.Failure{Status: http.StatusInternalServerError, Message: "Moment lookup failed", Detail: err.Error()}
+	}
+	byID := make(map[uuid.UUID]*models.Moment, len(moments))
+	for i := range moments {
+		byID[moments[i].ID] = &moments[i]
+	}
+	checkedEvents := make(map[uuid.UUID]struct{})
+	for _, id := range ids {
+		moment, found := byID[id]
+		if !found || moment.EventID == nil {
+			if _, _, authErr := authz.RequireMomentCapability(c, id, capability); authErr != nil {
+				return authErr
+			}
+			continue
+		}
+		if _, checked := checkedEvents[*moment.EventID]; checked {
+			continue
+		}
+		if _, _, authErr := authz.RequireEventCapability(c, *moment.EventID, capability); authErr != nil {
+			return authErr
+		}
+		checkedEvents[*moment.EventID] = struct{}{}
+	}
+	return nil
+}
+
 func ReorderMoments(c echo.Context) error {
 	var body []struct {
 		ID    string `json:"id"`
@@ -352,17 +419,28 @@ func ReorderMoments(c echo.Context) error {
 	if len(body) == 0 {
 		return utils.Error(c, http.StatusBadRequest, "No moments provided", "")
 	}
+	if len(body) > maxBulkMomentIDs {
+		return utils.Error(c, http.StatusBadRequest, "Too many IDs", "max "+strconv.Itoa(maxBulkMomentIDs))
+	}
 
 	updates := make(map[uuid.UUID]int, len(body))
+	ids := make([]uuid.UUID, 0, len(body))
 	for _, item := range body {
 		id, err := uuid.FromString(item.ID)
 		if err != nil {
 			return utils.Error(c, http.StatusBadRequest, "Invalid UUID: "+item.ID, "")
 		}
-		if _, _, authErr := authz.RequireMomentCapability(c, id, authz.CapabilityEventManage); authErr != nil {
-			return authz.Respond(c, authErr)
+		if previous, duplicate := updates[id]; duplicate {
+			if previous != item.Order {
+				return utils.Error(c, http.StatusBadRequest, "Conflicting order for moment", id.String())
+			}
+			continue
 		}
 		updates[id] = item.Order
+		ids = append(ids, id)
+	}
+	if authErr := authorizeBulkMoments(c, ids, authz.CapabilityEventManage); authErr != nil {
+		return authz.Respond(c, authErr)
 	}
 
 	if err := momentSvc.BulkUpdateOrder(updates); err != nil {
@@ -685,20 +763,12 @@ func BulkDeleteMoments(c echo.Context) error {
 	if err := c.Bind(&body); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
 	}
-	if len(body.IDs) == 0 {
-		return utils.Error(c, http.StatusBadRequest, "No IDs provided", "")
+	ids, message, detail := parseBulkMomentIDs(body.IDs)
+	if message != "" {
+		return utils.Error(c, http.StatusBadRequest, message, detail)
 	}
-
-	ids := make([]uuid.UUID, 0, len(body.IDs))
-	for _, idStr := range body.IDs {
-		id, err := uuid.FromString(idStr)
-		if err != nil {
-			return utils.Error(c, http.StatusBadRequest, "Invalid UUID: "+idStr, "")
-		}
-		if _, _, authErr := authz.RequireMomentCapability(c, id, authz.CapabilityEventManage); authErr != nil {
-			return authz.Respond(c, authErr)
-		}
-		ids = append(ids, id)
+	if authErr := authorizeBulkMoments(c, ids, authz.CapabilityEventManage); authErr != nil {
+		return authz.Respond(c, authErr)
 	}
 
 	if err := momentSvc.BulkDeleteMoments(ids); err != nil {
@@ -739,22 +809,12 @@ func BulkApproveRejectMoments(c echo.Context) error {
 	if err := c.Bind(&body); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
 	}
-	if len(body.IDs) == 0 {
-		return utils.Error(c, http.StatusBadRequest, "No IDs provided", "")
+	uuids, message, detail := parseBulkMomentIDs(body.IDs)
+	if message != "" {
+		return utils.Error(c, http.StatusBadRequest, message, detail)
 	}
-
-	uuids := make([]uuid.UUID, 0, len(body.IDs))
-	for _, idStr := range body.IDs {
-		id, err := uuid.FromString(idStr)
-		if err != nil {
-			return utils.Error(c, http.StatusBadRequest, "Invalid UUID: "+idStr, "")
-		}
-		uuids = append(uuids, id)
-	}
-	for _, id := range uuids {
-		if _, _, authErr := authz.RequireMomentCapability(c, id, authz.CapabilityEventManage); authErr != nil {
-			return authz.Respond(c, authErr)
-		}
+	if authErr := authorizeBulkMoments(c, uuids, authz.CapabilityEventManage); authErr != nil {
+		return authz.Respond(c, authErr)
 	}
 
 	isApproved := false

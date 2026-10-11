@@ -33,6 +33,14 @@ var guestTableByID = eventtablerepository.GetEventTableByID
 
 const maxGuestCSVRows = 250000
 
+// maxBulkGuestIDs bounds DELETE /guests/bulk (same limit as bulk/status).
+const maxBulkGuestIDs = 100
+
+// maxGuestBatchSize bounds POST /guests/batch. It matches the dashboard's
+// GUEST_CSV_MAX_ROWS and keeps the guest INSERT (about 32 columns per row)
+// under Postgres's 65,535 bind parameters.
+const maxGuestBatchSize = 1000
+
 func guestCSVStatus(guest models.Guest) string {
 	status := strings.ToUpper(strings.TrimSpace(guest.RSVPStatus))
 	if status == "" {
@@ -522,6 +530,9 @@ func CreateGuests(c echo.Context) error {
 	if len(items) == 0 {
 		return utils.Error(c, http.StatusBadRequest, "No guests provided", "")
 	}
+	if len(items) > maxGuestBatchSize {
+		return utils.Error(c, http.StatusBadRequest, "Too many guests", "max "+strconv.Itoa(maxGuestBatchSize))
+	}
 
 	guests := make([]models.Guest, len(items))
 	for i, item := range items {
@@ -954,12 +965,22 @@ func BulkDeleteGuests(c echo.Context) error {
 	if len(body.IDs) == 0 {
 		return utils.Error(c, http.StatusBadRequest, "No IDs provided", "")
 	}
+	// Each id costs an authz lookup chain and a service lookup, so the list is
+	// capped like PATCH /guests/bulk/status and deduplicated before authz.
+	if len(body.IDs) > maxBulkGuestIDs {
+		return utils.Error(c, http.StatusBadRequest, "Too many IDs", "max "+strconv.Itoa(maxBulkGuestIDs))
+	}
 	uuids := make([]uuid.UUID, 0, len(body.IDs))
+	seen := make(map[uuid.UUID]struct{}, len(body.IDs))
 	for _, id := range body.IDs {
 		u, err := uuid.FromString(id)
 		if err != nil {
 			return utils.Error(c, http.StatusBadRequest, "Invalid UUID: "+id, err.Error())
 		}
+		if _, duplicate := seen[u]; duplicate {
+			continue
+		}
+		seen[u] = struct{}{}
 		uuids = append(uuids, u)
 	}
 	for _, id := range uuids {
