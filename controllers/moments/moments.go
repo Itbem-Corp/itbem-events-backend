@@ -345,6 +345,9 @@ func ListMomentActivity(c echo.Context) error {
 // maxBulkMomentIDs caps every bulk moment action (reorder, delete, approve).
 const maxBulkMomentIDs = 500
 
+// maxReorderMomentIDs caps a single reorder request; one SQL statement applies it.
+const maxReorderMomentIDs = 2000
+
 // parseBulkMomentIDs validates the size cap, parses the ids and drops
 // duplicates preserving first-seen order. The returned error is already an
 // HTTP response, written before ok=false is returned.
@@ -386,7 +389,7 @@ func ReorderMoments(c echo.Context) error {
 	for i, item := range body {
 		rawIDs[i] = item.ID
 	}
-	ids, ok := parseBulkMomentIDs(c, rawIDs, maxBulkMomentIDs)
+	ids, ok := parseBulkMomentIDs(c, rawIDs, maxReorderMomentIDs)
 	if !ok {
 		return nil
 	}

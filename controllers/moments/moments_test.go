@@ -3685,7 +3685,7 @@ func TestBulkMomentActions_RejectListsOverCap(t *testing.T) {
 	}
 
 	var reorder []string
-	for _, id := range ids {
+	for _, id := range newBulkIDs(maxReorderMomentIDs + 1) {
 		reorder = append(reorder, `{"id":"`+id.String()+`","order":1}`)
 	}
 	c, rec := newEchoCtx(http.MethodPut, "/moments/reorder", `[`+strings.Join(reorder, ",")+`]`)
