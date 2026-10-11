@@ -9,6 +9,7 @@ import (
 	"events-stocks/dtos"
 	"events-stocks/internal/authz"
 	"events-stocks/models"
+	"events-stocks/repositories/eventtablerepository"
 	eventsService "events-stocks/services/events"
 	guestService "events-stocks/services/guests"
 	"events-stocks/services/ports"
@@ -16,6 +17,7 @@ import (
 	"events-stocks/utils"
 	"github.com/gofrs/uuid"
 	"github.com/labstack/echo/v4"
+	"gorm.io/gorm"
 	"io"
 	"net/http"
 	"strconv"
@@ -24,6 +26,10 @@ import (
 )
 
 var errAttendeeServiceUnavailable = errors.New("attendee service unavailable")
+
+// guestTableByID resolves the seating table named by a guest write's table_id
+// so it can be checked against the guest's event; tests replace it.
+var guestTableByID = eventtablerepository.GetEventTableByID
 
 const maxGuestCSVRows = 250000
 
@@ -476,14 +482,13 @@ func EnsureRSVPToken(c echo.Context) error {
 
 // POST /guests
 func CreateGuest(c echo.Context) error {
-	rawBody := readJSONRequestBody(c)
-	requestFields := decodeJSONRequestFields(rawBody)
-
-	var guest models.Guest
-	if err := c.Bind(&guest); err != nil {
+	write, err := decodeGuestWrite(readJSONRequestBody(c))
+	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
 	}
-	applyGuestJSONAliases(&guest, requestFields)
+	var guest models.Guest
+	applyGuestWrite(&guest, write)
+	guest.EventID = guestWriteEventID(write.fields)
 	if err := c.Validate(&guest); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Validation error", err.Error())
 	}
@@ -496,6 +501,9 @@ func CreateGuest(c echo.Context) error {
 	if _, _, authErr := authz.RequireEventCapability(c, guest.EventID, authz.CapabilityGuestManage); authErr != nil {
 		return authz.Respond(c, authErr)
 	}
+	if err := checkGuestTable(guest.EventID, guest.TableID); err != nil {
+		return respondGuestTableError(c, err)
+	}
 
 	guests := []models.Guest{guest}
 	if err := guestSvc.CreateGuestsWithInvitations(guests); err != nil {
@@ -505,21 +513,24 @@ func CreateGuest(c echo.Context) error {
 }
 
 func CreateGuests(c echo.Context) error {
-	rawBody := readJSONRequestBody(c)
-	requestItems := decodeJSONRequestFieldList(rawBody)
-
-	var guests []models.Guest
-	if err := c.Bind(&guests); err != nil {
-		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
-	}
-	for i := range guests {
-		if i < len(requestItems) {
-			applyGuestJSONAliases(&guests[i], requestItems[i])
+	var items []json.RawMessage
+	if rawBody := readJSONRequestBody(c); len(bytes.TrimSpace(rawBody)) > 0 {
+		if err := json.Unmarshal(rawBody, &items); err != nil {
+			return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
 		}
 	}
-
-	if len(guests) == 0 {
+	if len(items) == 0 {
 		return utils.Error(c, http.StatusBadRequest, "No guests provided", "")
+	}
+
+	guests := make([]models.Guest, len(items))
+	for i, item := range items {
+		write, err := decodeGuestWrite(item)
+		if err != nil {
+			return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
+		}
+		applyGuestWrite(&guests[i], write)
+		guests[i].EventID = guestWriteEventID(write.fields)
 	}
 
 	eventID := guests[0].EventID
@@ -536,6 +547,20 @@ func CreateGuests(c echo.Context) error {
 	}
 	if _, _, authErr := authz.RequireEventCapability(c, eventID, authz.CapabilityGuestManage); authErr != nil {
 		return authz.Respond(c, authErr)
+	}
+	checkedTables := make(map[uuid.UUID]struct{})
+	for i := range guests {
+		tableID := guests[i].TableID
+		if tableID == nil {
+			continue
+		}
+		if _, checked := checkedTables[*tableID]; checked {
+			continue
+		}
+		if err := checkGuestTable(eventID, tableID); err != nil {
+			return respondGuestTableError(c, err)
+		}
+		checkedTables[*tableID] = struct{}{}
 	}
 
 	if err := guestSvc.CreateGuestsWithInvitations(guests); err != nil {
@@ -557,16 +582,14 @@ func UpdateGuest(c echo.Context) error {
 	if authErr != nil {
 		return authz.Respond(c, authErr)
 	}
-	rawBody := readJSONRequestBody(c)
-	requestFields := decodeJSONRequestFields(rawBody)
-	originalEventID := guest.EventID
-	if err := c.Bind(guest); err != nil {
+	write, err := decodeGuestWrite(readJSONRequestBody(c))
+	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
 	}
-	applyGuestJSONAliases(guest, requestFields)
-	guest.ID = id
-	guest.EventID = originalEventID
-	if guestCountFieldPresent(requestFields) {
+	// Only allowlisted columns change: id, event_id, invitation_id, rsvp_token_id,
+	// rsvp_at and created_at keep the stored values the authz check loaded.
+	applyGuestWrite(guest, write)
+	if guestCountFieldPresent(write.fields) {
 		if guest.GuestsCount > 0 {
 			guest.RSVPGuestCount = guest.GuestsCount
 		} else {
@@ -575,6 +598,11 @@ func UpdateGuest(c echo.Context) error {
 	}
 	if err := c.Validate(guest); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Validation error", err.Error())
+	}
+	if write.tableSet {
+		if err := checkGuestTable(guest.EventID, guest.TableID); err != nil {
+			return respondGuestTableError(c, err)
+		}
 	}
 	if err := guestSvc.UpdateGuest(guest); err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Error updating guest", err.Error())
@@ -586,6 +614,170 @@ func UpdateGuest(c echo.Context) error {
 	}
 
 	return utils.Success(c, http.StatusOK, "Guest updated", dtos.NewGuestResponse(updatedGuest))
+}
+
+// guestWritePayload is the allowlist of guest columns a dashboard client may
+// set through POST /guests, POST /guests/batch and PUT /guests/:id, under their
+// snake_case names. Server-owned columns (id, invitation_id, rsvp_token_id,
+// rsvp_at, created_at, updated_at, pretty_token), event_id (read separately on
+// create, ignored on update) and the nested table, guest_status and status
+// objects are deliberately absent, so they are dropped instead of reaching
+// GORM. Pointers keep an absent key or JSON null apart from a written zero
+// value, and a wrong JSON type still fails as it did with c.Bind. table_id is
+// parsed in decodeGuestWrite because "" must clear it; camel and Pascal
+// aliases come from applyGuestJSONAliases.
+type guestWritePayload struct {
+	FirstName           *string    `json:"first_name"`
+	LastName            *string    `json:"last_name"`
+	Nickname            *string    `json:"nickname"`
+	Email               *string    `json:"email"`
+	Phone               *string    `json:"phone"`
+	ShowContactInfo     *bool      `json:"show_contact_info"`
+	Role                *string    `json:"role"`
+	Bio                 *string    `json:"bio"`
+	Headline            *string    `json:"headline"`
+	Signature           *string    `json:"signature"`
+	Order               *int       `json:"order"`
+	ImageURL            *string    `json:"image_url"`
+	Image1URL           *string    `json:"image1_url"`
+	Image2URL           *string    `json:"image2_url"`
+	Image3URL           *string    `json:"image3_url"`
+	TableNumber         *string    `json:"table_number"`
+	IsHost              *bool      `json:"is_host"`
+	Notes               *string    `json:"notes"`
+	RSVPNotes           *string    `json:"rsvp_notes"`
+	DietaryRestrictions *string    `json:"dietary_restrictions"`
+	GuestsCount         *int       `json:"guests_count"`
+	RSVPGuestCount      *int       `json:"rsvp_guest_count"`
+	MaxGuests           *int       `json:"max_guests"`
+	GuestStatusID       *uuid.UUID `json:"guest_status_id"`
+	StatusID            *uuid.UUID `json:"status_id"`
+	RSVPStatus          *string    `json:"rsvp_status"`
+	RSVPMethod          *string    `json:"rsvp_method"`
+}
+
+// guestWrite is one decoded guest request object: the allowlisted snake_case
+// fields, the raw fields for the alias setters, and the table_id change.
+type guestWrite struct {
+	payload  guestWritePayload
+	fields   jsonRequestFields
+	tableSet bool
+	tableID  *uuid.UUID
+}
+
+var errInvalidGuestTableID = errors.New("table_id must be a UUID, an empty string or null")
+var errGuestTableOutsideEvent = errors.New("table_id does not belong to this event")
+
+func decodeGuestWrite(raw []byte) (guestWrite, error) {
+	write := guestWrite{fields: jsonRequestFields{}}
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return write, nil
+	}
+	if err := json.Unmarshal(raw, &write.payload); err != nil {
+		return write, err
+	}
+	if err := json.Unmarshal(raw, &write.fields); err != nil {
+		return write, err
+	}
+	if write.fields == nil {
+		write.fields = jsonRequestFields{}
+	}
+	if tableRaw := rawJSONValue(write.fields, "tableId", "tableID", "TableID", "TableId", "table_id"); tableRaw != nil {
+		write.tableSet = true
+		if !isJSONNull(tableRaw) {
+			tableID, ok := parseJSONUUID(tableRaw)
+			if !ok {
+				return write, errInvalidGuestTableID
+			}
+			if tableID != uuid.Nil {
+				write.tableID = &tableID
+			}
+		}
+	}
+	return write, nil
+}
+
+func applyGuestWrite(guest *models.Guest, write guestWrite) {
+	p := write.payload
+	setIfPresent(&guest.FirstName, p.FirstName)
+	setIfPresent(&guest.LastName, p.LastName)
+	setIfPresent(&guest.Nickname, p.Nickname)
+	setIfPresent(&guest.Email, p.Email)
+	setIfPresent(&guest.Phone, p.Phone)
+	setIfPresent(&guest.ShowContactInfo, p.ShowContactInfo)
+	setIfPresent(&guest.Role, p.Role)
+	setIfPresent(&guest.Bio, p.Bio)
+	setIfPresent(&guest.Headline, p.Headline)
+	setIfPresent(&guest.Signature, p.Signature)
+	setIfPresent(&guest.Order, p.Order)
+	setIfPresent(&guest.ImageURL, p.ImageURL)
+	setIfPresent(&guest.Image1URL, p.Image1URL)
+	setIfPresent(&guest.Image2URL, p.Image2URL)
+	setIfPresent(&guest.Image3URL, p.Image3URL)
+	setIfPresent(&guest.TableNumber, p.TableNumber)
+	setIfPresent(&guest.IsHost, p.IsHost)
+	setIfPresent(&guest.Notes, p.Notes)
+	setIfPresent(&guest.RSVPNotes, p.RSVPNotes)
+	setIfPresent(&guest.DietaryRestrictions, p.DietaryRestrictions)
+	setIfPresent(&guest.GuestsCount, p.GuestsCount)
+	setIfPresent(&guest.RSVPGuestCount, p.RSVPGuestCount)
+	setIfPresent(&guest.MaxGuests, p.MaxGuests)
+	setIfPresent(&guest.RSVPStatus, p.RSVPStatus)
+	setIfPresent(&guest.RSVPMethod, p.RSVPMethod)
+	// Both status columns move together and status_id wins, as it does in
+	// models.Guest.BeforeSave. A nil UUID leaves the stored status in place.
+	for _, statusID := range []*uuid.UUID{p.GuestStatusID, p.StatusID} {
+		if statusID != nil && *statusID != uuid.Nil {
+			guest.StatusID = *statusID
+			guest.GuestStatusID = *statusID
+		}
+	}
+	applyGuestJSONAliases(guest, write.fields)
+	if write.tableSet {
+		guest.TableID = write.tableID
+		guest.Table = nil
+	}
+}
+
+func setIfPresent[T any](dst *T, value *T) {
+	if value != nil {
+		*dst = *value
+	}
+}
+
+// guestWriteEventID reads the event of a guest create from event_id or one of
+// its aliases (an alias wins, as it did over c.Bind).
+func guestWriteEventID(fields jsonRequestFields) uuid.UUID {
+	eventID := uuid.Nil
+	setUUID(fields, []string{"event_id"}, func(value uuid.UUID) { eventID = value })
+	setUUID(fields, []string{"eventId", "eventID", "EventID", "EventId"}, func(value uuid.UUID) { eventID = value })
+	return eventID
+}
+
+// checkGuestTable makes sure a guest's table_id names a table of the guest's
+// own event; nil (no table) is always valid.
+func checkGuestTable(eventID uuid.UUID, tableID *uuid.UUID) error {
+	if tableID == nil {
+		return nil
+	}
+	table, err := guestTableByID(*tableID)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return errGuestTableOutsideEvent
+	}
+	if err != nil {
+		return err
+	}
+	if table == nil || table.EventID != eventID {
+		return errGuestTableOutsideEvent
+	}
+	return nil
+}
+
+func respondGuestTableError(c echo.Context, err error) error {
+	if errors.Is(err, errGuestTableOutsideEvent) {
+		return utils.Error(c, http.StatusBadRequest, "Invalid table_id", err.Error())
+	}
+	return utils.Error(c, http.StatusInternalServerError, "Error loading table", err.Error())
 }
 
 type jsonRequestFields map[string]json.RawMessage
@@ -605,35 +797,15 @@ func readJSONRequestBody(c echo.Context) []byte {
 	return raw
 }
 
-func decodeJSONRequestFields(raw []byte) jsonRequestFields {
-	fields := make(jsonRequestFields)
-	if len(raw) == 0 {
-		return fields
-	}
-
-	var payload jsonRequestFields
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return fields
-	}
-	return payload
-}
-
-func decodeJSONRequestFieldList(raw []byte) []jsonRequestFields {
-	if len(raw) == 0 {
-		return nil
-	}
-
-	var items []jsonRequestFields
-	if err := json.Unmarshal(raw, &items); err != nil {
-		return nil
-	}
-	return items
-}
-
+// guestCountFieldPresent reports whether the request set the party size; a
+// JSON null counts as absent.
 func guestCountFieldPresent(fields jsonRequestFields) bool {
-	return rawJSONValue(fields, "guests_count", "guest_count", "guestCount", "GuestCount", "guestsCount", "GuestsCount") != nil
+	raw := rawJSONValue(fields, "guests_count", "guest_count", "guestCount", "GuestCount", "guestsCount", "GuestsCount")
+	return raw != nil && !isJSONNull(raw)
 }
 
+// applyGuestJSONAliases applies the camel and Pascal spellings of the writable
+// guest fields, which deployed clients still send.
 func applyGuestJSONAliases(guest *models.Guest, fields jsonRequestFields) {
 	if guest == nil || len(fields) == 0 {
 		return
@@ -666,7 +838,6 @@ func applyGuestJSONAliases(guest *models.Guest, fields jsonRequestFields) {
 	setInt(fields, []string{"rsvpGuestCount", "RSVPGuestCount", "RsvpGuestCount"}, func(value int) { guest.RSVPGuestCount = value })
 	setInt(fields, []string{"public_order", "publicOrder", "PublicOrder", "display_order", "displayOrder", "DisplayOrder", "sort_order", "sortOrder", "SortOrder", "Order"}, func(value int) { guest.Order = value })
 
-	setUUID(fields, []string{"eventId", "eventID", "EventID", "EventId"}, func(value uuid.UUID) { guest.EventID = value })
 	setUUID(fields, []string{"statusId", "statusID", "StatusID", "StatusId"}, func(value uuid.UUID) {
 		guest.StatusID = value
 		guest.GuestStatusID = value
@@ -675,10 +846,14 @@ func applyGuestJSONAliases(guest *models.Guest, fields jsonRequestFields) {
 		guest.StatusID = value
 		guest.GuestStatusID = value
 	})
-	setUUID(fields, []string{"rsvpTokenId", "rsvpTokenID", "RSVPTokenID", "RsvpTokenId"}, func(value uuid.UUID) { guest.RSVPTokenID = &value })
-	setUUIDPtr(fields, []string{"tableId", "tableID", "TableID", "TableId"}, func(value *uuid.UUID) { guest.TableID = value })
-	setUUIDPtr(fields, []string{"invitationId", "invitationID", "InvitationID", "InvitationId"}, func(value *uuid.UUID) { guest.InvitationID = value })
-	setTimePtr(fields, []string{"rsvpAt", "RSVPAt", "RsvpAt"}, func(value *time.Time) { guest.RSVPAt = value })
+	// event_id, table_id and the server-owned invitation_id, rsvp_token_id and
+	// rsvp_at have no alias here: see guestWriteEventID and decodeGuestWrite.
+}
+
+// isJSONNull reports a JSON null, which the scalar setters treat as an absent
+// field so a client that sends a whole object with nulls keeps stored values.
+func isJSONNull(raw json.RawMessage) bool {
+	return string(bytes.TrimSpace(raw)) == "null"
 }
 
 func rawJSONValue(fields jsonRequestFields, keys ...string) json.RawMessage {
@@ -692,7 +867,7 @@ func rawJSONValue(fields jsonRequestFields, keys ...string) json.RawMessage {
 
 func setString(fields jsonRequestFields, keys []string, assign func(string)) {
 	raw := rawJSONValue(fields, keys...)
-	if raw == nil {
+	if raw == nil || isJSONNull(raw) {
 		return
 	}
 	var value string
@@ -703,7 +878,7 @@ func setString(fields jsonRequestFields, keys []string, assign func(string)) {
 
 func setBool(fields jsonRequestFields, keys []string, assign func(bool)) {
 	raw := rawJSONValue(fields, keys...)
-	if raw == nil {
+	if raw == nil || isJSONNull(raw) {
 		return
 	}
 	var value bool
@@ -714,7 +889,7 @@ func setBool(fields jsonRequestFields, keys []string, assign func(bool)) {
 
 func setInt(fields jsonRequestFields, keys []string, assign func(int)) {
 	raw := rawJSONValue(fields, keys...)
-	if raw == nil {
+	if raw == nil || isJSONNull(raw) {
 		return
 	}
 	var value int
@@ -737,58 +912,13 @@ func setInt(fields jsonRequestFields, keys []string, assign func(int)) {
 
 func setUUID(fields jsonRequestFields, keys []string, assign func(uuid.UUID)) {
 	raw := rawJSONValue(fields, keys...)
-	if raw == nil {
+	if raw == nil || isJSONNull(raw) {
 		return
 	}
 	id, ok := parseJSONUUID(raw)
 	if ok {
 		assign(id)
 	}
-}
-
-func setUUIDPtr(fields jsonRequestFields, keys []string, assign func(*uuid.UUID)) {
-	raw := rawJSONValue(fields, keys...)
-	if raw == nil {
-		return
-	}
-	if string(raw) == "null" {
-		assign(nil)
-		return
-	}
-	id, ok := parseJSONUUID(raw)
-	if !ok {
-		return
-	}
-	if id == uuid.Nil {
-		assign(nil)
-		return
-	}
-	assign(&id)
-}
-
-func setTimePtr(fields jsonRequestFields, keys []string, assign func(*time.Time)) {
-	raw := rawJSONValue(fields, keys...)
-	if raw == nil {
-		return
-	}
-	if string(raw) == "null" {
-		assign(nil)
-		return
-	}
-	var text string
-	if err := json.Unmarshal(raw, &text); err != nil {
-		return
-	}
-	text = strings.TrimSpace(text)
-	if text == "" {
-		assign(nil)
-		return
-	}
-	parsed, err := time.Parse(time.RFC3339, text)
-	if err != nil {
-		return
-	}
-	assign(&parsed)
 }
 
 func parseJSONUUID(raw json.RawMessage) (uuid.UUID, bool) {

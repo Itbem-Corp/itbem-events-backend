@@ -16,6 +16,7 @@ import (
 	"github.com/gofrs/uuid"
 	"golang.org/x/sync/errgroup"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type rsvpTokenWriter interface {
@@ -183,7 +184,10 @@ func (s *GuestService) CreateGuestsWithInvitations(guests []models.Guest) error 
 		if err := tx.Create(&invitations).Error; err != nil {
 			return err
 		}
-		if err := tx.Create(&guests).Error; err != nil {
+		// Omit associations so a nested table or guest_status object on a guest
+		// can never insert rows into another event's tables or the shared
+		// status catalog; table_id and guest_status_id are written as columns.
+		if err := tx.Omit(clause.Associations).Create(&guests).Error; err != nil {
 			return err
 		}
 		if err := tx.Create(&tokens).Error; err != nil {
@@ -432,14 +436,13 @@ func rsvpAnalyticsField(status string) string {
 }
 
 func (s *GuestService) updateInvitationMaxGuests(obj *models.Guest, oldGuest *models.Guest) error {
-	if s.invitations == nil || obj.MaxGuests <= 0 {
+	if s.invitations == nil || obj.MaxGuests <= 0 || oldGuest == nil {
 		return nil
 	}
 
-	invitationID := obj.InvitationID
-	if invitationID == nil && oldGuest != nil {
-		invitationID = oldGuest.InvitationID
-	}
+	// The stored row picks the invitation: obj is built from a request and must
+	// never point the MaxGuests sync at another (possibly foreign) invitation.
+	invitationID := oldGuest.InvitationID
 	if invitationID == nil || *invitationID == uuid.Nil {
 		return nil
 	}
