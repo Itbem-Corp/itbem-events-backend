@@ -83,7 +83,7 @@ requires an explicit HTTP(S) preview URL before QA can start.
 
 | File | Purpose |
 |------|---------|
-| `UserService.go` | User profile, Cognito sync, avatar |
+| `UserService.go` | User profile, Cognito sync, avatar, root-level delegation (`SetUserRootLevel`) |
 | `AdminUserService.go` | Admin user management (list, activate, deactivate) |
 
 ### Resources Domain (`services/resources/`)
@@ -183,6 +183,8 @@ Every service has an injectable struct with a constructor. The structs are used 
 | `ResourceService` | `NewResourceService(cfg, deps...)` | `ports.ResourceRepository`, `ports.ObjectStorageRepository`, `ports.CacheRepository` |
 
 > **`AdminUserService.ListAllUsers(query dtos.AdminUsersListQuery)`** - accepts pagination plus optional `search` and `status` filters. Returns typed rows with `data`, `total`, `page`, `page_size`, `total_pages`. Page defaults to 1, page_size defaults to 50, max 200, and filtering/pagination happens in the repository query.
+
+> **`UserService.SetUserRootLevel(userID, level)`** - accepts only `0` or `2` (anything else is an error mapped to `400`), writes `root_level=level` and clears the legacy `is_root` flag. It returns `gorm.ErrRecordNotFound` for an unknown user (`404`) and the sentinel `users.ErrProtectedRootAccount` when the target is a primary root (`IsPrimaryRoot()`: level 1 or a legacy `is_root` account), which the controller maps to `409 Protected account`. Level 1 cannot be restored through the API, so this also blocks self-demotion and losing the last primary root. Callers are gated by `authz.RequirePrimaryRoot`.
 
 All interfaces are defined in `services/ports/ports.go`.
 

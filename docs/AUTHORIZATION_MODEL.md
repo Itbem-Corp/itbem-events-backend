@@ -32,7 +32,7 @@ Only Owner and Administrator memberships propagate down an organization hierarch
 - A role can grant, change, or remove only roles below its hierarchy.
 - An Owner cannot be assigned or removed through ordinary member management.
 - A platform root cannot assign Owner through member management.
-- Only a Primary root can set `root_level`; it may set only `0` or `2`.
+- Only a Primary root can set `root_level`; it may set only `0` or `2`, and never on a Primary-root account (including itself), which is refused with `409 Protected account` because level 1 cannot be restored through the API.
 - Event permissions are a ceiling from the organization role. An event assignment may reduce access, never elevate it.
 
 ## Event capabilities and privacy

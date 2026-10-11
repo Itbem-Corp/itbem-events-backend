@@ -193,6 +193,7 @@ Legacy v1/v2 events remain auditable but cannot authorize a v3 action.
 - `DELETE /api/users/:id` → `users.DeleteUserDetail` — root only
 - `PUT /api/users/:id/deactivate` → `users.DeactivateUser` — root only
 - `PUT /api/users/:id/activate` → `users.ActivateUser` — root only
+- `PUT /api/users/:id/root-level` → `users.UpdateUserRootLevel` — Primary-root-only (Root 2, standard users and other-product sessions get `403`). Body `{"root_level": 0|2}` grants or revokes operational Root 2 and returns the admin user summary. Level `1` is never assignable (`400`); a primary-root target (level 1 or a legacy `is_root` account, including the caller itself) is refused with `409 Protected account` because level 1 cannot be restored through the API; unknown user → `404`.
 - `POST /api/users/invite` → `users.InviteUser` — root only
 - `POST /api/users/avatar` → `users.UploadAvatar`
 - `DELETE /api/users/avatar` → `users.DeleteAvatar`

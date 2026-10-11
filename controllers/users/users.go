@@ -11,6 +11,7 @@ import (
 	"events-stocks/utils"
 	"github.com/gofrs/uuid"
 	"github.com/labstack/echo/v4"
+	"gorm.io/gorm"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -276,6 +277,12 @@ func UpdateUserRootLevel(c echo.Context) error {
 		return utils.Error(c, http.StatusBadRequest, "Invalid data", err.Error())
 	}
 	if err := userSvc.SetUserRootLevel(userID, req.RootLevel); err != nil {
+		switch {
+		case errors.Is(err, users.ErrProtectedRootAccount):
+			return utils.Error(c, http.StatusConflict, "Protected account", err.Error())
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			return utils.Error(c, http.StatusNotFound, "User not found", "")
+		}
 		return utils.Error(c, http.StatusBadRequest, "Could not update root level", err.Error())
 	}
 	user, err := adminSvc.GetUserSummary(userID)

@@ -1,6 +1,7 @@
 package users
 
 import (
+	"errors"
 	"events-stocks/dtos"
 	"events-stocks/models"
 	"events-stocks/services/ports"
@@ -427,14 +428,25 @@ func (s *UserService) SetUserRoot(userID uuid.UUID, isRoot bool) error {
 	return s.userRepo.SetUserRoot(userID, isRoot)
 }
 
+// ErrProtectedRootAccount is returned when a root-level change targets a
+// primary root (level 1 or a historical is_root account).
+var ErrProtectedRootAccount = errors.New("primary roots retain their protected platform level")
+
 // SetUserRootLevel is deliberately narrow: level 1 cannot be delegated from
 // the dashboard; a primary root may only grant or revoke operational level 2.
+// Primary-root targets are refused because level 1 can never be restored
+// through the API: demoting one (including the caller itself, who is always
+// a primary root) could leave the platform without a primary root.
 func (s *UserService) SetUserRootLevel(userID uuid.UUID, level int) error {
 	if level != models.RootLevelNone && level != models.RootLevelOperational {
 		return fmt.Errorf("only operational root level can be assigned")
 	}
-	if _, err := s.userRepo.GetUserByID(userID); err != nil {
+	target, err := s.userRepo.GetUserByID(userID)
+	if err != nil {
 		return err
+	}
+	if target.IsPrimaryRoot() {
+		return ErrProtectedRootAccount
 	}
 	return s.userRepo.UpdateUserFields(userID, map[string]interface{}{
 		"root_level": level,
