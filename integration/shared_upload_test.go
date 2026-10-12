@@ -83,7 +83,7 @@ func setupMomentsEvent(t *testing.T, opts sharedUploadOpts) sharedUploadFx {
 	identifier := "test-up-" + suffix
 	event := models.Event{
 		ID: eventID, Name: "Upload Test " + suffix, Identifier: identifier,
-		EventTypeID: eventType.ID, IsActive: true,
+		EventTypeID: &eventType.ID, IsActive: true,
 		CreatedAt: time.Now(), UpdatedAt: time.Now(),
 	}
 	require.NoError(t, db.Create(&event).Error)
@@ -166,7 +166,7 @@ func TestCreateSharedMoment_NoEventConfig_Returns404(t *testing.T) {
 	identifier := "nocfg-" + suffix
 	event := models.Event{
 		ID: eventID, Name: "NoCfg " + suffix, Identifier: identifier,
-		EventTypeID: eventType.ID, IsActive: true,
+		EventTypeID: &eventType.ID, IsActive: true,
 		CreatedAt: time.Now(), UpdatedAt: time.Now(),
 	}
 	require.NoError(t, db.Create(&event).Error)

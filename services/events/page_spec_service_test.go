@@ -58,7 +58,7 @@ func stubEvent(musicUrl string) *models.Event {
 		SecondAddress: "Salon Izapa",
 		Timezone:      "America/Mexico_City",
 		Language:      "es",
-		EventTypeID:   testEventTypeID,
+		EventTypeID:   &testEventTypeID,
 		EventType:     models.EventType{ID: testEventTypeID, Name: "graduation"},
 		IsActive:      true,
 	}

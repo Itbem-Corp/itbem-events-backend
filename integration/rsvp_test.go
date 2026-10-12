@@ -191,7 +191,7 @@ func TestRSVP_HappyPath_Confirmed(t *testing.T) {
 		ID:          uuid.Must(uuid.NewV4()),
 		Name:        "Test Wedding " + suffix,
 		Identifier:  "test-wedding-" + suffix,
-		EventTypeID: eventType.ID,
+		EventTypeID: &eventType.ID,
 		IsActive:    true,
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),

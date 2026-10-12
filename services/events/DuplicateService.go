@@ -149,7 +149,7 @@ func buildDuplicateEvent(source *models.Event) models.Event {
 		EventDateTime:    source.EventDateTime,
 		Timezone:         source.Timezone,
 		Language:         source.Language,
-		EventTypeID:      source.EventTypeID,
+		EventTypeID:      cloneUUIDPointer(source.EventTypeID),
 		OrganizerName:    source.OrganizerName,
 		OrganizerEmail:   source.OrganizerEmail,
 		OrganizerPhone:   source.OrganizerPhone,

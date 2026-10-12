@@ -144,3 +144,35 @@ func TestUpdateEventConfigPersistsDesignChangesOverLoadedAssociations(t *testing
 	require.NotNil(t, cleared.DesignTemplateID)
 	assert.Equal(t, templateB.ID, *cleared.DesignTemplateID)
 }
+
+// EVT-1: "Tipo de evento" is optional in the dashboard. A missing type must be
+// stored as NULL on create, and clearing it on edit must store NULL too (the
+// zero UUID used to violate fk_events_event_type and return 500).
+func TestEventWithoutTypeIsStoredAsNullOnCreateAndUpdate(t *testing.T) {
+	db := configuration.DB
+	suffix := lifecycleSuffix()
+
+	untyped := createLifecycleEvent(t, nil, "Sin tipo "+suffix, "sin-tipo-"+suffix)
+	var typeIsNull bool
+	require.NoError(t, db.Raw("SELECT event_type_id IS NULL FROM events WHERE id = ?", untyped.ID).Row().Scan(&typeIsNull))
+	assert.True(t, typeIsNull)
+
+	eventType := models.EventType{ID: uuid.Must(uuid.NewV4()), Name: "qa-type-" + suffix}
+	require.NoError(t, db.Create(&eventType).Error)
+	typed := models.Event{
+		ID: uuid.Must(uuid.NewV4()), Name: "Con tipo " + suffix, Identifier: "con-tipo-" + suffix,
+		EventTypeID: &eventType.ID, Timezone: "UTC",
+	}
+	require.NoError(t, CreateEvent(&typed))
+
+	// The edit handler loads the event with EventType joined, then clears it.
+	loaded, err := GetEventByIDRaw(typed.ID)
+	require.NoError(t, err)
+	require.Equal(t, eventType.ID, loaded.EventType.ID, "the join must load the association for this test to mean anything")
+	loaded.EventTypeID = nil
+	require.NoError(t, UpdateEvent(loaded))
+
+	var cleared models.Event
+	require.NoError(t, db.First(&cleared, "id = ?", typed.ID).Error)
+	assert.Nil(t, cleared.EventTypeID)
+}

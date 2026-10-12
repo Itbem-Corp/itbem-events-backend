@@ -32,7 +32,7 @@ type Event struct {
 	EventDateTime             time.Time      `json:"event_date_time"`
 	Timezone                  string         `json:"timezone"`
 	Language                  string         `json:"language"`
-	EventTypeID               uuid.UUID      `gorm:"type:uuid;index" json:"event_type_id"`
+	EventTypeID               *uuid.UUID     `gorm:"type:uuid;index" json:"event_type_id"` // optional: NULL when the event has no type
 	EventType                 EventType      `gorm:"foreignKey:EventTypeID" json:"event_type,omitempty" validate:"-"`
 	EventConfig               EventConfig    `gorm:"foreignKey:ID;references:ID" json:"event_config,omitempty" validate:"-"`
 	OrganizerName             string         `json:"organizer_name"`

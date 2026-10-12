@@ -35,7 +35,7 @@ func TestNewEventResponseUsesExplicitDashboardContract(t *testing.T) {
 		EventDateTime:      eventDate,
 		Timezone:           "America/Mexico_City",
 		Language:           "es",
-		EventTypeID:        eventTypeID,
+		EventTypeID:        &eventTypeID,
 		EventType:          models.EventType{ID: eventTypeID, Name: "wedding"},
 		EventConfig:        models.EventConfig{ID: eventID, IsPublic: true, ShowHeader: true},
 		OrganizerName:      "Ana y Luis",
@@ -91,7 +91,7 @@ func TestEventPayloadApplyToNormalizesOptionalDashboardFields(t *testing.T) {
 	maxGuests := 100
 	event := models.Event{
 		ClientID:      &clientID,
-		EventTypeID:   eventTypeID,
+		EventTypeID:   &eventTypeID,
 		MaxGuests:     &maxGuests,
 		EventDateTime: time.Date(2026, time.August, 15, 20, 30, 0, 0, time.UTC),
 	}
@@ -100,7 +100,7 @@ func TestEventPayloadApplyToNormalizesOptionalDashboardFields(t *testing.T) {
 
 	assert.Equal(t, "Demo", event.Name)
 	assert.Nil(t, event.ClientID)
-	assert.Equal(t, uuid.Nil, event.EventTypeID)
+	assert.Nil(t, event.EventTypeID, "a null event type is stored as NULL, never the zero UUID")
 	assert.Nil(t, event.MaxGuests)
 	assert.True(t, event.EventDateTime.IsZero())
 	assert.Equal(t, "https://cdn.example.com/song.mp3", event.MusicUrl)
@@ -150,7 +150,8 @@ func TestEventPayloadApplyToAcceptsFrontendCasingAliases(t *testing.T) {
 	assert.True(t, event.EventDateTime.Equal(time.Date(2026, time.August, 16, 2, 30, 0, 0, time.UTC)))
 	assert.Equal(t, "America/Mexico_City", event.Timezone)
 	assert.Equal(t, "es", event.Language)
-	assert.Equal(t, eventTypeID, event.EventTypeID)
+	require.NotNil(t, event.EventTypeID)
+	assert.Equal(t, eventTypeID, *event.EventTypeID)
 	assert.Equal(t, "Ana y Luis", event.OrganizerName)
 	assert.Equal(t, "hola@example.com", event.OrganizerEmail)
 	assert.Equal(t, "+5215555555555", event.OrganizerPhone)
@@ -180,7 +181,8 @@ func TestEventPayloadCanonicalFieldsWinOverAliases(t *testing.T) {
 
 	assert.Equal(t, "canonical", event.Identifier)
 	assert.Equal(t, time.Date(2026, time.August, 15, 20, 30, 0, 0, time.UTC), event.EventDateTime)
-	assert.Equal(t, canonicalTypeID, event.EventTypeID)
+	require.NotNil(t, event.EventTypeID)
+	assert.Equal(t, canonicalTypeID, *event.EventTypeID)
 }
 
 func TestEventPayloadApplyToKeepsAbsentFields(t *testing.T) {
@@ -193,7 +195,7 @@ func TestEventPayloadApplyToKeepsAbsentFields(t *testing.T) {
 	maxGuests := 100
 	event := models.Event{
 		ClientID:    &clientID,
-		EventTypeID: eventTypeID,
+		EventTypeID: &eventTypeID,
 		MaxGuests:   &maxGuests,
 	}
 
@@ -202,7 +204,8 @@ func TestEventPayloadApplyToKeepsAbsentFields(t *testing.T) {
 	assert.Equal(t, "Actualizado", event.Name)
 	require.NotNil(t, event.ClientID)
 	assert.Equal(t, clientID, *event.ClientID)
-	assert.Equal(t, eventTypeID, event.EventTypeID)
+	require.NotNil(t, event.EventTypeID)
+	assert.Equal(t, eventTypeID, *event.EventTypeID)
 	require.NotNil(t, event.MaxGuests)
 	assert.Equal(t, 100, *event.MaxGuests)
 }

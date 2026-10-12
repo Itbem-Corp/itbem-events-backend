@@ -173,7 +173,7 @@ func (p EventPayload) ApplyTo(event *models.Event) error {
 		event.Language = strings.TrimSpace(*p.Language)
 	}
 	if p.EventTypeID != nil {
-		if err := decodeUUIDValue(p.EventTypeID, &event.EventTypeID); err != nil {
+		if err := decodeUUIDPointer(p.EventTypeID, &event.EventTypeID); err != nil {
 			return fieldError("event_type_id", err)
 		}
 	}
@@ -290,7 +290,7 @@ type EventResponse struct {
 	EventDateTime                time.Time              `json:"event_date_time"`
 	Timezone                     string                 `json:"timezone"`
 	Language                     string                 `json:"language"`
-	EventTypeID                  uuid.UUID              `json:"event_type_id"`
+	EventTypeID                  *uuid.UUID             `json:"event_type_id"`
 	EventType                    *EventTypeResponse     `json:"event_type,omitempty"`
 	EventConfig                  *EventConfigResponse   `json:"event_config,omitempty"`
 	Config                       *EventConfigResponse   `json:"config,omitempty"`
@@ -338,7 +338,7 @@ type EventNotification struct {
 	Timezone      string     `json:"timezone"`
 	IsActive      bool       `json:"is_active"`
 	ClientID      *uuid.UUID `json:"client_id,omitempty"`
-	EventTypeID   uuid.UUID  `json:"event_type_id"`
+	EventTypeID   *uuid.UUID `json:"event_type_id"`
 }
 
 // EventCallerAccess selects the caller-access portfolio (organization mode

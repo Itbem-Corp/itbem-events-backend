@@ -1279,7 +1279,7 @@ func TestCreateEvent_AcceptsEmptyOptionalDashboardFields(t *testing.T) {
 	assert.Equal(t, "test-event", captured.Identifier)
 	require.NotNil(t, captured.ClientID)
 	assert.Equal(t, clientID, *captured.ClientID)
-	assert.Equal(t, uuid.Nil, captured.EventTypeID)
+	assert.Nil(t, captured.EventTypeID, "an empty event type must be stored as NULL (EVT-1)")
 	assert.Nil(t, captured.MaxGuests)
 	assert.True(t, captured.EventDateTime.IsZero())
 	assert.True(t, captured.IsActive)

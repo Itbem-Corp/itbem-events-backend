@@ -35,7 +35,7 @@ func TestBuildDuplicateEventResetsOperationalFields(t *testing.T) {
 		EventDateTime:    time.Date(2026, time.March, 14, 20, 0, 0, 0, time.UTC),
 		Timezone:         "America/Mexico_City",
 		Language:         "es",
-		EventTypeID:      eventTypeID,
+		EventTypeID:      &eventTypeID,
 		OrganizerName:    "Eventi",
 		OrganizerEmail:   "hola@example.com",
 		OrganizerPhone:   "555-0101",

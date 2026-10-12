@@ -36,8 +36,15 @@ func CreateEvent(event *models.Event) error {
 	return nil
 }
 
+// UpdateEvent writes every column of the event but never its associations:
+// handlers load the event with EventType (and sometimes Client) joined, and a
+// Select("*") save would copy those loaded IDs back over a changed or cleared
+// event_type_id / client_id.
 func UpdateEvent(event *models.Event) error {
-	return gormrepository.Update(event, event.ID)
+	if err := gormrepository.UpdateOmitAssociations(event, event.ID); err != nil {
+		return ValidateError(err)
+	}
+	return nil
 }
 
 func DeleteEvent(id uuid.UUID) error {
