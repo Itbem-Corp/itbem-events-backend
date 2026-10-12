@@ -30,6 +30,10 @@ func applicationServiceTestDB(t *testing.T) (*gorm.DB, sqlmock.Sqlmock) {
 }
 
 func expectApplication(mock sqlmock.Sqlmock, code string, allowsPlatformAdmin bool) uuid.UUID {
+	return expectApplicationWithModules(mock, code, allowsPlatformAdmin, `["home","organizations"]`)
+}
+
+func expectApplicationWithModules(mock sqlmock.Sqlmock, code string, allowsPlatformAdmin bool, modules string) uuid.UUID {
 	id := uuid.Must(uuid.NewV4())
 	now := time.Now()
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "applications"`)).
@@ -37,7 +41,7 @@ func expectApplication(mock sqlmock.Sqlmock, code string, allowsPlatformAdmin bo
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "code", "name", "product_label", "modules",
 			"allows_platform_admin", "is_active", "created_at", "updated_at",
-		}).AddRow(id, code, "Application", "Product", `["home","organizations"]`, allowsPlatformAdmin, true, now, now))
+		}).AddRow(id, code, "Application", "Product", modules, allowsPlatformAdmin, true, now, now))
 	return id
 }
 
@@ -278,4 +282,131 @@ func TestEventProductRootsCanManageTeamsOnlyWithinAuthorizedRequests(t *testing.
 	assert.NotContains(t, operational, "events:create")
 	assert.NotContains(t, operational, "events:delete")
 	assert.NotContains(t, primary, "organizations:manage")
+}
+
+func eventiAppSessionApplication() models.Application {
+	return models.Application{
+		Code:                "eventiapp",
+		Modules:             models.StringList{"home", "events", "metrics"},
+		AllowsPlatformAdmin: true,
+	}
+}
+
+func sessionOrganizations(application models.Application, roles ...string) []OrganizationAccess {
+	organizations := make([]OrganizationAccess, 0, len(roles))
+	for _, role := range roles {
+		organizations = append(organizations, OrganizationAccess{
+			ID:           uuid.Must(uuid.NewV4()),
+			AccessRole:   role,
+			Capabilities: applicationOrganizationCapabilities(application, role),
+		})
+	}
+	return organizations
+}
+
+func TestEventiAppMetricsRestrictedToOrganizationAdmins(t *testing.T) {
+	application := eventiAppSessionApplication()
+	member := &models.User{ID: uuid.Must(uuid.NewV4()), IsActive: true}
+
+	for _, role := range []string{"Owner", "Admin", "owner", "INHERITED_OWNER", "INHERITED_ADMIN"} {
+		t.Run("allowed/"+role, func(t *testing.T) {
+			organizations := sessionOrganizations(application, role)
+			assert.Contains(t, organizations[0].Capabilities, "metrics:view")
+			assert.Contains(t, effectiveApplicationCapabilities(application, member, organizations), "metrics:view")
+		})
+	}
+	for _, role := range []string{"EVENT_MANAGER", "EDITOR", "ANALYST", "Member", "CHECKIN", "Guest", "VIEWER"} {
+		t.Run("denied/"+role, func(t *testing.T) {
+			organizations := sessionOrganizations(application, role)
+			assert.NotContains(t, organizations[0].Capabilities, "metrics:view")
+			assert.NotContains(t, effectiveApplicationCapabilities(application, member, organizations), "metrics:view")
+		})
+	}
+	// R3 regression: event analytics stay with the analytics roles.
+	for _, role := range []string{"EVENT_MANAGER", "EDITOR", "ANALYST"} {
+		organizations := sessionOrganizations(application, role)
+		assert.Contains(t, organizations[0].Capabilities, "analytics:view", role)
+		assert.Contains(t, effectiveApplicationCapabilities(application, member, organizations), "analytics:view", role)
+	}
+}
+
+func TestOtherProductsKeepMetricsForAnalyticsRoles(t *testing.T) {
+	member := &models.User{ID: uuid.Must(uuid.NewV4()), IsActive: true}
+	for _, application := range []models.Application{
+		{Code: "cafettonhouse", Modules: models.StringList{"home", "users", "organizations", "metrics"}},
+		{Code: "itbem", Modules: models.StringList{"home", "users", "organizations", "metrics", "automation"}, AllowsPlatformAdmin: true},
+	} {
+		for _, role := range []string{"EVENT_MANAGER", "EDITOR", "ANALYST"} {
+			t.Run(application.Code+"/"+role, func(t *testing.T) {
+				organizations := sessionOrganizations(application, role)
+				assert.Contains(t, organizations[0].Capabilities, "metrics:view")
+				assert.Contains(t, effectiveApplicationCapabilities(application, member, organizations), "metrics:view")
+			})
+		}
+	}
+}
+
+func TestEventiAppRootsKeepMetrics(t *testing.T) {
+	application := eventiAppSessionApplication()
+	platformOrganizations := sessionOrganizations(application, "PLATFORM", "PLATFORM")
+
+	primary := effectiveApplicationCapabilities(application, &models.User{RootLevel: models.RootLevelPrimary}, platformOrganizations)
+	operational := effectiveApplicationCapabilities(application, &models.User{RootLevel: models.RootLevelOperational}, platformOrganizations)
+	owner := effectiveApplicationCapabilities(application, &models.User{}, sessionOrganizations(application, "Owner"))
+
+	assert.Contains(t, primary, "metrics:view")
+	assert.Contains(t, operational, "metrics:view")
+	assert.Contains(t, owner, "metrics:view")
+	assert.Contains(t, primary, "audit:view")
+	assert.NotContains(t, operational, "audit:view")
+	assert.NotContains(t, owner, "audit:view")
+}
+
+func TestMixedUserKeepsTopLevelMetricsFromAdminOrg(t *testing.T) {
+	db, mock := applicationServiceTestDB(t)
+	userID := uuid.Must(uuid.NewV4())
+	ownedID := uuid.Must(uuid.NewV4())
+	editedID := uuid.Must(uuid.NewV4())
+	appID := expectApplicationWithModules(mock, "eventiapp", true, `["home","events","metrics"]`)
+	expectOrganizations(mock, appID, userID, sqlmock.NewRows([]string{"id", "name", "code", "logo", "access_role"}).
+		AddRow(ownedID, "A", "org-a", "", "Owner").
+		AddRow(editedID, "B", "org-b", "", "EDITOR"))
+	expectNoUserApplicationPolicy(mock, userID, appID)
+	service := NewSessionService(db, func(string) (*models.User, error) {
+		return &models.User{ID: userID, IsActive: true}, nil
+	})
+
+	session, err := service.Resolve("mixed-sub", "eventiapp")
+
+	require.NoError(t, err)
+	require.Len(t, session.Organizations, 2)
+	byID := map[uuid.UUID][]string{}
+	for _, organization := range session.Organizations {
+		byID[organization.ID] = organization.Capabilities
+	}
+	assert.Contains(t, byID[ownedID], "metrics:view")
+	assert.NotContains(t, byID[editedID], "metrics:view")
+	assert.Contains(t, byID[editedID], "analytics:view")
+	assert.Contains(t, session.Capabilities, "metrics:view")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestEventiAppEditorOnlySessionHasNoMetrics(t *testing.T) {
+	db, mock := applicationServiceTestDB(t)
+	userID := uuid.Must(uuid.NewV4())
+	appID := expectApplicationWithModules(mock, "eventiapp", true, `["home","events","metrics"]`)
+	expectOrganizations(mock, appID, userID, sqlmock.NewRows([]string{"id", "name", "code", "logo", "access_role"}).
+		AddRow(uuid.Must(uuid.NewV4()), "B", "org-b", "", "EDITOR"))
+	expectNoUserApplicationPolicy(mock, userID, appID)
+	service := NewSessionService(db, func(string) (*models.User, error) {
+		return &models.User{ID: userID, IsActive: true}, nil
+	})
+
+	session, err := service.Resolve("editor-sub", "eventiapp")
+
+	require.NoError(t, err)
+	assert.NotContains(t, session.Capabilities, "metrics:view")
+	assert.NotContains(t, session.Organizations[0].Capabilities, "metrics:view")
+	assert.Contains(t, session.Capabilities, "analytics:view")
+	require.NoError(t, mock.ExpectationsWereMet())
 }
