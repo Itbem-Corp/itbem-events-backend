@@ -5,7 +5,10 @@ import (
 	"events-stocks/dtos"
 	"events-stocks/internal/authz"
 	"events-stocks/internal/products/eventiapp"
+	"events-stocks/models"
+	clientsService "events-stocks/services/clients"
 	eventmembersService "events-stocks/services/eventmembers"
+	usersService "events-stocks/services/users"
 	"events-stocks/utils"
 	"net/http"
 
@@ -72,7 +75,7 @@ func Upsert(c echo.Context) error {
 	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid event ID", err.Error())
 	}
-	_, event, err := authz.RequireEventCapability(c, eventID, authz.CapabilityMembersManage)
+	requester, event, err := authz.RequireEventCapability(c, eventID, authz.CapabilityMembersManage)
 	if err != nil {
 		return authz.Respond(c, err)
 	}
@@ -82,6 +85,9 @@ func Upsert(c echo.Context) error {
 	}
 	if err := c.Bind(&body); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid data", err.Error())
+	}
+	if !requireMemberTarget(c, requester, event, body.UserID) {
+		return nil
 	}
 	member, err := service.Upsert(eventID, event.ClientID, body.UserID, body.Role)
 	if errors.Is(err, eventmembersService.ErrInvalidMemberAssignment) {
@@ -105,11 +111,35 @@ func Remove(c echo.Context) error {
 	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid user ID", err.Error())
 	}
-	if _, _, err := authz.RequireEventCapability(c, eventID, authz.CapabilityMembersManage); err != nil {
+	requester, event, err := authz.RequireEventCapability(c, eventID, authz.CapabilityMembersManage)
+	if err != nil {
 		return authz.Respond(c, err)
+	}
+	if !requireMemberTarget(c, requester, event, userID) {
+		return nil
 	}
 	if err := service.Remove(eventID, userID); err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Could not remove event member", err.Error())
 	}
 	return utils.Success(c, http.StatusOK, "Event member removed", nil)
+}
+
+// requireMemberTarget keeps an assignment from changing the access of a
+// member ranked at or above the requester, or of a platform-root account
+// (core rule: clients.AuthorizeMemberTarget).
+func requireMemberTarget(c echo.Context, requester *models.User, event *models.Event, targetUserID uuid.UUID) bool {
+	clientID := uuid.Nil
+	if event.ClientID != nil {
+		clientID = *event.ClientID
+	}
+	err := clientsService.AuthorizeMemberTarget(requester, clientID, targetUserID, usersService.GetUserByID)
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, clientsService.ErrMemberTargetDenied) {
+		_ = utils.Error(c, http.StatusForbidden, "Permission Denied", err.Error())
+	} else {
+		_ = utils.Error(c, http.StatusInternalServerError, "Authorization error", err.Error())
+	}
+	return false
 }

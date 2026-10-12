@@ -12,6 +12,7 @@ import (
 	"events-stocks/internal/authz"
 	"events-stocks/models"
 	eventsService "events-stocks/services/events"
+	guestsService "events-stocks/services/guests"
 	"events-stocks/services/ports"
 
 	"github.com/gofrs/uuid"
@@ -122,6 +123,124 @@ func withTableService(t *testing.T, repo ports.EventTableRepository) {
 	orig := tableSvc
 	tableSvc = eventsService.NewEventTableService(repo, &mockTableCache{})
 	t.Cleanup(func() { tableSvc = orig })
+}
+
+// seatingAuth describes the caller seen by the authz hooks: an organization
+// role, an optional event assignment that may narrow it, or a platform level.
+type seatingAuth struct {
+	orgRole   string
+	eventRole string
+	rootLevel int
+}
+
+func setSeatingAuth(t *testing.T, c echo.Context, auth seatingAuth) {
+	t.Helper()
+	userID := uuid.Must(uuid.NewV4())
+	clientID := uuid.Must(uuid.NewV4())
+	c.Set("cognito_sub", "test-sub")
+	restore := authz.ReplaceHooksForTest(authz.Hooks{
+		SyncUser: func(string) (*models.User, error) {
+			return &models.User{ID: userID, RootLevel: auth.rootLevel}, nil
+		},
+		GetEventByIDRaw: func(id uuid.UUID) (*models.Event, error) {
+			return &models.Event{ID: id, ClientID: &clientID}, nil
+		},
+		CheckAccessRecursive: func(gotUserID, gotClientID uuid.UUID) (bool, string) {
+			if gotUserID != userID || gotClientID != clientID || auth.orgRole == "" {
+				return false, ""
+			}
+			return true, auth.orgRole
+		},
+		GetEventMemberRole: func(uuid.UUID, uuid.UUID) (string, bool, error) {
+			return auth.eventRole, auth.eventRole != "", nil
+		},
+	})
+	t.Cleanup(restore)
+}
+
+// seatingGuestRepo serves the seating projection; the embedded interface is
+// left nil because GetSeatingWorkspace must not call any other guest method.
+type seatingGuestRepo struct {
+	ports.GuestRepository
+	called bool
+	guests []dtos.SeatingGuest
+}
+
+func (m *seatingGuestRepo) ListSeatingGuestsByEventID(uuid.UUID) ([]dtos.SeatingGuest, error) {
+	m.called = true
+	return m.guests, nil
+}
+
+func runSeatingWorkspace(t *testing.T, auth seatingAuth) (*httptest.ResponseRecorder, *seatingGuestRepo) {
+	t.Helper()
+	eventID := uuid.Must(uuid.NewV4())
+	tableID := uuid.Must(uuid.NewV4())
+	withTableService(t, &mockEventTableRepo{
+		listFunc: func(id uuid.UUID) ([]models.EventTable, error) {
+			return []models.EventTable{{ID: tableID, EventID: id, Name: "Mesa 1", Capacity: 8}}, nil
+		},
+	})
+	guests := &seatingGuestRepo{guests: []dtos.SeatingGuest{{
+		ID:         uuid.Must(uuid.NewV4()),
+		FirstName:  "Ana",
+		Email:      "ana.invitada@example.com",
+		TableID:    &tableID,
+		RSVPStatus: "confirmed",
+	}}}
+	previousGuestSvc := seatingGuestSvc
+	seatingGuestSvc = guestsService.NewGuestService(guests, nil, nil, nil)
+	t.Cleanup(func() { seatingGuestSvc = previousGuestSvc })
+
+	c, rec := newTableEchoCtx(http.MethodGet, "/events/"+eventID.String()+"/seating-workspace", "")
+	c.SetParamNames("id")
+	c.SetParamValues(eventID.String())
+	setSeatingAuth(t, c, auth)
+
+	require.NoError(t, GetSeatingWorkspace(c))
+	return rec, guests
+}
+
+// The seating workspace lists every guest's email and RSVP state, the same
+// projection GET /guests/seating:<id> guards with guest:manage.
+func TestGetSeatingWorkspace_RejectsCallersWithoutGuestManage(t *testing.T) {
+	cases := map[string]seatingAuth{
+		"viewer org role":            {orgRole: "Guest"},
+		"analyst org role":           {orgRole: "ANALYST"},
+		"check-in org role":          {orgRole: "CHECKIN"},
+		"editor narrowed to viewer":  {orgRole: "EDITOR", eventRole: "VIEWER"},
+		"member narrowed to checkin": {orgRole: "Member", eventRole: "CHECKIN"},
+		"caller outside the org":     {},
+	}
+	for name, auth := range cases {
+		t.Run(name, func(t *testing.T) {
+			rec, guests := runSeatingWorkspace(t, auth)
+
+			assert.Equal(t, http.StatusForbidden, rec.Code)
+			assert.False(t, guests.called, "guest projection must not be loaded for a denied caller")
+			assert.NotContains(t, rec.Body.String(), "ana.invitada@example.com")
+		})
+	}
+}
+
+func TestGetSeatingWorkspace_ReturnsGuestsToGuestManagers(t *testing.T) {
+	cases := map[string]seatingAuth{
+		"member org role":               {orgRole: "Member"},
+		"editor org role":               {orgRole: "EDITOR"},
+		"event manager org role":        {orgRole: "EVENT_MANAGER"},
+		"owner org role":                {orgRole: "Owner"},
+		"editor with editor event":      {orgRole: "EDITOR", eventRole: "EDITOR"},
+		"operational platform root (2)": {rootLevel: models.RootLevelOperational},
+	}
+	for name, auth := range cases {
+		t.Run(name, func(t *testing.T) {
+			rec, guests := runSeatingWorkspace(t, auth)
+
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			assert.True(t, guests.called)
+			assert.Contains(t, rec.Body.String(), "ana.invitada@example.com")
+			assert.Contains(t, rec.Body.String(), `"name":"Mesa 1"`)
+		})
+	}
 }
 
 func TestCreateTable_AcceptsSortOrderAliasAndTrimsName(t *testing.T) {

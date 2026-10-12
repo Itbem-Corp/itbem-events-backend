@@ -647,6 +647,38 @@ func TestConfirmRSVP_NormalizesStatusAndMethod(t *testing.T) {
 	assert.Equal(t, "web", captured.RSVPMethod)
 }
 
+// An anonymous token holder cannot record the organizer's "host" method (what
+// a door check-in writes) or free text: every spelling falls back to "web",
+// and the request still succeeds so no deployed page breaks.
+func TestConfirmRSVP_PublicMethodOutsideAllowlistIsStoredAsWeb(t *testing.T) {
+	for _, field := range []string{`"rsvp_method":"host"`, `"method":"HOST"`, `"RSVPMethod":"checkin"`, `"rsvpMethod":"<b>x</b>"`} {
+		t.Run(field, func(t *testing.T) {
+			var captured *models.Guest
+			svc := invitationsService.NewInvitationService(
+				&mockInvRepo{},
+				&mockGuestRepo{
+					UpdateGuestFunc: func(g *models.Guest) error {
+						copied := *g
+						captured = &copied
+						return nil
+					},
+				},
+				&mockTokenRepo{}, &mockLogRepo{}, &mockCacheRepo{},
+			)
+			orig := invitationSvc
+			invitationSvc = svc
+			defer func() { invitationSvc = orig }()
+
+			c, rec := newEchoCtx(http.MethodPost, "/rsvp", `{"pretty_token":"ABC123","status":"confirmed",`+field+`,"guest_count":1}`)
+			require.NoError(t, ConfirmRSVP(c))
+
+			assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			require.NotNil(t, captured)
+			assert.Equal(t, "web", captured.RSVPMethod)
+		})
+	}
+}
+
 func TestConfirmRSVP_AcceptsRSVPAliasesAndDietaryNotes(t *testing.T) {
 	var captured *models.Guest
 	svc := invitationsService.NewInvitationService(
@@ -667,7 +699,7 @@ func TestConfirmRSVP_AcceptsRSVPAliasesAndDietaryNotes(t *testing.T) {
 	body := `{
 		"prettyToken":"ABC123",
 		"rsvpStatus":" CONFIRMED ",
-		"rsvpMethod":" HOST ",
+		"rsvpMethod":" APP ",
 		"guestCount":2,
 		"dietaryRestrictions":" Vegano ",
 		"notes":" Mesa cerca de la pista "
@@ -677,7 +709,7 @@ func TestConfirmRSVP_AcceptsRSVPAliasesAndDietaryNotes(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	require.NotNil(t, captured)
 	assert.Equal(t, "confirmed", captured.RSVPStatus)
-	assert.Equal(t, "host", captured.RSVPMethod)
+	assert.Equal(t, "app", captured.RSVPMethod)
 	assert.Equal(t, 2, captured.RSVPGuestCount)
 	assert.Equal(t, "Vegano", captured.DietaryRestrictions)
 	assert.Equal(t, "Mesa cerca de la pista", captured.RSVPNotes)
@@ -772,7 +804,7 @@ func TestConfirmRSVP_AcceptsPascalAliases(t *testing.T) {
 	body := `{
 		"Token":"ABC123",
 		"RSVPStatus":" CONFIRMED ",
-		"RSVPMethod":" KIOSK ",
+		"RSVPMethod":" APP ",
 		"RSVPGuestCount":"2",
 		"DietaryRestrictions":" Sin gluten "
 	}`
@@ -781,7 +813,7 @@ func TestConfirmRSVP_AcceptsPascalAliases(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	require.NotNil(t, captured)
 	assert.Equal(t, "confirmed", captured.RSVPStatus)
-	assert.Equal(t, "kiosk", captured.RSVPMethod)
+	assert.Equal(t, "app", captured.RSVPMethod)
 	assert.Equal(t, 2, captured.RSVPGuestCount)
 	assert.Equal(t, "Sin gluten", captured.DietaryRestrictions)
 }

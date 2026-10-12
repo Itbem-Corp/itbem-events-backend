@@ -29,7 +29,6 @@ type mockGuestRepo struct {
 	GetGuestByInvitationIDFunc   func(invitationID uuid.UUID) (*models.Guest, error)
 	CreateGuestsFunc             func(guests []models.Guest) error
 	BulkDeleteGuestsFunc         func(ids []uuid.UUID) error
-	BulkUpdateGuestStatusFunc    func(eventID uuid.UUID, ids []uuid.UUID, statusID uuid.UUID, rsvpStatus, rsvpMethod string) error
 	ListGuestsByEventIDFunc      func(eventID uuid.UUID) ([]models.Guest, error)
 	GetGuestSummaryByEventIDFunc func(eventID uuid.UUID) (dtos.GuestSummary, error)
 	ListAttendeesByEventIDFunc   func(eventID uuid.UUID) ([]models.Guest, error)
@@ -87,12 +86,6 @@ func (m *mockGuestRepo) BulkDeleteGuests(ids []uuid.UUID) error {
 	m.bulkDeletedIDs = ids
 	if m.BulkDeleteGuestsFunc != nil {
 		return m.BulkDeleteGuestsFunc(ids)
-	}
-	return nil
-}
-func (m *mockGuestRepo) BulkUpdateGuestStatus(eventID uuid.UUID, ids []uuid.UUID, statusID uuid.UUID, rsvpStatus, rsvpMethod string) error {
-	if m.BulkUpdateGuestStatusFunc != nil {
-		return m.BulkUpdateGuestStatusFunc(eventID, ids, statusID, rsvpStatus, rsvpMethod)
 	}
 	return nil
 }

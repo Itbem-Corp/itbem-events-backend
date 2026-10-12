@@ -472,6 +472,8 @@ type mockMomentRepo struct {
 	GetByEventAndContentURLFunc   func(eventID uuid.UUID, contentURL string) (*models.Moment, error)
 	UpdateContentFunc             func(id uuid.UUID, contentURL, processingStatus, thumbnailURL, errorMessage string, durationMs, originalBytes, optimizedBytes int64) error
 	BulkUpdateApprovalFunc        func(ids []uuid.UUID, isApproved bool) error
+	BulkDeleteMomentsFunc         func(ids []uuid.UUID) error
+	BulkUpdateOrderFunc           func(updates map[uuid.UUID]int) error
 	ListProcessingFunc            func(eventID uuid.UUID, rawOnly bool) ([]models.Moment, error)
 }
 
@@ -506,6 +508,9 @@ func (m *mockMomentRepo) UpdateMoment(obj *models.Moment) error {
 }
 func (m *mockMomentRepo) DeleteMoment(id uuid.UUID) error { return nil }
 func (m *mockMomentRepo) BulkDeleteMoments(ids []uuid.UUID) error {
+	if m.BulkDeleteMomentsFunc != nil {
+		return m.BulkDeleteMomentsFunc(ids)
+	}
 	return nil
 }
 func (m *mockMomentRepo) GetMomentByID(id uuid.UUID) (*models.Moment, error) {
@@ -586,6 +591,9 @@ func (m *mockMomentRepo) GetMomentsByIDs(ids []uuid.UUID) ([]models.Moment, erro
 	return nil, nil
 }
 func (m *mockMomentRepo) BulkUpdateOrder(updates map[uuid.UUID]int) error {
+	if m.BulkUpdateOrderFunc != nil {
+		return m.BulkUpdateOrderFunc(updates)
+	}
 	return nil
 }
 func (m *mockMomentRepo) ListProcessingByEventID(eventID uuid.UUID, rawOnly bool) ([]models.Moment, error) {
