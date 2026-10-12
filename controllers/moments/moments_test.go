@@ -2312,7 +2312,7 @@ func TestConfirmSharedMoment_ReturnsMomentWithUploadQuota(t *testing.T) {
 		&models.Config{AwsBucketName: "events-bucket"},
 		resourcesService.ResourceServiceDeps{Storage: &mockObjectStorage{}},
 	)
-	momentsService.SetDefaultMomentService(momentsService.NewMomentService(&mockMomentRepo{}, &mockCacheRepo{}))
+	momentsService.SetDefaultMomentService(momentsService.NewMomentService(&mockMomentRepo{}, &mockCacheRepo{}, &mockMediaPublisher{}))
 
 	s3Key := "moments/" + eventID.String() + "/raw/foto.jpg"
 	c, rec := newEchoCtx(
@@ -3810,7 +3810,7 @@ func setupConfirmMomentTest(t *testing.T, repo *mockMomentRepo, storage *mockObj
 		resourcesService.ResourceServiceDeps{Storage: storage},
 	)
 	publicUploadCounter = counter
-	momentsService.SetDefaultMomentService(momentsService.NewMomentService(repo, &mockCacheRepo{}))
+	momentsService.SetDefaultMomentService(momentsService.NewMomentService(repo, &mockCacheRepo{}, &mockMediaPublisher{}))
 }
 
 func TestConfirmPresignedMomentRetryReturnsExistingWithoutQuotaOrCreate(t *testing.T) {

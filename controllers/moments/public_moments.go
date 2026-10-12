@@ -874,7 +874,9 @@ func CreatePublicMoment(c echo.Context) error {
 	// A queue failure is persisted as terminal "failed" by the service. The raw
 	// object remains private and can be retried by an admin; never publish it as
 	// a legacy-ready moment.
-	momentsService.EnqueueMediaProcessing(&moment, rawKey, eventResSvc.Bucket, contentType)
+	if !momentsService.EnqueueMediaProcessing(&moment, rawKey, eventResSvc.Bucket, contentType) {
+		refundFailedMomentUpload(quotaSubject, quotaReserved)
+	}
 
 	go recordMomentCreatedAnalytics(eventID, description)
 
@@ -935,7 +937,9 @@ func CreateSharedMoment(c echo.Context) error {
 		return utils.WriteFailed(c, "Error saving moment", err)
 	}
 
-	momentsService.EnqueueMediaProcessing(&moment, rawKey, eventResSvc.Bucket, contentType)
+	if !momentsService.EnqueueMediaProcessing(&moment, rawKey, eventResSvc.Bucket, contentType) {
+		refundFailedMomentUpload(quotaSubject, quotaReserved)
+	}
 
 	go recordMomentCreatedAnalytics(eventID, description)
 
@@ -1428,7 +1432,9 @@ func confirmPresignedMoment(c echo.Context, event *models.Event, cfg *models.Eve
 	if tagErr := eventResSvc.MarkMomentUploadConfirmed(ctx, objectKey); tagErr != nil {
 		slog.Warn("could not mark moment upload as confirmed", "event_id", event.ID, "moment_id", moment.ID, "object_key", objectKey, "error", tagErr)
 	}
-	momentsService.EnqueueMediaProcessing(&moment, objectKey, eventResSvc.Bucket, contentType)
+	if !momentsService.EnqueueMediaProcessing(&moment, objectKey, eventResSvc.Bucket, contentType) {
+		refundFailedMomentUpload(quotaSubject, quotaReserved)
+	}
 	go recordMomentCreatedAnalytics(eventID, description)
 	return &moment, nil
 }

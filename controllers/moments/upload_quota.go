@@ -209,3 +209,14 @@ func rollbackUploadLimit(subject uploadQuotaSubject) {
 		}
 	}
 }
+
+// refundFailedMomentUpload gives the slot back when the moment could not be
+// queued for processing (it is stored as "failed" and never reaches the wall),
+// so a failed upload does not use up the guest's quota (STU-66). Failures the
+// media worker reports later through the callback are not refunded: the
+// quota subject (device/IP key) is not stored on the moment.
+func refundFailedMomentUpload(subject uploadQuotaSubject, quotaReserved bool) {
+	if quotaReserved {
+		rollbackUploadLimit(subject)
+	}
+}

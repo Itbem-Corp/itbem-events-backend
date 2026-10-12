@@ -2,12 +2,15 @@ package moments
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"testing"
 	"time"
 
+	"events-stocks/dtos"
 	"events-stocks/models"
+	momentsService "events-stocks/services/moments"
 
 	"github.com/gofrs/uuid"
 	"github.com/labstack/echo/v4"
@@ -177,4 +180,25 @@ func TestConfirmPresignedMoment_PersonalUploadCountsAgainstTheInvitation(t *test
 	_, err := confirmPresignedMoment(c, &models.Event{ID: eventID}, &models.EventConfig{MaxUploadsPerGuest: 5}, &invitationID, key, "image/jpeg", 0, "")
 	require.NoError(t, err)
 	assert.Equal(t, map[string]int64{"moments:upload_count:" + eventID.String() + ":inv:" + invitationID.String(): 1}, counter.values)
+}
+
+// STU-66: when the moment cannot be queued for processing (stored as failed),
+// the reserved quota slot is given back.
+func TestConfirmPresignedMoment_EnqueueFailureRefundsQuota(t *testing.T) {
+	eventID := uuid.Must(uuid.NewV4())
+	invitationID := uuid.Must(uuid.NewV4())
+	key := "moments/" + eventID.String() + "/raw/photo.jpg"
+	repo := &mockMomentRepo{
+		GetByEventAndContentURLFunc: func(uuid.UUID, string) (*models.Moment, error) { return nil, gorm.ErrRecordNotFound },
+	}
+	setupConfirmMomentTest(t, repo, &mockObjectStorage{}, &mockUploadCounter{})
+	momentsService.SetDefaultMomentService(momentsService.NewMomentService(repo, &mockCacheRepo{}, &mockMediaPublisher{
+		PublishFunc: func(dtos.MediaProcessMessage) (bool, error) { return false, errors.New("queue down") },
+	}))
+	counter := useKeyedCounter(t)
+	c := uploadCtx("198.51.100.20", newDeviceID())
+
+	_, err := confirmPresignedMoment(c, &models.Event{ID: eventID}, &models.EventConfig{MaxUploadsPerGuest: 5}, &invitationID, key, "image/jpeg", 0, "")
+	require.NoError(t, err)
+	assert.Equal(t, map[string]int64{"moments:upload_count:" + eventID.String() + ":inv:" + invitationID.String(): 0}, counter.values)
 }
