@@ -134,6 +134,9 @@ func DeleteUser(c echo.Context) error {
 	}
 
 	if err := userSvc.DeleteFullAccount(cognitoSub); err != nil {
+		if errors.Is(err, users.ErrProtectedRootAccount) {
+			return utils.Error(c, http.StatusConflict, "Protected account", err.Error())
+		}
 		return utils.Error(c, http.StatusInternalServerError, "Error deleting account", err.Error())
 	}
 
@@ -432,6 +435,9 @@ func DeleteUserDetail(c echo.Context) error {
 	}
 
 	if err := adminSvc.DeleteUser(userID); err != nil {
+		if errors.Is(err, users.ErrProtectedRootAccount) {
+			return utils.Error(c, http.StatusConflict, "Protected account", err.Error())
+		}
 		return utils.Error(c, http.StatusInternalServerError, "Error deleting user", err.Error())
 	}
 
@@ -452,6 +458,9 @@ func DeactivateUser(c echo.Context) error {
 
 	user, err := adminSvc.SetUserActive(userID, false)
 	if err != nil {
+		if errors.Is(err, users.ErrProtectedRootAccount) {
+			return utils.Error(c, http.StatusConflict, "Protected account", err.Error())
+		}
 		return utils.Error(c, http.StatusInternalServerError, "Failed to deactivate user", err.Error())
 	}
 

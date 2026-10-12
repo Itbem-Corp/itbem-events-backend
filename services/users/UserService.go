@@ -350,10 +350,16 @@ func (s *UserService) GetUserByEmail(email string) (*models.User, error) {
 	return s.userRepo.GetUserByEmail(normalizedEmail)
 }
 
+// DeleteFullAccount closes an account in the identity provider and locally.
+// The stored account (not a product-scoped identity) decides: a primary root
+// is refused with ErrProtectedRootAccount so the platform keeps one.
 func (s *UserService) DeleteFullAccount(cognitoSub string) error {
 	user, err := s.userRepo.GetUserByCognitoSub(cognitoSub)
 	if err != nil {
 		return err
+	}
+	if user.IsPrimaryRoot() {
+		return fmt.Errorf("%w: a primary root cannot close its own account", ErrProtectedRootAccount)
 	}
 	if user.ProfileImage != "" {
 		s.deleteAvatarObject(user.ProfileImage, user.ProfileImageBucket)
@@ -428,8 +434,9 @@ func (s *UserService) SetUserRoot(userID uuid.UUID, isRoot bool) error {
 	return s.userRepo.SetUserRoot(userID, isRoot)
 }
 
-// ErrProtectedRootAccount is returned when a root-level change targets a
-// primary root (level 1 or a historical is_root account).
+// ErrProtectedRootAccount is returned when a root-level change, a deletion or
+// a deactivation targets a primary root (level 1 or a historical is_root
+// account). Controllers map it to 409 "Protected account".
 var ErrProtectedRootAccount = errors.New("primary roots retain their protected platform level")
 
 // SetUserRootLevel is deliberately narrow: level 1 cannot be delegated from
