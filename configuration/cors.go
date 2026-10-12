@@ -41,6 +41,9 @@ func GetCORSConfig(cfg *models.Config) echo.MiddlewareFunc {
 			echo.HeaderAuthorization,
 			"Idempotency-Key",
 			utils.HeaderEventAccessToken,
+			// Public moment uploads key the guest quota by this browser-generated
+			// UUIDv4 (controllers/moments.UploadDeviceIDHeader).
+			"X-Upload-Device-Id",
 			requestcontract.HeaderApplicationCode,
 			requestcontract.HeaderWorkspaceMode,
 			requestcontract.HeaderOrganizationID,
