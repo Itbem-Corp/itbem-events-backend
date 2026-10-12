@@ -1,13 +1,16 @@
 package eventtables
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"sync"
 
+	"events-stocks/configuration"
 	"events-stocks/dtos"
 	"events-stocks/internal/authz"
 	"events-stocks/models"
+	"events-stocks/repositories/eventtablerepository"
 	eventsService "events-stocks/services/events"
 	guestsService "events-stocks/services/guests"
 	"events-stocks/utils"
@@ -143,13 +146,22 @@ func UpdateTable(c echo.Context) error {
 		if *body.Capacity <= 0 {
 			return utils.Error(c, http.StatusBadRequest, "capacity must be greater than zero", "")
 		}
+		// Strict capacity: a table cannot shrink below the seats already taken.
+		if *body.Capacity < table.Capacity {
+			if err := tableSeatsFit(table.EventID, table.ID, *body.Capacity); err != nil {
+				if over := tableOverCapacity(err); over != nil {
+					return respondTableOverCapacity(c, over)
+				}
+				return utils.Error(c, http.StatusInternalServerError, "Error checking table capacity", "")
+			}
+		}
 		table.Capacity = *body.Capacity
 	}
 	if sortOrder := body.sortOrder(); sortOrder != nil {
 		table.SortOrder = *sortOrder
 	}
 	if err := tableSvc.UpdateTable(table); err != nil {
-		return utils.Error(c, http.StatusInternalServerError, "Error updating table", err.Error())
+		return utils.WriteFailed(c, "Error updating table", err)
 	}
 	return utils.Success(c, http.StatusOK, "Table updated", dtos.NewEventTableResponse(*table))
 }
@@ -203,6 +215,12 @@ func AssignTables(c echo.Context) error {
 		assignments[guestID] = tableID
 	}
 	if err := tableSvc.AssignGuests(eventID, assignments); err != nil {
+		if over := tableOverCapacity(err); over != nil {
+			return respondTableOverCapacity(c, over)
+		}
+		if errors.Is(err, eventtablerepository.ErrSeatingReferenceStale) {
+			return respondSeatingPlanStale(c)
+		}
 		return utils.Error(c, http.StatusBadRequest, "Error assigning tables", err.Error())
 	}
 	return utils.Success(c, http.StatusOK, "Tables assigned", nil)
@@ -222,6 +240,12 @@ func SavePlan(c echo.Context) error {
 	}
 	tables, err := tableSvc.SaveSeatingPlan(eventID, body)
 	if err != nil {
+		if over := tableOverCapacity(err); over != nil {
+			return respondTableOverCapacity(c, over)
+		}
+		if errors.Is(err, eventtablerepository.ErrSeatingReferenceStale) {
+			return respondSeatingPlanStale(c)
+		}
 		return utils.Error(c, http.StatusBadRequest, "Error saving seating plan", err.Error())
 	}
 	response := dtos.SeatingPlanSaveResponse{Tables: dtos.NewEventTableResponses(tables)}
@@ -231,6 +255,38 @@ func SavePlan(c echo.Context) error {
 		}
 	}
 	return utils.Success(c, http.StatusOK, "Seating plan saved", response)
+}
+
+// tableSeatsFit checks that the seats taken at a table fit newCapacity.
+// Replaced in tests.
+var tableSeatsFit = func(eventID, tableID uuid.UUID, newCapacity int) error {
+	return eventtablerepository.CheckSeatsFit(configuration.DB, eventID, tableID, nil, 0, newCapacity)
+}
+
+func tableOverCapacity(err error) *dtos.TableOverCapacityError {
+	var over *dtos.TableOverCapacityError
+	if errors.As(err, &over) {
+		return over
+	}
+	return nil
+}
+
+// respondTableOverCapacity answers the strict seating rule: HTTP 409 with
+// code table_over_capacity, a Spanish message and the offending tables.
+func respondTableOverCapacity(c echo.Context, over *dtos.TableOverCapacityError) error {
+	return c.JSON(http.StatusConflict, dtos.NewTableOverCapacityResponse(over))
+}
+
+// respondSeatingPlanStale answers a plan or assign that names a guest or
+// table no longer in the event: 409 code seating_plan_stale, so the dashboard
+// reloads its draft instead of showing a generic error.
+func respondSeatingPlanStale(c echo.Context) error {
+	return c.JSON(http.StatusConflict, map[string]interface{}{
+		"status":  http.StatusConflict,
+		"code":    "seating_plan_stale",
+		"error":   "seating_plan_stale",
+		"message": "Algunos invitados o mesas cambiaron mientras editabas. Recarga el plan de mesas e inténtalo de nuevo.",
+	})
 }
 
 type tableCreateRequest struct {

@@ -36,8 +36,15 @@ func CreateEvent(event *models.Event) error {
 	return nil
 }
 
+// UpdateEvent writes every column of the event but never its associations:
+// handlers load the event with EventType (and sometimes Client) joined, and a
+// Select("*") save would copy those loaded IDs back over a changed or cleared
+// event_type_id / client_id.
 func UpdateEvent(event *models.Event) error {
-	return gormrepository.Update(event, event.ID)
+	if err := gormrepository.UpdateOmitAssociations(event, event.ID); err != nil {
+		return ValidateError(err)
+	}
+	return nil
 }
 
 func DeleteEvent(id uuid.UUID) error {
@@ -249,9 +256,11 @@ func GetEventDashboardOverview(clientID *uuid.UUID, caller *dtos.EventCallerAcce
 
 func applyEventListFilters(query *gorm.DB, listQuery dtos.EventListQuery) *gorm.DB {
 	if search := strings.TrimSpace(listQuery.Search); search != "" {
-		pattern := "%" + search + "%"
+		pattern := "%" + foldSearchText(search) + "%"
 		query = query.Where(
-			"events.name ILIKE ? OR events.address ILIKE ? OR events.organizer_name ILIKE ?",
+			foldedSearchColumn("events.name")+" LIKE ? OR "+
+				foldedSearchColumn("events.address")+" LIKE ? OR "+
+				foldedSearchColumn("events.organizer_name")+" LIKE ?",
 			pattern,
 			pattern,
 			pattern,
@@ -269,6 +278,37 @@ func applyEventListFilters(query *gorm.DB, listQuery dtos.EventListQuery) *gorm.
 		query = query.Where(calendarDate+" < "+today, listQuery.Now)
 	}
 	return query
+}
+
+// Accent folding for the dashboard event search (EVT-10): "nandu" finds
+// "Ñandú". Postgres has no unaccent extension enabled here, so both sides go
+// through the same fixed translate() table of Spanish/Portuguese/French
+// accented letters (upper and lower case, so the fold does not depend on the
+// database ctype) and then lower(). Nothing is indexed for this search, as
+// with the ILIKE '%term%' it replaces.
+const (
+	searchFoldFrom = "ÁÀÄÂÃÉÈËÊÍÌÏÎÓÒÖÔÕÚÙÜÛÑÇáàäâãéèëêíìïîóòöôõúùüûñç"
+	searchFoldTo   = "AAAAAEEEEIIIIOOOOOUUUUNCaaaaaeeeeiiiiooooouuuunc"
+)
+
+var searchFoldReplacer = func() *strings.Replacer {
+	from := []rune(searchFoldFrom)
+	to := []rune(searchFoldTo)
+	pairs := make([]string, 0, len(from)*2)
+	for i := range from {
+		pairs = append(pairs, string(from[i]), string(to[i]))
+	}
+	return strings.NewReplacer(pairs...)
+}()
+
+func foldedSearchColumn(column string) string {
+	return "lower(translate(COALESCE(" + column + ", ''), '" + searchFoldFrom + "', '" + searchFoldTo + "'))"
+}
+
+// foldSearchText applies the same fold as foldedSearchColumn to the user's
+// search term.
+func foldSearchText(value string) string {
+	return strings.ToLower(searchFoldReplacer.Replace(value))
 }
 
 func eventListNeedsFilteredTotal(query dtos.EventListQuery) bool {
@@ -321,7 +361,7 @@ func ListEventPage(clientID *uuid.UUID, caller *dtos.EventCallerAccess, query dt
 				AND moments.processing_status NOT IN ('pending', 'processing')
 		) AS pending_moment_count`).
 			Joins("EventType").
-			Order("events.event_date_time DESC").
+			Order(eventListOrder(query)).
 			Limit(query.PageSize).
 			Offset((query.Page - 1) * query.PageSize).
 			Find(&events).Error
@@ -334,6 +374,66 @@ func ListEventPage(clientID *uuid.UUID, caller *dtos.EventCallerAccess, query dt
 	}
 
 	return events, int(total), counts, nil
+}
+
+// EventNameTakenFold reports whether another live event of the organization
+// (client_id IS NULL for unowned events) already uses name, ignoring case and
+// surrounding spaces. excludeID (the event being updated) is skipped when set.
+//
+// The unique index idx_events_client_name_live stays exact; this check is the
+// case-insensitive rule (EVT-22). It is advisory under a race: two concurrent
+// writes of "Boda" and "boda" can both pass, while exact duplicates are still
+// stopped by the index.
+func EventNameTakenFold(db *gorm.DB, clientID *uuid.UUID, name string, excludeID uuid.UUID) (bool, error) {
+	var count int64
+	query := db.Model(&models.Event{}).Where("lower(btrim(name)) = lower(btrim(?))", name)
+	if clientID == nil {
+		query = query.Where("client_id IS NULL")
+	} else {
+		query = query.Where("client_id = ?", *clientID)
+	}
+	if excludeID != uuid.Nil {
+		query = query.Where("id <> ?", excludeID)
+	}
+	if err := query.Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// EventNameTaken is EventNameTakenFold on the default connection.
+func (r *EventsRepo) EventNameTaken(clientID *uuid.UUID, name string, excludeID uuid.UUID) (bool, error) {
+	return EventNameTakenFold(gormrepository.DB(), clientID, name, excludeID)
+}
+
+// IdentifierDeleted reports whether a soft-deleted event used this identifier
+// (and no live event does: callers ask only after the live lookup missed).
+func IdentifierDeleted(identifier string) (bool, error) {
+	var count int64
+	err := gormrepository.DB().Unscoped().Model(&models.Event{}).
+		Where("identifier = ? AND deleted_at IS NOT NULL", identifier).
+		Count(&count).Error
+	return count > 0, err
+}
+
+func (r *EventsRepo) IdentifierDeleted(identifier string) (bool, error) {
+	return IdentifierDeleted(identifier)
+}
+
+// DeletedEventIDsByIdentifier lists the soft-deleted events that used this
+// identifier (newest first, capped), so page-spec can answer 410 only to a
+// caller holding a token for one of them.
+func DeletedEventIDsByIdentifier(identifier string) ([]uuid.UUID, error) {
+	var ids []uuid.UUID
+	err := gormrepository.DB().Unscoped().Model(&models.Event{}).
+		Where("identifier = ? AND deleted_at IS NOT NULL", identifier).
+		Order("deleted_at DESC").Limit(20).
+		Pluck("id", &ids).Error
+	return ids, err
+}
+
+func (r *EventsRepo) DeletedEventIDsByIdentifier(identifier string) ([]uuid.UUID, error) {
+	return DeletedEventIDsByIdentifier(identifier)
 }
 
 // IdentifierExists returns true if an event with the given identifier already exists.

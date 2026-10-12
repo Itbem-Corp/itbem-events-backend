@@ -82,7 +82,7 @@ Editor, so it cannot reach event structure through an account it controls.
 - Moving an event (`PUT /api/events/:id` with another `client_id`) requires
   organization-level `event:manage` on both the source and the destination.
   A grant never satisfies it. A move revokes the event's grants.
-- Detaching (`client_id: null`) is Root 1 only.
+- Detaching an event from its organization is rejected for everyone (400); `client_id: null` on an update keeps the current organization.
 - Duplicating (`POST /api/events/:id/duplicate`) requires organization-level
   `event:manage` on the source organization in addition to `event:create`
   on the destination.

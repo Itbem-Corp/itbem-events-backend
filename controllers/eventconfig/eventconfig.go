@@ -167,7 +167,7 @@ func UpdateEventConfig(c echo.Context) error {
 	}
 	config.ID = id
 	if err := eventConfigSvc.UpdateEventConfig(config); err != nil {
-		return utils.Error(c, http.StatusInternalServerError, "Error updating event config", err.Error())
+		return utils.WriteFailed(c, "Error updating event config", err)
 	}
 
 	updatedConfig, err := eventConfigSvc.GetEventConfigByID(id)

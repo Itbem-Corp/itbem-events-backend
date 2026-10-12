@@ -36,6 +36,10 @@ func useGuestTables(t *testing.T, tables ...models.EventTable) *[][]uuid.UUID {
 		return count, nil
 	}
 	t.Cleanup(func() { guestTablesInEvent = original })
+	// Every listed table has room unless a test stubs the capacity check.
+	originalSeats := guestTableSeatsFit
+	guestTableSeatsFit = func(uuid.UUID, uuid.UUID, []uuid.UUID, int) error { return nil }
+	t.Cleanup(func() { guestTableSeatsFit = originalSeats })
 	return &lookups
 }
 

@@ -444,8 +444,10 @@ func TestUpdateClient_InvalidLogoUpload_Returns400(t *testing.T) {
 
 	require.NoError(t, UpdateClient(c))
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Contains(t, rec.Body.String(), "Invalid logo")
-	assert.Contains(t, rec.Body.String(), "unsupported image type")
+	// The content check now reports a non-image logo as invalid_media_file
+	// with a Spanish message; the low-level reason stays in server logs.
+	assert.Contains(t, rec.Body.String(), "invalid_media_file")
+	assert.Contains(t, rec.Body.String(), "no es una imagen")
 }
 
 func TestGetMySubClients_MissingCognitoSub_Returns401(t *testing.T) {

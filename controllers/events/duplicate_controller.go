@@ -49,7 +49,7 @@ func DuplicateEvent(c echo.Context) error {
 
 	accessCandidate := *existing
 	if err := payload.ApplyTo(&accessCandidate); err != nil {
-		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
+		return respondEventPayloadError(c, err)
 	}
 	if err := authz.RequireEventClientForCreate(user, accessCandidate.ClientID); err != nil {
 		return authz.Respond(c, err)
@@ -67,7 +67,7 @@ func DuplicateEvent(c echo.Context) error {
 		if errors.Is(err, eventsService.ErrDuplicateServiceUnavailable) {
 			return utils.Error(c, http.StatusInternalServerError, "Duplicate service unavailable", err.Error())
 		}
-		return utils.Error(c, http.StatusInternalServerError, "Error duplicating event", err.Error())
+		return respondEventWriteError(c, err, "Error duplicating event")
 	}
 
 	return utils.Success(c, http.StatusCreated, "Event duplicated", eventResponseWithCoverView(duplicated))

@@ -205,7 +205,7 @@ func TestExportGuestsCSV_ReturnsCompleteSpreadsheetSafePayload(t *testing.T) {
 	assert.Equal(t, "text/csv; charset=utf-8", rec.Header().Get(echo.HeaderContentType))
 	assert.True(t, strings.HasPrefix(rec.Body.String(), "\xEF\xBB\xBF"))
 	assert.Contains(t, rec.Body.String(), `"Ana, María",López,ana@example.com`)
-	assert.Contains(t, rec.Body.String(), `,3,2,CONFIRMED,`)
+	assert.Contains(t, rec.Body.String(), `,3,2,Confirmado,`)
 }
 
 func TestExportGuestsCSV_InvitationViewIncludesRSVPColumns(t *testing.T) {
@@ -230,7 +230,7 @@ func TestExportGuestsCSV_InvitationViewIncludesRSVPColumns(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Header().Get(echo.HeaderContentDisposition), "invitaciones.csv")
 	assert.Contains(t, rec.Body.String(), "Estado RSVP,Fecha respuesta,Método,Acompañantes")
-	assert.Contains(t, rec.Body.String(), "Ana López,ana@example.com,'+52 555,CONFIRMED,2026-07-12T00:30:00Z,web,1")
+	assert.Contains(t, rec.Body.String(), "Ana López,ana@example.com,'+52 555,Confirmado,2026-07-12T00:30:00Z,web,1")
 }
 
 func TestExportGuestsCSV_RSVPViewIncludesCompleteAuditColumns(t *testing.T) {
@@ -256,7 +256,7 @@ func TestExportGuestsCSV_RSVPViewIncludesCompleteAuditColumns(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Header().Get(echo.HeaderContentDisposition), "rsvp.csv")
 	assert.Contains(t, rec.Body.String(), "Estado,Canal,+1s,Respondió,Agregado")
-	assert.Contains(t, rec.Body.String(), "Ana López,ana@example.com,,CONFIRMED,host,1,2026-07-11T19:00:00Z,2026-07-01T12:00:00Z")
+	assert.Contains(t, rec.Body.String(), "Ana López,ana@example.com,,Confirmado,host,1,2026-07-11T19:00:00Z,2026-07-01T12:00:00Z")
 }
 
 type listGuestRepo struct {
@@ -1920,4 +1920,12 @@ func TestGuestLists_OnlyCheckinSurfacesUseDoorSearch(t *testing.T) {
 		assert.Equal(t, "ana@gmail.com", repo.query.Search)
 		assert.False(t, repo.query.DoorSearch)
 	})
+}
+
+// GST-84: the export status column is written in Spanish.
+func TestGuestCSVStatusLabelIsSpanish(t *testing.T) {
+	assert.Equal(t, "Pendiente", guestCSVStatusLabel(models.Guest{}))
+	assert.Equal(t, "Confirmado", guestCSVStatusLabel(models.Guest{RSVPStatus: "confirmed"}))
+	assert.Equal(t, "Declinado", guestCSVStatusLabel(models.Guest{RSVPStatus: "declined"}))
+	assert.Equal(t, "Confirmado", guestCSVStatusLabel(models.Guest{GuestStatus: models.GuestStatus{Code: "confirmed"}}))
 }

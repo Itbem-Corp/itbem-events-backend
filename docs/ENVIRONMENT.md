@@ -54,6 +54,7 @@ go run ./cmd/api
 | `DB_PORT` | **yes** | PostgreSQL port (usually `5432`) |
 | `DB_TIMEZONE` | **yes** | DB timezone (e.g. `UTC`) |
 | `DB_LOG_LEVEL` | no | GORM SQL logging: `silent`, `error`, `warn`, or `info`. Defaults to `info` locally and `warn` when `ENV` is set, avoiding per-query log overhead in production while retaining slow-query/error diagnostics. |
+| `MOMENT_UPLOAD_IP_BACKSTOP_MULTIPLIER` | no | EventiApp public moment uploads: per-IP cap on device-keyed uploads (`X-Upload-Device-Id`) of one event, as a multiple of the event's per-guest limit (`max_uploads_per_guest`, default 30). Default `10` (300 uploads per IP per event with the default limit); values below 1 or non-numeric fall back to the default. Invitation-keyed uploads are not capped per IP. |
 | `REDIS_HOST` | **yes** | Redis/Valkey host + port (e.g. `localhost:6379`) |
 | `REDIS_PASSWORD` | no | Redis password. Leave empty only while the matching cluster has no AUTH; set it atomically with an AUTH migration. |
 | `REDIS_DB` | **yes** | Redis database index (usually `0`) |

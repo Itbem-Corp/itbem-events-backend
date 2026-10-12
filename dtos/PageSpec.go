@@ -23,6 +23,9 @@ type PageSpecAccess struct {
 	AccessVersion     string     `json:"accessVersion,omitempty"`
 	PreviewAuthorized bool       `json:"previewAuthorized,omitempty"`
 	PasswordVerified  bool       `json:"passwordVerified,omitempty"`
+	// WindowStatus is the server's view of the access window: "open",
+	// "not_started" or "ended". Outside the window the spec has no sections.
+	WindowStatus string `json:"windowStatus,omitempty"`
 }
 
 // PageSpecTheme carries the effective visual theme selected in EventConfig.
@@ -61,6 +64,8 @@ type PageSpecMeta struct {
 	EventType              string               `json:"eventType,omitempty"`
 	ContentVersion         string               `json:"contentVersion,omitempty"`
 	Access                 *PageSpecAccess      `json:"access,omitempty"`
+	RSVPDeadline           *time.Time           `json:"rsvp_deadline"`
+	RSVPOpen               bool                 `json:"rsvp_open"`
 	FooterVisible          bool                 `json:"footerVisible"`
 	Theme                  *PageSpecTheme       `json:"theme,omitempty"`
 }

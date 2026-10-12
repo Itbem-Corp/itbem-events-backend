@@ -17,12 +17,25 @@ import (
 	"events-stocks/repositories/gormrepository"
 	"events-stocks/repositories/outboxrepository"
 	"github.com/gofrs/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"golang.org/x/sync/errgroup"
 	"gorm.io/gorm"
 )
 
+// ErrDuplicateMomentContent is a create that collides with a live moment of
+// the same event and content_url (models.MomentLiveContentURLIndex): the
+// upload was already confirmed by a concurrent request.
+var ErrDuplicateMomentContent = errors.New("a live moment already uses this content")
+
 func CreateMoment(m *models.Moment) error {
-	return gormrepository.Insert(m)
+	if err := gormrepository.Insert(m); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == models.MomentLiveContentURLIndex {
+			return fmt.Errorf("%w: %v", ErrDuplicateMomentContent, err)
+		}
+		return err
+	}
+	return nil
 }
 
 func UpdateMoment(m *models.Moment) error {
@@ -49,8 +62,13 @@ func GetMomentByEventIDAndContentURL(eventID uuid.UUID, contentURL string) (*mod
 	return &model, err
 }
 
+// momentByEventIDAndContentURLQuery finds the live moment confirmed for an
+// upload key: its content_url while it is raw, or its processing_input_key
+// once processing replaced content_url with the optimized object, so a late
+// retry of the same confirm stays idempotent.
 func momentByEventIDAndContentURLQuery(db *gorm.DB, eventID uuid.UUID, contentURL string) *gorm.DB {
-	return db.Where("event_id = ? AND content_url = ?", eventID, contentURL)
+	return db.Where("event_id = ? AND (content_url = ? OR processing_input_key = ?)", eventID, contentURL, contentURL).
+		Order("created_at ASC")
 }
 
 func ListMoments() ([]models.Moment, error) {
