@@ -341,6 +341,19 @@ type EventNotification struct {
 	EventTypeID   uuid.UUID  `json:"event_type_id"`
 }
 
+// EventCallerAccess selects the caller-access portfolio (organization mode
+// without an organization id): the events of every organization the
+// application session lists for the caller. That means an active membership
+// in an active, not deleted organization with an active member access row for
+// the request application, the same rules as
+// services/applications.SessionService.organizationAccess. Descendant
+// organizations are not included; inherited Owner/Admin access uses an
+// explicit client_id.
+type EventCallerAccess struct {
+	UserID        uuid.UUID
+	ApplicationID uuid.UUID
+}
+
 type EventListQuery struct {
 	Page     int
 	PageSize int

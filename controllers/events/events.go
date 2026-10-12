@@ -11,7 +11,9 @@ import (
 	"events-stocks/internal/previewtoken"
 	"events-stocks/internal/publicaccessproof"
 	"events-stocks/internal/tenantresources"
+	"events-stocks/middleware/applicationaccess"
 	"events-stocks/models"
+	"events-stocks/services/applications"
 	eventsService "events-stocks/services/events"
 	guestsService "events-stocks/services/guests"
 	"events-stocks/services/ports"
@@ -243,10 +245,28 @@ func withPageSpecThemeFontViewURLs(theme *dtos.PageSpecTheme) *dtos.PageSpecThem
 	return &response
 }
 
+// callerAccess scopes a non-root list without client_id to the caller-access
+// portfolio: the caller's organizations that the request application session
+// allows (dtos.EventCallerAccess). The application comes from the session
+// resolved by middleware/applicationaccess, never from a header.
+func callerAccess(c echo.Context, user *models.User) (*dtos.EventCallerAccess, bool) {
+	session, ok := c.Get(applicationaccess.ContextKey).(*applications.Session)
+	if !ok || session == nil || user == nil || session.Application.ID == uuid.Nil {
+		return nil, false
+	}
+	return &dtos.EventCallerAccess{UserID: user.ID, ApplicationID: session.Application.ID}, true
+}
+
+// respondCallerAccessUnavailable fails closed when the route runs without an
+// application session (a wiring error): no portfolio is listed.
+func respondCallerAccessUnavailable(c echo.Context) error {
+	return utils.Error(c, http.StatusServiceUnavailable, "Application session unavailable", "")
+}
+
 // GET /api/events  (protected — scoped by client or root)
 // ?client_id=UUID  → events for that specific client (access-checked)
 // no param + root  → all events
-// no param + user  → events for all user's accessible clients
+// no param + user  → caller-access portfolio (see callerAccess); no descendants
 func ListEvents(c echo.Context) error {
 	user, err := authz.CurrentUser(c)
 	if err != nil {
@@ -282,8 +302,12 @@ func ListEvents(c echo.Context) error {
 		return utils.Success(c, http.StatusOK, "Events loaded", eventResponsesWithCoverView(events))
 	}
 
-	// Regular user: return events for all their clients
-	events, err := eventSvc.ListEventsForUser(user.ID)
+	// Regular user: the caller-access portfolio of the request application.
+	access, ok := callerAccess(c, user)
+	if !ok {
+		return respondCallerAccessUnavailable(c)
+	}
+	events, err := eventSvc.ListEventsForUser(*access)
 	if err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Error fetching events", err.Error())
 	}
@@ -311,7 +335,7 @@ func listEventPage(c echo.Context, user *models.User) error {
 	}
 
 	var clientID *uuid.UUID
-	var userID *uuid.UUID
+	var caller *dtos.EventCallerAccess
 	if rawClientID := c.QueryParam("client_id"); rawClientID != "" {
 		parsedClientID, parseErr := uuid.FromString(rawClientID)
 		if parseErr != nil {
@@ -322,7 +346,11 @@ func listEventPage(c echo.Context, user *models.User) error {
 		}
 		clientID = &parsedClientID
 	} else if !user.IsPlatformAdmin() {
-		userID = &user.ID
+		access, ok := callerAccess(c, user)
+		if !ok {
+			return respondCallerAccessUnavailable(c)
+		}
+		caller = access
 	}
 
 	query := dtos.EventListQuery{
@@ -332,7 +360,7 @@ func listEventPage(c echo.Context, user *models.User) error {
 		Filter:   filter,
 		Now:      time.Now(),
 	}
-	events, total, counts, listErr := eventSvc.ListEventPage(clientID, userID, query)
+	events, total, counts, listErr := eventSvc.ListEventPage(clientID, caller, query)
 	if listErr != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Error fetching events", listErr.Error())
 	}
@@ -357,7 +385,7 @@ func GetDashboardOverview(c echo.Context) error {
 	}
 
 	var clientID *uuid.UUID
-	var userID *uuid.UUID
+	var caller *dtos.EventCallerAccess
 	clientIDStr := c.QueryParam("client_id")
 	if clientIDStr != "" {
 		parsedClientID, parseErr := uuid.FromString(clientIDStr)
@@ -369,10 +397,14 @@ func GetDashboardOverview(c echo.Context) error {
 		}
 		clientID = &parsedClientID
 	} else if !user.IsPlatformAdmin() {
-		userID = &user.ID
+		access, ok := callerAccess(c, user)
+		if !ok {
+			return respondCallerAccessUnavailable(c)
+		}
+		caller = access
 	}
 
-	overview, err := eventSvc.GetDashboardOverview(clientID, userID, time.Now())
+	overview, err := eventSvc.GetDashboardOverview(clientID, caller, time.Now())
 	if err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Error fetching dashboard events", err.Error())
 	}
@@ -385,7 +417,8 @@ func GetEventNotifications(c echo.Context) error {
 	if err != nil {
 		return authz.Respond(c, err)
 	}
-	var clientID, userID *uuid.UUID
+	var clientID *uuid.UUID
+	var caller *dtos.EventCallerAccess
 	if raw := c.QueryParam("client_id"); raw != "" {
 		parsed, parseErr := uuid.FromString(raw)
 		if parseErr != nil {
@@ -396,9 +429,13 @@ func GetEventNotifications(c echo.Context) error {
 		}
 		clientID = &parsed
 	} else if !user.IsPlatformAdmin() {
-		userID = &user.ID
+		access, ok := callerAccess(c, user)
+		if !ok {
+			return respondCallerAccessUnavailable(c)
+		}
+		caller = access
 	}
-	notifications, listErr := eventSvc.ListEventNotifications(clientID, userID, time.Now())
+	notifications, listErr := eventSvc.ListEventNotifications(clientID, caller, time.Now())
 	if listErr != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Error fetching event notifications", listErr.Error())
 	}
