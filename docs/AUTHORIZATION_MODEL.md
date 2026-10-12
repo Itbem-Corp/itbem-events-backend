@@ -66,6 +66,80 @@ Types nest Platform › Agency › Customer; a Customer cannot have sub-organiza
 - A Primary-root account cannot be deleted (`DELETE /api/users/:id`) or deactivated (`PUT /api/users/:id/deactivate`) by anyone, itself included, and cannot close itself through `DELETE /api/users`: all return `409 Protected account`, so the platform cannot lose its last Primary root through the API. Re-activation stays allowed.
 - Event permissions are a ceiling from the organization role. An event assignment may reduce access, never elevate it.
 
+## One capability vocabulary
+
+`internal/capabilities` is the single table. It is a leaf package (standard
+library only), imported by `internal/authz` and `services/applications`, which
+cannot import each other (authz -> productmetricshttp -> services/applications).
+
+- The authz names are canonical (`event:manage`); `internal/authz` re-exports
+  them as type aliases, so callers did not change.
+- The session names are a projection (`capabilities.SessionName`):
+
+| authz | session |
+| --- | --- |
+| `view` | `events:view` |
+| `event:create` | `events:create` |
+| `event:manage` | `events:manage` |
+| `event:delete` | `events:delete` |
+| `guest:manage` | `guests:manage` |
+| `checkin:run` | `checkin:run` |
+| `analytics:view` | `analytics:view` |
+| `members:manage` | `members:manage` |
+| `organization:manage` | `organizations:manage` |
+| `metrics:view` | `metrics:view` |
+| `event:clients:manage` | `events:clients:manage` |
+
+- `RoleCapabilities(role)` drives both `authz.roleHasCapability` and the
+  session's `organizationCapabilities`. Any non-empty unknown role code keeps
+  its historical behaviour: `view` in authz, only `organizations:view` in the
+  session. Golden tests compare both sides with frozen copies of the previous
+  tables.
+- `events:clients:manage` reaches the session only while `EVENT_CLIENT_ACCESS`
+  is on (`SessionService.ConfigureEventClientCapability`).
+- `PolicyAllowList(application)` is the set of names a
+  `user_application_policy` may contain and the set the policy ceiling governs.
+  `events:delete` and `events:clients:manage` are deliberately outside it.
+
+## Server-side ceilings behind flags
+
+Both checks run after the platform, role (or grant) decision, through
+`authz.finalizeAuthorityDecision`:
+
+1. **Product entitlement** (`AUTHZ_PRODUCT_ENTITLEMENT`), event resources and
+   event lists only. `CheckApplicationAccessRecursive` answers the role lookup
+   and the entitlement in one query. `enforce` answers 403 `Your organization is
+   not enabled for this application`. Member, organization and application
+   management never apply it, so an Owner can always repair access.
+2. **Policy ceiling** (`AUTHZ_POLICY_CEILING`). The application session's
+   active policy is stamped on the per-request user; an allow-listed capability
+   the policy lacks is a 403 `Your application access policy does not allow this
+   action` in `enforce`. The primary root is exempt; Root 2 is capped.
+
+How the flags meet the event-client grant path (`internal/authz/event_authority.go`):
+
+- `resolveEventAuthority` uses the same organization lookup
+  (`lookupOrganizationAccess`, event-resource scope), so a member that is not
+  entitled stays on the organization path and is denied in `enforce`; the
+  grant path is never consulted for an organization member.
+- A grant passes `finalizeAuthorityDecision` as entitled (the grant itself is
+  only honoured when the event organization resolves to EventiApp, a hard gate
+  that is not flagged), so grants get the policy ceiling like memberships.
+- `RequireEventAccess` / `EnsureEventAccess` apply the entitlement to members
+  (`authorizeEventView`), matching `RequireEventListAccess`.
+- `EventCapabilityForOrganizationEvents` (event-client oversight) applies both
+  checks; a deny is `false`, a lookup failure is returned as an error.
+- In `enforce`, the session caps `event_access.capabilities` with the policy,
+  like the per-organization lists.
+- Event lists without `client_id` use the caller-access predicate (active
+  organization, active member access row for the request application), which
+  is always on; there is no separate enforce-only list narrowing.
+
+`shadow` never changes a decision: it logs `authz shadow denial` once per
+(user, organization, capability) every 10 minutes. Organization lookups are
+memoized per request (the event capabilities endpoint runs one access query)
+and a lookup error is a 500 that never falls through to another authority path.
+
 ## Event capabilities and privacy
 
 | Capability | Typical roles | What it covers |

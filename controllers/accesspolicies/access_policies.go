@@ -4,6 +4,7 @@ import (
 	"errors"
 	"events-stocks/configuration"
 	"events-stocks/internal/authz"
+	"events-stocks/internal/capabilities"
 	"events-stocks/internal/products"
 	"events-stocks/models"
 	"events-stocks/utils"
@@ -14,12 +15,6 @@ import (
 	"sort"
 	"strings"
 )
-
-var allowed = map[string]map[string]struct{}{
-	"itbem":         {"dashboard:view": {}, "metrics:view": {}, "audit:view": {}, "automation:view": {}, "automation:manage": {}, "platform:users:view": {}, "organizations:view": {}, "members:manage": {}},
-	"eventiapp":     {"dashboard:view": {}, "metrics:view": {}, "events:view": {}, "events:create": {}, "events:manage": {}, "guests:manage": {}, "checkin:run": {}, "analytics:view": {}, "members:manage": {}},
-	"cafettonhouse": {"dashboard:view": {}, "metrics:view": {}, "events:view": {}, "events:create": {}, "events:manage": {}, "guests:manage": {}, "checkin:run": {}, "analytics:view": {}, "members:manage": {}},
-}
 
 func Manage(c echo.Context) error {
 	actor, err := authz.CurrentUser(c)
@@ -70,7 +65,9 @@ func Manage(c echo.Context) error {
 	seen := map[string]struct{}{}
 	for _, value := range request.Capabilities {
 		value = strings.ToLower(strings.TrimSpace(value))
-		if _, ok := allowed[application.Code][value]; !ok {
+		// The allow-list is the single table in internal/capabilities; it is
+		// also the set of names the server-side policy ceiling governs.
+		if !capabilities.PolicyAllows(application.Code, value) {
 			return utils.Error(c, 400, "Invalid capability", value)
 		}
 		if _, ok := seen[value]; !ok {

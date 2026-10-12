@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"events-stocks/internal/capabilities"
 	productmetricshttp "events-stocks/internal/observability/productmetricshttp"
 	"events-stocks/internal/products"
 	"events-stocks/models"
@@ -17,20 +18,25 @@ import (
 )
 
 type Hooks struct {
-	SyncUser              func(cognitoSub string) (*models.User, error)
-	CheckAccessRecursive  func(userID, targetClientID uuid.UUID) (bool, string)
-	GetClientByID         func(clientID uuid.UUID) (*models.Client, error)
-	GetEventByIDRaw       func(eventID uuid.UUID) (*models.Event, error)
-	GetEventSectionByID   func(sectionID uuid.UUID) (*models.EventSection, error)
-	GetMomentByID         func(momentID uuid.UUID) (*models.Moment, error)
-	GetGuestByID          func(guestID uuid.UUID) (*models.Guest, error)
-	GetInvitationByIDLite func(invitationID uuid.UUID) (*models.Invitation, error)
-	GetResourceByID       func(resourceID uuid.UUID) (*models.Resource, error)
-	GetEventMemberRole    func(eventID, userID uuid.UUID) (role string, found bool, err error)
+	SyncUser             func(cognitoSub string) (*models.User, error)
+	CheckAccessRecursive func(userID, targetClientID uuid.UUID) (bool, string)
 	// CheckAccessRecursiveE is the error-returning organization lookup. When
-	// configured it replaces CheckAccessRecursive so a database failure is a
-	// 500, never a silent deny or a fall-through to the event-client path.
+	// configured it is preferred over CheckAccessRecursive, and a lookup error
+	// is a 500 that never falls through to a weaker authority path (including
+	// the event-client grant path).
 	CheckAccessRecursiveE func(userID, targetClientID uuid.UUID) (bool, string, error)
+	// CheckApplicationAccessRecursive answers the organization lookup plus the
+	// product entitlement in one query. It is used for event resources and
+	// event lists while AUTHZ_PRODUCT_ENTITLEMENT is shadow or enforce.
+	CheckApplicationAccessRecursive func(userID, targetClientID uuid.UUID, application string) (ApplicationAccess, error)
+	GetClientByID                   func(clientID uuid.UUID) (*models.Client, error)
+	GetEventByIDRaw                 func(eventID uuid.UUID) (*models.Event, error)
+	GetEventSectionByID             func(sectionID uuid.UUID) (*models.EventSection, error)
+	GetMomentByID                   func(momentID uuid.UUID) (*models.Moment, error)
+	GetGuestByID                    func(guestID uuid.UUID) (*models.Guest, error)
+	GetInvitationByIDLite           func(invitationID uuid.UUID) (*models.Invitation, error)
+	GetResourceByID                 func(resourceID uuid.UUID) (*models.Resource, error)
+	GetEventMemberRole              func(eventID, userID uuid.UUID) (role string, found bool, err error)
 	// HasEventClientGrant is configured only while EVENT_CLIENT_ACCESS is on.
 	// A nil hook disables the event-client authority path entirely.
 	HasEventClientGrant func(eventID, userID uuid.UUID) (bool, error)
@@ -57,6 +63,12 @@ func ReplaceHooksForTest(replacement Hooks) func() {
 	}
 	if replacement.CheckAccessRecursive != nil {
 		hooks.CheckAccessRecursive = replacement.CheckAccessRecursive
+	}
+	if replacement.CheckAccessRecursiveE != nil {
+		hooks.CheckAccessRecursiveE = replacement.CheckAccessRecursiveE
+	}
+	if replacement.CheckApplicationAccessRecursive != nil {
+		hooks.CheckApplicationAccessRecursive = replacement.CheckApplicationAccessRecursive
 	}
 	if replacement.GetClientByID != nil {
 		hooks.GetClientByID = replacement.GetClientByID
@@ -109,44 +121,36 @@ type Failure struct {
 }
 
 // Capability is an action, not a screen. Controllers use it to keep server
-// enforcement independent from what the dashboard chooses to render.
-type Capability string
+// enforcement independent from what the dashboard chooses to render. The
+// vocabulary lives in the leaf package internal/capabilities; these aliases
+// keep every caller unchanged.
+type Capability = capabilities.Capability
 
 const (
-	CapabilityView          Capability = "view"
-	CapabilityEventCreate   Capability = "event:create"
-	CapabilityEventManage   Capability = "event:manage"
-	CapabilityEventDelete   Capability = "event:delete"
-	CapabilityGuestManage   Capability = "guest:manage"
-	CapabilityCheckin       Capability = "checkin:run"
-	CapabilityAnalyticsView Capability = "analytics:view"
-	CapabilityMembersManage Capability = "members:manage"
-	CapabilityOrgManage     Capability = "organization:manage"
+	CapabilityView          = capabilities.View
+	CapabilityEventCreate   = capabilities.EventCreate
+	CapabilityEventManage   = capabilities.EventManage
+	CapabilityEventDelete   = capabilities.EventDelete
+	CapabilityGuestManage   = capabilities.GuestManage
+	CapabilityCheckin       = capabilities.Checkin
+	CapabilityAnalyticsView = capabilities.AnalyticsView
+	CapabilityMembersManage = capabilities.MembersManage
+	CapabilityOrgManage     = capabilities.OrgManage
 	// CapabilityMetricsView gates organization-scoped product metrics. Only
 	// Owner/Admin (direct or inherited) and platform roots hold it; callers
 	// that do not reserve the metrics module keep using analytics:view.
-	CapabilityMetricsView Capability = "metrics:view"
-	// CapabilityEventClientsManage lets an organization manager assign
-	// external event clients (event_client_grants) to an event.
-	CapabilityEventClientsManage Capability = "event:clients:manage"
+	CapabilityMetricsView = capabilities.MetricsView
+	// CapabilityEventClientsManage grants and revokes EventiApp event-client
+	// access (used by the event-client grant path).
+	CapabilityEventClientsManage = capabilities.EventClientsManage
 )
 
-// allCapabilities lists every Capability above. PlatformRootMayGrantRole
-// checks each one, so a new capability must be added here too
-// (TestAllCapabilitiesListsEveryDeclaredCapability enforces it).
-var allCapabilities = []Capability{
-	CapabilityView,
-	CapabilityEventCreate,
-	CapabilityEventManage,
-	CapabilityEventDelete,
-	CapabilityGuestManage,
-	CapabilityCheckin,
-	CapabilityAnalyticsView,
-	CapabilityMembersManage,
-	CapabilityOrgManage,
-	CapabilityMetricsView,
-	CapabilityEventClientsManage,
-}
+// allCapabilities is every capability, read from the single vocabulary in
+// internal/capabilities. PlatformRootMayGrantRole checks each one, so a
+// capability missing here would let Root 2 grant a role that carries it
+// (TestAllCapabilitiesListsEveryDeclaredCapability enforces the list is
+// complete).
+var allCapabilities = capabilities.All()
 
 func (e *Failure) Error() string {
 	if e.Detail != "" {
@@ -193,23 +197,27 @@ func CurrentUser(c echo.Context) (*models.User, error) {
 // cosmetic hostname. Platform-root authority exists on EventiApp and the ITBEM
 // control plane; branded customer portals use explicit memberships and roles.
 //
-// Every scoped copy also carries the session application, so organization
-// checks by id apply the same product boundary as the lists and the session.
+// The returned user is always a per-request copy (never the synced user)
+// stamped with the session application (so organization checks by id apply
+// the same product boundary as the lists and the session), the application
+// policy ceiling and the request authorization memo (see enforcement.go).
+// An empty tenant leaves the session application unset and keeps platform
+// authority, as before.
 func scopeUserToTenant(c echo.Context, user *models.User) *models.User {
-	tenantCode, _ := c.Get("tenant_code").(string)
-	if user == nil || tenantCode == "" {
-		return user
+	if user == nil {
+		return nil
 	}
+	tenantCode, _ := c.Get("tenant_code").(string)
 	scoped := *user
 	if definition, ok := products.Resolve(tenantCode); ok {
 		scoped.SessionApplicationCode = definition.Code.String()
 	}
-	if products.AllowsPlatformAuthority(tenantCode) {
-		return &scoped
+	if tenantCode != "" && !products.AllowsPlatformAuthority(tenantCode) {
+		scoped.IsRoot = false
+		scoped.RootLevel = models.RootLevelNone
+		scoped.AuthTenantCode = strings.ToLower(strings.TrimSpace(tenantCode))
 	}
-	scoped.IsRoot = false
-	scoped.RootLevel = models.RootLevelNone
-	scoped.AuthTenantCode = strings.ToLower(strings.TrimSpace(tenantCode))
+	stampRequestAuthorization(c, &scoped)
 	return &scoped
 }
 
@@ -261,48 +269,80 @@ func RequirePrimaryRoot(c echo.Context) (*models.User, error) {
 	return user, nil
 }
 
+// RequireClientAccess checks organization membership only. It does not apply
+// product entitlement, so organization and member management stay reachable
+// (an Owner can always repair access). Event lists use RequireEventListAccess.
 func RequireClientAccess(user *models.User, clientID uuid.UUID) error {
+	return requireClientAccess(user, clientID, scopeOrganization)
+}
+
+// RequireEventListAccess gates listing the events of one organization. It is
+// RequireClientAccess plus the product entitlement (AUTHZ_PRODUCT_ENTITLEMENT).
+func RequireEventListAccess(user *models.User, clientID uuid.UUID) error {
+	return requireClientAccess(user, clientID, scopeEventResource)
+}
+
+func requireClientAccess(user *models.User, clientID uuid.UUID, scope accessScope) error {
 	if err := requireTenantClientBoundary(user, clientID); err != nil {
 		return err
 	}
 	if user.IsPlatformAdmin() {
 		return nil
 	}
-	allowed, _, err := checkOrganizationAccess(user.ID, clientID)
+	access, err := lookupOrganizationAccess(user, clientID, scope)
 	if err != nil {
 		return err
 	}
-	if !allowed {
+	if !access.Allowed {
 		return &Failure{
 			Status:  http.StatusForbidden,
 			Message: "Access denied",
 			Detail:  "You do not have access to this client",
 		}
 	}
-	return requireSessionApplicationReach(user, clientID)
+	// Both boundaries must pass: the application reach (a live deny, checked
+	// first so shadow entitlement logs only count requests that would
+	// otherwise succeed), then the product entitlement.
+	if err := requireSessionApplicationReach(user, clientID); err != nil {
+		return err
+	}
+	return enforceProductEntitlement(user, clientID, CapabilityView, access)
 }
 
 // RequireClientCapability evaluates the effective direct or inherited client
 // role. Event memberships may narrow this later, but can never grant a
 // capability beyond this organization role.
+//
+// The application policy ceiling (AUTHZ_POLICY_CEILING) applies after the
+// platform/role decision. Product entitlement does not apply here: members,
+// organization and application management must stay repairable.
 func RequireClientCapability(user *models.User, clientID uuid.UUID, capability Capability) error {
+	return requireClientCapability(user, clientID, capability, scopeOrganization)
+}
+
+func requireClientCapability(user *models.User, clientID uuid.UUID, capability Capability, scope accessScope) error {
 	if err := requireTenantClientBoundary(user, clientID); err != nil {
 		return err
 	}
 	if user.IsPlatformAdmin() {
 		if platformHasCapability(user, capability) {
-			return nil
+			return enforcePolicyCeiling(user, capability)
 		}
 		return &Failure{Status: http.StatusForbidden, Message: "Access denied", Detail: "Your platform administrator level cannot perform this action"}
 	}
-	allowed, role, err := checkOrganizationAccess(user.ID, clientID)
+	access, err := lookupOrganizationAccess(user, clientID, scope)
 	if err != nil {
 		return err
 	}
-	if !allowed || !roleHasCapability(role, capability) {
+	if !access.Allowed || !roleHasCapability(access.Role, capability) {
 		return &Failure{Status: http.StatusForbidden, Message: "Access denied", Detail: "Your organization role cannot perform this action"}
 	}
-	return requireSessionApplicationReach(user, clientID)
+	// Application reach first (see requireClientAccess), then product
+	// entitlement and the application policy ceiling.
+	if err := requireSessionApplicationReach(user, clientID); err != nil {
+		return err
+	}
+	return finalizeAuthorityDecision(user, clientID, capability, access)
 }
 
 // requireSessionApplicationReach keeps organization checks by id inside the
@@ -327,24 +367,6 @@ func requireSessionApplicationReach(user *models.User, clientID uuid.UUID) error
 		return &Failure{Status: http.StatusForbidden, Message: "Access denied", Detail: "Client is outside the current application"}
 	}
 	return nil
-}
-
-// checkOrganizationAccess prefers the error-returning lookup. The legacy
-// boolean hook remains a fallback for callers (and tests) that only configure
-// it; it cannot distinguish a lookup failure from a deny.
-func checkOrganizationAccess(userID, clientID uuid.UUID) (bool, string, error) {
-	if hooks.CheckAccessRecursiveE != nil {
-		allowed, role, err := hooks.CheckAccessRecursiveE(userID, clientID)
-		if err != nil {
-			return false, "", &Failure{Status: http.StatusInternalServerError, Message: "Authorization error", Detail: "organization access lookup failed"}
-		}
-		return allowed, role, nil
-	}
-	if hooks.CheckAccessRecursive == nil {
-		return false, "", dependencyFailure("CheckAccessRecursive")
-	}
-	allowed, role := hooks.CheckAccessRecursive(userID, clientID)
-	return allowed, role, nil
 }
 
 func requireTenantClientBoundary(user *models.User, clientID uuid.UUID) error {
@@ -416,33 +438,9 @@ func PlatformRootMayGrantRole(user *models.User, roleCode string) bool {
 	return true
 }
 
+// roleHasCapability reads the single table in internal/capabilities.
 func roleHasCapability(role string, capability Capability) bool {
-	code := strings.TrimPrefix(strings.ToUpper(strings.TrimSpace(role)), "INHERITED_")
-	if code == "OWNER" || code == "ADMIN" {
-		return true
-	}
-	switch capability {
-	case CapabilityView:
-		return code != ""
-	case CapabilityEventCreate:
-		return code == "EVENT_MANAGER"
-	case CapabilityEventManage:
-		return code == "EVENT_MANAGER" || code == "EDITOR"
-	case CapabilityEventDelete:
-		return false
-	case CapabilityGuestManage:
-		return code == "EVENT_MANAGER" || code == "EDITOR" || code == "MEMBER"
-	case CapabilityCheckin:
-		return code == "EVENT_MANAGER" || code == "CHECKIN"
-	case CapabilityAnalyticsView:
-		return code == "EVENT_MANAGER" || code == "EDITOR" || code == "ANALYST"
-	case CapabilityEventClientsManage:
-		return code == "EVENT_MANAGER"
-	case CapabilityMembersManage, CapabilityOrgManage, CapabilityMetricsView:
-		return false
-	default:
-		return false
-	}
+	return capabilities.RoleHas(role, capability)
 }
 
 func RequireEventAccess(c echo.Context, eventID uuid.UUID) (*models.User, *models.Event, error) {
@@ -475,7 +473,11 @@ func RequireEventAccess(c echo.Context, eventID uuid.UUID) (*models.User, *model
 	if err != nil {
 		return nil, nil, err
 	}
-	if _, err := memoizedEventAuthority(c, user, event); err != nil {
+	authority, err := memoizedEventAuthority(c, user, event)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := authorizeEventView(user, event, authority); err != nil {
 		return nil, nil, err
 	}
 	if event.ClientID != nil {
@@ -573,8 +575,11 @@ func loadEventAccessInputs(
 // EnsureEventAccess has no request context, so it resolves the authority
 // fresh. It honours the same precedence as RequireEventAccess.
 func EnsureEventAccess(user *models.User, event *models.Event) error {
-	_, err := resolveEventAuthority(user, event)
-	return err
+	authority, err := resolveEventAuthority(user, event)
+	if err != nil {
+		return err
+	}
+	return authorizeEventView(user, event, authority)
 }
 
 func RequireEventCapability(c echo.Context, eventID uuid.UUID, capability Capability) (*models.User, *models.Event, error) {
@@ -589,17 +594,29 @@ func RequireEventCapability(c echo.Context, eventID uuid.UUID, capability Capabi
 	switch authority.kind {
 	case authorityPlatform:
 		if platformHasCapability(user, capability) {
+			if err := enforcePolicyCeiling(user, capability); err != nil {
+				return nil, nil, err
+			}
 			return user, event, nil
 		}
 		return nil, nil, &Failure{Status: http.StatusForbidden, Message: "Access denied", Detail: "Your platform administrator level cannot perform this action"}
 	case authorityEventClient:
 		if eventClientHasCapability(capability) {
+			if err := finalizeAuthorityDecision(user, *event.ClientID, capability, eventClientGrantAccess()); err != nil {
+				return nil, nil, err
+			}
 			return user, event, nil
 		}
 		return nil, nil, &Failure{Status: http.StatusForbidden, Message: "Access denied", Detail: "Your event client access cannot perform this action"}
 	}
-	if !roleHasCapability(authority.role, capability) {
+	if event.ClientID == nil {
+		return nil, nil, &Failure{Status: http.StatusForbidden, Message: "Access denied", Detail: "Event is not linked to a client"}
+	}
+	if !roleHasCapability(authority.access.Role, capability) {
 		return nil, nil, &Failure{Status: http.StatusForbidden, Message: "Access denied", Detail: "Your organization role cannot perform this action"}
+	}
+	if err := finalizeAuthorityDecision(user, *event.ClientID, capability, authority.access); err != nil {
+		return nil, nil, err
 	}
 	if hooks.GetEventMemberRole != nil {
 		role, found, memberErr := hooks.GetEventMemberRole(eventID, user.ID)
@@ -873,7 +890,7 @@ func RequireEventClientForCreate(user *models.User, clientID *uuid.UUID) error {
 			Detail:  "Events must belong to a client",
 		}
 	}
-	if err := RequireClientCapability(user, *clientID, CapabilityEventCreate); err != nil {
+	if err := requireClientCapability(user, *clientID, CapabilityEventCreate, scopeEventResource); err != nil {
 		return err
 	}
 	return nil

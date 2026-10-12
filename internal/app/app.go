@@ -35,6 +35,7 @@ import (
 	usersController "events-stocks/controllers/users"
 	"events-stocks/internal/aicredentials"
 	"events-stocks/internal/authz"
+	"events-stocks/internal/capabilities"
 	"events-stocks/internal/observability"
 	"events-stocks/internal/products/eventiapp"
 	"events-stocks/middleware/applicationaccess"
@@ -436,6 +437,8 @@ func wireDependencies(cfg *models.Config) {
 		},
 	)
 	applicationSessionSvc.ConfigureLocalBootstrap(userSvc.BootstrapConfiguredLocalRoot)
+	entitlementMode, ceilingMode := authorizationModes(cfg)
+	applicationSessionSvc.ConfigurePolicyCeiling(ceilingMode)
 	applicationaccess.Configure(applicationSessionSvc)
 	sessionsController.Configure(applicationSessionSvc)
 	adminSvc := usersService.NewAdminUserService(userRepo, clientRepo, authProviderRepo)
@@ -454,10 +457,14 @@ func wireDependencies(cfg *models.Config) {
 	eventClientAccess := eventiapp.ParseEventClientAccess(cfg.EventClientAccess)
 	eventiapp.SetEventClientAccess(eventClientAccess)
 	authzHooks := authz.Hooks{
-		SyncUser:                        userSvc.SyncUser,
-		CheckAccessRecursive:            clientRepo.CheckAccessRecursive,
-		CheckAccessRecursiveE:           clientRepo.CheckAccessRecursiveE,
-		ResolveClientProduct:            clientRepo.ResolveClientProduct,
+		SyncUser:              userSvc.SyncUser,
+		CheckAccessRecursive:  clientRepo.CheckAccessRecursive,
+		CheckAccessRecursiveE: clientRepo.CheckAccessRecursiveE,
+		ResolveClientProduct:  clientRepo.ResolveClientProduct,
+		CheckApplicationAccessRecursive: func(userID, clientID uuid.UUID, application string) (authz.ApplicationAccess, error) {
+			access, err := clientRepo.CheckApplicationAccessRecursive(userID, clientID, application)
+			return authz.ApplicationAccess(access), err
+		},
 		GetClientByID:                   clientRepo.GetClientByID,
 		GetEventByIDRaw:                 eventsRepo.GetEventByIDRaw,
 		GetEventSectionByID:             eventSectionRepo.GetEventSectionByID,
@@ -476,6 +483,10 @@ func wireDependencies(cfg *models.Config) {
 		applicationSessionSvc.ConfigureEventClientAccess(eventClientRepo.CountActiveForUser)
 	}
 	eventsrepository.ConfigureEventClientScope(eventClientAccess)
+	// Only while EVENT_CLIENT_ACCESS is on does the session project
+	// events:clients:manage for roles that hold it.
+	applicationSessionSvc.ConfigureEventClientCapability(eventClientAccess)
+	authz.ConfigureEnforcement(entitlementMode, ceilingMode)
 	authz.Configure(authzHooks)
 	eventclientsController.Init(eventclientsService.NewService(
 		eventClientRepo,
@@ -547,4 +558,22 @@ func wireDependencies(cfg *models.Config) {
 	guestsService.SetDefaultGuestStatusService(guestStatusSvc)
 	momentsService.SetDefaultMomentTypeService(momentTypeSvc)
 	templatesService.SetDefaultDesignTemplateService(templateSvc)
+}
+
+// authorizationModes parses AUTHZ_PRODUCT_ENTITLEMENT and AUTHZ_POLICY_CEILING
+// once at startup. An invalid value is logged and treated as off, so a typo can
+// never turn enforcement on.
+func authorizationModes(cfg *models.Config) (entitlement, ceiling capabilities.Mode) {
+	entitlement = parseAuthorizationMode("AUTHZ_PRODUCT_ENTITLEMENT", cfg.AuthzProductEntitlement)
+	ceiling = parseAuthorizationMode("AUTHZ_POLICY_CEILING", cfg.AuthzPolicyCeiling)
+	slog.Info("authorization rollout modes", "product_entitlement", string(entitlement), "policy_ceiling", string(ceiling))
+	return entitlement, ceiling
+}
+
+func parseAuthorizationMode(name, raw string) capabilities.Mode {
+	mode, err := capabilities.ParseMode(raw)
+	if err != nil {
+		slog.Error("invalid authorization mode; using off", "name", name, "error", err)
+	}
+	return mode
 }

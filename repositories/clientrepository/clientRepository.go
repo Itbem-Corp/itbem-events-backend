@@ -461,9 +461,6 @@ func (r *ClientRepo) ReachableClientIDsInApplication(userID uuid.UUID, applicati
 func (r *ClientRepo) CheckAccessRecursive(userID, targetClientID uuid.UUID) (bool, string) {
 	return CheckAccessRecursive(userID, targetClientID)
 }
-func (r *ClientRepo) CheckAccessRecursiveE(userID, targetClientID uuid.UUID) (bool, string, error) {
-	return CheckAccessRecursiveE(userID, targetClientID)
-}
 func (r *ClientRepo) ResolveClientProduct(clientID uuid.UUID) (string, error) {
 	return ResolveClientProduct(clientID)
 }

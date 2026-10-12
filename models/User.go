@@ -21,6 +21,14 @@ type User struct {
 	RootLevel      int    `gorm:"default:0;index" json:"root_level"`
 	IsRoot         bool   `gorm:"default:false" json:"is_root"`
 	AuthTenantCode string `gorm:"-" json:"-"`
+	// Transient, per-request authorization context stamped by internal/authz
+	// from the application session: the authenticated application, whether an
+	// active user_application_policy exists, and the session names it allows.
+	AuthApplicationCode    string              `gorm:"-" json:"-"`
+	AuthPolicyRestricted   bool                `gorm:"-" json:"-"`
+	AuthPolicyCapabilities map[string]struct{} `gorm:"-" json:"-"`
+	// AuthRequestMemo is owned by internal/authz (per-request lookup memo).
+	AuthRequestMemo any `gorm:"-" json:"-"`
 	// SessionApplicationCode is the product of the authenticated request
 	// (from the Cognito audience). Request-scoped, never stored.
 	SessionApplicationCode string `gorm:"-" json:"-"`

@@ -63,9 +63,26 @@ func TestNonRootMayNotGrantThroughPlatformAuthority(t *testing.T) {
 
 // PlatformRootMayGrantRole checks every capability in allCapabilities; a
 // capability missing from that list would let Root 2 grant a role that
-// carries it. Keep the list equal to the declared Capability constants.
+// carries it. The vocabulary lives in internal/capabilities, so the list must
+// equal every Capability constant declared there, and authz.go must not
+// declare capability literals of its own outside that single source.
 func TestAllCapabilitiesListsEveryDeclaredCapability(t *testing.T) {
-	file, err := parser.ParseFile(token.NewFileSet(), "authz.go", nil, 0)
+	declared := capabilityLiterals(t, "../capabilities/vocabulary.go")
+	require.NotEmpty(t, declared)
+	assert.Empty(t, capabilityLiterals(t, "authz.go"), "declare new capabilities in internal/capabilities, not in authz.go")
+
+	listed := map[string]bool{}
+	for _, capability := range allCapabilities {
+		listed[string(capability)] = true
+	}
+	assert.Equal(t, declared, listed)
+}
+
+// capabilityLiterals returns the string values of the constants typed
+// Capability that path declares with a literal value.
+func capabilityLiterals(t *testing.T, path string) map[string]bool {
+	t.Helper()
+	file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
 	require.NoError(t, err)
 
 	declared := map[string]bool{}
@@ -88,11 +105,5 @@ func TestAllCapabilitiesListsEveryDeclaredCapability(t *testing.T) {
 			}
 		}
 	}
-	require.NotEmpty(t, declared)
-
-	listed := map[string]bool{}
-	for _, capability := range allCapabilities {
-		listed[string(capability)] = true
-	}
-	assert.Equal(t, declared, listed)
+	return declared
 }

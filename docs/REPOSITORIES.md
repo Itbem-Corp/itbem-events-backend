@@ -55,7 +55,8 @@
 | Path | Purpose |
 |------|---------|
 | `repositories/clientrepository/clientRepository.go` | Client CRUD + hierarchy |
-| `repositories/clientrepository/access_lookup.go` | `CheckAccessRecursiveE` (organization role lookup that returns its error; `CheckAccessRecursive` wraps it) and `ResolveClientProduct` (nearest branded ancestor's application code) |
+| `repositories/clientrepository/access_lookup.go` | `ResolveClientProduct` (nearest branded ancestor's application code) |
+| `repositories/clientrepository/access_checks.go` | Authorization lookups: `CheckAccessRecursiveE` (error-returning organization role lookup, 32-level bound; `CheckAccessRecursive` wraps it and swallows errors for legacy service callers) and `CheckApplicationAccessRecursive` (same lookup plus the product entitlement in one CTE, nearest-branded-ancestor rule, `Reason` for the first failed condition). Opt-in Postgres tests: `CLIENT_ACCESS_TEST_DSN`. |
 | `repositories/clienttyperepository/clientTypeRepository.go` | ClientType catalog |
 | `repositories/clientrolerepository/clientRoleRepository.go` | ClientRole catalog |
 | `repositories/userrepository/UserRepository.go` | User CRUD, Cognito sync |

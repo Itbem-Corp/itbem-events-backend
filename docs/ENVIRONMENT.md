@@ -210,6 +210,23 @@ The current deploy workflow still maps the deprecated aliases for compatibility.
 New deployment environments should inject standard AWS variables or, preferably,
 attach a workload/instance role and omit all four legacy aliases.
 
+### Authorization rollout flags
+
+| Variable | Required | Values | Purpose |
+|---|---:|---|---|
+| `AUTHZ_PRODUCT_ENTITLEMENT` | no | `off` (default), `shadow`, `enforce` | Product entitlement on EventiApp event resources and event lists. A member must hold an active `eventiapp` entitlement in an active organization whose nearest branded ancestor is EventiApp with the product enabled. |
+| `AUTHZ_POLICY_CEILING` | no | `off` (default), `shadow`, `enforce` | `user_application_policies` become a server-side ceiling for the allow-listed capabilities (`internal/capabilities.PolicyAllowList`). In `enforce` the session's per-organization capability lists are capped too. |
+
+Empty means `off`. Any other value is logged at startup (`invalid
+authorization mode; using off`) and treated as `off`, so a typo never turns
+enforcement on. Both are parsed once in `internal/app/app.go`
+(`authorizationModes`); the startup log line `authorization rollout modes`
+shows the effective values. In production they are GitHub Actions
+**repository variables** (`vars.AUTHZ_PRODUCT_ENTITLEMENT`,
+`vars.AUTHZ_POLICY_CEILING`) rendered as `--optional` keys by
+`deploy-backend.yml`; changing one takes effect on the next deploy run. The
+rollout and rollback steps are in `docs/OPERATIONS.md`.
+
 ### Backend deployment-only settings
 
 These values configure GitHub Actions and are not application environment
