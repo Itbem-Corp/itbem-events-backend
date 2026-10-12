@@ -3951,7 +3951,10 @@ func TestConfirmPresignedMomentVerificationFailureDeletesObjectWithoutConsumingQ
 	_, err := confirmPresignedMoment(c, &models.Event{ID: eventID}, &models.EventConfig{MaxUploadsPerGuest: 5}, nil, key, "image/jpeg", 0, "")
 
 	require.NoError(t, err)
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	// PUB-N4 / STU-N2: a non-retryable 4xx with a stable code and Spanish copy.
+	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"upload_not_found"`)
+	assert.Contains(t, rec.Body.String(), "No recibimos tu archivo. Vuelve a subirlo.")
 	assert.Zero(t, counter.increments)
 	assert.Zero(t, counter.decrements)
 	assert.Equal(t, []string{key}, storage.deletedObjects)

@@ -8,11 +8,13 @@ import (
 	"events-stocks/models"
 	"events-stocks/services/ports"
 	"events-stocks/utils"
+	"fmt"
 	"image"
 	"image/color"
 	"image/jpeg"
 	"io"
 	"mime/multipart"
+	"net/http"
 	"net/textproto"
 	"strings"
 	"testing"
@@ -1104,4 +1106,22 @@ func TestCompleteMomentMultipartUploadReturnsNoSuchUploadWhenObjectIsMissing(t *
 	)
 
 	assert.ErrorIs(t, err, ports.ErrMultipartUploadNotFound)
+}
+
+// PUB-N4 / STU-N2: a confirmation whose object never reached storage is a
+// stable, non-retryable 422 upload_not_found with a Spanish message, not a
+// 500 storage error the public site retries.
+func TestVerifyMomentUploadMissingObjectIsUploadNotFound(t *testing.T) {
+	storage := &metadataObjectStorage{
+		mockObjectStorage: &mockObjectStorage{},
+		metadataErr:       fmt.Errorf("%w: moments/event-1/raw/photo.jpg", ports.ErrObjectNotFound),
+	}
+	svc := newTestResourceService(nil, nil, storage)
+
+	_, err := svc.VerifyMomentUploadSize("moments/event-1/raw/photo.jpg", "image/jpeg", 2048)
+	require.ErrorIs(t, err, ErrUploadNotFound)
+	status, detail := UploadErrorResponse(err)
+	assert.Equal(t, http.StatusUnprocessableEntity, status)
+	assert.Equal(t, UploadNotFoundCode, detail)
+	assert.Equal(t, "No recibimos tu archivo. Vuelve a subirlo.", UploadErrorMessage(err, "Upload verification failed"))
 }

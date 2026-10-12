@@ -898,6 +898,9 @@ func (rs *ResourceService) VerifyMomentUploadSize(s3Key, requestedContentType st
 	if metadataReader, ok := storage.(ports.ObjectStorageMetadataReader); ok {
 		metadata, metadataErr := metadataReader.GetObjectMetadata(filename, folder, rs.Bucket, rs.Provider)
 		if metadataErr != nil {
+			if errors.Is(metadataErr, ports.ErrObjectNotFound) {
+				return "", fmt.Errorf("%w: %s", ErrUploadNotFound, s3Key)
+			}
 			return "", fmt.Errorf("failed to verify uploaded object: %w", metadataErr)
 		}
 		if metadata.Size <= 0 {
@@ -928,7 +931,7 @@ func (rs *ResourceService) VerifyMomentUploadSize(s3Key, requestedContentType st
 		return "", fmt.Errorf("failed to verify uploaded object: %w", existsErr)
 	}
 	if !exists {
-		return "", services.ValidationError{Msg: "uploaded file was not found; wait for the upload to finish and retry"}
+		return "", fmt.Errorf("%w: %s", ErrUploadNotFound, s3Key)
 	}
 	return contentType, nil
 }
