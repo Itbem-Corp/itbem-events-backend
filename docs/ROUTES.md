@@ -128,6 +128,11 @@ Legacy v1/v2 events remain auditable but cannot authorize a v3 action.
 - `POST /api/events` → `events.CreateEvent`
 - `PUT /api/events/:id` → `events.UpdateEvent`
   - Create, update and `POST /api/events/:id/duplicate` share these errors: `409` `error: "event_name_taken"` ("Ya existe un evento con ese nombre en esta organización." — names are unique per organization among non-deleted events), `409` `error: "event_identifier_taken"` ("Esa URL del evento ya está en uso. Elige otra." — identifiers are unique platform-wide among non-deleted events), `400` `error: "invalid_timezone"` ("Zona horaria inválida" — `timezone` must be an IANA zone or empty).
+  - `400` `event_name_too_long` ("El nombre del evento admite máximo 120 caracteres.") for a new or changed name over 120 characters; a stored longer name sent back unchanged keeps saving. `timezone` is validated only when it changes, so a stored legacy value PostgreSQL accepts (e.g. `america/mexico_city`, `UTC+5`) keeps saving.
+  - Other write failures are `500` `event_write_failed` (cause only in the server log).
+  - `POST /api/events/:id/duplicate` reads `shift_dates` (default `true`): the copy's access window and RSVP deadline move with the new date; `false` keeps them exactly as in the source.
+  - New events start with `show_moment_wall=false` (the wall is off until the organizer publishes it).
+  - The dashboard search folds accents (`nandu` finds "Ñandú") over name, address and organizer.
   - `event_type_id` is optional: `null`/`""` stores NULL and responses return `event_type_id: null`.
   - Update: `client_id: null`/`""` keeps the current organization. Moving to another organization needs `event:manage` in both; detaching is rejected with `400`.
   - The paginated list sorts `upcoming`/`today` soonest first and `past`/`all` most recent first (tiebreak `id`).
