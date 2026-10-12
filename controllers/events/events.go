@@ -288,7 +288,7 @@ func ListEvents(c echo.Context) error {
 		}
 		events, err := eventSvc.ListEventsByClientID(clientID)
 		if err != nil {
-			return utils.Error(c, http.StatusInternalServerError, "Error fetching events", err.Error())
+			return respondEventListError(c, err)
 		}
 		return utils.Success(c, http.StatusOK, "Events loaded", eventResponsesWithCoverView(events))
 	}
@@ -297,7 +297,7 @@ func ListEvents(c echo.Context) error {
 	if user.IsPlatformAdmin() {
 		events, err := eventSvc.ListEventsForDashboard()
 		if err != nil {
-			return utils.Error(c, http.StatusInternalServerError, "Error fetching events", err.Error())
+			return respondEventListError(c, err)
 		}
 		return utils.Success(c, http.StatusOK, "Events loaded", eventResponsesWithCoverView(events))
 	}
@@ -309,7 +309,7 @@ func ListEvents(c echo.Context) error {
 	}
 	events, err := eventSvc.ListEventsForUser(*access)
 	if err != nil {
-		return utils.Error(c, http.StatusInternalServerError, "Error fetching events", err.Error())
+		return respondEventListError(c, err)
 	}
 	return utils.Success(c, http.StatusOK, "Events loaded", eventResponsesWithCoverView(events))
 }
@@ -362,7 +362,7 @@ func listEventPage(c echo.Context, user *models.User) error {
 	}
 	events, total, counts, listErr := eventSvc.ListEventPage(clientID, caller, query)
 	if listErr != nil {
-		return utils.Error(c, http.StatusInternalServerError, "Error fetching events", listErr.Error())
+		return respondEventListError(c, listErr)
 	}
 	totalPages := (total + pageSize - 1) / pageSize
 	return utils.Success(c, http.StatusOK, "Events loaded", dtos.EventListPage{
@@ -406,7 +406,7 @@ func GetDashboardOverview(c echo.Context) error {
 
 	overview, err := eventSvc.GetDashboardOverview(clientID, caller, time.Now())
 	if err != nil {
-		return utils.Error(c, http.StatusInternalServerError, "Error fetching dashboard events", err.Error())
+		return respondEventReadError(c, err, "dashboard events")
 	}
 
 	return utils.Success(c, http.StatusOK, "Dashboard loaded", overview)
@@ -437,7 +437,7 @@ func GetEventNotifications(c echo.Context) error {
 	}
 	notifications, listErr := eventSvc.ListEventNotifications(clientID, caller, time.Now())
 	if listErr != nil {
-		return utils.Error(c, http.StatusInternalServerError, "Error fetching event notifications", listErr.Error())
+		return respondEventReadError(c, listErr, "event notifications")
 	}
 	return utils.Success(c, http.StatusOK, "Event notifications loaded", notifications)
 }

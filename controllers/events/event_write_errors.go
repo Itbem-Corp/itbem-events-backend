@@ -2,6 +2,7 @@ package events
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"events-stocks/dtos"
@@ -19,7 +20,26 @@ const (
 	eventErrorNameTaken       = "event_name_taken"
 	eventErrorIdentifierTaken = "event_identifier_taken"
 	eventErrorInvalidTimezone = "invalid_timezone"
+	// eventErrorListFailed is the code of a failed event read (list,
+	// dashboard, notifications). The cause is logged, never returned: driver
+	// errors carry SQL and column names (ROLES-68).
+	eventErrorListFailed = "events_load_failed"
+	// eventErrorWriteFailed: an unexpected create/update/duplicate failure;
+	// the cause is logged only.
+	eventErrorWriteFailed = "event_write_failed"
 )
+
+// respondEventListError answers a failed GET /api/events.
+func respondEventListError(c echo.Context, err error) error {
+	return respondEventReadError(c, err, "events list")
+}
+
+// respondEventReadError logs a failed protected event read and answers a 500
+// with a Spanish message and a stable code, without the internal error.
+func respondEventReadError(c echo.Context, err error, what string) error {
+	slog.Error("event read failed", "read", what, "path", c.Path(), "error", err)
+	return utils.Error(c, http.StatusInternalServerError, "No pudimos cargar los eventos. Intenta de nuevo en unos segundos.", eventErrorListFailed)
+}
 
 // respondEventPayloadError answers a payload that could not be applied to an
 // event: 400 always, with a Spanish message for the cases the form can fix.
@@ -43,7 +63,8 @@ func respondEventWriteError(c echo.Context, err error, fallback string) error {
 	case err != nil && err.Error() == "record not found":
 		return utils.Error(c, http.StatusNotFound, "Evento no encontrado", "")
 	}
-	return utils.Error(c, http.StatusInternalServerError, fallback, err.Error())
+	slog.Error("event write failed", "operation", fallback, "error", err)
+	return utils.Error(c, http.StatusInternalServerError, fallback, eventErrorWriteFailed)
 }
 
 // keepClientWhenCleared treats client_id: null (or "") on an update as
