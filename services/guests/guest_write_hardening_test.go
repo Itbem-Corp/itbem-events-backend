@@ -88,3 +88,82 @@ func TestUpdateGuest_MaxGuestsSyncIgnoresInvitationIDOnUpdatedObject(t *testing.
 	require.NoError(t, err)
 	assert.Equal(t, []uuid.UUID{storedInvitationID}, lookedUp)
 }
+
+// A guest whose stored invitation belongs to another event (a cross-event link
+// left by the old PUT) never syncs max_guests into that invitation; the guest
+// row itself is still saved.
+func TestUpdateGuest_MaxGuestsSyncSkipsInvitationOfAnotherEvent(t *testing.T) {
+	eventID := uuid.Must(uuid.NewV4())
+	foreignInvitationID := uuid.Must(uuid.NewV4())
+	guestID := uuid.Must(uuid.NewV4())
+	guestSaved := false
+	repo := &mockGuestRepo{
+		GetGuestByIDFunc: func(id uuid.UUID) (*models.Guest, error) {
+			return &models.Guest{ID: id, EventID: eventID, InvitationID: &foreignInvitationID, MaxGuests: 1}, nil
+		},
+		UpdateGuestFunc: func(*models.Guest) error { guestSaved = true; return nil },
+	}
+	invitations := &mockInvitationRepo{
+		GetInvitationByIDLiteFunc: func(id uuid.UUID) (*models.Invitation, error) {
+			return &models.Invitation{ID: id, EventID: uuid.Must(uuid.NewV4()), MaxGuests: 2}, nil
+		},
+		UpdateInvitationFunc: func(*models.Invitation) error {
+			t.Fatal("an invitation of another event must not be written")
+			return nil
+		},
+	}
+	svc := newGuestService(repo, nil, nil, nil, invitations)
+
+	err := svc.UpdateGuest(&models.Guest{ID: guestID, EventID: eventID, FirstName: "Ana", InvitationID: &foreignInvitationID, MaxGuests: 9})
+
+	require.NoError(t, err)
+	assert.True(t, guestSaved)
+}
+
+// The regression twin: the guest's own invitation still follows max_guests.
+func TestUpdateGuest_MaxGuestsSyncUpdatesInvitationOfSameEvent(t *testing.T) {
+	eventID := uuid.Must(uuid.NewV4())
+	invitationID := uuid.Must(uuid.NewV4())
+	repo := &mockGuestRepo{
+		GetGuestByIDFunc: func(id uuid.UUID) (*models.Guest, error) {
+			return &models.Guest{ID: id, EventID: eventID, InvitationID: &invitationID, MaxGuests: 1}, nil
+		},
+	}
+	var written []models.Invitation
+	invitations := &mockInvitationRepo{
+		GetInvitationByIDLiteFunc: func(id uuid.UUID) (*models.Invitation, error) {
+			return &models.Invitation{ID: id, EventID: eventID, MaxGuests: 1}, nil
+		},
+		UpdateInvitationFunc: func(invitation *models.Invitation) error { written = append(written, *invitation); return nil },
+	}
+	svc := newGuestService(repo, nil, nil, nil, invitations)
+
+	require.NoError(t, svc.UpdateGuest(&models.Guest{ID: uuid.Must(uuid.NewV4()), EventID: eventID, FirstName: "Ana", MaxGuests: 4}))
+
+	require.Len(t, written, 1)
+	assert.Equal(t, invitationID, written[0].ID)
+	assert.Equal(t, 4, written[0].MaxGuests)
+}
+
+// CreateGuestsWithInvitations owns both references: every guest gets its new
+// invitation and no RSVP token id from the caller.
+func TestCreateGuestsWithInvitations_ClearsCallerReferences(t *testing.T) {
+	accessToken := &mockAccessTokenRepo{
+		GeneratePrettyTokenFunc: func(uuid.UUID, int) (string, error) { return uuid.Must(uuid.NewV4()).String()[:8], nil },
+	}
+	svc := newGuestService(&mockGuestRepo{}, accessToken, nil, nil)
+	foreign := uuid.Must(uuid.NewV4())
+	eventID := uuid.Must(uuid.NewV4())
+	guests := []models.Guest{
+		{EventID: eventID, FirstName: "Ana", InvitationID: &foreign, RSVPTokenID: &foreign},
+		{EventID: eventID, FirstName: "Bob", RSVPTokenID: &foreign},
+	}
+
+	require.NoError(t, svc.CreateGuestsWithInvitations(guests))
+
+	for _, guest := range guests {
+		require.NotNil(t, guest.InvitationID, guest.FirstName)
+		assert.NotEqual(t, foreign, *guest.InvitationID, guest.FirstName)
+		assert.Nil(t, guest.RSVPTokenID, guest.FirstName)
+	}
+}

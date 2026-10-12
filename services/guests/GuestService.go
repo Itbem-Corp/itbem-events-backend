@@ -10,6 +10,7 @@ import (
 	"events-stocks/services/ports"
 	"events-stocks/utils"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -129,8 +130,11 @@ func (s *GuestService) CreateGuestsWithInvitations(guests []models.Guest) error 
 		if guests[i].RSVPGuestCount <= 0 && guests[i].GuestsCount > 0 {
 			guests[i].RSVPGuestCount = guests[i].GuestsCount
 		}
+		// Both references are server-owned: the guest gets its own new
+		// invitation, and its RSVP token is linked later by the RSVP flow.
 		invID := uuid.Must(uuid.NewV4())
 		guests[i].InvitationID = &invID
+		guests[i].RSVPTokenID = nil
 		invitations = append(invitations, models.Invitation{
 			ID:          invID,
 			EventID:     guests[i].EventID,
@@ -457,6 +461,13 @@ func (s *GuestService) updateInvitationMaxGuests(obj *models.Guest, oldGuest *mo
 		return err
 	}
 	if invitation == nil {
+		return nil
+	}
+	// A stored link to another event's invitation (left by older writes) never
+	// lets this event's guest manager change that event's seat count.
+	if invitation.EventID != oldGuest.EventID {
+		slog.Warn("guest invitation belongs to another event; max_guests not synced",
+			"guest_id", oldGuest.ID, "event_id", oldGuest.EventID)
 		return nil
 	}
 	if invitation.MaxGuests == obj.MaxGuests {
