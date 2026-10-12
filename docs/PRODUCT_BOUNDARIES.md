@@ -18,6 +18,12 @@ internal/products/
 Controllers, authorization and services must resolve a product through this
 registry. Do not add `tenant == "..."` branches outside a product definition.
 
+A product may reserve modules for organization Owner/Admin and platform roots
+(`internal/products/<product>/access.go`, read through
+`products.ModuleRequiresOrganizationAdmin`). Only EventiApp does today
+(`metrics`). It is not a `core.Definition` field because definitions mirror the
+pinned product contract.
+
 ## Cache contract
 
 Valkey is shared for efficiency, with explicit namespaces:

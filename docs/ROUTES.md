@@ -48,6 +48,12 @@
 
 ## Protected Routes (`/api`) — Require `Authorization: Bearer <token>`
 
+### Session, audit trail and product metrics
+- `GET /api/session` → `sessions.GetSession` — application session: user, organizations with per-organization `capabilities`, top-level `capabilities`. On EventiApp `metrics:view` appears only on Owner/Admin organizations (direct or inherited) and, top-level, for roots 1/2 or a user with at least one Owner/Admin organization.
+- `POST /api/session/organization-context` → `sessions.IssueOrganizationContext` — issues the 5-minute signed `X-Organization-Context` credential for an organization in the session (403 otherwise). Audit: a successful re-issue for the organization the request already selected (`X-Organization-ID` equal to the body `organization_id`) writes no audit row (`audit.SkipOnSuccess`); switches, 400, 401, 403 and 503 are still audited.
+- `GET /api/audit-logs` → `auditlogs.List` — Root 1 only (`authz.RequirePrimaryRoot`); everyone else gets 403 `Primary platform administrator required`.
+- `GET /api/metrics/portfolio?from=&to=&client_id=` → `productmetrics.Portfolio` — surface gate `metrics:view`. With `client_id`: `analytics:view` on that organization, or `metrics:view` on EventiApp (Owner/Admin or root). Without `client_id`: platform roots only, otherwise 403 `Organization required`. Known gap: summaries with `client_id` are not filtered by tenant.
+
 ### ITBEM delivery control plane
 
 - `GET /api/automation/agents` → `automation.GetAgentDirectory` — v1 snapshot of logical profiles, recent worker instances, assigned active runs, 30-day usage/cost aggregates, and queued counts by operation. Platform admins (Root 1/2) may query platform-wide or filter `client_id`/`project_id`; organization-workspace callers must select a client or project, and client-level data is intersected with their project-view memberships. Organization context and project/client ownership are validated server-side; IDs are not authorization. Scoped aggregates do not mix other clients/projects, and scoped availability is explicitly unknown because worker heartbeats are not hierarchy-owned. The response omits prompts, private object refs, raw usage, hostnames, paths, and credentials. See `docs/AGENT_DIRECTORY.md` for status and identity trust-boundary details.

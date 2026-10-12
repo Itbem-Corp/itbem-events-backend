@@ -44,6 +44,15 @@ Only Owner and Administrator memberships propagate down an organization hierarch
 | Guest manage | Owner, Admin, Event manager, Editor, Member | Guest directory, seating, invitations, RSVP links and exports. This is the boundary for guest PII. |
 | Check-in | Guest-managing roles and Check-in | The check-in workspace and status operations. |
 | Analytics view | Owner, Admin, Event manager, Editor, Member, Analyst | Aggregate event and RSVP metrics. |
+| Metrics view (`metrics:view`) | EventiApp: Owner and Admin (direct or inherited) plus roots 1 and 2. Cafetton House and ITBEM: Owner, Admin, Event manager, Editor, Analyst | Product-metrics portfolio (`GET /api/metrics/portfolio`). Not an event capability: event analytics stay on Analytics view. |
 | Members manage | Owner and Admin | Organization and event-team assignment. |
+
+On EventiApp, `services/applications.applicationOrganizationCapabilities`
+removes `metrics:view` from every organization role except Owner/Admin, so the
+`/api/metrics` surface gate in `middleware/applicationaccess` answers 403
+`Application capability denied`. With `client_id`, the portfolio handler also
+requires `authz.CapabilityMetricsView` on that organization
+(`controllers/productmetrics.authorizePortfolioScope`); other products require
+`analytics:view` there.
 
 An Analyst can read aggregate analytics, but cannot retrieve guest-level data such as emails, invitation tokens, dietary restrictions or exports. A Check-in role can work in the dedicated check-in workspace without gaining access to the complete guest-management surface.
