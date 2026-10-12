@@ -7,6 +7,7 @@ import (
 	"events-stocks/middleware/applicationaccess"
 	"events-stocks/models"
 	"events-stocks/services/applications"
+	"events-stocks/services/clients"
 	"events-stocks/services/users"
 	"events-stocks/utils"
 	"net/http"
@@ -95,6 +96,12 @@ func SetMemberApplication(c echo.Context) error {
 	}
 	if operationalRootCannotManageApplicationTarget(c, currentUser, userID) {
 		return nil
+	}
+	if err := clients.AuthorizeMemberTarget(currentUser, clientID, userID, users.GetUserByID); err != nil {
+		if errors.Is(err, clients.ErrMemberTargetDenied) {
+			return utils.Error(c, http.StatusForbidden, "Permission Denied", err.Error())
+		}
+		return utils.Error(c, http.StatusInternalServerError, "Authorization error", err.Error())
 	}
 	var request struct {
 		IsActive bool `json:"is_active"`
