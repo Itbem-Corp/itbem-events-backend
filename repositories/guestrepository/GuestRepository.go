@@ -9,7 +9,6 @@ import (
 	"events-stocks/repositories/gormrepository"
 	"events-stocks/repositories/gueststatusrepository"
 	"events-stocks/utils"
-	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -17,6 +16,7 @@ import (
 	"github.com/gofrs/uuid"
 	"golang.org/x/sync/errgroup"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var pendingStatusID uuid.UUID
@@ -519,32 +519,68 @@ func BulkDeleteGuests(ids []uuid.UUID) error {
 	return configuration.DB.Where("id IN ?", ids).Delete(&models.Guest{}).Error
 }
 
-func BulkUpdateGuestStatus(eventID uuid.UUID, ids []uuid.UUID, statusID uuid.UUID, rsvpStatus, rsvpMethod string) error {
+var errGuestsOutsideEvent = errors.New("one or more guests do not belong to event")
+
+// TransitionGuestStatuses changes the RSVP state of guests of one event in a
+// single transaction. It locks the guests named by ids (SELECT ... FOR UPDATE,
+// in id order so two concurrent calls cannot deadlock), fails when any id is
+// not a live guest of eventID, lets apply decide each guest's new values from
+// the locked rows and writes back, for the guests apply returns, only the
+// columns guestStatusTransitionValues lists.
+func TransitionGuestStatuses(eventID uuid.UUID, ids []uuid.UUID, apply func(locked []models.Guest) ([]models.Guest, error)) error {
 	if len(ids) == 0 {
 		return nil
 	}
 	return configuration.DB.Transaction(func(tx *gorm.DB) error {
-		var statusCount int64
-		if err := tx.Model(&models.GuestStatus{}).Where("id = ?", statusID).Count(&statusCount).Error; err != nil {
+		var locked []models.Guest
+		if err := lockGuestsForStatusTransition(tx, eventID, ids).Find(&locked).Error; err != nil {
 			return err
 		}
-		if statusCount != 1 {
-			return fmt.Errorf("guest status does not exist")
+		if len(locked) != len(ids) {
+			return errGuestsOutsideEvent
 		}
-		result := tx.Model(&models.Guest{}).
-			Where("event_id = ? AND id IN ?", eventID, ids).
-			Updates(map[string]interface{}{
-				"guest_status_id": statusID,
-				"rsvp_status":     rsvpStatus, "rsvp_method": rsvpMethod,
-			})
-		if result.Error != nil {
-			return result.Error
+		changed, err := apply(locked)
+		if err != nil {
+			return err
 		}
-		if result.RowsAffected != int64(len(ids)) {
-			return fmt.Errorf("one or more guests do not belong to event")
+		for i := range changed {
+			result := tx.Model(&models.Guest{}).
+				Where("id = ? AND event_id = ?", changed[i].ID, eventID).
+				Updates(guestStatusTransitionValues(&changed[i]))
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return errGuestsOutsideEvent
+			}
 		}
 		return nil
 	})
+}
+
+func lockGuestsForStatusTransition(tx *gorm.DB, eventID uuid.UUID, ids []uuid.UUID) *gorm.DB {
+	return tx.Model(&models.Guest{}).
+		Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("event_id = ? AND id IN ?", eventID, ids).
+		Order("id")
+}
+
+// guestStatusTransitionValues is everything a status transition may write;
+// no other guest column is touched. Nil pointers become untyped NULLs.
+func guestStatusTransitionValues(guest *models.Guest) map[string]interface{} {
+	return map[string]interface{}{
+		"guest_status_id": guest.GuestStatusID,
+		"rsvp_status":     guest.RSVPStatus,
+		"rsvp_method":     guest.RSVPMethod,
+		"rsvp_at":         sqlNullable(guest.RSVPAt),
+	}
+}
+
+func sqlNullable[T any](value *T) interface{} {
+	if value == nil {
+		return nil
+	}
+	return *value
 }
 
 // ListAttendeesByEventID returns guests for an event ordered by display order.
@@ -598,8 +634,8 @@ func (r *GuestRepo) GetGuestByInvitationID(id uuid.UUID) (*models.Guest, error) 
 func (r *GuestRepo) CreateGuests(guests []models.Guest) error { return CreateGuests(guests) }
 func (r *GuestRepo) GetPendingStatusID() uuid.UUID            { return GetPendingStatusID() }
 func (r *GuestRepo) BulkDeleteGuests(ids []uuid.UUID) error   { return BulkDeleteGuests(ids) }
-func (r *GuestRepo) BulkUpdateGuestStatus(eventID uuid.UUID, ids []uuid.UUID, statusID uuid.UUID, rsvpStatus, rsvpMethod string) error {
-	return BulkUpdateGuestStatus(eventID, ids, statusID, rsvpStatus, rsvpMethod)
+func (r *GuestRepo) TransitionGuestStatuses(eventID uuid.UUID, ids []uuid.UUID, apply func(locked []models.Guest) ([]models.Guest, error)) error {
+	return TransitionGuestStatuses(eventID, ids, apply)
 }
 func (r *GuestRepo) ListGuestsByEventID(eventID uuid.UUID) ([]models.Guest, error) {
 	return ListGuestsByEventID(eventID)

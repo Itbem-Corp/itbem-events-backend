@@ -495,22 +495,84 @@ func (s *GuestService) BulkDeleteGuests(ids []uuid.UUID) error {
 	return s.invalidateGuestsCacheForEvents(eventIDs)
 }
 
-type bulkGuestStatusRepository interface {
-	BulkUpdateGuestStatus(eventID uuid.UUID, ids []uuid.UUID, statusID uuid.UUID, rsvpStatus, rsvpMethod string) error
+// guestStatusTransitionRepository locks guests of one event, lets apply pick
+// their new RSVP values and writes back the guests apply returns, atomically
+// (guestrepository.TransitionGuestStatuses).
+type guestStatusTransitionRepository interface {
+	TransitionGuestStatuses(eventID uuid.UUID, ids []uuid.UUID, apply func(locked []models.Guest) ([]models.Guest, error)) error
 }
 
+// guestStatusStep moves one locked guest and reports whether it must be
+// written; an error aborts the whole transition.
+type guestStatusStep func(guest *models.Guest, now time.Time) (write bool, err error)
+
+// BulkUpdateGuestStatus moves each guest to statusID and rsvpStatus with the
+// bookkeeping of a single PUT /guests/:id: rsvp_at is stamped only when the
+// guest's RSVP status changes and the RSVP analytics follow each guest's move.
+// The caller makes sure statusID's code is rsvpStatus.
 func (s *GuestService) BulkUpdateGuestStatus(eventID uuid.UUID, ids []uuid.UUID, statusID uuid.UUID, rsvpStatus, rsvpMethod string) error {
+	return s.transitionGuestStatuses(eventID, ids, func(guest *models.Guest, now time.Time) (bool, error) {
+		setGuestRSVP(guest, statusID, rsvpStatus, rsvpMethod, now)
+		return true, nil
+	})
+}
+
+// transitionGuestStatuses runs step on every guest of eventID named by ids in
+// one locked transaction, then counts the RSVP analytics of the guests that
+// moved (only after the commit) and drops their caches.
+func (s *GuestService) transitionGuestStatuses(eventID uuid.UUID, ids []uuid.UUID, step guestStatusStep) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	repo, ok := s.repo.(bulkGuestStatusRepository)
+	repo, ok := s.repo.(guestStatusTransitionRepository)
 	if !ok {
-		return fmt.Errorf("bulk guest status repository unavailable")
+		return fmt.Errorf("guest status transition repository unavailable")
 	}
-	if err := repo.BulkUpdateGuestStatus(eventID, ids, statusID, rsvpStatus, rsvpMethod); err != nil {
+	type rsvpMove struct{ from, to string }
+	var moves []rsvpMove
+	now := time.Now()
+	err := repo.TransitionGuestStatuses(eventID, ids, func(locked []models.Guest) ([]models.Guest, error) {
+		moves = moves[:0]
+		changed := make([]models.Guest, 0, len(locked))
+		for i := range locked {
+			from := locked[i].RSVPStatus
+			write, err := step(&locked[i], now)
+			if err != nil {
+				return nil, err
+			}
+			if write {
+				changed = append(changed, locked[i])
+				moves = append(moves, rsvpMove{from: from, to: locked[i].RSVPStatus})
+			}
+		}
+		return changed, nil
+	})
+	if err != nil {
 		return err
 	}
+	for _, move := range moves {
+		trackRSVPAnalyticsTransition(eventID, move.from, move.to)
+	}
+	if s.cache != nil {
+		for _, id := range ids {
+			_ = s.cache.Invalidate("guests", id.String())
+		}
+	}
 	return s.invalidateGuestsCacheForEvent(eventID)
+}
+
+// setGuestRSVP writes a host-side RSVP: both status columns, rsvp_status and
+// rsvp_method, and a fresh rsvp_at only when the RSVP status changes (the rule
+// syncRSVPMetadata applies to single updates).
+func setGuestRSVP(guest *models.Guest, statusID uuid.UUID, rsvpStatus, rsvpMethod string, now time.Time) {
+	if normalizeRSVPStatus(guest.RSVPStatus) != normalizeRSVPStatus(rsvpStatus) {
+		stamped := now
+		guest.RSVPAt = &stamped
+	}
+	guest.GuestStatusID = statusID
+	guest.StatusID = statusID
+	guest.RSVPStatus = rsvpStatus
+	guest.RSVPMethod = rsvpMethod
 }
 
 func (s *GuestService) ListGuestsByEventID(eventID uuid.UUID) ([]models.Guest, error) {

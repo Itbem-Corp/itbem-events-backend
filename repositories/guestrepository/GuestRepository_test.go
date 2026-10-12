@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"events-stocks/dtos"
+	"events-stocks/models"
 	"github.com/gofrs/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -193,4 +194,45 @@ func TestCheckinGuestsQuery_QRIgnoresSearch(t *testing.T) {
 	assert.Contains(t, where, "invitation_access_tokens.pretty_token = $")
 	assert.NotContains(t, where, " like ")
 	assert.Contains(t, vars, "PRETTY42")
+}
+
+func TestLockGuestsForStatusTransitionLocksLiveGuestsOfTheEventInIDOrder(t *testing.T) {
+	db, err := gorm.Open(postgres.Open("host=localhost user=test dbname=test sslmode=disable"), &gorm.Config{
+		DryRun:               true,
+		DisableAutomaticPing: true,
+	})
+	require.NoError(t, err)
+
+	eventID := uuid.Must(uuid.NewV4())
+	ids := []uuid.UUID{uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())}
+	var guests []models.Guest
+	stmt := lockGuestsForStatusTransition(db, eventID, ids).Find(&guests).Statement
+	sqlText := strings.ToLower(strings.Join(strings.Fields(stmt.SQL.String()), " "))
+
+	assert.Contains(t, sqlText, "from \"guests\"")
+	assert.Contains(t, sqlText, "event_id = $1 and id in ($2,$3)")
+	assert.Contains(t, sqlText, "\"guests\".\"deleted_at\" is null")
+	assert.Contains(t, sqlText, "order by id")
+	assert.True(t, strings.HasSuffix(sqlText, "for update"), sqlText)
+	assert.Equal(t, []interface{}{eventID, ids[0], ids[1]}, stmt.Vars)
+}
+
+func TestGuestStatusTransitionValuesWritesOnlyRSVPColumnsWithSQLNulls(t *testing.T) {
+	statusID := uuid.Must(uuid.NewV4())
+	guest := models.Guest{
+		ID: uuid.Must(uuid.NewV4()), FirstName: "Ana", Email: "ana@example.com",
+		GuestStatusID: statusID, RSVPStatus: "pending", RSVPMethod: "host",
+	}
+
+	values := guestStatusTransitionValues(&guest)
+
+	assert.Equal(t, statusID, values["guest_status_id"])
+	assert.Equal(t, "pending", values["rsvp_status"])
+	assert.Equal(t, "host", values["rsvp_method"])
+	rsvpAt, present := values["rsvp_at"]
+	assert.True(t, present)
+	assert.Nil(t, rsvpAt, "a nil pointer must reach the driver as an untyped NULL")
+	for _, column := range []string{"first_name", "email", "event_id", "id", "table_id"} {
+		assert.NotContains(t, values, column)
+	}
 }

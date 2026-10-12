@@ -60,9 +60,7 @@ func setAuthzContext(t *testing.T, c echo.Context, eventID uuid.UUID, guest *mod
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
 
-type mockGuestRepo struct {
-	bulkUpdateGuestStatusFunc func(eventID uuid.UUID, ids []uuid.UUID, statusID uuid.UUID, rsvpStatus, rsvpMethod string) error
-}
+type mockGuestRepo struct{}
 
 func (m *mockGuestRepo) CreateGuest(obj *models.Guest) error              { return nil }
 func (m *mockGuestRepo) UpdateGuest(g *models.Guest) error                { return nil }
@@ -70,12 +68,6 @@ func (m *mockGuestRepo) DeleteGuest(id uuid.UUID) error                   { retu
 func (m *mockGuestRepo) GetGuestByID(id uuid.UUID) (*models.Guest, error) { return nil, nil }
 func (m *mockGuestRepo) CreateGuests(guests []models.Guest) error         { return nil }
 func (m *mockGuestRepo) BulkDeleteGuests(ids []uuid.UUID) error           { return nil }
-func (m *mockGuestRepo) BulkUpdateGuestStatus(eventID uuid.UUID, ids []uuid.UUID, statusID uuid.UUID, rsvpStatus, rsvpMethod string) error {
-	if m.bulkUpdateGuestStatusFunc != nil {
-		return m.bulkUpdateGuestStatusFunc(eventID, ids, statusID, rsvpStatus, rsvpMethod)
-	}
-	return nil
-}
 func (m *mockGuestRepo) ListGuestsByEventID(eventID uuid.UUID) ([]models.Guest, error) {
 	return nil, nil
 }
@@ -1043,21 +1035,7 @@ func TestBulkUpdateGuestStatus_UpdatesSelectionInOneServiceCall(t *testing.T) {
 	stubGuestStatusLookup(t, catalog)
 	statusID := catalog.confirmed.ID
 	guestIDs := []uuid.UUID{uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())}
-	var capturedIDs []uuid.UUID
-	repo := &mockGuestRepo{
-		bulkUpdateGuestStatusFunc: func(gotEventID uuid.UUID, ids []uuid.UUID, gotStatusID uuid.UUID, rsvpStatus, rsvpMethod string) error {
-			assert.Equal(t, eventID, gotEventID)
-			assert.Equal(t, statusID, gotStatusID)
-			assert.Equal(t, "confirmed", rsvpStatus)
-			assert.Equal(t, "host", rsvpMethod)
-			capturedIDs = append([]uuid.UUID(nil), ids...)
-			return nil
-		},
-	}
-	svc := guestsService.NewGuestService(repo, &mockTokenRepo{}, &mockCacheRepo{}, &mockTransactor{})
-	orig := guestSvc
-	guestSvc = svc
-	defer func() { guestSvc = orig }()
+	store := useBulkStatusStore(t)
 
 	body := `{"event_id":"` + eventID.String() + `","ids":["` + guestIDs[0].String() + `","` + guestIDs[1].String() + `"],"status_id":"` + statusID.String() + `","rsvp_status":"confirmed","rsvp_method":"host"}`
 	c, rec := newEchoCtx(http.MethodPatch, "/guests/bulk/status", body)
@@ -1065,7 +1043,10 @@ func TestBulkUpdateGuestStatus_UpdatesSelectionInOneServiceCall(t *testing.T) {
 
 	require.NoError(t, BulkUpdateGuestStatus(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, guestIDs, capturedIDs)
+	assert.Equal(t, 1, store.writes())
+	for _, id := range guestIDs {
+		assertGuestRSVP(t, store.get(id), catalog.confirmed, "confirmed", "host")
+	}
 }
 
 // ── GetAttendees ──────────────────────────────────────────────────────────────

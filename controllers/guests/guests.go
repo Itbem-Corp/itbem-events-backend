@@ -1026,22 +1026,6 @@ func BulkDeleteGuests(c echo.Context) error {
 
 const bulkCheckinOnlyDetail = "Without guest:manage only check-in is allowed: rsvp_status confirmed with the confirmed guest status"
 
-// isBulkCheckinTransition reports whether a bulk status change is the door
-// check-in: rsvp_status confirmed through the catalog status whose code is
-// confirmed (rsvp_method is already forced to host). Check-in has no column of
-// its own, so an undo to pending or a decline cannot be told apart from
-// rewriting the guest's own RSVP; those need guest:manage.
-func isBulkCheckinTransition(statusID uuid.UUID, rsvpStatus string) (bool, error) {
-	if rsvpStatus != "confirmed" {
-		return false, nil
-	}
-	status, err := guestStatusByID(statusID)
-	if err != nil {
-		return false, err
-	}
-	return status != nil && strings.EqualFold(strings.TrimSpace(status.Code), "confirmed"), nil
-}
-
 // PATCH /guests/bulk/status — checkin:run on event_id. Callers that also hold
 // guest:manage may set any status; checkin:run alone may only check guests in.
 func BulkUpdateGuestStatus(c echo.Context) error {
@@ -1098,14 +1082,23 @@ func BulkUpdateGuestStatus(c echo.Context) error {
 		seen[id] = struct{}{}
 		ids = append(ids, id)
 	}
-	checkin, err := isBulkCheckinTransition(statusID, rsvpStatus)
+	status, err := guestStatusByID(statusID)
+	if errors.Is(err, gorm.ErrRecordNotFound) || (err == nil && status == nil) {
+		return utils.Error(c, http.StatusBadRequest, "Invalid status_id", "guest status does not exist")
+	}
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return utils.Error(c, http.StatusBadRequest, "Invalid status_id", "guest status does not exist")
-		}
 		return utils.Error(c, http.StatusInternalServerError, "Error loading guest status", err.Error())
 	}
-	if !checkin {
+	// Both columns describe one RSVP state; a status_id whose code is not
+	// rsvp_status would leave the guest list and the check-in counts (which
+	// read rsvp_status first) disagreeing with the status shown elsewhere.
+	if strings.ToLower(strings.TrimSpace(status.Code)) != rsvpStatus {
+		return utils.Error(c, http.StatusBadRequest, "status_id does not match rsvp_status", "the guest status code must equal rsvp_status")
+	}
+	// The door check-in (confirmed) needs only checkin:run. Check-in has no
+	// column of its own, so any other change could rewrite the guest's own
+	// RSVP and needs guest:manage.
+	if rsvpStatus != "confirmed" {
 		if _, _, authErr := authz.RequireEventCapability(c, eventID, authz.CapabilityGuestManage); authErr != nil {
 			var failure *authz.Failure
 			if errors.As(authErr, &failure) && failure.Status == http.StatusForbidden {
