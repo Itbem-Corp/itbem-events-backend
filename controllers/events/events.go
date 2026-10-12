@@ -460,7 +460,10 @@ func GetEvent(c echo.Context) error {
 	return utils.Success(c, http.StatusOK, "Event loaded", response)
 }
 
-// GET /events/:key
+// GET /api/events/:key (public group). Anonymous read of one event by UUID or
+// identifier, behind the same gate as /meta: active, access window, password
+// proof, then public or invitation token (a preview token bypasses all of it).
+// It returns the minimal PublicEventResponse, never the dashboard EventResponse.
 func GetEvents(c echo.Context) error {
 	keyParam := c.Param("key")
 	if keyParam == "" {
@@ -481,7 +484,7 @@ func GetEvents(c echo.Context) error {
 		}
 		return utils.Error(c, http.StatusNotFound, "Event not found", detail)
 	}
-	allowed, err := allowPublicEventRead(event, utils.PublicPreviewToken(c), utils.PublicInvitationQueryToken(c))
+	allowed, err := allowPublicEventReadWithProof(c, event)
 	if err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Error loading event config", err.Error())
 	}
@@ -489,7 +492,29 @@ func GetEvents(c echo.Context) error {
 		return utils.Error(c, http.StatusForbidden, "Event is not public", "")
 	}
 
-	return utils.Success(c, http.StatusOK, "Event loaded", []dtos.EventResponse{eventResponseWithCoverView(event)})
+	// The array envelope is the legacy shape of this route; keep it.
+	return utils.Success(c, http.StatusOK, "Event loaded", []dtos.PublicEventResponse{publicEventResponse(event)})
+}
+
+func publicEventResponse(event *models.Event) dtos.PublicEventResponse {
+	coverURL, coverURLExpiresAt := coverViewURLWithExpiry(event.CoverImageURL, event.MediaBucket)
+	return dtos.PublicEventResponse{
+		ID:                    event.ID,
+		Name:                  event.Name,
+		Identifier:            event.Identifier,
+		Description:           event.Description,
+		CoverImageURL:         event.CoverImageURL,
+		CoverViewURL:          coverURL,
+		CoverViewURLExpiresAt: coverURLExpiresAt,
+		ViewURL:               coverURL,
+		ViewURLExpiresAt:      coverURLExpiresAt,
+		EventDateTime:         event.EventDateTime,
+		Address:               event.Address,
+		SecondAddress:         event.SecondAddress,
+		Timezone:              event.Timezone,
+		Language:              event.Language,
+		OrganizerName:         event.OrganizerName,
+	}
 }
 
 func loadPublicEventByKey(key string) (*models.Event, error) {
@@ -857,7 +882,7 @@ func GetEventMeta(c echo.Context) error {
 	if err != nil || event == nil {
 		return utils.Error(c, http.StatusNotFound, "Event not found", "")
 	}
-	allowed, err := allowPublicEventMetaRead(c, event)
+	allowed, err := allowPublicEventReadWithProof(c, event)
 	if err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Error loading event config", err.Error())
 	}
@@ -910,7 +935,10 @@ func allowPublicEventRead(event *models.Event, previewToken, invitationToken str
 	}))
 }
 
-func allowPublicEventMetaRead(c echo.Context, event *models.Event) (bool, error) {
+// allowPublicEventReadWithProof is the gate for anonymous reads of event data
+// (/meta and the bare /events/:key): it also requires the verify-access proof
+// (X-Event-Access-Token or event_access_token) for password-protected events.
+func allowPublicEventReadWithProof(c echo.Context, event *models.Event) (bool, error) {
 	if event == nil {
 		return false, nil
 	}
