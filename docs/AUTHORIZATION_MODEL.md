@@ -20,7 +20,7 @@ Historical `is_root=true` accounts are treated as level 1 until explicitly migra
 | Administrator | Members below owner, organization operations, all events. |
 | Event manager | Create and operate events, guests, check-in and analytics. |
 | Editor | Edit event and guest content. |
-| Check-in | Check-in and RSVP operations only. |
+| Check-in | Check-in operations only; it can mark guests confirmed at the door and undo door check-ins, but cannot otherwise rewrite a guest's RSVP (not the guest's own answer, not an organizer's confirmation). |
 | Analyst | Read event and guest analytics only. |
 | Member | Standard event collaboration. |
 | Viewer | Read-only access. |
@@ -47,8 +47,19 @@ Only Owner and Administrator memberships propagate down an organization hierarch
 | Event manage | Owner, Admin, Event manager, Editor | Event configuration, sections, media and moments. |
 | Event delete | Owner, Admin | Deleting events. |
 | Guest manage | Owner, Admin, Event manager, Editor, Member | Guest directory, seating, invitations, RSVP links and exports. This is the boundary for guest PII. |
-| Check-in | Owner, Admin, Event manager, Check-in | The check-in workspace and status operations. |
+| Check-in | Guest-managing roles and Check-in | The check-in workspace and the check-in status operation. Its reads return the door projection (`dtos.CheckinGuest`, see below), never the full guest record. Without Guest manage, `PATCH /api/guests/bulk/status` only marks guests confirmed (the door check-in, with or without `action: checkin`) and, with `action: undo_checkin`, gives a door-checked-in guest back the RSVP they had before. Only door check-ins record provenance and can be undone: a guest manager's confirmation without `action: checkin` (the guests panel's bulk Confirmar, or `PUT /api/guests/:id`) and the guest's own confirmation answer 409, and declining or any other RSVP rewrite needs Guest manage. |
 | Analytics view | Owner, Admin, Event manager, Editor, Analyst | Aggregate event and RSVP metrics. |
 | Members manage | Owner and Admin (and both platform-root levels) | Organization and event-team assignment, limited to members ranked below the actor (see Delegation invariants). |
 
 An Analyst can read aggregate analytics, but cannot retrieve guest-level data such as emails, invitation tokens, dietary restrictions or exports. A Check-in role can work in the dedicated check-in workspace without gaining access to the complete guest-management surface.
+
+View access never includes the event access password or a guest's invitation token, and Check-in never includes guest contact data, notes or tokens. Read routes that would carry them either require the capability, redact the field or return a narrower projection:
+
+| Payload | Rule |
+| --- | --- |
+| `GET /events/:id/config`, `GET /events/:id/studio-workspace` (full config with `auth_password_preview`) | Require Event manage. |
+| `GET /events/:id/seating-workspace` (guest emails and RSVP state) | Requires Guest manage. |
+| `GET /events/:id/detail` | View access; `auth_password_preview` is blanked without Event manage and `guest_share_summary.first_pending` (email and invitation token) is omitted without Guest manage. A failed capability lookup redacts. |
+| `GET /events/:id/checkin-workspace`, `GET /guests/checkin:<event>` | Require Check-in and return the door projection (`dtos.CheckinGuest`): name, table, party size and RSVP status only, plus `checked_in_at` while a door check-in is in place (so the page knows which guests it may undo; who checked them in and the previous RSVP stay server-side). No email, phone, notes, dietary restrictions or invitation/RSVP token, for any caller. A QR scan is resolved on the server (`qr` query). The `search` query matches name and table by substring but email and phone only by their complete value, so which guests match never reveals part of a contact field. |
+
+The role lists in the capability table above describe intent. The enforced role-to-capability mapping is `roleHasCapability` and `eventRoleHasCapability` in `internal/authz/authz.go`, which `GET /events/:id/capabilities` and the dashboard follow.

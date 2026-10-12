@@ -124,6 +124,15 @@ func (s *MomentService) GetMomentByID(id uuid.UUID) (*models.Moment, error) {
 	return s.repo.GetMomentByID(id)
 }
 
+// GetMomentsByIDs loads several moments in one query; ids that do not exist are
+// simply absent from the result.
+func (s *MomentService) GetMomentsByIDs(ids []uuid.UUID) ([]models.Moment, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	return s.repo.GetMomentsByIDs(ids)
+}
+
 func (s *MomentService) GetMomentByEventIDAndContentURL(eventID uuid.UUID, contentURL string) (*models.Moment, error) {
 	return s.repo.GetMomentByEventIDAndContentURL(eventID, strings.TrimSpace(contentURL))
 }
@@ -418,6 +427,40 @@ func validateMediaCallbackKeys(moment *models.Moment, status, objectKey, thumbna
 		return fmt.Errorf("%w: final object key does not belong to moment/event", ErrInvalidMomentProcessingCallback)
 	}
 	return nil
+}
+
+// IsEventMomentKey reports whether key is a storage key of eventID's moments:
+// moments/<eventID>/<something>, bare or under an organization namespace
+// (organizations/<uuid>/), the layouts ValidateMomentRawKey and the processing
+// callbacks produce. Absolute URLs, other prefixes or namespaces, ".." and
+// backslashes are rejected, so a key that passes can only be presigned for an
+// object of this event.
+func IsEventMomentKey(eventID uuid.UUID, key string) bool {
+	key = strings.TrimSpace(key)
+	if eventID == uuid.Nil || key == "" || strings.Contains(key, "..") || strings.Contains(key, `\`) {
+		return false
+	}
+	namespace := storagekeys.Namespace(key)
+	if namespace != "" && !isOrganizationNamespace(namespace) {
+		return false
+	}
+	prefix := "moments/" + eventID.String() + "/"
+	rest := strings.TrimPrefix(key, namespace)
+	return strings.HasPrefix(rest, prefix) && len(rest) > len(prefix)
+}
+
+// isOrganizationNamespace accepts exactly organizations/<canonical uuid>/.
+func isOrganizationNamespace(namespace string) bool {
+	id, ok := strings.CutPrefix(namespace, "organizations/")
+	if !ok {
+		return false
+	}
+	id, ok = strings.CutSuffix(id, "/")
+	if !ok {
+		return false
+	}
+	parsed, err := uuid.FromString(id)
+	return err == nil && parsed != uuid.Nil && parsed.String() == id
 }
 
 func normalizeMomentProcessingStatus(value string) (string, error) {

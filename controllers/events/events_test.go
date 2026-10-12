@@ -11,6 +11,7 @@ import (
 	customValidator "events-stocks/middleware/validator"
 	"events-stocks/models"
 	eventsService "events-stocks/services/events"
+	guestsService "events-stocks/services/guests"
 	"events-stocks/services/ports"
 	resourcesService "events-stocks/services/resources"
 	"io"
@@ -312,6 +313,212 @@ func (m *mockEventAnalyticsRepo) AdjustEventAnalytics(eventID uuid.UUID, field s
 var _ ports.EventAnalyticsRepository = (*mockEventAnalyticsRepo)(nil)
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
+
+// detailAuth describes the caller seen by the authz hooks for GET
+// /events/:id/detail: an organization role, an optional event assignment that
+// may narrow it, or a platform level.
+type detailAuth struct {
+	orgRole       string
+	eventRole     string
+	rootLevel     int
+	memberRoleErr error
+}
+
+func setDetailAuth(t *testing.T, c echo.Context, auth detailAuth) {
+	t.Helper()
+	userID := uuid.Must(uuid.NewV4())
+	clientID := uuid.Must(uuid.NewV4())
+	c.Set("cognito_sub", "test-sub")
+	restore := authz.ReplaceHooksForTest(authz.Hooks{
+		SyncUser: func(string) (*models.User, error) {
+			return &models.User{ID: userID, RootLevel: auth.rootLevel}, nil
+		},
+		GetEventByIDRaw: func(id uuid.UUID) (*models.Event, error) {
+			return &models.Event{ID: id, ClientID: &clientID, Name: "Boda QA", IsActive: true}, nil
+		},
+		CheckAccessRecursive: func(gotUserID, gotClientID uuid.UUID) (bool, string) {
+			if gotUserID != userID || gotClientID != clientID || auth.orgRole == "" {
+				return false, ""
+			}
+			return true, auth.orgRole
+		},
+		GetEventMemberRole: func(uuid.UUID, uuid.UUID) (string, bool, error) {
+			if auth.memberRoleErr != nil {
+				return "", false, auth.memberRoleErr
+			}
+			return auth.eventRole, auth.eventRole != "", nil
+		},
+	})
+	t.Cleanup(restore)
+}
+
+// detailGuestRepo serves the dashboard summaries only; the embedded interface
+// is left nil because GetEvent must not call any other guest method.
+type detailGuestRepo struct {
+	ports.GuestRepository
+}
+
+const (
+	detailEventPassword = "clave-del-evento"
+	detailGuestEmail    = "pendiente@example.com"
+	detailGuestToken    = "PRETTYTOKEN123"
+)
+
+func (m *detailGuestRepo) GetGuestDashboardSummariesByEventID(uuid.UUID) (dtos.GuestSummary, dtos.GuestShareSummary, error) {
+	return dtos.GuestSummary{Total: 3, Confirmed: 1, Pending: 2},
+		dtos.GuestShareSummary{
+			Total:            3,
+			WithEmail:        2,
+			PendingWithEmail: 1,
+			FirstPending: &dtos.GuestShareRecipient{
+				ID:          uuid.Must(uuid.NewV4()),
+				FirstName:   "Pendiente",
+				Email:       detailGuestEmail,
+				PrettyToken: detailGuestToken,
+			},
+		}, nil
+}
+
+type eventDetailBody struct {
+	EventConfig       map[string]interface{} `json:"event_config"`
+	Config            map[string]interface{} `json:"config"`
+	GuestShareSummary map[string]interface{} `json:"guest_share_summary"`
+	GuestSummary      map[string]interface{} `json:"guest_summary"`
+}
+
+func runEventDetail(t *testing.T, auth detailAuth) (*httptest.ResponseRecorder, eventDetailBody) {
+	t.Helper()
+	previousConfigSvc := eventConfigSvc
+	previousGuestSvc := eventGuestSvc
+	t.Cleanup(func() {
+		eventConfigSvc = previousConfigSvc
+		eventGuestSvc = previousGuestSvc
+		eventsService.SetDefaultEventSectionService(nil)
+	})
+
+	eventID := uuid.Must(uuid.NewV4())
+	eventConfigSvc = eventsService.NewEventConfigService(&mockEventConfigRepo{cfg: &models.EventConfig{
+		ID:                  eventID,
+		IsAuthPreview:       true,
+		AuthPasswordPreview: detailEventPassword,
+		AllowUploads:        true,
+		AutoApproveUploads:  true,
+	}}, &mockCacheRepo{})
+	eventGuestSvc = guestsService.NewGuestService(&detailGuestRepo{}, nil, nil, nil)
+	eventsService.SetDefaultEventSectionService(eventsService.NewEventSectionService(&mockEventSectionRepo{}, &mockCacheRepo{}))
+
+	c, rec := newEchoCtx(http.MethodGet, "/events/"+eventID.String()+"/detail", "")
+	c.SetParamNames("id")
+	c.SetParamValues(eventID.String())
+	setDetailAuth(t, c, auth)
+
+	require.NoError(t, GetEvent(c))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var body struct {
+		Data eventDetailBody `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.NotNil(t, body.Data.EventConfig)
+	require.NotNil(t, body.Data.Config)
+	require.NotNil(t, body.Data.GuestShareSummary, "the share summary object stays so the dashboard keeps caching the workspace")
+	return rec, body.Data
+}
+
+// GET /events/:id/detail is open to every event viewer, so the event access
+// password (event:manage) and the first pending guest's invitation token
+// (guest:manage) are only included for callers holding those capabilities.
+func TestGetEvent_DetailRedactsSecretsByCapability(t *testing.T) {
+	cases := map[string]struct {
+		auth          detailAuth
+		seesPassword  bool
+		seesRecipient bool
+	}{
+		"viewer org role":               {auth: detailAuth{orgRole: "Guest"}},
+		"analyst org role":              {auth: detailAuth{orgRole: "ANALYST"}},
+		"check-in org role":             {auth: detailAuth{orgRole: "CHECKIN"}},
+		"member org role":               {auth: detailAuth{orgRole: "Member"}, seesRecipient: true},
+		"editor narrowed to viewer":     {auth: detailAuth{orgRole: "EDITOR", eventRole: "VIEWER"}},
+		"operational platform root (2)": {auth: detailAuth{rootLevel: models.RootLevelOperational}, seesRecipient: true},
+		"editor org role":               {auth: detailAuth{orgRole: "EDITOR"}, seesPassword: true, seesRecipient: true},
+		"event manager org role":        {auth: detailAuth{orgRole: "EVENT_MANAGER"}, seesPassword: true, seesRecipient: true},
+		"owner org role":                {auth: detailAuth{orgRole: "Owner"}, seesPassword: true, seesRecipient: true},
+		"primary platform root (1)":     {auth: detailAuth{rootLevel: models.RootLevelPrimary}, seesPassword: true, seesRecipient: true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			rec, data := runEventDetail(t, tc.auth)
+			raw := rec.Body.String()
+
+			// Fields every viewer relies on stay untouched.
+			assert.Equal(t, true, data.EventConfig["is_auth_preview"])
+			assert.Equal(t, true, data.EventConfig["auto_approve_uploads"])
+			assert.Equal(t, float64(3), data.GuestShareSummary["total"])
+			assert.Equal(t, float64(1), data.GuestShareSummary["pending_with_email"])
+			assert.Equal(t, float64(2), data.GuestSummary["pending"])
+
+			if tc.seesPassword {
+				assert.Equal(t, detailEventPassword, data.EventConfig["auth_password_preview"])
+				assert.Equal(t, detailEventPassword, data.Config["auth_password_preview"])
+			} else {
+				assert.Equal(t, "", data.EventConfig["auth_password_preview"])
+				assert.Equal(t, "", data.Config["auth_password_preview"])
+				assert.NotContains(t, raw, detailEventPassword)
+			}
+
+			if tc.seesRecipient {
+				recipient, ok := data.GuestShareSummary["first_pending"].(map[string]interface{})
+				require.True(t, ok, "first_pending must be present")
+				assert.Equal(t, detailGuestEmail, recipient["email"])
+				assert.Equal(t, detailGuestToken, recipient["pretty_token"])
+			} else {
+				assert.NotContains(t, data.GuestShareSummary, "first_pending")
+				assert.NotContains(t, raw, detailGuestEmail)
+				assert.NotContains(t, raw, detailGuestToken)
+			}
+		})
+	}
+}
+
+func TestGetEvent_DetailFailsClosedWhenCapabilityLookupErrors(t *testing.T) {
+	rec, data := runEventDetail(t, detailAuth{orgRole: "EDITOR", memberRoleErr: errors.New("event member lookup unavailable")})
+	raw := rec.Body.String()
+
+	assert.Equal(t, "", data.EventConfig["auth_password_preview"])
+	assert.Equal(t, "", data.Config["auth_password_preview"])
+	assert.NotContains(t, data.GuestShareSummary, "first_pending")
+	assert.NotContains(t, raw, detailEventPassword)
+	assert.NotContains(t, raw, detailGuestToken)
+}
+
+// The capability checks run off the request goroutine; a panicking authz
+// dependency must surface on the request goroutine (where Echo's recovery
+// middleware can contain it) instead of crashing the process.
+func TestGetEvent_DetailRepanicsCapabilityPanicOnRequestGoroutine(t *testing.T) {
+	previousConfigSvc := eventConfigSvc
+	previousGuestSvc := eventGuestSvc
+	t.Cleanup(func() {
+		eventConfigSvc = previousConfigSvc
+		eventGuestSvc = previousGuestSvc
+		eventsService.SetDefaultEventSectionService(nil)
+	})
+	eventID := uuid.Must(uuid.NewV4())
+	eventConfigSvc = eventsService.NewEventConfigService(&mockEventConfigRepo{cfg: &models.EventConfig{ID: eventID}}, &mockCacheRepo{})
+	eventGuestSvc = guestsService.NewGuestService(&detailGuestRepo{}, nil, nil, nil)
+	eventsService.SetDefaultEventSectionService(eventsService.NewEventSectionService(&mockEventSectionRepo{}, &mockCacheRepo{}))
+
+	c, _ := newEchoCtx(http.MethodGet, "/events/"+eventID.String()+"/detail", "")
+	c.SetParamNames("id")
+	c.SetParamValues(eventID.String())
+	setDetailAuth(t, c, detailAuth{orgRole: "EDITOR"})
+	restore := authz.ReplaceHooksForTest(authz.Hooks{
+		GetEventMemberRole: func(uuid.UUID, uuid.UUID) (string, bool, error) {
+			panic("event member lookup exploded")
+		},
+	})
+	t.Cleanup(restore)
+
+	assert.PanicsWithValue(t, "event member lookup exploded", func() { _ = GetEvent(c) })
+}
 
 func TestGetPageSpec_ExpiredTokenReturns401(t *testing.T) {
 	t.Cleanup(func() {
