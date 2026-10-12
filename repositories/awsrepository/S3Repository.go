@@ -335,20 +335,25 @@ func CheckS3ObjectExists(ctx context.Context, key, bucket string) (bool, error) 
 	})
 
 	if err != nil {
-		var apiErr smithy.APIError
-		if errors.As(err, &apiErr) {
-			switch apiErr.ErrorCode() {
-			case "NotFound", "NoSuchKey", "NoSuchObject":
-				return false, nil
-			}
-		}
-		var statusErr interface{ HTTPStatusCode() int }
-		if errors.As(err, &statusErr) && statusErr.HTTPStatusCode() == http.StatusNotFound {
+		if isS3ObjectNotFound(err) {
 			return false, nil
 		}
 		return false, wrapStorageError("check object", err)
 	}
 	return true, nil
+}
+
+// isS3ObjectNotFound reports a missing object on HeadObject/GetObject.
+func isS3ObjectNotFound(err error) bool {
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.ErrorCode() {
+		case "NotFound", "NoSuchKey", "NoSuchObject":
+			return true
+		}
+	}
+	var statusErr interface{ HTTPStatusCode() int }
+	return errors.As(err, &statusErr) && statusErr.HTTPStatusCode() == http.StatusNotFound
 }
 
 func GetS3ObjectMetadata(ctx context.Context, key, bucket string) (int64, string, error) {
@@ -363,6 +368,9 @@ func GetS3ObjectMetadata(ctx context.Context, key, bucket string) (int64, string
 		Key:    aws.String(key),
 	})
 	if err != nil {
+		if isS3ObjectNotFound(err) {
+			return 0, "", fmt.Errorf("%w: %s", ports.ErrObjectNotFound, key)
+		}
 		return 0, "", wrapStorageError("read object metadata", err)
 	}
 	return aws.ToInt64(response.ContentLength), aws.ToString(response.ContentType), nil

@@ -31,10 +31,13 @@ import (
 	guestsCtrl "events-stocks/controllers/guests"
 	invitationsCtrl "events-stocks/controllers/invitations"
 	momentsCtrl "events-stocks/controllers/moments"
+	"events-stocks/controllers/publicaccess"
 	"events-stocks/dtos"
 	"events-stocks/internal/authz"
 	customValidator "events-stocks/middleware/validator"
 	"events-stocks/models"
+	eventconfigrepository "events-stocks/repositories/eventconfigrepository"
+	eventsrepository "events-stocks/repositories/eventsrepository"
 	"events-stocks/repositories/eventtablerepository"
 	"events-stocks/repositories/gormrepository"
 	guestrepository "events-stocks/repositories/guestrepository"
@@ -317,8 +320,8 @@ func newDoorCheckinFixture(t *testing.T) doorCheckinFixture {
 	require.NoError(t, db.Where("code = ?", "confirmed").First(&f.confirmed).Error)
 	eventType := models.EventType{ID: uuid.Must(uuid.NewV4()), Name: "checkin-" + suffix, CreatedAt: time.Now(), UpdatedAt: time.Now()}
 	require.NoError(t, db.Create(&eventType).Error)
-	f.event = models.Event{ID: uuid.Must(uuid.NewV4()), Name: "Door " + suffix, Identifier: "door-" + suffix, EventTypeID: eventType.ID, IsActive: true}
-	f.otherEvent = models.Event{ID: uuid.Must(uuid.NewV4()), Name: "Other " + suffix, Identifier: "other-" + suffix, EventTypeID: eventType.ID, IsActive: true}
+	f.event = models.Event{ID: uuid.Must(uuid.NewV4()), Name: "Door " + suffix, Identifier: "door-" + suffix, EventTypeID: &eventType.ID, IsActive: true}
+	f.otherEvent = models.Event{ID: uuid.Must(uuid.NewV4()), Name: "Other " + suffix, Identifier: "other-" + suffix, EventTypeID: &eventType.ID, IsActive: true}
 	require.NoError(t, db.Create(&f.event).Error)
 	require.NoError(t, db.Create(&f.otherEvent).Error)
 	f.answeredAt = time.Date(2026, time.April, 2, 18, 30, 0, 0, time.UTC)
@@ -508,8 +511,8 @@ func newReferenceIntegrityFixture(t *testing.T) referenceIntegrityFixture {
 	require.NoError(t, db.Create(&eventType).Error)
 
 	var f referenceIntegrityFixture
-	f.eventA = models.Event{ID: uuid.Must(uuid.NewV4()), Name: "A " + suffix, Identifier: "integrity-a-" + suffix, EventTypeID: eventType.ID, IsActive: true}
-	f.eventB = models.Event{ID: uuid.Must(uuid.NewV4()), Name: "B " + suffix, Identifier: "integrity-b-" + suffix, EventTypeID: eventType.ID, IsActive: true}
+	f.eventA = models.Event{ID: uuid.Must(uuid.NewV4()), Name: "A " + suffix, Identifier: "integrity-a-" + suffix, EventTypeID: &eventType.ID, IsActive: true}
+	f.eventB = models.Event{ID: uuid.Must(uuid.NewV4()), Name: "B " + suffix, Identifier: "integrity-b-" + suffix, EventTypeID: &eventType.ID, IsActive: true}
 	require.NoError(t, db.Create(&f.eventA).Error)
 	require.NoError(t, db.Create(&f.eventB).Error)
 	f.invitationA = models.Invitation{ID: uuid.Must(uuid.NewV4()), EventID: f.eventA.ID, MaxGuests: 1}
@@ -773,7 +776,7 @@ func newSeatingCapacityFixture(t *testing.T) seatingCapacityFixture {
 	eventType := models.EventType{ID: uuid.Must(uuid.NewV4()), Name: "seating-" + suffix, CreatedAt: time.Now(), UpdatedAt: time.Now()}
 	require.NoError(t, db.Create(&eventType).Error)
 	var f seatingCapacityFixture
-	f.event = models.Event{ID: uuid.Must(uuid.NewV4()), Name: "Seating " + suffix, Identifier: "seating-" + suffix, EventTypeID: eventType.ID, IsActive: true}
+	f.event = models.Event{ID: uuid.Must(uuid.NewV4()), Name: "Seating " + suffix, Identifier: "seating-" + suffix, EventTypeID: &eventType.ID, IsActive: true}
 	require.NoError(t, db.Create(&f.event).Error)
 	invitationTwo := models.Invitation{ID: uuid.Must(uuid.NewV4()), EventID: f.event.ID, MaxGuests: 2}
 	require.NoError(t, db.Create(&invitationTwo).Error)
@@ -937,4 +940,168 @@ func TestSeatingCapacity_ConcurrentAssignsCannotOverfill(t *testing.T) {
 	}
 	assert.Equal(t, 1, succeeded, "3 + 2 never both fit a table of 4")
 	require.NoError(t, eventtablerepository.CheckSeatsFit(configuration.DB, f.event.ID, f.roomy.ID, nil, 0, 0))
+}
+
+// ── GST-1 / rsvp_deadline fixtures ───────────────────────────────────────────
+
+type revocationFixture struct {
+	eventID      uuid.UUID
+	invitationID uuid.UUID
+	tokenID      uuid.UUID
+	prettyToken  string
+	guestIDs     []uuid.UUID
+}
+
+// createRevocationFixture creates an active event with one invitation, its
+// access token and guestCount guests holding that invitation.
+func createRevocationFixture(t *testing.T, guestCount int, cfg *models.EventConfig) revocationFixture {
+	t.Helper()
+	db := configuration.DB
+	suffix := uuid.Must(uuid.NewV4()).String()[:8]
+	var pendingStatus models.GuestStatus
+	require.NoError(t, db.Where("code = ?", "pending").First(&pendingStatus).Error)
+
+	eventType := models.EventType{ID: uuid.Must(uuid.NewV4()), Name: "qa-revoke-" + suffix}
+	require.NoError(t, db.Create(&eventType).Error)
+	event := models.Event{
+		ID: uuid.Must(uuid.NewV4()), Name: "QA Revoke " + suffix, Identifier: "qa-revoke-" + suffix,
+		EventTypeID: &eventType.ID, IsActive: true,
+	}
+	require.NoError(t, db.Create(&event).Error)
+	if cfg != nil {
+		cfg.ID = event.ID
+		require.NoError(t, db.Create(cfg).Error)
+	}
+	f := revocationFixture{eventID: event.ID, invitationID: uuid.Must(uuid.NewV4()), tokenID: uuid.Must(uuid.NewV4()), prettyToken: "QA-REV-" + suffix}
+	require.NoError(t, db.Create(&models.Invitation{ID: f.invitationID, EventID: event.ID, MaxGuests: 3}).Error)
+	require.NoError(t, db.Create(&models.InvitationAccessToken{
+		ID: f.tokenID, InvitationID: f.invitationID, Token: uuid.Must(uuid.NewV4()).String(), PrettyToken: f.prettyToken,
+	}).Error)
+	for i := 0; i < guestCount; i++ {
+		invitationID := f.invitationID
+		guest := models.Guest{
+			ID: uuid.Must(uuid.NewV4()), EventID: event.ID, InvitationID: &invitationID,
+			FirstName: fmt.Sprintf("Invitado %d", i+1), GuestStatusID: pendingStatus.ID,
+		}
+		require.NoError(t, db.Create(&guest).Error)
+		f.guestIDs = append(f.guestIDs, guest.ID)
+	}
+	t.Cleanup(func() {
+		db.Unscoped().Where("invitation_id = ?", f.invitationID).Delete(&models.InvitationLog{})
+		db.Unscoped().Where("event_id = ?", event.ID).Delete(&models.Guest{})
+		db.Unscoped().Where("id = ?", f.tokenID).Delete(&models.InvitationAccessToken{})
+		db.Unscoped().Where("id = ?", f.invitationID).Delete(&models.Invitation{})
+		db.Unscoped().Where("id = ?", event.ID).Delete(&models.EventConfig{})
+		db.Unscoped().Where("id = ?", event.ID).Delete(&models.Event{})
+		db.Unscoped().Where("id = ?", eventType.ID).Delete(&models.EventType{})
+	})
+	return f
+}
+
+func (f revocationFixture) publicReadAllowed(t *testing.T) bool {
+	t.Helper()
+	allowed, err := publicaccess.AllowEventRead(f.eventID, "", f.prettyToken, publicaccess.EventReadDeps{
+		ConfigRepo:     eventconfigrepository.NewEventConfigRepo(),
+		TokenRepo:      invitationaccesstokenrepository.NewAccessTokenRepo(),
+		InvitationRepo: invitationrepository.NewInvitationRepo(),
+		IsEventActive:  func(uuid.UUID) (bool, error) { return true, nil },
+	})
+	require.NoError(t, err)
+	return allowed
+}
+
+func (f revocationFixture) assertRevoked(t *testing.T, revoked bool) {
+	t.Helper()
+	db := configuration.DB
+	var token models.InvitationAccessToken
+	require.NoError(t, db.Where("id = ?", f.tokenID).First(&token).Error)
+	var invitation models.Invitation
+	require.NoError(t, db.Unscoped().Where("id = ?", f.invitationID).First(&invitation).Error)
+	live, err := invitationrepository.InvitationHasLiveGuest(f.invitationID)
+	require.NoError(t, err)
+	if revoked {
+		require.NotNil(t, token.ExpiresAt, "token must expire")
+		assert.False(t, token.ExpiresAt.After(time.Now()))
+		assert.True(t, invitation.DeletedAt.Valid, "invitation must be soft-deleted")
+		assert.False(t, live)
+		assert.False(t, f.publicReadAllowed(t), "the link must stop opening the private event")
+		return
+	}
+	assert.Nil(t, token.ExpiresAt)
+	assert.False(t, invitation.DeletedAt.Valid)
+	assert.True(t, live)
+	assert.True(t, f.publicReadAllowed(t))
+}
+
+// GST-1: deleting a guest revokes their invitation link.
+func TestGuestDelete_RevokesInvitationLink(t *testing.T) {
+	f := createRevocationFixture(t, 1, &models.EventConfig{IsPublic: false})
+	f.assertRevoked(t, false)
+
+	require.NoError(t, guestrepository.DeleteGuest(f.guestIDs[0]))
+	f.assertRevoked(t, true)
+
+	_, err := invitationsSvc.NewInvitationService(
+		invitationrepository.NewInvitationRepo(), guestrepository.NewGuestRepo(),
+		invitationaccesstokenrepository.NewAccessTokenRepo(), invitationlogrepository.NewInvitationLogRepo(), redisrepository.NewRedisRepo(),
+	).GetInvitationByToken(f.prettyToken)
+	assert.Error(t, err, "ByToken refuses the revoked link")
+}
+
+// GST-1: bulk delete revokes only once no live guest holds the invitation.
+func TestGuestBulkDelete_RevokesWhenLastHolderIsDeleted(t *testing.T) {
+	f := createRevocationFixture(t, 2, &models.EventConfig{IsPublic: false})
+
+	require.NoError(t, guestrepository.BulkDeleteGuests(f.guestIDs[:1]))
+	f.assertRevoked(t, false)
+
+	require.NoError(t, guestrepository.BulkDeleteGuests(f.guestIDs[1:]))
+	f.assertRevoked(t, true)
+}
+
+// GST-1: guests deleted before revocation existed (token still live) are
+// refused by the live-guest check.
+func TestPublicAccess_RefusesLegacyDeletedGuestToken(t *testing.T) {
+	f := createRevocationFixture(t, 1, &models.EventConfig{IsPublic: false})
+	require.NoError(t, configuration.DB.Where("id = ?", f.guestIDs[0]).Delete(&models.Guest{}).Error)
+
+	assert.False(t, f.publicReadAllowed(t))
+}
+
+// rsvp_deadline: the column is migrated and a public RSVP after it is 403 rsvp_closed.
+func TestRSVP_AfterDeadline_Returns403RSVPClosed(t *testing.T) {
+	past := time.Now().Add(-time.Hour).UTC()
+	f := createRevocationFixture(t, 1, &models.EventConfig{
+		IsPublic: true, VisibilityConfigured: true, ShowRSVPSection: true, RSVPDeadline: &past,
+	})
+
+	var stored models.EventConfig
+	require.NoError(t, configuration.DB.Where("id = ?", f.eventID).First(&stored).Error)
+	require.NotNil(t, stored.RSVPDeadline)
+
+	svc := invitationsSvc.NewInvitationServiceWithDeps(invitationsSvc.InvitationServiceDeps{
+		Repo:       invitationrepository.NewInvitationRepo(),
+		GuestRepo:  guestrepository.NewGuestRepo(),
+		TokenRepo:  invitationaccesstokenrepository.NewAccessTokenRepo(),
+		LogRepo:    invitationlogrepository.NewInvitationLogRepo(),
+		Cache:      redisrepository.NewRedisRepo(),
+		EventsRepo: eventsrepository.NewEventsRepo(),
+		ConfigRepo: eventconfigrepository.NewEventConfigRepo(),
+	})
+	invitationsCtrl.InitInvitationsController(svc)
+	e := echo.New()
+	e.Validator = customValidator.New()
+	e.POST("/api/invitations/rsvp", invitationsCtrl.ConfirmRSVP)
+
+	body := `{"pretty_token":"` + f.prettyToken + `","status":"confirmed","guest_count":1}`
+	req := httptest.NewRequest(http.MethodPost, "/api/invitations/rsvp", strings.NewReader(body))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `"code":"rsvp_closed"`)
+	var guest models.Guest
+	require.NoError(t, configuration.DB.Where("id = ?", f.guestIDs[0]).First(&guest).Error)
+	assert.Empty(t, guest.RSVPStatus, "a closed RSVP must not write the guest")
 }

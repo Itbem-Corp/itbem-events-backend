@@ -2312,7 +2312,7 @@ func TestConfirmSharedMoment_ReturnsMomentWithUploadQuota(t *testing.T) {
 		&models.Config{AwsBucketName: "events-bucket"},
 		resourcesService.ResourceServiceDeps{Storage: &mockObjectStorage{}},
 	)
-	momentsService.SetDefaultMomentService(momentsService.NewMomentService(&mockMomentRepo{}, &mockCacheRepo{}))
+	momentsService.SetDefaultMomentService(momentsService.NewMomentService(&mockMomentRepo{}, &mockCacheRepo{}, &mockMediaPublisher{}))
 
 	s3Key := "moments/" + eventID.String() + "/raw/foto.jpg"
 	c, rec := newEchoCtx(
@@ -2838,7 +2838,8 @@ func TestRequestPublicMomentUploadURL_UsesDefaultConfigWhenMissing(t *testing.T)
 	require.NoError(t, RequestPublicMomentUploadURL(c))
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 	assert.Equal(t, "RAW/123", tokenRepo.seen)
-	assert.Contains(t, rec.Body.String(), `"message":"Uploads are closed because the moments wall is already published"`)
+	// The default config has uploads off and (EVT-68) the wall unpublished.
+	assert.Contains(t, rec.Body.String(), `"message":"Uploads are disabled for this event"`)
 	assert.NotContains(t, rec.Body.String(), "Event config not found")
 }
 
@@ -3809,7 +3810,7 @@ func setupConfirmMomentTest(t *testing.T, repo *mockMomentRepo, storage *mockObj
 		resourcesService.ResourceServiceDeps{Storage: storage},
 	)
 	publicUploadCounter = counter
-	momentsService.SetDefaultMomentService(momentsService.NewMomentService(repo, &mockCacheRepo{}))
+	momentsService.SetDefaultMomentService(momentsService.NewMomentService(repo, &mockCacheRepo{}, &mockMediaPublisher{}))
 }
 
 func TestConfirmPresignedMomentRetryReturnsExistingWithoutQuotaOrCreate(t *testing.T) {
@@ -3950,7 +3951,10 @@ func TestConfirmPresignedMomentVerificationFailureDeletesObjectWithoutConsumingQ
 	_, err := confirmPresignedMoment(c, &models.Event{ID: eventID}, &models.EventConfig{MaxUploadsPerGuest: 5}, nil, key, "image/jpeg", 0, "")
 
 	require.NoError(t, err)
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	// PUB-N4 / STU-N2: a non-retryable 4xx with a stable code and Spanish copy.
+	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"upload_not_found"`)
+	assert.Contains(t, rec.Body.String(), "No recibimos tu archivo. Vuelve a subirlo.")
 	assert.Zero(t, counter.increments)
 	assert.Zero(t, counter.decrements)
 	assert.Equal(t, []string{key}, storage.deletedObjects)

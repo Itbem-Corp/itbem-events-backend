@@ -364,7 +364,7 @@ func CreateResource(c echo.Context) error {
 	)
 	if err != nil {
 		status, detail := Resources.UploadErrorResponse(err)
-		return utils.Error(c, status, "Failed to create resource", detail)
+		return utils.Error(c, status, Resources.UploadErrorMessage(err, "Failed to create resource"), detail)
 	}
 
 	// 🔐 Generar URL firmada
@@ -436,7 +436,7 @@ func UploadMultipleResources(c echo.Context) error {
 	resources, err := scopedResourceSvc.UploadMultipleResources(files, sectionID, resourceTypeID)
 	if err != nil {
 		status, detail := Resources.UploadErrorResponse(err)
-		return utils.Error(c, status, "Failed to upload resources", detail)
+		return utils.Error(c, status, Resources.UploadErrorMessage(err, "Failed to upload resources"), detail)
 	}
 
 	result := make([]dtos.AdminResourceResponse, 0, len(resources))
@@ -486,7 +486,7 @@ func UpdateFileContent(c echo.Context) error {
 	path, err := scopedResourceSvc.UpdateFileContent(file, resource.Path, fileHeader)
 	if err != nil {
 		status, detail := Resources.UploadErrorResponse(err)
-		return utils.Error(c, status, "Failed to update file content", detail)
+		return utils.Error(c, status, Resources.UploadErrorMessage(err, "Failed to update file content"), detail)
 	}
 	if path != resource.Path {
 		resource.Path = path
@@ -538,7 +538,7 @@ func ReplaceFile(c echo.Context) error {
 	path, err := scopedResourceSvc.ReplaceFile(oldPath, file, fileHeader)
 	if err != nil {
 		status, detail := Resources.UploadErrorResponse(err)
-		return utils.Error(c, status, "Failed to replace file", detail)
+		return utils.Error(c, status, Resources.UploadErrorMessage(err, "Failed to replace file"), detail)
 	}
 	if path != oldPath {
 		resource.Path = path

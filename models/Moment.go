@@ -6,6 +6,13 @@ import (
 	"time"
 )
 
+// MomentLiveContentURLIndex is the partial unique index on
+// (event_id, content_url) WHERE deleted_at IS NULL AND content_url <> ”.
+// It is raw DDL (configuration/moment_content_integrity.go), not a GORM tag:
+// existing duplicates must be soft-deleted before it can be built, which
+// AutoMigrate cannot do.
+const MomentLiveContentURLIndex = "uidx_moments_event_content_url_live"
+
 type Moment struct {
 	ID            uuid.UUID     `gorm:"type:uuid;default:uuid_generate_v4();primaryKey" json:"id"`
 	EventID       *uuid.UUID    `gorm:"type:uuid;index" json:"event_id,omitempty"`

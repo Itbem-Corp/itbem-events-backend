@@ -69,6 +69,31 @@ func Validate(token string, eventID uuid.UUID, accessVersion string) bool {
 	return time.Now().Unix() <= parsed.ExpiresAt
 }
 
+// passwordVersionPurpose domain-separates the password version HMAC from the
+// proof signature, which uses the same secret.
+const passwordVersionPurpose = "event-password-version"
+
+// PasswordVersion derives the access version for a password-protected event
+// from the password itself, keyed with EVENT_ACCESS_SECRET. It changes only
+// when the password changes (or the event differs), so unrelated config saves
+// no longer rotate proofs. The value is public (meta.access.accessVersion); the
+// server-side key keeps it from being an offline oracle for the password.
+// Returns "" when there is no password or no secret (no proof can be minted).
+func PasswordVersion(eventID uuid.UUID, password string) string {
+	secret := accessSecret()
+	password = strings.TrimSpace(password)
+	if secret == "" || password == "" {
+		return ""
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(passwordVersionPurpose))
+	mac.Write([]byte{0})
+	mac.Write([]byte(eventID.String()))
+	mac.Write([]byte{0})
+	mac.Write([]byte(password))
+	return "pw1." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))[:22]
+}
+
 func sign(payload, secret string) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(payload))
