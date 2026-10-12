@@ -6,6 +6,7 @@ import (
 	"errors"
 	"events-stocks/dtos"
 	"events-stocks/models"
+	"events-stocks/repositories/eventsrepository"
 	"events-stocks/services/ports"
 	"events-stocks/utils"
 	"fmt"
@@ -1235,4 +1236,45 @@ func TestEventSectionService_ListByEventID_RepoError(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Nil(t, result)
+}
+
+type nameCheckingEventsRepo struct {
+	*mockEventsRepo
+	taken     bool
+	seenName  string
+	seenSkip  uuid.UUID
+	seenOwner *uuid.UUID
+}
+
+func (r *nameCheckingEventsRepo) EventNameTaken(clientID *uuid.UUID, name string, excludeID uuid.UUID) (bool, error) {
+	r.seenOwner, r.seenName, r.seenSkip = clientID, name, excludeID
+	return r.taken, nil
+}
+
+// EVT-22: a name that differs only in letter case from another live event of
+// the organization is rejected before the insert (409 event_name_taken).
+func TestEventService_CreateEvent_RejectsCaseOnlyDuplicateName(t *testing.T) {
+	created := false
+	clientID := uuid.Must(uuid.NewV4())
+	repo := &nameCheckingEventsRepo{
+		mockEventsRepo: &mockEventsRepo{CreateEventFunc: func(*models.Event) error { created = true; return nil }},
+		taken:          true,
+	}
+
+	err := NewEventService(repo, &mockCacheRepo{}).CreateEvent(&models.Event{ClientID: &clientID, Name: "qa-autotest events 1"})
+
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, eventsrepository.ErrEventNameAlreadyExists))
+	assert.False(t, created)
+	assert.Equal(t, "qa-autotest events 1", repo.seenName)
+	assert.Equal(t, &clientID, repo.seenOwner)
+	assert.Equal(t, uuid.Nil, repo.seenSkip)
+}
+
+func TestEventService_EnsureEventNameAvailable_FreeNamePasses(t *testing.T) {
+	eventID := uuid.Must(uuid.NewV4())
+	repo := &nameCheckingEventsRepo{mockEventsRepo: &mockEventsRepo{}}
+
+	require.NoError(t, NewEventService(repo, &mockCacheRepo{}).EnsureEventNameAvailable(nil, "Boda", eventID))
+	assert.Equal(t, eventID, repo.seenSkip)
 }

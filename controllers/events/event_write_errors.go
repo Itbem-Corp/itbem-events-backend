@@ -77,3 +77,10 @@ func keepClientWhenCleared(event *models.Event, originalClientID *uuid.UUID) {
 		event.ClientID = &clientID
 	}
 }
+
+func sameClientID(a, b *uuid.UUID) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}

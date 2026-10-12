@@ -343,6 +343,36 @@ func ListEventPage(clientID *uuid.UUID, caller *dtos.EventCallerAccess, query dt
 	return events, int(total), counts, nil
 }
 
+// EventNameTakenFold reports whether another live event of the organization
+// (client_id IS NULL for unowned events) already uses name, ignoring case and
+// surrounding spaces. excludeID (the event being updated) is skipped when set.
+//
+// The unique index idx_events_client_name_live stays exact; this check is the
+// case-insensitive rule (EVT-22). It is advisory under a race: two concurrent
+// writes of "Boda" and "boda" can both pass, while exact duplicates are still
+// stopped by the index.
+func EventNameTakenFold(db *gorm.DB, clientID *uuid.UUID, name string, excludeID uuid.UUID) (bool, error) {
+	var count int64
+	query := db.Model(&models.Event{}).Where("lower(btrim(name)) = lower(btrim(?))", name)
+	if clientID == nil {
+		query = query.Where("client_id IS NULL")
+	} else {
+		query = query.Where("client_id = ?", *clientID)
+	}
+	if excludeID != uuid.Nil {
+		query = query.Where("id <> ?", excludeID)
+	}
+	if err := query.Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// EventNameTaken is EventNameTakenFold on the default connection.
+func (r *EventsRepo) EventNameTaken(clientID *uuid.UUID, name string, excludeID uuid.UUID) (bool, error) {
+	return EventNameTakenFold(gormrepository.DB(), clientID, name, excludeID)
+}
+
 // IdentifierExists returns true if an event with the given identifier already exists.
 func IdentifierExists(identifier string) bool {
 	var count int64

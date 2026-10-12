@@ -662,6 +662,7 @@ func UpdateEvent(c echo.Context) error {
 	}
 
 	originalClientID := existing.ClientID
+	originalName := existing.Name
 	var payload dtos.EventPayload
 	if err := c.Bind(&payload); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
@@ -678,6 +679,14 @@ func UpdateEvent(c echo.Context) error {
 	}
 
 	existing.ID = id
+	// Only a rename or a move is checked against the case-insensitive rule,
+	// so events that already share a name in another letter case keep
+	// saving their other fields (EVT-22).
+	if existing.Name != originalName || !sameClientID(existing.ClientID, originalClientID) {
+		if err := eventSvc.EnsureEventNameAvailable(existing.ClientID, existing.Name, id); err != nil {
+			return respondEventWriteError(c, err, "Error updating event")
+		}
+	}
 	if err := eventSvc.UpdateEvent(existing); err != nil {
 		return respondEventWriteError(c, err, "Error updating event")
 	}

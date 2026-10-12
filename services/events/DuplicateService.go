@@ -10,6 +10,7 @@ import (
 
 	"events-stocks/dtos"
 	"events-stocks/models"
+	"events-stocks/repositories/eventsrepository"
 	"events-stocks/services/ports"
 	"events-stocks/utils"
 
@@ -82,11 +83,25 @@ func (s *DuplicateService) DuplicateEventByID(sourceID uuid.UUID, payload dtos.E
 		}
 		normalizeDuplicateEventForCreate(&duplicate)
 
-		name, err := generateUniqueEventName(tx, duplicate.ClientID, duplicate.Name)
-		if err != nil {
-			return err
+		// Naming rule (EVT-87): a name the organizer typed is kept as typed,
+		// so a taken one is a 409 event_name_taken like create, never a silent
+		// "Boda 2". Without a name the copy is "<source> (copia)", numbered
+		// ("(copia) 2", ...) until it is free in the organization.
+		if duplicateNameRequested(payload) {
+			taken, err := eventsrepository.EventNameTakenFold(tx, duplicate.ClientID, duplicate.Name, uuid.Nil)
+			if err != nil {
+				return err
+			}
+			if taken {
+				return fmt.Errorf("%w: %q", eventsrepository.ErrEventNameAlreadyExists, duplicate.Name)
+			}
+		} else {
+			name, err := generateUniqueEventName(tx, duplicate.ClientID, duplicate.Name)
+			if err != nil {
+				return err
+			}
+			duplicate.Name = name
 		}
-		duplicate.Name = name
 
 		identifierBase := duplicate.Identifier
 		if strings.TrimSpace(identifierBase) == "" {
@@ -102,7 +117,7 @@ func (s *DuplicateService) DuplicateEventByID(sourceID uuid.UUID, payload dtos.E
 			return err
 		}
 
-		config, err := duplicateEventConfig(tx, sourceID, duplicate.ID)
+		config, err := duplicateEventConfig(tx, sourceID, duplicate.ID, duplicate.EventDateTime.Sub(source.EventDateTime), time.Now())
 		if err != nil {
 			return err
 		}
@@ -236,18 +251,14 @@ func generateUniqueEventName(tx *gorm.DB, clientID *uuid.UUID, baseName string) 
 	}
 }
 
+// duplicateNameRequested reports whether the duplicate request carries a
+// non-blank name chosen by the organizer.
+func duplicateNameRequested(payload dtos.EventPayload) bool {
+	return payload.Name != nil && strings.TrimSpace(*payload.Name) != ""
+}
+
 func eventNameExists(tx *gorm.DB, clientID *uuid.UUID, name string) (bool, error) {
-	var count int64
-	query := tx.Model(&models.Event{}).Where("name = ?", name)
-	if clientID == nil {
-		query = query.Where("client_id IS NULL")
-	} else {
-		query = query.Where("client_id = ?", *clientID)
-	}
-	if err := query.Count(&count).Error; err != nil {
-		return false, err
-	}
-	return count > 0, nil
+	return eventsrepository.EventNameTakenFold(tx, clientID, name, uuid.Nil)
 }
 
 func generateUniqueEventIdentifier(tx *gorm.DB, baseIdentifier string) (string, error) {
@@ -277,7 +288,7 @@ func eventIdentifierExists(tx *gorm.DB, identifier string) (bool, error) {
 	return count > 0, nil
 }
 
-func duplicateEventConfig(tx *gorm.DB, sourceID, duplicateID uuid.UUID) (models.EventConfig, error) {
+func duplicateEventConfig(tx *gorm.DB, sourceID, duplicateID uuid.UUID, dateShift time.Duration, now time.Time) (models.EventConfig, error) {
 	var sourceConfig models.EventConfig
 	if err := tx.First(&sourceConfig, "id = ?", sourceID).Error; err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -291,6 +302,7 @@ func duplicateEventConfig(tx *gorm.DB, sourceID, duplicateID uuid.UUID) (models.
 	}
 
 	config := copyEventConfigForDuplicate(&sourceConfig, duplicateID)
+	shiftDuplicateConfigDates(&config, dateShift, now)
 	if err := tx.Create(&config).Error; err != nil {
 		return models.EventConfig{}, err
 	}
@@ -315,6 +327,37 @@ func copyEventConfigForDuplicate(source *models.EventConfig, duplicateID uuid.UU
 	config.UpdatedAt = time.Time{}
 	config.DeletedAt = gorm.DeletedAt{}
 	return config
+}
+
+// shiftDuplicateConfigDates moves the access window ("Disponible desde/hasta")
+// and the RSVP deadline by the same offset as the event date, so a copy moved
+// to a later date keeps the source's schedule relative to its own event
+// (EVT-86). A deadline or window end that is still in the past after the
+// shift is cleared: a copy is never born with RSVP or access already closed.
+// ActiveFrom is shifted but never cleared (a past start just means open).
+func shiftDuplicateConfigDates(config *models.EventConfig, shift time.Duration, now time.Time) {
+	if config == nil {
+		return
+	}
+	if shift != 0 {
+		if !config.ActiveFrom.IsZero() {
+			config.ActiveFrom = config.ActiveFrom.Add(shift)
+		}
+		if config.ActiveUntil != nil {
+			shifted := config.ActiveUntil.Add(shift)
+			config.ActiveUntil = &shifted
+		}
+		if config.RSVPDeadline != nil {
+			shifted := config.RSVPDeadline.Add(shift)
+			config.RSVPDeadline = &shifted
+		}
+	}
+	if config.ActiveUntil != nil && !config.ActiveUntil.After(now) {
+		config.ActiveUntil = nil
+	}
+	if config.RSVPDeadline != nil && !config.RSVPDeadline.After(now) {
+		config.RSVPDeadline = nil
+	}
 }
 
 func cloneTimePointer(value *time.Time) *time.Time {
