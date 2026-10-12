@@ -121,8 +121,9 @@ required-check identity change therefore makes the previous approval stale.
 Legacy v1/v2 events remain auditable but cannot authorize a v3 action.
 
 ### Events
-- `GET /api/events/all` → `events.ListEvents` — compatibility path for dashboard list; requires auth and returns root/all or user-scoped events
-- `GET /api/events` → `events.ListEvents` — Protected. Query params: `?client_id=UUID` (optional). Root users see all events; regular users see events for their accessible clients; with `?client_id` returns events for that client (access-checked).
+- `GET /api/events/all` → `events.ListEvents` — compatibility path for dashboard list; requires auth and returns root/all or caller-access events
+- `GET /api/events` → `events.ListEvents` — Protected. Query params: `?client_id=UUID` (optional), `page`/`page_size`/`search`/`filter` (paged). Root users see all events; other users without `client_id` see the caller-access portfolio: organizations the application session lists for them (active, not deleted, membership enabled for the request application; direct memberships only). With `?client_id` returns events for that client (access-checked, inherited Owner/Admin included). See `docs/AUTHORIZATION_MODEL.md`.
+- `GET /api/events/dashboard` → `events.GetDashboardOverview` and `GET /api/events/notifications` → `events.GetEventNotifications` — same scope rules as `GET /api/events`.
 - `POST /api/events` → `events.CreateEvent`
 - `PUT /api/events/:id` → `events.UpdateEvent`
 - `DELETE /api/events/:id` → `events.DeleteEvent`

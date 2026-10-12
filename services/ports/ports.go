@@ -92,7 +92,7 @@ type EventsRepository interface {
 	GetEventByIdentifier(identifier string) (*models.Event, error)
 	GetEventsByClientID(clientID uuid.UUID) ([]models.Event, error)
 	GetAllEventsForDashboard() ([]models.Event, error)
-	GetEventsForUser(userID uuid.UUID) ([]models.Event, error)
+	GetEventsForUser(access dtos.EventCallerAccess) ([]models.Event, error)
 	UpdateEventCover(id uuid.UUID, coverImageURL string) error
 	IdentifierExists(identifier string) bool
 }
@@ -101,7 +101,7 @@ type EventsRepository interface {
 // by production repositories. EventService retains an in-memory fallback for
 // adapters that only implement EventsRepository.
 type EventsDashboardRepository interface {
-	GetEventDashboardOverview(clientID, userID *uuid.UUID, now time.Time) (dtos.EventDashboardOverview, error)
+	GetEventDashboardOverview(clientID *uuid.UUID, caller *dtos.EventCallerAccess, now time.Time) (dtos.EventDashboardOverview, error)
 }
 
 // EventCoverVariantsRepository is optional so lightweight adapters remain
@@ -123,11 +123,11 @@ type EventCoverProcessingOutboxRepository interface {
 }
 
 type EventsPageRepository interface {
-	ListEventPage(clientID, userID *uuid.UUID, query dtos.EventListQuery) ([]models.Event, int, dtos.EventListCounts, error)
+	ListEventPage(clientID *uuid.UUID, caller *dtos.EventCallerAccess, query dtos.EventListQuery) ([]models.Event, int, dtos.EventListCounts, error)
 }
 
 type EventsNotificationRepository interface {
-	ListEventNotifications(clientID, userID *uuid.UUID, now time.Time) ([]dtos.EventNotification, error)
+	ListEventNotifications(clientID *uuid.UUID, caller *dtos.EventCallerAccess, now time.Time) ([]dtos.EventNotification, error)
 }
 
 // EventConfigRepository is the data access contract for EventConfig records.

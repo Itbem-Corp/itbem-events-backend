@@ -27,6 +27,28 @@ Historical `is_root=true` accounts are treated as level 1 until explicitly migra
 
 Only Owner and Administrator memberships propagate down an organization hierarchy. A child organization can never grant access back to its parent.
 
+### Event lists without an organization (caller-access)
+
+`GET /api/events`, `/api/events/all`, `/api/events/dashboard` and
+`/api/events/notifications` without `client_id`:
+
+- Platform roots list every event, as before.
+- Every other caller gets the caller-access portfolio
+  (`dtos.EventCallerAccess`): the events of the organizations the application
+  session lists for that caller. The rules are the ones in
+  `services/applications.SessionService.organizationAccess`: an active
+  membership with a role, in an active and not deleted organization, with an
+  active `client_member_applications` row for the request application. The
+  application ID comes from the resolved session, never from a header. The
+  SQL is `eventsrepository.callerAccessEventPredicate`, shared by every list
+  path (paged list and counts, unpaged list, dashboard overview,
+  notifications).
+- Only direct memberships count. Inherited Owner/Admin access to child
+  organizations is reached with an explicit `client_id`, which
+  `authz.RequireClientAccess` authorizes as before.
+- Without an application session the handlers answer 503
+  `Application session unavailable` and run no query.
+
 ## Delegation invariants
 
 - A role can grant, change, or remove only roles below its hierarchy.
