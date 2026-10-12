@@ -543,7 +543,11 @@ func injectRuntimeSectionConfig(componentType string, config json.RawMessage, ev
 
 	switch sectionKind {
 	case "CountdownHeader":
-		if !event.EventDateTime.IsZero() {
+		// The section's own "fecha objetivo" wins when it is a valid date;
+		// the event date is only the default (STU-3).
+		if target, ok := countdownSectionTargetDate(configMap["targetDate"], event); ok {
+			configMap["targetDate"] = target
+		} else if !event.EventDateTime.IsZero() {
 			configMap["targetDate"] = event.EventDateTime.Format(time.RFC3339)
 		}
 	case "MomentWall":
@@ -557,9 +561,18 @@ func injectRuntimeSectionConfig(componentType string, config json.RawMessage, ev
 		configMap["show_moment_wall"] = momentsWallPublished
 		configMap["share_uploads_enabled"] = cfg != nil && cfg.AllowUploads && cfg.ShareUploadsEnabled && !momentsWallPublished
 		configMap["max_uploads_per_guest"] = pageSpecMaxUploadsPerGuest(cfg)
+		// Copy keys are the section's when set; the event's default moment
+		// request message only fills them in (STU-4). The identifier and
+		// the upload/visibility flags above stay backend-authoritative: they
+		// mirror gates the API enforces, so a section cannot claim them.
+		// The public MomentWall prefers moment_request_message, so a section
+		// that only set its subtitle shows that subtitle there too.
+		if subtitle, ok := configMap["subtitle"].(string); ok {
+			setConfigStringDefault(configMap, "moment_request_message", subtitle)
+		}
 		if cfg != nil {
-			setConfigString(configMap, "moment_request_message", cfg.DefaultMomentRequestMessage)
-			setConfigString(configMap, "subtitle", cfg.DefaultMomentRequestMessage)
+			setConfigStringDefault(configMap, "moment_request_message", cfg.DefaultMomentRequestMessage)
+			setConfigStringDefault(configMap, "subtitle", cfg.DefaultMomentRequestMessage)
 		}
 	case "RSVPConfirmation":
 		if cfg != nil {
@@ -608,6 +621,50 @@ func pageSpecMaxUploadsPerGuest(cfg *models.EventConfig) int {
 		return cfg.MaxUploadsPerGuest
 	}
 	return defaultPageSpecMaxUploadsPerGuest
+}
+
+// setConfigStringDefault sets key only when the section has no non-blank
+// string of its own there.
+func setConfigStringDefault(config map[string]interface{}, key, value string) {
+	if current, ok := config[key].(string); ok && strings.TrimSpace(current) != "" {
+		return
+	}
+	setConfigString(config, key, value)
+}
+
+// countdownSectionLocalLayouts are the zone-less forms the Studio editors save
+// (an <input type="datetime-local"> value) plus a bare date.
+var countdownSectionLocalLayouts = []string{"2006-01-02T15:04", "2006-01-02T15:04:05", "2006-01-02"}
+
+// countdownSectionTargetDate normalizes a section's own targetDate to RFC3339.
+// A value with an offset is kept as that instant; a zone-less value is read in
+// the event's timezone (UTC when unknown), so every visitor counts down to the
+// same moment instead of their own local clock. Blank or unparseable values
+// return false and the event date applies.
+func countdownSectionTargetDate(raw interface{}, event *models.Event) (string, bool) {
+	value, ok := raw.(string)
+	if !ok {
+		return "", false
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", false
+	}
+	if parsed, err := time.Parse(time.RFC3339, value); err == nil {
+		return parsed.Format(time.RFC3339), true
+	}
+	location := time.UTC
+	if event != nil {
+		if loaded, err := time.LoadLocation(strings.TrimSpace(event.Timezone)); err == nil && strings.TrimSpace(event.Timezone) != "" {
+			location = loaded
+		}
+	}
+	for _, layout := range countdownSectionLocalLayouts {
+		if parsed, err := time.ParseInLocation(layout, value, location); err == nil {
+			return parsed.Format(time.RFC3339), true
+		}
+	}
+	return "", false
 }
 
 func setConfigString(config map[string]interface{}, key, value string) {
