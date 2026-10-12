@@ -30,7 +30,6 @@
 | Path | Purpose |
 |------|---------|
 | `repositories/eventsrepository/EventsRepository.go` | Event CRUD and dashboard lists; `dashboardEventsScope` selects one organization, the caller-access portfolio (`callerAccessEventPredicate`, mirrors `SessionService.organizationAccess`) or all events for roots |
-| `repositories/eventsrepository/entitlement_scope.go` | Portfolio list scope (no `client_id`). `ConfigureEntitlementScope(mode)`: with `AUTHZ_PRODUCT_ENTITLEMENT=enforce` the membership condition also requires an active, non-deleted organization and an active `eventiapp` member entitlement. |
 | `repositories/eventsrepository/errorHandler.go` | Domain-specific error mapping |
 | `repositories/eventconfigrepository/EventConfigRepository.go` | EventConfig CRUD |
 | `repositories/eventsectionrepository/EventSectionRepository.go` | EventSection CRUD |

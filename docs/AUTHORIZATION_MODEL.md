@@ -107,6 +107,25 @@ Both checks run after the platform, role (or grant) decision, through
    the policy lacks is a 403 `Your application access policy does not allow this
    action` in `enforce`. The primary root is exempt; Root 2 is capped.
 
+How the flags meet the event-client grant path (`internal/authz/event_authority.go`):
+
+- `resolveEventAuthority` uses the same organization lookup
+  (`lookupOrganizationAccess`, event-resource scope), so a member that is not
+  entitled stays on the organization path and is denied in `enforce`; the
+  grant path is never consulted for an organization member.
+- A grant passes `finalizeAuthorityDecision` as entitled (the grant itself is
+  only honoured when the event organization resolves to EventiApp, a hard gate
+  that is not flagged), so grants get the policy ceiling like memberships.
+- `RequireEventAccess` / `EnsureEventAccess` apply the entitlement to members
+  (`authorizeEventView`), matching `RequireEventListAccess`.
+- `EventCapabilityForOrganizationEvents` (event-client oversight) applies both
+  checks; a deny is `false`, a lookup failure is returned as an error.
+- In `enforce`, the session caps `event_access.capabilities` with the policy,
+  like the per-organization lists.
+- Event lists without `client_id` use the caller-access predicate (active
+  organization, active member access row for the request application), which
+  is always on; there is no separate enforce-only list narrowing.
+
 `shadow` never changes a decision: it logs `authz shadow denial` once per
 (user, organization, capability) every 10 minutes. Organization lookups are
 memoized per request (the event capabilities endpoint runs one access query)
