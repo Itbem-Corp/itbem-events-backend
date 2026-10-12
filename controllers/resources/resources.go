@@ -1,6 +1,7 @@
 package resources
 
 import (
+	"errors"
 	"events-stocks/controllers/publicaccess"
 	"events-stocks/dtos"
 	"events-stocks/internal/authz"
@@ -12,6 +13,7 @@ import (
 	"events-stocks/utils"
 	"github.com/gofrs/uuid"
 	"github.com/labstack/echo/v4"
+	"gorm.io/gorm"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -179,6 +181,11 @@ func resourceEventActive(eventID uuid.UUID) (bool, error) {
 		return true, nil
 	}
 	event, err := resourceEventRepo.GetEventByIDRaw(eventID)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		// A deleted event is simply not readable: the gate answers 403 like
+		// an inactive event instead of a 500 (EVT-9).
+		return false, nil
+	}
 	if err != nil || event == nil {
 		return false, err
 	}

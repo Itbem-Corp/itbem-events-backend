@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gofrs/uuid"
+	"gorm.io/gorm"
 )
 
 type InvitationWithGuest = dtos.InvitationLookup
@@ -30,6 +31,10 @@ type EventCoverViewURLFunc func(path, bucket string) (string, *time.Time)
 var (
 	ErrInvitationEventUnavailable  = errors.New("invitation event is unavailable")
 	ErrInvitationEventAccessFailed = errors.New("invitation event access check failed")
+	// ErrInvitationEventGone: the invitation's event was deleted (soft
+	// delete hides it from reads). A guest with an old link gets 410, not a
+	// 500 "access check failed" (EVT-9).
+	ErrInvitationEventGone = errors.New("invitation event no longer exists")
 	ErrInvalidRSVPRequest          = errors.New("invalid RSVP request")
 )
 
@@ -351,6 +356,9 @@ func (s *InvitationService) ensureInvitationEventAvailable(invitation *models.In
 	}
 	if s.eventsRepo != nil {
 		event, err := s.eventsRepo.GetEventByIDRaw(invitation.EventID)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrInvitationEventGone
+		}
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrInvitationEventAccessFailed, err)
 		}

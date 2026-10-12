@@ -175,6 +175,9 @@ func GetInvitationByToken(c echo.Context) error {
 	}
 	result, err := invitationSvc.GetInvitationByToken(token)
 	if err != nil {
+		if errors.Is(err, invitationsService.ErrInvitationEventGone) {
+			return utils.Error(c, http.StatusGone, "Este evento ya no está disponible", "event_gone")
+		}
 		if errors.Is(err, invitationsService.ErrInvitationEventUnavailable) {
 			return utils.Error(c, http.StatusForbidden, "Event is not public", "")
 		}
@@ -219,6 +222,9 @@ func ConfirmRSVP(c echo.Context) error {
 	}
 	confirmation, err := invitationSvc.ConfirmRSVPWithResult(token, req.Status, req.Method, req.guestCount(), dietaryRestrictions, noteArgs...)
 	if err != nil {
+		if errors.Is(err, invitationsService.ErrInvitationEventGone) {
+			return utils.Error(c, http.StatusGone, "Este evento ya no está disponible", "event_gone")
+		}
 		if errors.Is(err, invitationsService.ErrInvitationEventUnavailable) {
 			return utils.Error(c, http.StatusForbidden, "Event is not public", "")
 		}
