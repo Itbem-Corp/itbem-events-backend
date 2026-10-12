@@ -23,8 +23,8 @@ decides where that identity may enter and what it may do.
 
 | Product | Root level 1 | Root level 2 |
 | --- | --- | --- |
-| EventiApp | Full event definition and operation across the platform | Event visibility, guest operation, check-in, analytics and event-team assignments; cannot change event structure |
-| ITBEM | Organizations, members, application access, users and root assignment | Support view of users and organizations plus team management (members below Owner and their application access); cannot touch Owners or root accounts, change governance or root levels |
+| EventiApp | Full event definition and operation across the platform | Event visibility, guest operation, check-in, analytics and event-team assignments; cannot change event structure, nor grant a role that can (Admin, Event manager, Editor) |
+| ITBEM | Organizations, members, application access, users and root assignment | Support view of users and organizations plus team management (members below Owner and their application access; grants only Check-in, Analyst, Member or Viewer); cannot touch Owners or root accounts, grant Admin, Event manager or Editor, change governance or root levels |
 | Cafetton House | No implicit access; requires an explicit organization membership and application entitlement | No implicit access; requires an explicit organization membership and application entitlement |
 
 ## Organization roles
@@ -32,7 +32,9 @@ decides where that identity may enter and what it may do.
 | Role | Organization/team | Event content | Guests | Check-in | Analytics |
 | --- | --- | --- | --- | --- | --- |
 | Owner / Admin | Manage | Manage | Manage | Run | View |
-| Event manager / Editor / Member | View | Manage | Manage | Run | View |
+| Event manager | View | Create and manage | Manage | Run | View |
+| Editor | View | Manage | Manage | No | View |
+| Member | View | View | Manage | No | No |
 | Check-in | View | View | No | Run | No |
 | Analyst | View | View | No | No | View |
 | Guest | View | View | No | No | No |
@@ -44,7 +46,10 @@ assignments) only reaches members ranked strictly below the actor's own
 organization role; Root 2 reaches every member except an Owner and never a
 platform-root account. Only Root 1 may change an Owner's or a root account's
 application access or event assignments, and nobody assigns, re-roles or
-removes an Owner through member management.
+removes an Owner through member management. A root grants only roles whose
+capabilities its own level holds: Root 2 may add, invite or re-role members
+into Check-in, Analyst, Member or Viewer, never Admin, Event manager or
+Editor, so it cannot reach event structure through an account it controls.
 
 ## Product surfaces
 
