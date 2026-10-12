@@ -6,6 +6,7 @@ import (
 	"events-stocks/dtos"
 	"events-stocks/internal/accesstoken"
 	"events-stocks/internal/previewtoken"
+	"events-stocks/internal/publicaccessproof"
 	"events-stocks/models"
 	"events-stocks/services/ports"
 	"fmt"
@@ -371,17 +372,13 @@ func pageSpecContactVisible(cfg *models.EventConfig) bool {
 	return cfg == nil || cfg.ShowContactSection
 }
 
+// pageSpecAccessVersion is the version bound into password proofs. It is
+// derived from the password, so only a password change logs guests out.
 func pageSpecAccessVersion(cfg *models.EventConfig) string {
-	if cfg == nil {
+	if cfg == nil || !cfg.HasAuthPasswordPreview() {
 		return ""
 	}
-	if !cfg.UpdatedAt.IsZero() {
-		return cfg.UpdatedAt.UTC().Format(time.RFC3339Nano)
-	}
-	if !cfg.CreatedAt.IsZero() {
-		return cfg.CreatedAt.UTC().Format(time.RFC3339Nano)
-	}
-	return ""
+	return publicaccessproof.PasswordVersion(cfg.ID, cfg.NormalizedAuthPasswordPreview())
 }
 
 func latestPageSpecTime(current time.Time, candidates ...time.Time) time.Time {

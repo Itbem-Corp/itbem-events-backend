@@ -1496,12 +1496,14 @@ func TestBuildPageSpec_UsesFooterVisibilityFromEventConfig(t *testing.T) {
 }
 
 func TestBuildPageSpec_ExposesAccessVersionFromEventConfig(t *testing.T) {
+	t.Setenv("EVENT_ACCESS_SECRET", "test-secret")
 	updatedAt := time.Date(2026, 7, 7, 21, 15, 0, 123, time.FixedZone("CST", -6*60*60))
 
 	spec, err := buildPageSpecFromEvent(stubEvent(""), buildSpecDeps{
 		getSections: func(eventID uuid.UUID) ([]models.EventSection, error) { return stubSections(), nil },
 		getConfig: func(id uuid.UUID) (*models.EventConfig, error) {
 			return &models.EventConfig{
+				ID:                  testEventID,
 				AuthPasswordPreview: "secreto",
 				UpdatedAt:           updatedAt,
 			}, nil
@@ -1512,7 +1514,29 @@ func TestBuildPageSpec_ExposesAccessVersionFromEventConfig(t *testing.T) {
 	require.NotNil(t, spec)
 	require.NotNil(t, spec.Meta.Access)
 	assert.True(t, spec.Meta.Access.PasswordProtected)
-	assert.Equal(t, updatedAt.UTC().Format(time.RFC3339Nano), spec.Meta.Access.AccessVersion)
+	assert.NotEmpty(t, spec.Meta.Access.AccessVersion)
+	assert.NotContains(t, spec.Meta.Access.AccessVersion, "secreto")
+	assert.Equal(t, EventConfigAccessVersion(&models.EventConfig{ID: testEventID, AuthPasswordPreview: "secreto"}), spec.Meta.Access.AccessVersion)
+}
+
+// SET-13: saving unrelated config (palette, wall, block toggles) bumps
+// updated_at but must not log guests out of a password-protected page.
+func TestEventConfigAccessVersion_OnlyRotatesWhenPasswordChanges(t *testing.T) {
+	t.Setenv("EVENT_ACCESS_SECRET", "test-secret")
+	base := &models.EventConfig{ID: testEventID, AuthPasswordPreview: "secreto", UpdatedAt: time.Now()}
+	resaved := *base
+	resaved.UpdatedAt = base.UpdatedAt.Add(time.Hour)
+	resaved.ShowMomentWall = true
+	resaved.IsPublic = !base.IsPublic
+	changed := *base
+	changed.AuthPasswordPreview = "otro-secreto"
+	otherEvent := *base
+	otherEvent.ID = uuid.Must(uuid.NewV4())
+
+	assert.Equal(t, EventConfigAccessVersion(base), EventConfigAccessVersion(&resaved))
+	assert.NotEqual(t, EventConfigAccessVersion(base), EventConfigAccessVersion(&changed))
+	assert.NotEqual(t, EventConfigAccessVersion(base), EventConfigAccessVersion(&otherEvent))
+	assert.Empty(t, EventConfigAccessVersion(&models.EventConfig{ID: testEventID}))
 }
 
 func TestBuildPageSpec_ExposesContentVersionFromLatestEventConfigOrSectionChange(t *testing.T) {
