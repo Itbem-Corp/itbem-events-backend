@@ -67,3 +67,13 @@ func TestConfigFieldEnvVarHonorsExplicitAcronymMapping(t *testing.T) {
 		t.Fatalf("default environment mapping changed: %q", got)
 	}
 }
+
+func TestEventClientAccessUsesDocumentedEnvironmentName(t *testing.T) {
+	field, ok := reflect.TypeOf(models.Config{}).FieldByName("EventClientAccess")
+	if !ok {
+		t.Fatal("EventClientAccess configuration field is missing")
+	}
+	if got := configFieldEnvVar(field); got != "EVENT_CLIENT_ACCESS" {
+		t.Fatalf("event client access environment mapping changed: %q", got)
+	}
+}

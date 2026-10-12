@@ -20,6 +20,7 @@ import (
 	clientsController "events-stocks/controllers/clients"
 	deliveryController "events-stocks/controllers/delivery"
 	designtemplatesController "events-stocks/controllers/designtemplates"
+	eventclientsController "events-stocks/controllers/eventclients"
 	eventconfigController "events-stocks/controllers/eventconfig"
 	eventmembersController "events-stocks/controllers/eventmembers"
 	eventsController "events-stocks/controllers/events"
@@ -35,6 +36,7 @@ import (
 	"events-stocks/internal/aicredentials"
 	"events-stocks/internal/authz"
 	"events-stocks/internal/observability"
+	"events-stocks/internal/products/eventiapp"
 	"events-stocks/middleware/applicationaccess"
 	customValidator "events-stocks/middleware/validator"
 	"events-stocks/models"
@@ -46,6 +48,7 @@ import (
 	clienttyperepository "events-stocks/repositories/clienttyperepository"
 	colorrepository "events-stocks/repositories/colorrepository"
 	eventanalyticsrepository "events-stocks/repositories/eventanalyticsrepository"
+	eventclientrepository "events-stocks/repositories/eventclientrepository"
 	eventconfigrepository "events-stocks/repositories/eventconfigrepository"
 	eventmemberrepository "events-stocks/repositories/eventmemberrepository"
 	eventsectionrepository "events-stocks/repositories/eventsectionrepository"
@@ -74,6 +77,7 @@ import (
 	clientsService "events-stocks/services/clients"
 	clienttypesService "events-stocks/services/clienttypes"
 	colorsService "events-stocks/services/colors"
+	eventclientsService "events-stocks/services/eventclients"
 	eventmembersService "events-stocks/services/eventmembers"
 	eventsService "events-stocks/services/events"
 	fontsService "events-stocks/services/fonts"
@@ -446,9 +450,14 @@ func wireDependencies(cfg *models.Config) {
 	momentTypeSvc := momentsService.NewMomentTypeService(momentTypeRepo, redisRepo)
 	templateSvc := templatesService.NewDesignTemplateService(templateRepo, redisRepo)
 
-	authz.Configure(authz.Hooks{
+	eventClientRepo := eventclientrepository.New(gormrepository.DB())
+	eventClientAccess := eventiapp.ParseEventClientAccess(cfg.EventClientAccess)
+	eventiapp.SetEventClientAccess(eventClientAccess)
+	authzHooks := authz.Hooks{
 		SyncUser:              userSvc.SyncUser,
 		CheckAccessRecursive:  clientRepo.CheckAccessRecursive,
+		CheckAccessRecursiveE: clientRepo.CheckAccessRecursiveE,
+		ResolveClientProduct:  clientRepo.ResolveClientProduct,
 		GetClientByID:         clientRepo.GetClientByID,
 		GetEventByIDRaw:       eventsRepo.GetEventByIDRaw,
 		GetEventSectionByID:   eventSectionRepo.GetEventSectionByID,
@@ -457,7 +466,25 @@ func wireDependencies(cfg *models.Config) {
 		GetInvitationByIDLite: invitationRepo.GetInvitationByIDLite,
 		GetResourceByID:       resourceRepo.GetResourceByID,
 		GetEventMemberRole:    eventMemberRepo.RoleForUser,
-	})
+		GetEventMemberRoles:   eventMemberRepo.RolesForUser,
+	}
+	if eventClientAccess {
+		// EVENT_CLIENT_ACCESS=on: the grant authority path, the grant-only
+		// session and grant visibility in user-scoped event lists.
+		authzHooks.HasEventClientGrant = eventClientRepo.HasActiveGrant
+		applicationSessionSvc.ConfigureEventClientAccess(eventClientRepo.CountActiveForUser)
+	}
+	eventsrepository.ConfigureEventClientScope(eventClientAccess)
+	authz.Configure(authzHooks)
+	eventclientsController.Init(eventclientsService.NewService(
+		eventClientRepo,
+		newEventClientIdentity(userSvc, authProviderRepo),
+		clientRepo,
+		func(actor *models.User, orgID uuid.UUID, eventIDs []uuid.UUID) (map[uuid.UUID]bool, error) {
+			return authz.EventCapabilityForOrganizationEvents(actor, orgID, eventIDs, authz.CapabilityEventClientsManage)
+		},
+		applicationSessionSvc.InvalidateCognitoSub,
+	))
 
 	resourcesController.InitResourceController(resourceSvc, resourcesController.PublicResourceAccessDeps{
 		SectionRepo:    eventSectionRepo,
@@ -473,6 +500,13 @@ func wireDependencies(cfg *models.Config) {
 	eventsController.InitCoverController(resourceSvc)
 	eventsController.InitDuplicateController(duplicateSvc)
 	eventsController.InitRepairController(repairSvc)
+	eventsController.InitEventClientAccess(eventsController.EventClientDeps{
+		GrantedEventIDs: eventClientRepo.ActiveGrantedEventIDs,
+		RevokeAllForEvent: func(eventID, actorID uuid.UUID) error {
+			_, err := eventClientRepo.RevokeAllForEvent(nil, eventID, actorID)
+			return err
+		},
+	})
 	eventmembersController.InitEventMembersController(eventMemberSvc)
 	eventconfigController.InitEventConfigController(eventConfigSvc, resourceSvc)
 	eventsectionController.InitEventSectionController(eventSectSvc)

@@ -10,6 +10,7 @@ import (
 	"events-stocks/controllers/clienttypes"
 	"events-stocks/controllers/delivery"
 	"events-stocks/controllers/designtemplates"
+	"events-stocks/controllers/eventclients"
 	"events-stocks/controllers/eventconfig"
 	"events-stocks/controllers/eventmembers"
 	"events-stocks/controllers/events"
@@ -544,6 +545,16 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	protected.GET("/events/:id/members", eventmembers.List)
 	protected.PUT("/events/:id/members", eventmembers.Upsert)
 	protected.DELETE("/events/:id/members/:user_id", eventmembers.Remove)
+	// ── Event clients (EVENT_CLIENT_ACCESS; 404 while off) ──
+	protected.GET("/events/:id/clients", eventclients.List)
+	protected.GET("/events/:id/clients/candidates", eventclients.Candidates)
+	protected.GET("/events/:id/clients/:user_id/assignments", eventclients.ListAssignments)
+	protected.PATCH("/events/:id/clients/:user_id/assignments", eventclients.UpdateAssignments)
+	protected.DELETE("/events/:id/clients/:user_id", eventclients.Revoke)
+	eventClientInvites := protected.Group("/events/:id/clients")
+	eventClientInvites.Use(sensitiveRateLimiter())
+	eventClientInvites.POST("", eventclients.Create)
+	eventClientInvites.POST("/:user_id/resend-invitation", eventclients.ResendInvitation)
 	protected.GET("/events/:id/guests/export", guests.ExportGuestsCSV)
 	protected.POST("/guests", guests.CreateGuest)
 	protected.POST("/guests/batch", guests.CreateGuests) // Batch con invitaciones automáticas
@@ -581,6 +592,8 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	protected.PUT("/clients/members/:user_id", clients.UpdateMemberRole)
 	protected.GET("/clients/:id/member-applications/:user_id", sessions.ListMemberApplications)
 	protected.PUT("/clients/:id/member-applications/:user_id/:application_code", sessions.SetMemberApplication)
+	protected.GET("/clients/:id/members/event-clients", eventclients.ListOrganizationGrants)
+	protected.DELETE("/clients/:id/members/event-clients/:user_id", eventclients.RevokeOrganizationUser)
 	protected.GET("/clients/:id", clients.GetClient)
 	protected.PUT("/clients/:id", clients.UpdateClient)
 	protected.DELETE("/clients/:id", clients.DeleteClient)
