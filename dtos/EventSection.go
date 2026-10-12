@@ -80,6 +80,9 @@ func ApplyEventSectionPayload(section *models.EventSection, payload EventSection
 		if err != nil {
 			return err
 		}
+		if err := ValidateEventSectionConfigURLs(config); err != nil {
+			return err
+		}
 		section.Config = config
 	} else if isCreate && strings.TrimSpace(section.Config) == "" {
 		section.Config = "{}"

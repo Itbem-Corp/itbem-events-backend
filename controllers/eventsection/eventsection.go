@@ -1,6 +1,7 @@
 package eventsection
 
 import (
+	"errors"
 	"events-stocks/dtos"
 	"events-stocks/internal/authz"
 	"events-stocks/models"
@@ -15,6 +16,17 @@ var eventSectionSvc *eventsService.EventSectionService
 
 func InitEventSectionController(svc *eventsService.EventSectionService) {
 	eventSectionSvc = svc
+}
+
+// respondInvalidSectionConfig answers 400 for a rejected section payload. A
+// link with a disallowed scheme (javascript:, data:...) gets the Spanish
+// message and the stable code invalid_section_url (STU-N4).
+func respondInvalidSectionConfig(c echo.Context, err error) error {
+	var urlErr dtos.InvalidSectionURLError
+	if errors.As(err, &urlErr) {
+		return utils.Error(c, http.StatusBadRequest, urlErr.Error(), dtos.InvalidSectionURLCode)
+	}
+	return utils.Error(c, http.StatusBadRequest, "Invalid section config", err.Error())
 }
 
 // GET /events/:id/sections
@@ -56,7 +68,7 @@ func CreateSection(c echo.Context) error {
 	var section models.EventSection
 	section.EventID = eventID
 	if err := dtos.ApplyEventSectionPayload(&section, payload, true); err != nil {
-		return utils.Error(c, http.StatusBadRequest, "Invalid section config", err.Error())
+		return respondInvalidSectionConfig(c, err)
 	}
 	if err := authz.RequireEventSectionForCreate(user, section.EventID); err != nil {
 		return authz.Respond(c, err)
@@ -89,7 +101,7 @@ func UpdateSection(c echo.Context) error {
 	section.ID = id
 	section.EventID = originalEventID
 	if err := dtos.ApplyEventSectionPayload(section, payload, false); err != nil {
-		return utils.Error(c, http.StatusBadRequest, "Invalid section config", err.Error())
+		return respondInvalidSectionConfig(c, err)
 	}
 	if err := eventSectionSvc.UpdateEventSection(section); err != nil {
 		return utils.WriteFailed(c, "Error updating section", err)
