@@ -73,6 +73,15 @@ type EventsRepo struct{}
 
 func NewEventsRepo() *EventsRepo { return &EventsRepo{} }
 
+// EventService type-asserts the optimized list projections. A signature drift
+// would silently fall back to the in-memory path, so pin them at build time.
+var (
+	_ ports.EventsRepository             = (*EventsRepo)(nil)
+	_ ports.EventsDashboardRepository    = (*EventsRepo)(nil)
+	_ ports.EventsPageRepository         = (*EventsRepo)(nil)
+	_ ports.EventsNotificationRepository = (*EventsRepo)(nil)
+)
+
 func (r *EventsRepo) CreateEvent(event *models.Event) error { return CreateEvent(event) }
 func (r *EventsRepo) UpdateEvent(event *models.Event) error { return UpdateEvent(event) }
 func (r *EventsRepo) DeleteEvent(id uuid.UUID) error        { return DeleteEvent(id) }
@@ -96,40 +105,62 @@ func (r *EventsRepo) GetEventsByClientID(clientID uuid.UUID) ([]models.Event, er
 func (r *EventsRepo) GetAllEventsForDashboard() ([]models.Event, error) {
 	return GetAllEventsForDashboard()
 }
-func (r *EventsRepo) GetEventsForUser(userID uuid.UUID) ([]models.Event, error) {
-	return GetEventsForUser(userID)
+func (r *EventsRepo) GetEventsForUser(access dtos.EventCallerAccess) ([]models.Event, error) {
+	return GetEventsForUser(access)
 }
 func (r *EventsRepo) UpdateEventCover(id uuid.UUID, coverImageURL string) error {
 	return UpdateEventCover(id, coverImageURL)
 }
-func (r *EventsRepo) GetEventDashboardOverview(clientID, userID *uuid.UUID, now time.Time) (dtos.EventDashboardOverview, error) {
-	return GetEventDashboardOverview(clientID, userID, now)
+func (r *EventsRepo) GetEventDashboardOverview(clientID *uuid.UUID, caller *dtos.EventCallerAccess, now time.Time) (dtos.EventDashboardOverview, error) {
+	return GetEventDashboardOverview(clientID, caller, now)
 }
-func (r *EventsRepo) ListEventPage(clientID, userID *uuid.UUID, query dtos.EventListQuery) ([]models.Event, int, dtos.EventListCounts, error) {
-	return ListEventPage(clientID, userID, query)
+func (r *EventsRepo) ListEventPage(clientID *uuid.UUID, caller *dtos.EventCallerAccess, query dtos.EventListQuery) ([]models.Event, int, dtos.EventListCounts, error) {
+	return ListEventPage(clientID, caller, query)
 }
-func (r *EventsRepo) ListEventNotifications(clientID, userID *uuid.UUID, now time.Time) ([]dtos.EventNotification, error) {
-	return ListEventNotifications(clientID, userID, now)
+func (r *EventsRepo) ListEventNotifications(clientID *uuid.UUID, caller *dtos.EventCallerAccess, now time.Time) ([]dtos.EventNotification, error) {
+	return ListEventNotifications(clientID, caller, now)
 }
 
-func dashboardEventsScope(query *gorm.DB, clientID, userID *uuid.UUID) *gorm.DB {
+// callerAccessEventPredicate keeps an event when its organization is one the
+// application session lists for the caller. It mirrors
+// services/applications.SessionService.organizationAccess: an active
+// membership with a role, in an active and not deleted organization, with an
+// active member access row for the request application. Arguments: the
+// request application ID, then the user ID. Only direct memberships count, as
+// before; inherited Owner/Admin access is reached with an explicit client_id.
+const callerAccessEventPredicate = `EXISTS (
+	SELECT 1
+	FROM client_members cm
+	JOIN clients c ON c.id = cm.client_id AND c.deleted_at IS NULL AND c.is_active = true
+	JOIN client_roles cr ON cr.id = cm.client_role_id
+	JOIN client_member_applications cma ON cma.client_member_id = cm.id AND cma.is_active = true AND cma.application_id = ?
+	WHERE cm.client_id = events.client_id
+		AND cm.user_id = ?
+		AND cm.is_active = true
+)`
+
+func scopeEventsToCallerAccess(query *gorm.DB, access dtos.EventCallerAccess) *gorm.DB {
+	return query.Where(callerAccessEventPredicate, access.ApplicationID, access.UserID)
+}
+
+// dashboardEventsScope selects the events of one organization (clientID,
+// authorized by the caller), the caller-access portfolio (caller), or every
+// event when both are nil (platform roots only).
+func dashboardEventsScope(query *gorm.DB, clientID *uuid.UUID, caller *dtos.EventCallerAccess) *gorm.DB {
 	if clientID != nil {
 		return query.Where("events.client_id = ?", *clientID)
 	}
-	if userID != nil {
-		return query.Where(
-			"EXISTS (SELECT 1 FROM client_members cm WHERE cm.client_id = events.client_id AND cm.user_id = ? AND cm.is_active = true)",
-			*userID,
-		)
+	if caller != nil {
+		return scopeEventsToCallerAccess(query, *caller)
 	}
 	return query
 }
 
-func ListEventNotifications(clientID, userID *uuid.UUID, now time.Time) ([]dtos.EventNotification, error) {
+func ListEventNotifications(clientID *uuid.UUID, caller *dtos.EventCallerAccess, now time.Time) ([]dtos.EventNotification, error) {
 	calendarDate := "DATE(events.event_date_time AT TIME ZONE COALESCE(NULLIF(events.timezone, ''), 'UTC'))"
 	today := "DATE(? AT TIME ZONE COALESCE(NULLIF(events.timezone, ''), 'UTC'))"
 	var notifications []dtos.EventNotification
-	err := dashboardEventsScope(gormrepository.DB().Model(&models.Event{}), clientID, userID).
+	err := dashboardEventsScope(gormrepository.DB().Model(&models.Event{}), clientID, caller).
 		Select("events.id, events.name, events.identifier, events.event_date_time, events.timezone, events.is_active, events.client_id, events.event_type_id").
 		Where(calendarDate+" BETWEEN ("+today+" - INTERVAL '3 days') AND ("+today+" + INTERVAL '3 days')", now, now).
 		Order("events.event_date_time ASC").
@@ -137,7 +168,7 @@ func ListEventNotifications(clientID, userID *uuid.UUID, now time.Time) ([]dtos.
 	return notifications, err
 }
 
-func GetEventDashboardOverview(clientID, userID *uuid.UUID, now time.Time) (dtos.EventDashboardOverview, error) {
+func GetEventDashboardOverview(clientID *uuid.UUID, caller *dtos.EventCallerAccess, now time.Time) (dtos.EventDashboardOverview, error) {
 	db := gormrepository.DB()
 	calendarDate := "DATE(events.event_date_time AT TIME ZONE COALESCE(NULLIF(events.timezone, ''), 'UTC'))"
 	today := "DATE(? AT TIME ZONE COALESCE(NULLIF(events.timezone, ''), 'UTC'))"
@@ -154,7 +185,7 @@ func GetEventDashboardOverview(clientID, userID *uuid.UUID, now time.Time) (dtos
 	nextFound := false
 	group := new(errgroup.Group)
 	group.Go(func() error {
-		return dashboardEventsScope(db.Model(&models.Event{}), clientID, userID).
+		return dashboardEventsScope(db.Model(&models.Event{}), clientID, caller).
 			Select(
 				"COUNT(*) AS total, "+
 					"COUNT(*) FILTER (WHERE events.is_active = true) AS active, "+
@@ -167,7 +198,7 @@ func GetEventDashboardOverview(clientID, userID *uuid.UUID, now time.Time) (dtos
 			Scan(&metrics).Error
 	})
 	group.Go(func() error {
-		return dashboardEventsScope(db.Model(&models.Event{}), clientID, userID).
+		return dashboardEventsScope(db.Model(&models.Event{}), clientID, caller).
 			Select("events.*").
 			Joins("EventType").
 			Where("events.is_active = true").
@@ -176,7 +207,7 @@ func GetEventDashboardOverview(clientID, userID *uuid.UUID, now time.Time) (dtos
 			Find(&activeEvents).Error
 	})
 	group.Go(func() error {
-		err := dashboardEventsScope(db.Model(&models.Event{}), clientID, userID).
+		err := dashboardEventsScope(db.Model(&models.Event{}), clientID, caller).
 			Select("events.*").
 			Joins("EventType").
 			Where("events.is_active = true").
@@ -245,7 +276,7 @@ func eventListNeedsFilteredTotal(query dtos.EventListQuery) bool {
 	return strings.TrimSpace(query.Search) != "" || (filter != "" && filter != "all")
 }
 
-func ListEventPage(clientID, userID *uuid.UUID, query dtos.EventListQuery) ([]models.Event, int, dtos.EventListCounts, error) {
+func ListEventPage(clientID *uuid.UUID, caller *dtos.EventCallerAccess, query dtos.EventListQuery) ([]models.Event, int, dtos.EventListCounts, error) {
 	db := gormrepository.DB()
 	calendarDate := "DATE(events.event_date_time AT TIME ZONE COALESCE(NULLIF(events.timezone, ''), 'UTC'))"
 	today := "DATE(? AT TIME ZONE COALESCE(NULLIF(events.timezone, ''), 'UTC'))"
@@ -256,7 +287,7 @@ func ListEventPage(clientID, userID *uuid.UUID, query dtos.EventListQuery) ([]mo
 	group := new(errgroup.Group)
 	needsFilteredTotal := eventListNeedsFilteredTotal(query)
 	group.Go(func() error {
-		return dashboardEventsScope(db.Model(&models.Event{}), clientID, userID).
+		return dashboardEventsScope(db.Model(&models.Event{}), clientID, caller).
 			Select(
 				"COUNT(*) AS \"all\", "+
 					"COUNT(*) FILTER (WHERE "+calendarDate+" > "+today+") AS upcoming, "+
@@ -271,14 +302,14 @@ func ListEventPage(clientID, userID *uuid.UUID, query dtos.EventListQuery) ([]mo
 	if needsFilteredTotal {
 		group.Go(func() error {
 			return applyEventListFilters(
-				dashboardEventsScope(db.Model(&models.Event{}), clientID, userID),
+				dashboardEventsScope(db.Model(&models.Event{}), clientID, caller),
 				query,
 			).Count(&total).Error
 		})
 	}
 	group.Go(func() error {
 		return applyEventListFilters(
-			dashboardEventsScope(db.Model(&models.Event{}), clientID, userID),
+			dashboardEventsScope(db.Model(&models.Event{}), clientID, caller),
 			query,
 		).
 			Select(`events.*, (
@@ -518,13 +549,11 @@ func GetAllEventsForDashboard() ([]models.Event, error) {
 	return events, err
 }
 
-// GetEventsForUser returns events for all clients a user is a member of.
-func GetEventsForUser(userID uuid.UUID) ([]models.Event, error) {
+// GetEventsForUser returns the caller-access portfolio: the events of every
+// organization the request application session lists for the user.
+func GetEventsForUser(access dtos.EventCallerAccess) ([]models.Event, error) {
 	var events []models.Event
-	err := gormrepository.DB().
-		Preload("EventType").
-		Joins("JOIN client_members ON client_members.client_id = events.client_id").
-		Where("client_members.user_id = ? AND client_members.is_active = true", userID).
+	err := scopeEventsToCallerAccess(gormrepository.DB().Preload("EventType"), access).
 		Order("events.event_date_time DESC").
 		Find(&events).Error
 	return events, err

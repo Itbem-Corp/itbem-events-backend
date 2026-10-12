@@ -81,7 +81,7 @@ func (m *mockResourceEventRepo) GetEventsByClientID(clientID uuid.UUID) ([]model
 func (m *mockResourceEventRepo) GetAllEventsForDashboard() ([]models.Event, error) {
 	return nil, nil
 }
-func (m *mockResourceEventRepo) GetEventsForUser(userID uuid.UUID) ([]models.Event, error) {
+func (m *mockResourceEventRepo) GetEventsForUser(_ dtos.EventCallerAccess) ([]models.Event, error) {
 	return nil, nil
 }
 func (m *mockResourceEventRepo) UpdateEventCover(id uuid.UUID, coverImageURL string) error {

@@ -375,7 +375,7 @@ func (m *mockGuestEventRepo) GetEventsByClientID(clientID uuid.UUID) ([]models.E
 	return nil, nil
 }
 func (m *mockGuestEventRepo) GetAllEventsForDashboard() ([]models.Event, error) { return nil, nil }
-func (m *mockGuestEventRepo) GetEventsForUser(userID uuid.UUID) ([]models.Event, error) {
+func (m *mockGuestEventRepo) GetEventsForUser(_ dtos.EventCallerAccess) ([]models.Event, error) {
 	return nil, nil
 }
 func (m *mockGuestEventRepo) UpdateEventCover(id uuid.UUID, coverImageURL string) error {

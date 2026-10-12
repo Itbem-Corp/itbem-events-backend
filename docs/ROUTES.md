@@ -48,6 +48,12 @@
 
 ## Protected Routes (`/api`) — Require `Authorization: Bearer <token>`
 
+### Session, audit trail and product metrics
+- `GET /api/session` → `sessions.GetSession` — application session: user, organizations with per-organization `capabilities`, top-level `capabilities`. On EventiApp `metrics:view` appears only on Owner/Admin organizations (direct or inherited) and, top-level, for roots 1/2 or a user with at least one Owner/Admin organization.
+- `POST /api/session/organization-context` → `sessions.IssueOrganizationContext` — issues the 5-minute signed `X-Organization-Context` credential for an organization in the session (403 otherwise). Audit: a successful re-issue for the organization the request already selected (`X-Organization-ID` equal to the body `organization_id`) writes no audit row (`audit.SkipOnSuccess`); switches, 400, 401, 403 and 503 are still audited.
+- `GET /api/audit-logs` → `auditlogs.List` — Root 1 only (`authz.RequirePrimaryRoot`); everyone else gets 403 `Primary platform administrator required`.
+- `GET /api/metrics/portfolio?from=&to=&client_id=` → `productmetrics.Portfolio` — surface gate `metrics:view`. With `client_id`: `analytics:view` on that organization, or `metrics:view` on EventiApp (Owner/Admin or root). Without `client_id`: platform roots only, otherwise 403 `Organization required`. Known gap: summaries with `client_id` are not filtered by tenant.
+
 ### ITBEM delivery control plane
 
 - `GET /api/automation/agents` → `automation.GetAgentDirectory` — v1 snapshot of logical profiles, recent worker instances, assigned active runs, 30-day usage/cost aggregates, and queued counts by operation. Platform admins (Root 1/2) may query platform-wide or filter `client_id`/`project_id`; organization-workspace callers must select a client or project, and client-level data is intersected with their project-view memberships. Organization context and project/client ownership are validated server-side; IDs are not authorization. Scoped aggregates do not mix other clients/projects, and scoped availability is explicitly unknown because worker heartbeats are not hierarchy-owned. The response omits prompts, private object refs, raw usage, hostnames, paths, and credentials. See `docs/AGENT_DIRECTORY.md` for status and identity trust-boundary details.
@@ -115,8 +121,9 @@ required-check identity change therefore makes the previous approval stale.
 Legacy v1/v2 events remain auditable but cannot authorize a v3 action.
 
 ### Events
-- `GET /api/events/all` → `events.ListEvents` — compatibility path for dashboard list; requires auth and returns root/all or user-scoped events
-- `GET /api/events` → `events.ListEvents` — Protected. Query params: `?client_id=UUID` (optional). Root users see all events; regular users see events for their accessible clients; with `?client_id` returns events for that client (access-checked).
+- `GET /api/events/all` → `events.ListEvents` — compatibility path for dashboard list; requires auth and returns root/all or caller-access events
+- `GET /api/events` → `events.ListEvents` — Protected. Query params: `?client_id=UUID` (optional), `page`/`page_size`/`search`/`filter` (paged). Root users see all events; other users without `client_id` see the caller-access portfolio: organizations the application session lists for them (active, not deleted, membership enabled for the request application; direct memberships only). With `?client_id` returns events for that client (access-checked, inherited Owner/Admin included). See `docs/AUTHORIZATION_MODEL.md`.
+- `GET /api/events/dashboard` → `events.GetDashboardOverview` and `GET /api/events/notifications` → `events.GetEventNotifications` — same scope rules as `GET /api/events`.
 - `POST /api/events` → `events.CreateEvent`
 - `PUT /api/events/:id` → `events.UpdateEvent`
 - `DELETE /api/events/:id` → `events.DeleteEvent`

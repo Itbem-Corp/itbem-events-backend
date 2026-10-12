@@ -49,6 +49,31 @@ publish a clearly labelled test message, verify receipt in the monitored inbox,
 then record the time and recipient. Never use `set-alarm-state` on production
 automation without an approved drill window.
 
+## Security audit trail
+
+`middleware/audit.Mutations` writes one append-only `audit_logs` row for every
+protected POST/PUT/PATCH/DELETE and for every 401/403 a handler returns,
+whatever the method. Denials from the token and `applicationaccess.Require`
+middleware (for example 403 `Application capability denied`) happen before
+`Mutations` runs and are not in the trail. Rows are never updated or deleted
+(database triggers in `configuration/gorm.go` enforce it).
+
+One exception exists. When `POST /api/session/organization-context` succeeds
+and its handler called `audit.SkipOnSuccess` (the body organization equals the
+organization the request already selected through `X-Organization-ID`), no row
+is written: the dashboard renews that credential every 4m15s and after each
+session revalidation, and the renewal changes no state. The mark is honoured
+only for a successful POST on that exact route, so no other handler can use it
+to hide a state change. Still audited:
+
+- organization switches (body organization differs from the header, or no
+  header organization);
+- 400, 401, 403 (including an organization outside the session) and 5xx;
+- every other route, marked or not.
+
+When reviewing the trail, the absence of organization-context rows during an
+idle session is expected; explicit switches and denials remain visible.
+
 ## Rust worker DLQ alarm
 
 Preserve the message and correlate its job ID, receive count, worker revision,

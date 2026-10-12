@@ -82,7 +82,7 @@ type mockEventsRepo struct {
 	GetEventByIdentifierFunc         func(identifier string) (*models.Event, error)
 	GetEventsByClientIDFunc          func(clientID uuid.UUID) ([]models.Event, error)
 	GetAllEventsDashboardFunc        func() ([]models.Event, error)
-	GetEventsForUserFunc             func(userID uuid.UUID) ([]models.Event, error)
+	GetEventsForUserFunc             func(access dtos.EventCallerAccess) ([]models.Event, error)
 	UpdateEventCoverFunc             func(id uuid.UUID, coverImageURL string) error
 	UpdateEventCoverWithVariantsFunc func(id uuid.UUID, coverImageURL string, variants models.MediaVariants) error
 	BeginEventCoverProcessingFunc    func(id uuid.UUID, pendingURL, jobID string) (*models.Event, string, error)
@@ -150,9 +150,9 @@ func (m *mockEventsRepo) GetAllEventsForDashboard() ([]models.Event, error) {
 	}
 	return nil, nil
 }
-func (m *mockEventsRepo) GetEventsForUser(userID uuid.UUID) ([]models.Event, error) {
+func (m *mockEventsRepo) GetEventsForUser(access dtos.EventCallerAccess) ([]models.Event, error) {
 	if m.GetEventsForUserFunc != nil {
-		return m.GetEventsForUserFunc(userID)
+		return m.GetEventsForUserFunc(access)
 	}
 	return nil, nil
 }

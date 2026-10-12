@@ -419,3 +419,69 @@ func TestLoadEventAccessInputsDoesNotWaitForEventAfterIdentityError(t *testing.T
 		t.Fatal("event loader did not stop after release")
 	}
 }
+
+func TestMetricsViewOwnerAdminOnly(t *testing.T) {
+	for _, role := range []string{"Owner", "Admin", "owner", "OWNER", "INHERITED_OWNER", "INHERITED_ADMIN", " inherited_admin "} {
+		assert.True(t, roleHasCapability(role, CapabilityMetricsView), role)
+	}
+	for _, role := range []string{"EVENT_MANAGER", "EDITOR", "ANALYST", "Member", "CHECKIN", "Guest", "VIEWER", "PLATFORM", ""} {
+		assert.False(t, roleHasCapability(role, CapabilityMetricsView), role)
+	}
+
+	clientID := uuid.Must(uuid.NewV4())
+	user := &models.User{ID: uuid.Must(uuid.NewV4())}
+	role := "Owner"
+	restore := ReplaceHooksForTest(Hooks{
+		CheckAccessRecursive: func(uuid.UUID, uuid.UUID) (bool, string) { return true, role },
+	})
+	t.Cleanup(restore)
+
+	require.NoError(t, RequireClientCapability(user, clientID, CapabilityMetricsView))
+	role = "INHERITED_ADMIN"
+	require.NoError(t, RequireClientCapability(user, clientID, CapabilityMetricsView))
+	for _, denied := range []string{"EVENT_MANAGER", "EDITOR", "ANALYST"} {
+		role = denied
+		err := RequireClientCapability(user, clientID, CapabilityMetricsView)
+		require.Error(t, err, denied)
+		assert.Equal(t, http.StatusForbidden, err.(*Failure).Status, denied)
+	}
+}
+
+func TestOperationalRootHasMetricsView(t *testing.T) {
+	primary := &models.User{RootLevel: models.RootLevelPrimary}
+	operational := &models.User{RootLevel: models.RootLevelOperational}
+
+	assert.True(t, platformHasCapability(primary, CapabilityMetricsView))
+	assert.True(t, platformHasCapability(operational, CapabilityMetricsView))
+	// Metrics are support visibility, not governance: Root 2 still cannot govern.
+	assert.False(t, platformHasCapability(operational, CapabilityOrgManage))
+	assert.False(t, platformHasCapability(operational, CapabilityEventManage))
+
+	require.NoError(t, RequireClientCapability(operational, uuid.Must(uuid.NewV4()), CapabilityMetricsView))
+}
+
+// R3 regression: restricting metrics to Owner/Admin must not touch event
+// analytics. GET /api/events/:id/analytics authorizes analytics:view per event.
+func TestEventAnalyticsStayAvailableToAnalyticsRolesOnEventiApp(t *testing.T) {
+	eventID := uuid.Must(uuid.NewV4())
+	clientID := uuid.Must(uuid.NewV4())
+	for _, role := range []string{"ANALYST", "EDITOR", "EVENT_MANAGER"} {
+		t.Run(role, func(t *testing.T) {
+			e := echo.New()
+			c := e.NewContext(httptest.NewRequest(http.MethodGet, "/api/events/"+eventID.String()+"/analytics", nil), httptest.NewRecorder())
+			c.Set("cognito_sub", "analytics-member")
+			c.Set("tenant_code", "eventiapp")
+			restore := ReplaceHooksForTest(Hooks{
+				SyncUser:             func(string) (*models.User, error) { return &models.User{ID: uuid.Must(uuid.NewV4())}, nil },
+				GetEventByIDRaw:      func(uuid.UUID) (*models.Event, error) { return &models.Event{ID: eventID, ClientID: &clientID}, nil },
+				CheckAccessRecursive: func(uuid.UUID, uuid.UUID) (bool, string) { return true, role },
+				GetEventMemberRole:   func(uuid.UUID, uuid.UUID) (string, bool, error) { return "", false, nil },
+			})
+			t.Cleanup(restore)
+
+			_, _, err := RequireEventCapability(c, eventID, CapabilityAnalyticsView)
+			require.NoError(t, err)
+			assert.False(t, roleHasCapability(role, CapabilityMetricsView))
+		})
+	}
+}

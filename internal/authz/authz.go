@@ -92,6 +92,10 @@ const (
 	CapabilityAnalyticsView Capability = "analytics:view"
 	CapabilityMembersManage Capability = "members:manage"
 	CapabilityOrgManage     Capability = "organization:manage"
+	// CapabilityMetricsView gates organization-scoped product metrics. Only
+	// Owner/Admin (direct or inherited) and platform roots hold it; callers
+	// that do not reserve the metrics module keep using analytics:view.
+	CapabilityMetricsView Capability = "metrics:view"
 )
 
 // allCapabilities lists every Capability above. PlatformRootMayGrantRole
@@ -107,6 +111,7 @@ var allCapabilities = []Capability{
 	CapabilityAnalyticsView,
 	CapabilityMembersManage,
 	CapabilityOrgManage,
+	CapabilityMetricsView,
 }
 
 func (e *Failure) Error() string {
@@ -298,7 +303,7 @@ func platformHasCapability(user *models.User, capability Capability) bool {
 		return false
 	}
 	switch capability {
-	case CapabilityView, CapabilityGuestManage, CapabilityCheckin, CapabilityAnalyticsView, CapabilityMembersManage:
+	case CapabilityView, CapabilityGuestManage, CapabilityCheckin, CapabilityAnalyticsView, CapabilityMetricsView, CapabilityMembersManage:
 		return true
 	default:
 		return false
@@ -346,7 +351,7 @@ func roleHasCapability(role string, capability Capability) bool {
 		return code == "EVENT_MANAGER" || code == "CHECKIN"
 	case CapabilityAnalyticsView:
 		return code == "EVENT_MANAGER" || code == "EDITOR" || code == "ANALYST"
-	case CapabilityMembersManage, CapabilityOrgManage:
+	case CapabilityMembersManage, CapabilityOrgManage, CapabilityMetricsView:
 		return false
 	default:
 		return false

@@ -100,7 +100,7 @@ func (m *mockEventsRepo) GetEventsByClientID(_ uuid.UUID) ([]models.Event, error
 func (m *mockEventsRepo) GetAllEventsForDashboard() ([]models.Event, error) {
 	return nil, nil
 }
-func (m *mockEventsRepo) GetEventsForUser(_ uuid.UUID) ([]models.Event, error) {
+func (m *mockEventsRepo) GetEventsForUser(_ dtos.EventCallerAccess) ([]models.Event, error) {
 	return nil, nil
 }
 func (m *mockEventsRepo) UpdateEventCover(id uuid.UUID, coverImageURL string) error {

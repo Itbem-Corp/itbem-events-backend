@@ -23,3 +23,26 @@ func TestProductRegistryKeepsPlatformAndEventBoundariesExplicit(t *testing.T) {
 		t.Fatalf("default product = %q, want %q", got, core.EventiApp)
 	}
 }
+
+func TestModuleRequiresOrganizationAdmin(t *testing.T) {
+	tests := []struct {
+		product string
+		module  string
+		want    bool
+	}{
+		{product: "eventiapp", module: "metrics", want: true},
+		{product: " EventiApp ", module: " METRICS ", want: true},
+		{product: "eventiapp", module: "events", want: false},
+		{product: "eventiapp", module: "home", want: false},
+		{product: "eventiapp", module: "", want: false},
+		{product: "itbem", module: "metrics", want: false},
+		{product: "cafettonhouse", module: "metrics", want: false},
+		{product: "unknown", module: "metrics", want: false},
+		{product: "", module: "metrics", want: false},
+	}
+	for _, test := range tests {
+		if got := ModuleRequiresOrganizationAdmin(test.product, test.module); got != test.want {
+			t.Errorf("ModuleRequiresOrganizationAdmin(%q, %q) = %v, want %v", test.product, test.module, got, test.want)
+		}
+	}
+}

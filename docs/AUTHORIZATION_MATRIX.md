@@ -23,21 +23,21 @@ decides where that identity may enter and what it may do.
 
 | Product | Root level 1 | Root level 2 |
 | --- | --- | --- |
-| EventiApp | Full event definition and operation across the platform | Event visibility, guest operation, check-in, analytics and event-team assignments; cannot change event structure, nor grant a role that can (Admin, Event manager, Editor) |
+| EventiApp | Full event definition and operation across the platform, product metrics and the audit trail | Event visibility, guest operation, check-in, analytics, product metrics and event-team assignments; cannot change event structure, nor grant a role that can (Admin, Event manager, Editor), nor read the audit trail |
 | ITBEM | Organizations, members, application access, users and root assignment | Support view of users and organizations plus team management (members below Owner and their application access; grants only Check-in, Analyst, Member or Viewer); cannot touch Owners or root accounts, grant Admin, Event manager or Editor, change governance or root levels |
 | Cafetton House | No implicit access; requires an explicit organization membership and application entitlement | No implicit access; requires an explicit organization membership and application entitlement |
 
 ## Organization roles
 
-| Role | Organization/team | Event content | Guests | Check-in | Analytics |
-| --- | --- | --- | --- | --- | --- |
-| Owner / Admin | Manage | Manage | Manage | Run | View |
-| Event manager | View | Create and manage | Manage | Run | View |
-| Editor | View | Manage | Manage | No | View |
-| Member | View | View | Manage | No | No |
-| Check-in | View | View | No | Run | No |
-| Analyst | View | View | No | No | View |
-| Guest | View | View | No | No | No |
+| Role | Organization/team | Event content | Guests | Check-in | Analytics | Metrics |
+| --- | --- | --- | --- | --- | --- | --- |
+| Owner / Admin | Manage | Manage | Manage | Run | View | View |
+| Event manager | View | Create and manage | Manage | Run | View | EventiApp: No. Cafetton House / ITBEM: View |
+| Editor | View | Manage | Manage | No | View | EventiApp: No. Cafetton House / ITBEM: View |
+| Member | View | View | Manage | No | No | No |
+| Check-in | View | View | No | Run | No | No |
+| Analyst | View | View | No | No | View | EventiApp: No. Cafetton House / ITBEM: View |
+| Guest | View | View | No | No | No | No |
 
 An optional event assignment can narrow this further for one event.
 
@@ -51,6 +51,19 @@ removes an Owner through member management. A root grants only roles whose
 capabilities its own level holds: Root 2 may add, invite or re-role members
 into Check-in, Analyst, Member or Viewer, never Admin, Event manager or
 Editor, so it cannot reach event structure through an account it controls.
+
+**Analytics** is event analytics (`analytics:view`, `GET /api/events/:id/analytics`).
+**Metrics** is the product-metrics portfolio (`metrics:view`,
+`GET /api/metrics/portfolio`). EventiApp reserves metrics for organization
+Owner/Admin (direct or inherited, any case) and platform roots 1 and 2
+(`internal/products/eventiapp/access.go`, read through
+`products.ModuleRequiresOrganizationAdmin`). Cafetton House and ITBEM keep
+metrics for Event manager, Editor and Analyst. The rule is per organization: a
+user who is Owner of A and Editor of B sees metrics for A only.
+
+The security audit trail (`GET /api/audit-logs`, `audit:view`) is Root 1 only
+on EventiApp and ITBEM; Cafetton House strips platform authority, so nobody
+reads it there. Root 2, Owner and Admin never receive it.
 
 ## Product surfaces
 

@@ -92,13 +92,15 @@ func (s *EventService) ListEventsForDashboard() ([]models.Event, error) {
 	return s.repo.GetAllEventsForDashboard()
 }
 
-func (s *EventService) ListEventsForUser(userID uuid.UUID) ([]models.Event, error) {
-	return s.repo.GetEventsForUser(userID)
+// ListEventsForUser lists the caller-access portfolio (see
+// dtos.EventCallerAccess).
+func (s *EventService) ListEventsForUser(access dtos.EventCallerAccess) ([]models.Event, error) {
+	return s.repo.GetEventsForUser(access)
 }
 
-func (s *EventService) GetDashboardOverview(clientID, userID *uuid.UUID, now time.Time) (dtos.EventDashboardOverview, error) {
+func (s *EventService) GetDashboardOverview(clientID *uuid.UUID, caller *dtos.EventCallerAccess, now time.Time) (dtos.EventDashboardOverview, error) {
 	if optimized, ok := s.repo.(ports.EventsDashboardRepository); ok {
-		return optimized.GetEventDashboardOverview(clientID, userID, now)
+		return optimized.GetEventDashboardOverview(clientID, caller, now)
 	}
 
 	var (
@@ -107,8 +109,8 @@ func (s *EventService) GetDashboardOverview(clientID, userID *uuid.UUID, now tim
 	)
 	if clientID != nil {
 		events, err = s.repo.GetEventsByClientID(*clientID)
-	} else if userID != nil {
-		events, err = s.repo.GetEventsForUser(*userID)
+	} else if caller != nil {
+		events, err = s.repo.GetEventsForUser(*caller)
 	} else {
 		events, err = s.repo.GetAllEventsForDashboard()
 	}
@@ -118,9 +120,9 @@ func (s *EventService) GetDashboardOverview(clientID, userID *uuid.UUID, now tim
 	return BuildDashboardOverview(events, now), nil
 }
 
-func (s *EventService) ListEventPage(clientID, userID *uuid.UUID, query dtos.EventListQuery) ([]models.Event, int, dtos.EventListCounts, error) {
+func (s *EventService) ListEventPage(clientID *uuid.UUID, caller *dtos.EventCallerAccess, query dtos.EventListQuery) ([]models.Event, int, dtos.EventListCounts, error) {
 	if optimized, ok := s.repo.(ports.EventsPageRepository); ok {
-		return optimized.ListEventPage(clientID, userID, query)
+		return optimized.ListEventPage(clientID, caller, query)
 	}
 
 	var (
@@ -129,8 +131,8 @@ func (s *EventService) ListEventPage(clientID, userID *uuid.UUID, query dtos.Eve
 	)
 	if clientID != nil {
 		events, err = s.repo.GetEventsByClientID(*clientID)
-	} else if userID != nil {
-		events, err = s.repo.GetEventsForUser(*userID)
+	} else if caller != nil {
+		events, err = s.repo.GetEventsForUser(*caller)
 	} else {
 		events, err = s.repo.GetAllEventsForDashboard()
 	}
@@ -176,16 +178,16 @@ func (s *EventService) ListEventPage(clientID, userID *uuid.UUID, query dtos.Eve
 	return filtered[start:end], total, counts, nil
 }
 
-func (s *EventService) ListEventNotifications(clientID, userID *uuid.UUID, now time.Time) ([]dtos.EventNotification, error) {
+func (s *EventService) ListEventNotifications(clientID *uuid.UUID, caller *dtos.EventCallerAccess, now time.Time) ([]dtos.EventNotification, error) {
 	if optimized, ok := s.repo.(ports.EventsNotificationRepository); ok {
-		return optimized.ListEventNotifications(clientID, userID, now)
+		return optimized.ListEventNotifications(clientID, caller, now)
 	}
 	var source []models.Event
 	var err error
 	if clientID != nil {
 		source, err = s.repo.GetEventsByClientID(*clientID)
-	} else if userID != nil {
-		source, err = s.repo.GetEventsForUser(*userID)
+	} else if caller != nil {
+		source, err = s.repo.GetEventsForUser(*caller)
 	} else {
 		source, err = s.repo.GetAllEventsForDashboard()
 	}

@@ -484,7 +484,19 @@ func applicationOrganizationCapabilities(application models.Application, role st
 	if !moduleEnabled(application.Modules, "automation") {
 		capabilities.remove("automation:view", "automation:manage")
 	}
+	// A product may reserve metrics for organization Owner/Admin (EventiApp,
+	// R3). Platform roots get metrics from their platform authority instead.
+	if products.ModuleRequiresOrganizationAdmin(application.Code, "metrics") && !isOrganizationAdminRole(role) {
+		capabilities.remove("metrics:view")
+	}
 	return capabilities.values()
+}
+
+// isOrganizationAdminRole accepts direct and inherited Owner/Admin role codes,
+// which are stored in mixed case (seeds/ClientRoleSeed.go).
+func isOrganizationAdminRole(role string) bool {
+	code := strings.TrimPrefix(strings.ToUpper(strings.TrimSpace(role)), "INHERITED_")
+	return code == "OWNER" || code == "ADMIN"
 }
 
 func moduleEnabled(modules models.StringList, expected string) bool {

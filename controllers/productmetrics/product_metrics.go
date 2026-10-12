@@ -8,6 +8,8 @@ import (
 	"events-stocks/configuration"
 	"events-stocks/internal/authz"
 	productmetricshttp "events-stocks/internal/observability/productmetricshttp"
+	"events-stocks/internal/products"
+	"events-stocks/models"
 	"events-stocks/utils"
 
 	"github.com/gofrs/uuid"
@@ -66,13 +68,11 @@ func Portfolio(c echo.Context) error {
 	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid organization", err.Error())
 	}
+	if err := authorizePortfolioScope(user, tenant, clientID, hasClient); err != nil {
+		return authz.Respond(c, err)
+	}
 	if hasClient {
-		if err := authz.RequireClientCapability(user, clientID, authz.CapabilityAnalyticsView); err != nil {
-			return authz.Respond(c, err)
-		}
 		productmetricshttp.ScopeOrganization(c, clientID)
-	} else if !user.IsPlatformAdmin() {
-		return utils.Error(c, http.StatusForbidden, "Organization required", "Select an organization to view metrics")
 	}
 
 	query := configuration.DB.Table("product_metric_daily metrics").
@@ -137,6 +137,24 @@ func Portfolio(c echo.Context) error {
 	return utils.Success(c, http.StatusOK, "Product metrics", portfolioResponse{
 		From: from, To: to, Summaries: summaries, Timeline: timeline, Inventory: inventory,
 	})
+}
+
+// authorizePortfolioScope decides who may read portfolio metrics. With an
+// organization, the caller needs analytics:view on it, or metrics:view when the
+// product reserves metrics for organization Owner/Admin (EventiApp). Without
+// one, only platform roots may read the cross-organization portfolio.
+func authorizePortfolioScope(user *models.User, tenant string, clientID uuid.UUID, hasClient bool) error {
+	if hasClient {
+		capability := authz.CapabilityAnalyticsView
+		if products.ModuleRequiresOrganizationAdmin(tenant, "metrics") {
+			capability = authz.CapabilityMetricsView
+		}
+		return authz.RequireClientCapability(user, clientID, capability)
+	}
+	if user == nil || !user.IsPlatformAdmin() {
+		return &authz.Failure{Status: http.StatusForbidden, Message: "Organization required", Detail: "Select an organization to view metrics"}
+	}
+	return nil
 }
 
 func loadInventory(tenant string, clientID uuid.UUID, hasClient, crossProduct bool) inventorySummary {

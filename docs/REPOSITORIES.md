@@ -29,7 +29,7 @@
 
 | Path | Purpose |
 |------|---------|
-| `repositories/eventsrepository/EventsRepository.go` | Event CRUD |
+| `repositories/eventsrepository/EventsRepository.go` | Event CRUD and dashboard lists; `dashboardEventsScope` selects one organization, the caller-access portfolio (`callerAccessEventPredicate`, mirrors `SessionService.organizationAccess`) or all events for roots |
 | `repositories/eventsrepository/errorHandler.go` | Domain-specific error mapping |
 | `repositories/eventconfigrepository/EventConfigRepository.go` | EventConfig CRUD |
 | `repositories/eventsectionrepository/EventSectionRepository.go` | EventSection CRUD |
