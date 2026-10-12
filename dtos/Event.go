@@ -7,6 +7,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
+	// Embed the IANA database so timezone validation does not depend on the
+	// image's /usr/share/zoneinfo (the runtime image is debian-slim).
+	_ "time/tzdata"
 
 	"github.com/gofrs/uuid"
 )
@@ -31,6 +35,10 @@ type EventPayload struct {
 	AllowGuestAccess *bool           `json:"allow_guest_access"`
 	SlugLocked       *bool           `json:"slug_locked"`
 	IsActive         *bool           `json:"is_active"`
+	// ShiftDates is read only by POST /events/:id/duplicate (default true):
+	// shift the copy's access window and RSVP deadline by the event-date
+	// offset. ApplyTo ignores it.
+	ShiftDates *bool `json:"shift_dates"`
 }
 
 func (p *EventPayload) UnmarshalJSON(data []byte) error {
@@ -91,6 +99,9 @@ func (p *EventPayload) UnmarshalJSON(data []byte) error {
 	if next.IsActive, err = eventPayloadBool(fields, "is_active", "isActive", "IsActive"); err != nil {
 		return fieldError("is_active", err)
 	}
+	if next.ShiftDates, err = eventPayloadBool(fields, "shift_dates", "shiftDates", "ShiftDates"); err != nil {
+		return fieldError("shift_dates", err)
+	}
 
 	*p = next
 	return nil
@@ -141,7 +152,13 @@ func (p EventPayload) ApplyTo(event *models.Event) error {
 		}
 	}
 	if p.Name != nil {
-		event.Name = strings.TrimSpace(*p.Name)
+		name := strings.TrimSpace(*p.Name)
+		// A new or changed name is capped; a stored longer name that is sent
+		// back unchanged keeps saving (events created before the cap).
+		if utf8.RuneCountInString(name) > EventNameMaxChars && name != event.Name {
+			return ErrEventNameTooLong
+		}
+		event.Name = name
 	}
 	if p.Identifier != nil {
 		event.Identifier = strings.TrimSpace(*p.Identifier)
@@ -167,13 +184,23 @@ func (p EventPayload) ApplyTo(event *models.Event) error {
 		}
 	}
 	if p.Timezone != nil {
-		event.Timezone = strings.TrimSpace(*p.Timezone)
+		timezone := strings.TrimSpace(*p.Timezone)
+		// Only a new or changed zone is validated: a stored legacy value that
+		// PostgreSQL accepts but Go does not (lower-case IANA name, POSIX
+		// "UTC+5") is sent back unchanged by every dashboard save and must
+		// keep saving.
+		if timezone != strings.TrimSpace(event.Timezone) {
+			if err := ValidateEventTimezone(timezone); err != nil {
+				return fieldError("timezone", err)
+			}
+		}
+		event.Timezone = timezone
 	}
 	if p.Language != nil {
 		event.Language = strings.TrimSpace(*p.Language)
 	}
 	if p.EventTypeID != nil {
-		if err := decodeUUIDValue(p.EventTypeID, &event.EventTypeID); err != nil {
+		if err := decodeUUIDPointer(p.EventTypeID, &event.EventTypeID); err != nil {
 			return fieldError("event_type_id", err)
 		}
 	}
@@ -290,7 +317,7 @@ type EventResponse struct {
 	EventDateTime                time.Time              `json:"event_date_time"`
 	Timezone                     string                 `json:"timezone"`
 	Language                     string                 `json:"language"`
-	EventTypeID                  uuid.UUID              `json:"event_type_id"`
+	EventTypeID                  *uuid.UUID             `json:"event_type_id"`
 	EventType                    *EventTypeResponse     `json:"event_type,omitempty"`
 	EventConfig                  *EventConfigResponse   `json:"event_config,omitempty"`
 	Config                       *EventConfigResponse   `json:"config,omitempty"`
@@ -338,7 +365,7 @@ type EventNotification struct {
 	Timezone      string     `json:"timezone"`
 	IsActive      bool       `json:"is_active"`
 	ClientID      *uuid.UUID `json:"client_id,omitempty"`
-	EventTypeID   uuid.UUID  `json:"event_type_id"`
+	EventTypeID   *uuid.UUID `json:"event_type_id"`
 }
 
 // EventCallerAccess selects the caller-access portfolio (organization mode
@@ -440,4 +467,35 @@ func NewEventResponses(events []models.Event) []EventResponse {
 		response = append(response, NewEventResponse(&events[i]))
 	}
 	return response
+}
+
+// ErrInvalidEventTimezone is returned (wrapped in a field error) when an event
+// payload carries a timezone that is not an IANA zone name. An invalid value
+// used to be stored and then broke every list, count and overview query that
+// does `event_date_time AT TIME ZONE events.timezone` (EVT-3, SET-16).
+var ErrInvalidEventTimezone = errors.New("zona horaria inválida")
+
+// EventNameMaxChars caps an event name (characters, after trimming).
+const EventNameMaxChars = 120
+
+// ErrEventNameTooLong: a new or changed event name over EventNameMaxChars
+// (400 event_name_too_long).
+var ErrEventNameTooLong = errors.New("event name exceeds 120 characters")
+
+// ValidateEventTimezone accepts "" (the default zone is applied later) and any
+// IANA zone name time.LoadLocation knows, such as "America/Mexico_City" or
+// "UTC". "Local" is rejected: it names the server's zone, not the event's,
+// and PostgreSQL does not know it.
+func ValidateEventTimezone(timezone string) error {
+	timezone = strings.TrimSpace(timezone)
+	if timezone == "" {
+		return nil
+	}
+	if strings.EqualFold(timezone, "local") {
+		return ErrInvalidEventTimezone
+	}
+	if _, err := time.LoadLocation(timezone); err != nil {
+		return ErrInvalidEventTimezone
+	}
+	return nil
 }

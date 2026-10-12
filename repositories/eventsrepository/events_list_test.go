@@ -26,3 +26,11 @@ func TestEventListNeedsFilteredTotal(t *testing.T) {
 		})
 	}
 }
+
+// EVT-10: the dashboard search ignores accents and letter case.
+func TestFoldSearchTextMatchesColumnFold(t *testing.T) {
+	assert.Equal(t, "nandu", foldSearchText("Ñandú"))
+	assert.Equal(t, "jose maria", foldSearchText("JOSÉ MARÍA"))
+	assert.Equal(t, "quinceanera", foldSearchText("Quinceañera"))
+	assert.Equal(t, len([]rune(searchFoldFrom)), len([]rune(searchFoldTo)))
+}

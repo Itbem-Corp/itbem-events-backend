@@ -153,3 +153,26 @@ func TestGetCORSConfigRejectsUnknownOrigins(t *testing.T) {
 		t.Fatalf("expected unknown origin to be rejected, got %q", got)
 	}
 }
+
+func TestGetCORSConfigAllowsUploadDeviceIDHeader(t *testing.T) {
+	e := newCORSTestServer(&models.Config{CorsAllowOrigins: "http://localhost:4321"})
+	for _, origin := range []string{"https://eventiapp.com.mx", "http://localhost:4321"} {
+		rec := performCORSPreflight(e, origin, http.MethodPost, echo.HeaderContentType, "X-Upload-Device-Id")
+		if got := rec.Header().Get(echo.HeaderAccessControlAllowOrigin); got != origin {
+			t.Fatalf("expected origin %q to be allowed, got %q", origin, got)
+		}
+		if allowed := strings.ToLower(rec.Header().Get(echo.HeaderAccessControlAllowHeaders)); !strings.Contains(allowed, "x-upload-device-id") {
+			t.Fatalf("expected X-Upload-Device-Id in preflight headers, got %q", allowed)
+		}
+	}
+}
+
+func TestGetCORSConfigExposesRetryAfter(t *testing.T) {
+	e := newCORSTestServer(&models.Config{})
+
+	rec := performCORSRequest(e, "https://eventiapp.com.mx")
+
+	if got := rec.Header().Get(echo.HeaderAccessControlExposeHeaders); !strings.Contains(got, echo.HeaderRetryAfter) {
+		t.Fatalf("expected Retry-After in exposed headers, got %q", got)
+	}
+}

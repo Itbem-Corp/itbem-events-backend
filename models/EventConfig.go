@@ -24,6 +24,7 @@ type EventConfig struct {
 	FontSet                     *FontSet        `gorm:"foreignKey:FontSetID" json:"font_set,omitempty"`
 	ActiveFrom                  time.Time       `json:"active_from"`
 	ActiveUntil                 *time.Time      `json:"active_until,omitempty"`
+	RSVPDeadline                *time.Time      `gorm:"column:rsvp_deadline;type:timestamptz" json:"rsvp_deadline"` // closes public RSVP after this instant; NULL = no deadline; host edits unaffected
 	DefaultWelcomeMessage       string          `json:"default_welcome_message"`
 	DefaultMomentRequestMessage string          `json:"default_moment_request_message"`
 	DefaultThankYouMessage      string          `json:"default_thank_you_message"`
@@ -93,6 +94,14 @@ func (c *EventConfig) WithVisibilityDefaults() *EventConfig {
 	normalized := *c
 	normalized.ApplyVisibilityDefaults()
 	return &normalized
+}
+
+// RSVPDeadlinePassed reports whether a configured RSVP deadline is in the past.
+func (c *EventConfig) RSVPDeadlinePassed(now time.Time) bool {
+	if c == nil || c.RSVPDeadline == nil || c.RSVPDeadline.IsZero() || c.RSVPDeadline.Year() <= 1970 {
+		return false
+	}
+	return now.After(*c.RSVPDeadline)
 }
 
 func (c *EventConfig) NormalizedAuthPasswordPreview() string {

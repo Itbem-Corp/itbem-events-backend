@@ -10,6 +10,7 @@ import (
 	"github.com/gofrs/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -58,7 +59,7 @@ func stubEvent(musicUrl string) *models.Event {
 		SecondAddress: "Salon Izapa",
 		Timezone:      "America/Mexico_City",
 		Language:      "es",
-		EventTypeID:   testEventTypeID,
+		EventTypeID:   &testEventTypeID,
 		EventType:     models.EventType{ID: testEventTypeID, Name: "graduation"},
 		IsActive:      true,
 	}
@@ -169,7 +170,8 @@ func TestGetPageSpec_InvitationNotFound(t *testing.T) {
 	spec, err := getPageSpec(deps, "ABC123")
 	assert.Nil(t, spec)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invitation not found")
+	// GST-36: a revoked link (invitation deleted) is an invalid token.
+	assert.ErrorIs(t, err, ErrPageSpecTokenNotFound)
 }
 
 func TestGetPageSpec_Success_WithMusic(t *testing.T) {
@@ -259,8 +261,8 @@ func TestBuildPageSpec_UnwrapsLegacyEncodedSectionConfig(t *testing.T) {
 	assert.Equal(t, "https://maps.example.com", config["mapUrl"])
 }
 
-func TestBuildPageSpec_InjectsCountdownTargetDateFromEventDateTime(t *testing.T) {
-	event := stubEvent("")
+func countdownTargetDate(t *testing.T, event *models.Event, sectionConfig string) interface{} {
+	t.Helper()
 	spec, err := buildPageSpecFromEvent(event, buildSpecDeps{
 		getSections: func(eventID uuid.UUID) ([]models.EventSection, error) {
 			return []models.EventSection{
@@ -268,21 +270,42 @@ func TestBuildPageSpec_InjectsCountdownTargetDateFromEventDateTime(t *testing.T)
 					ID:            testSectionID1,
 					EventID:       eventID,
 					ComponentType: "CountdownHeader",
-					Config:        `{"heading":"EL GRAN DIA","targetDate":"2025-01-01T00:00"}`,
+					Config:        sectionConfig,
 					Order:         1,
 					IsVisible:     true,
 				},
 			}, nil
 		},
 	})
-
 	require.NoError(t, err)
 	require.Len(t, spec.Sections, 1)
-
 	var config map[string]interface{}
 	require.NoError(t, json.Unmarshal(spec.Sections[0].Config, &config))
 	assert.Equal(t, "EL GRAN DIA", config["heading"])
-	assert.Equal(t, event.EventDateTime.Format(time.RFC3339), config["targetDate"])
+	return config["targetDate"]
+}
+
+func TestBuildPageSpec_InjectsCountdownTargetDateFromEventDateTime(t *testing.T) {
+	event := stubEvent("")
+	for _, sectionConfig := range []string{
+		`{"heading":"EL GRAN DIA"}`,
+		`{"heading":"EL GRAN DIA","targetDate":""}`,
+		`{"heading":"EL GRAN DIA","targetDate":"no es fecha"}`,
+	} {
+		assert.Equal(t, event.EventDateTime.Format(time.RFC3339), countdownTargetDate(t, event, sectionConfig), sectionConfig)
+	}
+}
+
+// STU-3: the Studio "fecha objetivo" was always overwritten by the event
+// date. A valid section date wins; a zone-less editor value is read in the
+// event's timezone so every visitor counts down to the same instant.
+func TestBuildPageSpec_CountdownRespectsTheSectionTargetDate(t *testing.T) {
+	event := stubEvent("") // America/Mexico_City
+	assert.Equal(t, "2025-01-01T00:00:00-06:00", countdownTargetDate(t, event, `{"heading":"EL GRAN DIA","targetDate":"2025-01-01T00:00"}`))
+	assert.Equal(t, "2025-03-04T18:30:00Z", countdownTargetDate(t, event, `{"heading":"EL GRAN DIA","targetDate":"2025-03-04T18:30:00Z"}`))
+
+	event.Timezone = ""
+	assert.Equal(t, "2025-01-01T00:00:00Z", countdownTargetDate(t, event, `{"heading":"EL GRAN DIA","targetDate":"2025-01-01T00:00"}`))
 }
 
 func TestBuildPageSpec_SortsSectionsByOrderWithStableTieBreak(t *testing.T) {
@@ -905,8 +928,90 @@ func TestGetPageSpecByIdentifier_BlocksPrivateEventWithExpiredInvitationToken(t 
 	spec, err := getPageSpecByIdentifier(deps, "grad-izapa-2025", "", "invite-expired")
 	assert.Nil(t, spec)
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, ErrPageSpecNotPublic))
-	assert.False(t, invitationLoaded)
+	// PUB-33/43: an expired link of this event is a 401 "expired", not the
+	// 403 "not published" (the invitation is read to confirm the event).
+	assert.True(t, errors.Is(err, ErrPageSpecTokenExpired))
+	assert.True(t, invitationLoaded)
+}
+
+// PUB-74: an unknown or other-event token on a private event is "invalid";
+// with no token at all the event is just not public.
+func TestGetPageSpecByIdentifier_PrivateEventTokenErrors(t *testing.T) {
+	otherEvent := uuid.Must(uuid.NewV4())
+	deps := identifierPageSpecDeps{
+		getEventByIdentifier: func(string) (*models.Event, error) { return stubEvent(""), nil },
+		getToken: func(token string) (*models.InvitationAccessToken, error) {
+			if token == "other-event" {
+				return &models.InvitationAccessToken{InvitationID: testInvitationID}, nil
+			}
+			return nil, errors.New("not found")
+		},
+		getInvitation: func(id uuid.UUID) (*models.Invitation, error) {
+			return &models.Invitation{ID: id, EventID: otherEvent}, nil
+		},
+		getConfig: func(uuid.UUID) (*models.EventConfig, error) { return &models.EventConfig{IsPublic: false}, nil },
+	}
+
+	_, err := getPageSpecByIdentifier(deps, "grad-izapa-2025", "", "nope")
+	assert.ErrorIs(t, err, ErrPageSpecTokenNotFound)
+	_, err = getPageSpecByIdentifier(deps, "grad-izapa-2025", "", "other-event")
+	assert.ErrorIs(t, err, ErrPageSpecTokenNotFound)
+	_, err = getPageSpecByIdentifier(deps, "grad-izapa-2025", "", "")
+	assert.ErrorIs(t, err, ErrPageSpecNotPublic)
+}
+
+// EVT-93: a deleted event's identifier is 410 event_gone on both routes.
+func TestGetPageSpec_DeletedEventIsGone(t *testing.T) {
+	deletedID := uuid.Must(uuid.NewV4())
+	otherID := uuid.Must(uuid.NewV4())
+	invitationEvent := map[string]uuid.UUID{"invite-deleted": deletedID, "invite-other": otherID}
+	invitationByID := map[uuid.UUID]uuid.UUID{}
+	deps := identifierPageSpecDeps{
+		getEventByIdentifier: func(string) (*models.Event, error) { return nil, gorm.ErrRecordNotFound },
+		deletedEventIDs:      func(string) ([]uuid.UUID, error) { return []uuid.UUID{deletedID}, nil },
+		validatePreviewToken: func(token string, eventID uuid.UUID) bool { return token == "preview-ok" && eventID == deletedID },
+		getToken: func(token string) (*models.InvitationAccessToken, error) {
+			eventID, ok := invitationEvent[token]
+			if !ok {
+				return nil, errors.New("not found")
+			}
+			invitationID := uuid.Must(uuid.NewV4())
+			invitationByID[invitationID] = eventID
+			return &models.InvitationAccessToken{InvitationID: invitationID}, nil
+		},
+		getInvitation: func(id uuid.UUID) (*models.Invitation, error) {
+			return &models.Invitation{ID: id, EventID: invitationByID[id]}, nil
+		},
+	}
+
+	// Anonymous: same answer as a slug that never existed.
+	_, err := getPageSpecByIdentifier(deps, "deleted-event", "", "")
+	assert.Error(t, err)
+	assert.NotErrorIs(t, err, ErrPageSpecEventGone)
+	_, err = getPageSpecByIdentifier(deps, "deleted-event", "forged", "unknown")
+	assert.NotErrorIs(t, err, ErrPageSpecEventGone)
+	_, err = getPageSpecByIdentifier(deps, "deleted-event", "", "invite-other")
+	assert.NotErrorIs(t, err, ErrPageSpecEventGone, "a token of another event proves nothing")
+
+	// A caller with a link to the deleted event learns it is gone.
+	_, err = getPageSpecByIdentifier(deps, "deleted-event", "preview-ok", "")
+	assert.ErrorIs(t, err, ErrPageSpecEventGone)
+	_, err = getPageSpecByIdentifier(deps, "deleted-event", "", "invite-deleted")
+	assert.ErrorIs(t, err, ErrPageSpecEventGone)
+
+	_, err = getPageSpecByIdentifier(identifierPageSpecDeps{
+		getEventByIdentifier: func(string) (*models.Event, error) { return nil, gorm.ErrRecordNotFound },
+		deletedEventIDs:      func(string) ([]uuid.UUID, error) { return nil, nil },
+	}, "never-existed", "preview-ok", "")
+	assert.Error(t, err)
+	assert.NotErrorIs(t, err, ErrPageSpecEventGone)
+
+	_, err = getPageSpec(pageSpecDeps{
+		getToken:      func(string) (*models.InvitationAccessToken, error) { return stubToken(), nil },
+		getInvitation: func(uuid.UUID) (*models.Invitation, error) { return stubInvitation(), nil },
+		getEvent:      func(uuid.UUID) (*models.Event, error) { return nil, gorm.ErrRecordNotFound },
+	}, "ABC123")
+	assert.ErrorIs(t, err, ErrPageSpecEventGone)
 }
 
 func TestGetPageSpecByIdentifier_UsesInjectedClockForInvitationTokenExpiry(t *testing.T) {
@@ -1166,7 +1271,7 @@ func TestBuildPageSpec_InjectsRSVPMessagesFromEventConfig(t *testing.T) {
 	assert.NotContains(t, cfg, "moment_request_message")
 }
 
-func TestGetPageSpec_MomentWallUsesDefaultConfigAsPublished(t *testing.T) {
+func TestGetPageSpec_DefaultConfigHidesUnpublishedMomentWall(t *testing.T) {
 	sections := []models.EventSection{
 		{
 			ID:            testSectionID1,
@@ -1190,15 +1295,10 @@ func TestGetPageSpec_MomentWallUsesDefaultConfigAsPublished(t *testing.T) {
 
 	spec, err := getPageSpec(deps, "ABC123")
 	require.NoError(t, err)
-	require.Len(t, spec.Sections, 1)
-
-	var cfg map[string]interface{}
-	require.NoError(t, json.Unmarshal(spec.Sections[0].Config, &cfg))
-	assert.Equal(t, true, cfg["published"])
-	assert.Equal(t, true, cfg["moments_wall_published"])
-	assert.Equal(t, false, cfg["allow_uploads"])
-	assert.Equal(t, false, cfg["allow_messages"])
-	assert.Equal(t, false, cfg["share_uploads_enabled"])
+	// EVT-68: a new event's wall starts unpublished and uploads closed, so
+	// the MomentWall section stays out of the PageSpec until the organizer
+	// opens uploads or publishes the wall.
+	require.Len(t, spec.Sections, 0)
 }
 
 func TestBuildPageSpec_UsesDefaultConfigWhenConfigLoadFails(t *testing.T) {
@@ -1223,16 +1323,9 @@ func TestBuildPageSpec_UsesDefaultConfigWhenConfigLoadFails(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, spec)
 	assert.True(t, spec.Meta.FooterVisible)
-	require.Len(t, spec.Sections, 1)
-
-	var cfg map[string]interface{}
-	require.NoError(t, json.Unmarshal(spec.Sections[0].Config, &cfg))
-	assert.Equal(t, "grad-izapa-2025", cfg["identifier"])
-	assert.Equal(t, true, cfg["published"])
-	assert.Equal(t, true, cfg["moments_wall_published"])
-	assert.Equal(t, false, cfg["allow_uploads"])
-	assert.Equal(t, false, cfg["allow_messages"])
-	assert.Equal(t, false, cfg["share_uploads_enabled"])
+	// The default config keeps the wall unpublished and uploads closed
+	// (EVT-68), so the MomentWall section is filtered out.
+	require.Len(t, spec.Sections, 0)
 }
 
 func TestBuildPageSpec_FiltersSectionsByEventConfig(t *testing.T) {
@@ -1508,12 +1601,14 @@ func TestBuildPageSpec_UsesFooterVisibilityFromEventConfig(t *testing.T) {
 }
 
 func TestBuildPageSpec_ExposesAccessVersionFromEventConfig(t *testing.T) {
+	t.Setenv("EVENT_ACCESS_SECRET", "test-secret")
 	updatedAt := time.Date(2026, 7, 7, 21, 15, 0, 123, time.FixedZone("CST", -6*60*60))
 
 	spec, err := buildPageSpecFromEvent(stubEvent(""), buildSpecDeps{
 		getSections: func(eventID uuid.UUID) ([]models.EventSection, error) { return stubSections(), nil },
 		getConfig: func(id uuid.UUID) (*models.EventConfig, error) {
 			return &models.EventConfig{
+				ID:                  testEventID,
 				AuthPasswordPreview: "secreto",
 				UpdatedAt:           updatedAt,
 			}, nil
@@ -1524,7 +1619,29 @@ func TestBuildPageSpec_ExposesAccessVersionFromEventConfig(t *testing.T) {
 	require.NotNil(t, spec)
 	require.NotNil(t, spec.Meta.Access)
 	assert.True(t, spec.Meta.Access.PasswordProtected)
-	assert.Equal(t, updatedAt.UTC().Format(time.RFC3339Nano), spec.Meta.Access.AccessVersion)
+	assert.NotEmpty(t, spec.Meta.Access.AccessVersion)
+	assert.NotContains(t, spec.Meta.Access.AccessVersion, "secreto")
+	assert.Equal(t, EventConfigAccessVersion(&models.EventConfig{ID: testEventID, AuthPasswordPreview: "secreto"}), spec.Meta.Access.AccessVersion)
+}
+
+// SET-13: saving unrelated config (palette, wall, block toggles) bumps
+// updated_at but must not log guests out of a password-protected page.
+func TestEventConfigAccessVersion_OnlyRotatesWhenPasswordChanges(t *testing.T) {
+	t.Setenv("EVENT_ACCESS_SECRET", "test-secret")
+	base := &models.EventConfig{ID: testEventID, AuthPasswordPreview: "secreto", UpdatedAt: time.Now()}
+	resaved := *base
+	resaved.UpdatedAt = base.UpdatedAt.Add(time.Hour)
+	resaved.ShowMomentWall = true
+	resaved.IsPublic = !base.IsPublic
+	changed := *base
+	changed.AuthPasswordPreview = "otro-secreto"
+	otherEvent := *base
+	otherEvent.ID = uuid.Must(uuid.NewV4())
+
+	assert.Equal(t, EventConfigAccessVersion(base), EventConfigAccessVersion(&resaved))
+	assert.NotEqual(t, EventConfigAccessVersion(base), EventConfigAccessVersion(&changed))
+	assert.NotEqual(t, EventConfigAccessVersion(base), EventConfigAccessVersion(&otherEvent))
+	assert.Empty(t, EventConfigAccessVersion(&models.EventConfig{ID: testEventID}))
 }
 
 func TestBuildPageSpec_ExposesContentVersionFromLatestEventConfigOrSectionChange(t *testing.T) {
@@ -1998,4 +2115,42 @@ func TestBuildPageSpec_LegacyVisibilityDefaultsKeepSectionsAroundOpenUploads(t *
 	assert.Equal(t, true, cfg["share_uploads_enabled"])
 	assert.Equal(t, false, cfg["published"])
 	assert.Equal(t, false, cfg["moments_wall_published"])
+}
+
+// STU-4: the section's own MomentWall copy wins over the event default; the
+// upload/visibility flags stay backend-authoritative.
+func TestGetPageSpec_MomentWallKeepsSectionCopyButNotGates(t *testing.T) {
+	sections := []models.EventSection{{
+		ID:            testSectionID1,
+		EventID:       testEventID,
+		ComponentType: "MomentWall",
+		Config:        `{"title":"Momentos","subtitle":"Sube tus fotos de la fiesta","moment_request_message":"Mensaje propio","allow_uploads":true,"published":false,"identifier":"otro-evento"}`,
+		Order:         1,
+		IsVisible:     true,
+	}}
+	deps := pageSpecDeps{
+		getToken:      func(token string) (*models.InvitationAccessToken, error) { return stubToken(), nil },
+		getInvitation: func(id uuid.UUID) (*models.Invitation, error) { return stubInvitation(), nil },
+		getEvent:      func(id uuid.UUID) (*models.Event, error) { return stubEvent(""), nil },
+		getSections:   func(eventID uuid.UUID) ([]models.EventSection, error) { return sections, nil },
+		getConfig: func(id uuid.UUID) (*models.EventConfig, error) {
+			return &models.EventConfig{
+				AllowUploads:                false,
+				ShowMomentWall:              true,
+				DefaultMomentRequestMessage: "Comparte tus mejores recuerdos con nosotros",
+			}, nil
+		},
+	}
+
+	spec, err := getPageSpec(deps, "ABC123")
+	require.NoError(t, err)
+	require.Len(t, spec.Sections, 1)
+	var cfg map[string]interface{}
+	require.NoError(t, json.Unmarshal(spec.Sections[0].Config, &cfg))
+	assert.Equal(t, "Momentos", cfg["title"])
+	assert.Equal(t, "Sube tus fotos de la fiesta", cfg["subtitle"])
+	assert.Equal(t, "Mensaje propio", cfg["moment_request_message"])
+	assert.Equal(t, false, cfg["allow_uploads"], "the section cannot open uploads the event config keeps closed")
+	assert.Equal(t, true, cfg["published"])
+	assert.Equal(t, "grad-izapa-2025", cfg["identifier"])
 }

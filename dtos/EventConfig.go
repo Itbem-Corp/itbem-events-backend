@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"events-stocks/internal/publicaccessproof"
 	"events-stocks/models"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gofrs/uuid"
 )
@@ -30,6 +32,7 @@ type EventConfigResponse struct {
 	FontSet                     *FontSetResponse        `json:"font_set,omitempty"`
 	ActiveFrom                  *time.Time              `json:"active_from,omitempty"`
 	ActiveUntil                 *time.Time              `json:"active_until,omitempty"`
+	RSVPDeadline                *time.Time              `json:"rsvp_deadline"`
 	DefaultWelcomeMessage       string                  `json:"default_welcome_message"`
 	DefaultMomentRequestMessage string                  `json:"default_moment_request_message"`
 	DefaultThankYouMessage      string                  `json:"default_thank_you_message"`
@@ -80,6 +83,7 @@ func NewEventConfigResponse(config *models.EventConfig, eventID uuid.UUID) Event
 		FontSet:                     fontSetResponsePtr(config.FontSet),
 		ActiveFrom:                  eventConfigResponseTime(config.ActiveFrom),
 		ActiveUntil:                 eventConfigResponseTimePtr(config.ActiveUntil),
+		RSVPDeadline:                eventConfigResponseTimePtr(config.RSVPDeadline),
 		DefaultWelcomeMessage:       config.DefaultWelcomeMessage,
 		DefaultMomentRequestMessage: config.DefaultMomentRequestMessage,
 		DefaultThankYouMessage:      config.DefaultThankYouMessage,
@@ -170,7 +174,11 @@ func (p EventConfigPatch) ApplyTo(config *models.EventConfig) error {
 			if err := decodeString(raw, &value); err != nil {
 				return fieldError(field, err)
 			}
-			config.AuthPasswordPreview = strings.TrimSpace(value)
+			value = strings.TrimSpace(value)
+			if err := validateNewEventPassword(value, config.NormalizedAuthPasswordPreview()); err != nil {
+				return fieldError(field, err)
+			}
+			config.AuthPasswordPreview = value
 		case "notify_on_moment_upload":
 			if err := decodeBool(raw, &config.NotifyOnMomentUpload); err != nil {
 				return fieldError(field, err)
@@ -193,6 +201,10 @@ func (p EventConfigPatch) ApplyTo(config *models.EventConfig) error {
 			}
 		case "active_until":
 			if err := decodeTimePointer(raw, &config.ActiveUntil); err != nil {
+				return fieldError(field, err)
+			}
+		case "rsvp_deadline":
+			if err := decodeTimePointer(raw, &config.RSVPDeadline); err != nil {
 				return fieldError(field, err)
 			}
 		case "default_welcome_message", "welcome_message":
@@ -306,6 +318,28 @@ func (p EventConfigPatch) ApplyTo(config *models.EventConfig) error {
 	return nil
 }
 
+const (
+	eventPasswordMinLength = publicaccessproof.MinPasswordLength
+	eventPasswordMaxLength = publicaccessproof.MaxPasswordLength
+)
+
+// validateNewEventPassword applies length bounds only when the password is set
+// or changed, so a legacy short password keeps working until it is replaced and
+// an empty value still removes protection.
+func validateNewEventPassword(value, current string) error {
+	if value == "" || value == current {
+		return nil
+	}
+	length := utf8.RuneCountInString(value)
+	if length < eventPasswordMinLength {
+		return fmt.Errorf("must be at least %d characters", eventPasswordMinLength)
+	}
+	if length > eventPasswordMaxLength {
+		return fmt.Errorf("must be at most %d characters", eventPasswordMaxLength)
+	}
+	return nil
+}
+
 func eventConfigActiveRangeInvalid(config *models.EventConfig) bool {
 	if config == nil || config.ActiveUntil == nil || config.ActiveUntil.IsZero() {
 		return false
@@ -373,6 +407,8 @@ func normalizeEventConfigPatchField(field string) string {
 		return "active_from"
 	case "activeUntil", "ActiveUntil":
 		return "active_until"
+	case "rsvpDeadline", "RSVPDeadline", "RsvpDeadline":
+		return "rsvp_deadline"
 	case "defaultWelcomeMessage", "DefaultWelcomeMessage":
 		return "default_welcome_message"
 	case "defaultMomentRequestMessage", "DefaultMomentRequestMessage":

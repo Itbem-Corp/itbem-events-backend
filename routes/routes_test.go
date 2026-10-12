@@ -44,6 +44,7 @@ func TestConfigurarRutasRegistersFrontendContractRoutes(t *testing.T) {
 		"GET /api/events/page-spec",
 		"GET /api/events/:identifier/page-spec",
 		"GET /api/events/:identifier/meta",
+		"GET /api/events/:identifier/cover-image",
 		"POST /api/events/:identifier/view",
 		"POST /api/events/:identifier/verify-access",
 		"GET /api/events/phrases",
