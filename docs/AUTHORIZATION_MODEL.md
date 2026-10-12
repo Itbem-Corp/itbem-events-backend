@@ -20,7 +20,7 @@ Historical `is_root=true` accounts are treated as level 1 until explicitly migra
 | Administrator | Members below owner, organization operations, all events. |
 | Event manager | Create and operate events, guests, check-in and analytics. |
 | Editor | Edit event and guest content. |
-| Check-in | Check-in operations only; it can mark guests confirmed at the door but cannot otherwise rewrite a guest's RSVP. |
+| Check-in | Check-in operations only; it can mark guests confirmed at the door and undo those door check-ins, but cannot otherwise rewrite a guest's RSVP. |
 | Analyst | Read event and guest analytics only. |
 | Member | Standard event collaboration. |
 | Viewer | Read-only access. |
@@ -42,7 +42,7 @@ Only Owner and Administrator memberships propagate down an organization hierarch
 | View | All assigned roles | Event metadata and read-only workspace access. |
 | Event manage | Owner, Admin, Event manager, Editor, Member | Event configuration, sections, media and moments. |
 | Guest manage | Owner, Admin, Event manager, Editor, Member | Guest directory, seating, invitations, RSVP links and exports. This is the boundary for guest PII. |
-| Check-in | Guest-managing roles and Check-in | The check-in workspace and the check-in status operation. Without Guest manage, `PATCH /api/guests/bulk/status` only marks guests confirmed (the check-in); undoing it, declining or any other RSVP rewrite needs Guest manage. |
+| Check-in | Guest-managing roles and Check-in | The check-in workspace and the check-in status operation. Without Guest manage, `PATCH /api/guests/bulk/status` only marks guests confirmed (the check-in) and, with `action: undo_checkin`, gives a door-checked-in guest back the RSVP they had before; undoing a guest's own confirmation (409), declining or any other RSVP rewrite needs Guest manage. |
 | Analytics view | Owner, Admin, Event manager, Editor, Member, Analyst | Aggregate event and RSVP metrics. |
 | Members manage | Owner and Admin | Organization and event-team assignment. |
 

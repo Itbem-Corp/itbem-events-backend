@@ -40,7 +40,7 @@
 
 | Path | Purpose |
 |------|---------|
-| `repositories/guestrepository/GuestRepository.go` | Guest CRUD + bulk ops |
+| `repositories/guestrepository/GuestRepository.go` | Guest CRUD + bulk ops. `TransitionGuestStatuses(eventID, ids, apply)` locks the event's guests (`FOR UPDATE`, id order), fails when an id is not a live guest of the event, attaches their catalog status, lets `apply` pick new values and writes back only the RSVP and door check-in columns, in one transaction. |
 | `repositories/gueststatusrepository/GuestStatusRepository.go` | GuestStatus catalog |
 | `repositories/invitationrepository/InvitationRepository.go` | Invitation CRUD |
 | `repositories/invitationlogrepository/InvitationLogRepository.go` | Log insertion |
