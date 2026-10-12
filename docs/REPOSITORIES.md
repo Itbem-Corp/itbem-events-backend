@@ -35,6 +35,7 @@
 | `repositories/eventsectionrepository/EventSectionRepository.go` | EventSection CRUD |
 | `repositories/eventtyperepository/EventTypeRepository.go` | EventType catalog queries |
 | `repositories/eventanalyticsrepository/EventAnalyticsRepository.go` | Analytics upsert/aggregate |
+| `repositories/eventtablerepository/EventTableRepository.go` | Seating tables (physical table `tables`): CRUD, `AssignGuestsToTables`, `SaveSeatingPlan`. `CountEventTablesInEvent(eventID, ids)` counts the live (not soft-deleted) tables of the event among `ids` in one query; guest create/update compare it with the number of distinct ids. |
 
 ### Guests & Invitations
 
