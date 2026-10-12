@@ -11,7 +11,7 @@ type Event struct {
 	ClientID                  *uuid.UUID     `gorm:"type:uuid;index" json:"client_id"`
 	Client                    *Client        `gorm:"foreignKey:ClientID" json:"client,omitempty" validate:"-"`
 	Name                      string         `json:"name" validate:"required"` // unique per client among live events: configuration.EventClientNameLiveIndex
-	Identifier                string         `json:"identifier"`                 // unique among live events: configuration.EventIdentifierLiveIndex
+	Identifier                string         `json:"identifier"`               // unique among live events: configuration.EventIdentifierLiveIndex
 	Description               string         `json:"description"`
 	CoverImageURL             string         `json:"cover_image_url"`
 	MediaBucket               string         `gorm:"type:varchar(255);not null;default:'';index" json:"-"`

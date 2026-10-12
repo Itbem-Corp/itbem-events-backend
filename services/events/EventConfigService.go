@@ -36,14 +36,14 @@ func NewEventConfigService(repo ports.EventConfigRepository, cache ports.CacheRe
 func NewDefaultEventConfig(id uuid.UUID) *models.EventConfig {
 	defaultTemplateID := models.DefaultDesignTemplateID()
 	return &models.EventConfig{
-		ID:                   id,
-		DesignTemplateID:     &defaultTemplateID,
-		ShowCountdown:        true,
-		ShowRSVPSection:      true,
-		ShowEventLocation:    true,
-		ShowSecondLocation:   true,
-		ShowHostsSection:     true,
-		ShowPhotoGallery:     true,
+		ID:                 id,
+		DesignTemplateID:   &defaultTemplateID,
+		ShowCountdown:      true,
+		ShowRSVPSection:    true,
+		ShowEventLocation:  true,
+		ShowSecondLocation: true,
+		ShowHostsSection:   true,
+		ShowPhotoGallery:   true,
 		// A new event starts with the moment wall unpublished: while the wall
 		// is published uploads stay closed (PageSpec forces allow_uploads off),
 		// so a published default made "Permitir subir fotos" look broken

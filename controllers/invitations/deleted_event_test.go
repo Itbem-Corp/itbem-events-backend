@@ -5,8 +5,8 @@ import (
 	"testing"
 
 	"events-stocks/models"
-	"events-stocks/services/ports"
 	invitationsService "events-stocks/services/invitations"
+	"events-stocks/services/ports"
 
 	"github.com/gofrs/uuid"
 	"github.com/stretchr/testify/assert"
