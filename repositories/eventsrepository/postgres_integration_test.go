@@ -1,0 +1,146 @@
+//go:build integration
+
+package eventsrepository
+
+// Real-PostgreSQL regression tests for the event lifecycle (EVT-1, EVT-2,
+// EVT-6, STU-19). They start a disposable postgres:16 container with
+// testcontainers and migrate it through configuration.MigrateModelsForTest,
+// the same transactional path the API runs on boot, so the raw DDL integrity
+// migrations are exercised too. Nothing touches the local stack database.
+//
+//	go test -tags integration ./repositories/eventsrepository -count=1
+//
+// Without Docker the suite prints SKIP and exits 0: that is "not run".
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"testing"
+	"time"
+
+	"github.com/gofrs/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
+	gormpostgres "gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
+
+	"events-stocks/configuration"
+	"events-stocks/models"
+	"events-stocks/repositories/eventconfigrepository"
+)
+
+func TestMain(m *testing.M) {
+	os.Exit(runPostgresSuite(m))
+}
+
+func runPostgresSuite(m *testing.M) int {
+	if exec.Command("docker", "info").Run() != nil {
+		fmt.Println("SKIP: Docker not available; event lifecycle PostgreSQL tests not run")
+		return 0
+	}
+	ctx := context.Background()
+	container, err := tcpostgres.Run(ctx, "postgres:16-alpine",
+		tcpostgres.WithDatabase("testdb"),
+		tcpostgres.WithUsername("test"),
+		tcpostgres.WithPassword("test"),
+		tcpostgres.BasicWaitStrategies(),
+	)
+	if err != nil {
+		fmt.Println("ERROR: could not start disposable PostgreSQL test container:", err)
+		return 1
+	}
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = container.Terminate(cleanupCtx)
+	}()
+	dsn, err := container.ConnectionString(ctx, "sslmode=disable")
+	if err != nil {
+		fmt.Println("ERROR: could not obtain disposable PostgreSQL connection:", err)
+		return 1
+	}
+	db, err := gorm.Open(gormpostgres.Open(dsn), &gorm.Config{Logger: gormlogger.Default.LogMode(gormlogger.Silent)})
+	if err != nil {
+		fmt.Println("ERROR: could not open disposable PostgreSQL database:", err)
+		return 1
+	}
+	previous := configuration.DB
+	configuration.DB = db
+	defer func() { configuration.DB = previous }()
+	if err := configuration.MigrateModelsForTest(db); err != nil {
+		fmt.Println("ERROR: could not migrate disposable PostgreSQL database:", err)
+		return 1
+	}
+	return m.Run()
+}
+
+func lifecycleSuffix() string {
+	return uuid.Must(uuid.NewV4()).String()[:8]
+}
+
+func createLifecycleEvent(t *testing.T, clientID *uuid.UUID, name, identifier string) models.Event {
+	t.Helper()
+	event := models.Event{
+		ID:            uuid.Must(uuid.NewV4()),
+		ClientID:      clientID,
+		Name:          name,
+		Identifier:    identifier,
+		EventDateTime: time.Now().Add(72 * time.Hour),
+		Timezone:      "America/Mexico_City",
+	}
+	require.NoError(t, CreateEvent(&event))
+	return event
+}
+
+// STU-19: the dashboard loads the config with its design associations, the
+// patch changes only the *ID fields, and the save used to copy the loaded
+// association IDs back, so the old template/palette stayed stored.
+func TestUpdateEventConfigPersistsDesignChangesOverLoadedAssociations(t *testing.T) {
+	db := configuration.DB
+	suffix := lifecycleSuffix()
+
+	templateA := models.DesignTemplate{ID: uuid.Must(uuid.NewV4()), Name: "A", Identifier: "qa-template-a-" + suffix, IsActive: true}
+	templateB := models.DesignTemplate{ID: uuid.Must(uuid.NewV4()), Name: "B", Identifier: "qa-template-b-" + suffix, IsActive: true}
+	paletteA := models.ColorPalette{ID: uuid.Must(uuid.NewV4()), Name: "palette-a-" + suffix}
+	paletteB := models.ColorPalette{ID: uuid.Must(uuid.NewV4()), Name: "palette-b-" + suffix}
+	require.NoError(t, db.Create(&templateA).Error)
+	require.NoError(t, db.Create(&templateB).Error)
+	require.NoError(t, db.Create(&paletteA).Error)
+	require.NoError(t, db.Create(&paletteB).Error)
+
+	event := createLifecycleEvent(t, nil, "Design switch "+suffix, "design-switch-"+suffix)
+	config := models.EventConfig{ID: event.ID, DesignTemplateID: &templateA.ID, ColorPaletteID: &paletteA.ID, ActiveFrom: time.Now()}
+	require.NoError(t, db.Create(&config).Error)
+
+	loaded, err := eventconfigrepository.GetEventConfigByID(event.ID)
+	require.NoError(t, err)
+	require.NotNil(t, loaded.DesignTemplate, "the read path must load the association for this test to mean anything")
+	require.NotNil(t, loaded.ColorPalette)
+
+	loaded.DesignTemplateID = &templateB.ID
+	loaded.ColorPaletteID = &paletteB.ID
+	require.NoError(t, eventconfigrepository.UpdateEventConfig(loaded))
+
+	var stored models.EventConfig
+	require.NoError(t, db.First(&stored, "id = ?", event.ID).Error)
+	require.NotNil(t, stored.DesignTemplateID)
+	require.NotNil(t, stored.ColorPaletteID)
+	assert.Equal(t, templateB.ID, *stored.DesignTemplateID)
+	assert.Equal(t, paletteB.ID, *stored.ColorPaletteID)
+
+	// "Usar plantilla": clearing the palette override must store NULL.
+	reloaded, err := eventconfigrepository.GetEventConfigByID(event.ID)
+	require.NoError(t, err)
+	require.NotNil(t, reloaded.ColorPalette)
+	reloaded.ColorPaletteID = nil
+	require.NoError(t, eventconfigrepository.UpdateEventConfig(reloaded))
+	var cleared models.EventConfig
+	require.NoError(t, db.First(&cleared, "id = ?", event.ID).Error)
+	assert.Nil(t, cleared.ColorPaletteID)
+	require.NotNil(t, cleared.DesignTemplateID)
+	assert.Equal(t, templateB.ID, *cleared.DesignTemplateID)
+}
