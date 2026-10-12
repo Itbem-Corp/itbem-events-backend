@@ -158,6 +158,7 @@ Legacy v1/v2 events remain auditable but cannot authorize a v3 action.
 - `POST /api/events/:id/sections` → `eventsection.CreateSection`
 - `PATCH /api/events/:id/sections/reorder` → `eventsection.ReorderSections` — Bulk reorder event sections. Body: `{"sections": [{"id": "uuid", "order": 1}]}`.
 - `PUT /api/sections/:id` → `eventsection.UpdateSection`
+- Update/save failures of sections, event config, cover, tables, guests, moments (also the public save), resources and users answer `500` `write_failed` ("No se pudieron guardar los cambios. Inténtalo de nuevo."); database errors are logged, never echoed.
 - `DELETE /api/sections/:id` → `eventsection.DeleteSection`
 
 ### Resources
