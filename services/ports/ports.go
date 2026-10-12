@@ -380,7 +380,7 @@ type ClientMembersPageRepository interface {
 }
 
 type UserClientStatusRepository interface {
-	CountUserClientStatuses(userID uuid.UUID) (active, inactive int64, err error)
+	CountUserClientStatuses(userID uuid.UUID) (dtos.UserClientCounts, error)
 }
 
 // ClientRoleRepository is the data access contract for ClientRole records.

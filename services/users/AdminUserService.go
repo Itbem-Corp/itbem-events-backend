@@ -126,8 +126,7 @@ func (s *AdminUserService) ListUserClients(userID uuid.UUID) ([]models.Client, e
 func (s *AdminUserService) ListUserClientsPage(userID uuid.UUID, query dtos.ClientsListQuery) (dtos.ClientsPageResponse, error) {
 	var clients []models.Client
 	var total int64
-	var active int64
-	var inactive int64
+	var counts dtos.UserClientCounts
 	group := new(errgroup.Group)
 	group.Go(func() error {
 		loaded, count, err := s.clientRepo.ListClientsPaginated(&userID, query)
@@ -136,14 +135,14 @@ func (s *AdminUserService) ListUserClientsPage(userID uuid.UUID, query dtos.Clie
 	})
 	if stats, ok := s.clientRepo.(ports.UserClientStatusRepository); ok {
 		group.Go(func() error {
-			active, inactive, _ = stats.CountUserClientStatuses(userID)
+			counts, _ = stats.CountUserClientStatuses(userID)
 			return nil
 		})
 	}
 	if err := group.Wait(); err != nil {
 		return dtos.ClientsPageResponse{}, err
 	}
-	response := dtos.ClientsPageResponse{Data: dtos.NewClientResponses(clients), Total: total, Active: active, Inactive: inactive, Page: query.Page, PageSize: query.PageSize, TotalPages: int((total + int64(query.PageSize) - 1) / int64(query.PageSize))}
+	response := dtos.ClientsPageResponse{Data: dtos.NewClientResponses(clients), Total: total, Active: counts.Active, Inactive: counts.Inactive, Direct: counts.Direct, Inherited: counts.Inherited, Page: query.Page, PageSize: query.PageSize, TotalPages: int((total + int64(query.PageSize) - 1) / int64(query.PageSize))}
 	return response, nil
 }
 

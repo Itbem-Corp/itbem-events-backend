@@ -10,14 +10,12 @@ import (
 	"strings"
 )
 
-func ListClientsPaginated(userID *uuid.UUID, query dtos.ClientsListQuery) ([]models.Client, int64, error) {
-	baseQuery := func() *gorm.DB {
-		base := gormrepository.DB().Model(&models.Client{})
-		if userID != nil {
-			// Owners and admins inherit visibility down their organization tree. Other
-			// roles intentionally remain scoped to their direct organization. DISTINCT
-			// ON keeps a direct assignment authoritative when both paths exist.
-			base = base.Joins(`JOIN (
+// scopedAccessJoin is the per-user organization reach: direct memberships
+// plus, for Owner/Admin, every descendant. Other roles intentionally remain
+// scoped to their direct organization. DISTINCT ON keeps a direct assignment
+// authoritative when both paths exist. It takes the user id as its only
+// parameter and exposes scoped_access.client_id / scoped_access.access_role.
+const scopedAccessJoin = `JOIN (
 				WITH RECURSIVE reachable_clients AS (
 					SELECT cm.client_id, cr.code AS role_code, 0 AS depth
 					FROM client_members cm
@@ -35,7 +33,13 @@ func ListClientsPaginated(userID *uuid.UUID, query dtos.ClientsListQuery) ([]mod
 					CASE WHEN depth = 0 THEN role_code ELSE 'INHERITED_' || role_code END AS access_role
 				FROM reachable_clients
 				ORDER BY client_id, depth ASC
-			) scoped_access ON scoped_access.client_id = clients.id`, *userID)
+			) scoped_access ON scoped_access.client_id = clients.id`
+
+func ListClientsPaginated(userID *uuid.UUID, query dtos.ClientsListQuery) ([]models.Client, int64, error) {
+	baseQuery := func() *gorm.DB {
+		base := gormrepository.DB().Model(&models.Client{})
+		if userID != nil {
+			base = base.Joins(scopedAccessJoin, *userID)
 		}
 		if tenantCode := strings.ToLower(strings.TrimSpace(query.TenantCode)); tenantCode != "" {
 			base = base.Where(`
@@ -84,12 +88,19 @@ func ListClientsPaginated(userID *uuid.UUID, query dtos.ClientsListQuery) ([]mod
 	return clients, total, nil
 }
 
-func CountUserClientStatuses(userID uuid.UUID) (active, inactive int64, err error) {
-	err = gormrepository.DB().Model(&models.Client{}).
-		Joins("JOIN client_members cm ON cm.client_id = clients.id AND cm.user_id = ? AND cm.is_active = true", userID).
-		Select("COUNT(DISTINCT clients.id) FILTER (WHERE clients.is_active = true) AS active, COUNT(DISTINCT clients.id) FILTER (WHERE clients.is_active = false) AS inactive").
-		Row().Scan(&active, &inactive)
-	return
+// CountUserClientStatuses counts the organizations the user can reach over
+// the same set ListClientsPaginated returns (direct + inherited), so the
+// totals shown next to that list always add up.
+func CountUserClientStatuses(userID uuid.UUID) (dtos.UserClientCounts, error) {
+	var counts dtos.UserClientCounts
+	err := gormrepository.DB().Model(&models.Client{}).
+		Joins(scopedAccessJoin, userID).
+		Select(`COUNT(*) FILTER (WHERE clients.is_active = true) AS active,
+			COUNT(*) FILTER (WHERE clients.is_active = false) AS inactive,
+			COUNT(*) FILTER (WHERE NOT starts_with(scoped_access.access_role, 'INHERITED_')) AS direct,
+			COUNT(*) FILTER (WHERE starts_with(scoped_access.access_role, 'INHERITED_')) AS inherited`).
+		Row().Scan(&counts.Active, &counts.Inactive, &counts.Direct, &counts.Inherited)
+	return counts, err
 }
 
 // ... (CreateClient, GetClientByID, UpdateClient, AddMember se quedan igual) ...
@@ -308,7 +319,9 @@ func ListClientsByUser(userID uuid.UUID) ([]models.Client, error) {
 	return clients, err
 }
 
-// CountClientsByUsers returns client counts for multiple users in a single query.
+// CountClientsByUsers returns, per user, how many organizations the user can
+// reach (direct memberships plus Owner/Admin inheritance down the tree), in a
+// single query. It matches the total of the user's organization page.
 func CountClientsByUsers(userIDs []uuid.UUID) (map[uuid.UUID]int64, error) {
 	if len(userIDs) == 0 {
 		return map[uuid.UUID]int64{}, nil
@@ -318,12 +331,25 @@ func CountClientsByUsers(userIDs []uuid.UUID) (map[uuid.UUID]int64, error) {
 		Count  int64
 	}
 	var rows []row
-	err := gormrepository.DB().
-		Model(&models.ClientMember{}).
-		Select("user_id, COUNT(*) as count").
-		Where("user_id IN ? AND is_active = true", userIDs).
-		Group("user_id").
-		Scan(&rows).Error
+	err := gormrepository.DB().Raw(`
+		WITH RECURSIVE reachable AS (
+			SELECT cm.user_id, cm.client_id, cr.code AS role_code, 0 AS depth
+			FROM client_members cm
+			JOIN client_roles cr ON cr.id = cm.client_role_id
+			WHERE cm.user_id IN ? AND cm.is_active = true
+			UNION ALL
+			SELECT reachable.user_id, child.id, reachable.role_code, reachable.depth + 1
+			FROM clients child
+			JOIN reachable ON child.parent_id = reachable.client_id
+			WHERE child.deleted_at IS NULL
+				AND UPPER(reachable.role_code) IN ('OWNER', 'ADMIN')
+				AND reachable.depth < 31
+		)
+		SELECT reachable.user_id, COUNT(DISTINCT reachable.client_id) AS count
+		FROM reachable
+		JOIN clients ON clients.id = reachable.client_id AND clients.deleted_at IS NULL
+		GROUP BY reachable.user_id
+	`, userIDs).Scan(&rows).Error
 	if err != nil {
 		return nil, err
 	}
@@ -375,7 +401,7 @@ func (r *ClientRepo) GetMembers(clientID uuid.UUID) ([]models.ClientMember, erro
 func (r *ClientRepo) ListMembersPage(clientID uuid.UUID, page, pageSize int, search string) ([]models.ClientMember, int64, error) {
 	return ListMembersPage(clientID, page, pageSize, search)
 }
-func (r *ClientRepo) CountUserClientStatuses(userID uuid.UUID) (int64, int64, error) {
+func (r *ClientRepo) CountUserClientStatuses(userID uuid.UUID) (dtos.UserClientCounts, error) {
 	return CountUserClientStatuses(userID)
 }
 func (r *ClientRepo) DeleteAllMembers(clientID uuid.UUID) error { return DeleteAllMembers(clientID) }
