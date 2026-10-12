@@ -34,6 +34,7 @@
 ### Invitations / RSVP
 - `GET /api/invitations/ByToken?token=...` → `invitations.GetInvitationByToken` — recommended for URL-sensitive tokens. Query aliases accepted: `token`, `Token`, `invitation_token`, `invitationToken`, `InvitationToken`, `pretty_token`, `prettyToken`, `PrettyToken`. `GET /api/invitations/ByToken/:token` is still registered for simple legacy tokens.
 - `POST /api/invitations/rsvp` → `invitations.ConfirmRSVP` — `rsvp_method` (any of `method`, `Method`, `rsvp_method`, `rsvpMethod`, `RSVPMethod`) is stored only as `web` or `app`; `host` (the organizer's answer and what a door check-in writes), empty and any other text are stored as `web`, never a 400. The guest's own answer clears the door check-in provenance (see `PATCH /api/guests/bulk/status`).
+- Both answer `410` `error: "event_gone"` ("Este evento ya no está disponible") when the invitation's event was deleted.
 
 ### Public Moments (MomentWall)
 - `GET /api/events/:identifier/moments` → `moments.ListPublicMoments` — Paginated wall. Query: `?page=1&limit=20` (max 50). Returns only `is_approved=true AND processing_status IN ('','done')`. Response: `{ items, total, page, limit, has_more, published, uploads_remaining, uploads_used }`. Cached in Redis (`moments:wall:{eventID}:p{n}:l{n}`, TTL 5min). If `EventConfig.AuthPasswordPreview` is set, callers must send `X-Event-Access-Token` from `POST /api/events/:identifier/verify-access` unless `preview_token` is valid.
@@ -126,6 +127,10 @@ Legacy v1/v2 events remain auditable but cannot authorize a v3 action.
 - `GET /api/events/dashboard` → `events.GetDashboardOverview` and `GET /api/events/notifications` → `events.GetEventNotifications` — same scope rules as `GET /api/events`.
 - `POST /api/events` → `events.CreateEvent`
 - `PUT /api/events/:id` → `events.UpdateEvent`
+  - Create, update and `POST /api/events/:id/duplicate` share these errors: `409` `error: "event_name_taken"` ("Ya existe un evento con ese nombre en esta organización." — names are unique per organization among non-deleted events), `409` `error: "event_identifier_taken"` ("Esa URL del evento ya está en uso. Elige otra." — identifiers are unique platform-wide among non-deleted events), `400` `error: "invalid_timezone"` ("Zona horaria inválida" — `timezone` must be an IANA zone or empty).
+  - `event_type_id` is optional: `null`/`""` stores NULL and responses return `event_type_id: null`.
+  - Update: `client_id: null`/`""` keeps the current organization. Moving to another organization needs `event:manage` in both; detaching is rejected with `400`.
+  - The paginated list sorts `upcoming`/`today` soonest first and `past`/`all` most recent first (tiebreak `id`).
 - `DELETE /api/events/:id` → `events.DeleteEvent`
 - `POST /api/events/:id/cover` → `events.UploadEventCover` — Stores a validated source, returns `202` plus a signed pending preview, and queues responsive processing. The previous public cover remains active until a generation-matched terminal callback succeeds. Local environments without SQS retain a synchronous fallback.
 - `DELETE /api/events/:id/cover` → `events.DeleteEventCover` — Clears `cover_image_url` and best-effort deletes the old S3 object.

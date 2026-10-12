@@ -27,7 +27,7 @@ Event     Event          `gorm:"foreignKey:EventID" json:"event,omitempty"`
 ### Event
 - **File**: `models/Event.go`
 - **Purpose**: Main event entity
-- **Key fields**: `ClientID *uuid.UUID` (nullable, FK to Client — added Phase 1), `client_id` JSON tag, `Identifier string` (unique slug, auto-generated from Name if empty on create)
+- **Key fields**: `ClientID *uuid.UUID` (nullable, FK to Client — added Phase 1), `client_id` JSON tag, `Identifier string` (slug, auto-generated from Name if empty on create; unique among non-deleted events, index `idx_events_identifier_live`), `Name` (unique per `client_id` among non-deleted events, index `idx_events_client_name_live`; both partial indexes come from `configuration/event_identity_integrity.go`), `EventTypeID *uuid.UUID` (optional, NULL when the event has no type), `Timezone` (IANA zone or empty; invalid stored values are blanked on boot by `configuration/event_timezone_repair.go`)
 - **Relationships**: HasMany Guests, HasMany Invitations, HasMany Resources, BelongsTo Client (optional), BelongsTo EventType
 
 ### EventType
