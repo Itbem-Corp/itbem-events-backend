@@ -823,12 +823,33 @@ func RequireResourceSectionForCreate(user *models.User, sectionID *uuid.UUID) er
 	return nil
 }
 
+// RequireClientMoveAccess authorizes changing an event's organization.
+//   - Unchanged (including a legacy event with no organization that stays
+//     without one): allowed.
+//   - Detaching (old set, new nil): rejected. An event without an
+//     organization is reachable only by platform admins, so this orphaned
+//     events from their own organization (EVT-4).
+//   - Moving: requires event:manage in BOTH organizations. Event-level access
+//     (an event member) is not enough to take the event out of its
+//     organization.
 func RequireClientMoveAccess(user *models.User, oldClientID, newClientID *uuid.UUID) error {
 	if newClientID == nil {
-		return nil
+		if oldClientID == nil {
+			return nil
+		}
+		return &Failure{
+			Status:  http.StatusBadRequest,
+			Message: "client_id es obligatorio",
+			Detail:  "An event cannot be detached from its organization",
+		}
 	}
 	if oldClientID != nil && *oldClientID == *newClientID {
 		return nil
+	}
+	if oldClientID != nil {
+		if err := RequireClientCapability(user, *oldClientID, CapabilityEventManage); err != nil {
+			return err
+		}
 	}
 	if err := RequireClientCapability(user, *newClientID, CapabilityEventManage); err != nil {
 		return err
