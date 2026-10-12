@@ -16,6 +16,17 @@ func TestValidateEventSectionConfigURLs(t *testing.T) {
 		`{"mapUrl":"java\tscript:alert(1)"}`,
 		`{"items":[{"buttonLink":"data:text/html,<script>alert(1)</script>"}]}`,
 		`{"venue":{"href":"vbscript:msgbox(1)"}}`,
+		// Plural and other link keys (security review 2026-10-12 #4).
+		`{"urls":["https://ok.mx","javascript:alert(1)"]}`,
+		`{"links":["javascript:alert(1)"]}`,
+		`{"imageUrls":["data:text/html,x"]}`,
+		`{"socialLinks":{"instagram":"javascript:alert(1)"}}`,
+		`{"links":[{"label":"Mapa","target":"javascript:alert(1)"}]}`,
+		`{"src":"javascript:alert(1)"}`,
+		`{"imgSrc":"data:text/html,x"}`,
+		`{"website":"data:text/html,x"}`,
+		`{"hrefs":["vbscript:x"]}`,
+		`{"gallery":{"items":[{"photoSrc":"file:///etc/passwd"}]}}`,
 	}
 	for _, config := range rejected {
 		err := ValidateEventSectionConfigURLs(config)
@@ -33,6 +44,11 @@ func TestValidateEventSectionConfigURLs(t *testing.T) {
 		`{"mapUrl":""}`,
 		`{"title":"javascript: no es un enlace"}`,
 		`{"timeUrl":"10:30"}`,
+		`{"links":["https://a.mx","/e/boda","mailto:a@b.mx"]}`,
+		`{"socialLinks":{"instagram":"https://instagram.com/x","label":"Síguenos: aquí"}}`,
+		`{"links":[{"label":"Nota: llegar temprano","url":"geo:19.4,-99.1"}]}`,
+		`{"website":"https://boda.mx","src":"events/abc/foto.jpg"}`,
+		`{"title":"Data: lo que sigue"}`,
 		`{}`,
 	}
 	for _, config := range accepted {
