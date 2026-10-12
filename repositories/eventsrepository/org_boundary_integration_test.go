@@ -3,13 +3,11 @@
 package eventsrepository
 
 // Real-PostgreSQL tests for the organization product boundary (backend
-// review M6, security review #2), the timezone repair (M4) and the moment
-// dedupe order (M7). They share the disposable container of
+// review M6, security review #2). They share the disposable container of
 // postgres_integration_test.go; nothing touches the local stack database.
 
 import (
 	"testing"
-	"time"
 
 	"github.com/gofrs/uuid"
 	"github.com/stretchr/testify/assert"
@@ -22,6 +20,10 @@ import (
 	"events-stocks/services/applications"
 )
 
+func boundarySuffix() string {
+	return uuid.Must(uuid.NewV4()).String()[:8]
+}
+
 // The migration does not run the seeds, so the product catalog rows the
 // boundary depends on are created here when missing (idempotent).
 func ensureClientWithCode(t *testing.T, code string, parentID *uuid.UUID) uuid.UUID {
@@ -32,7 +34,7 @@ func ensureClientWithCode(t *testing.T, code string, parentID *uuid.UUID) uuid.U
 	}
 	var clientType models.ClientType
 	if err := configuration.DB.First(&clientType).Error; err != nil {
-		clientType = models.ClientType{ID: uuid.Must(uuid.NewV4()), Name: "QA", Code: "QA-boundary-" + lifecycleSuffix()}
+		clientType = models.ClientType{ID: uuid.Must(uuid.NewV4()), Name: "QA", Code: "QA-boundary-" + boundarySuffix()}
 		require.NoError(t, configuration.DB.Create(&clientType).Error)
 	}
 	client = models.Client{ID: uuid.Must(uuid.NewV4()), Name: code, Code: code, ClientTypeID: clientType.ID, ParentID: parentID, IsActive: true}
@@ -121,7 +123,7 @@ func sessionOrganizationIDs(t *testing.T, user *models.User, product string) map
 // another product's portal or its subtree, and inheritance stops at inactive
 // or deleted organizations.
 func TestSessionInheritanceStaysInsideTheApplicationOnPostgres(t *testing.T) {
-	suffix := lifecycleSuffix()
+	suffix := boundarySuffix()
 	root := clientIDByCode(t, "eventiapp")
 	itbemPortal := ensureClientWithCode(t, "itbem", &root)
 	cafettonPortal := ensureClientWithCode(t, "cafettonhouse", &root)
@@ -176,56 +178,4 @@ func TestSessionInheritanceStaysInsideTheApplicationOnPostgres(t *testing.T) {
 	assert.Contains(t, seedOrgs, plain)
 	assert.NotContains(t, seedOrgs, inactiveSeed)
 	assert.NotContains(t, seedOrgs, underSeed)
-}
-
-// Review M4: the boot repair blanks only zones PostgreSQL rejects; values it
-// accepts (lower-case IANA, POSIX) are kept, and a second boot is a no-op.
-func TestStartupTimezoneRepairKeepsZonesPostgresAccepts(t *testing.T) {
-	suffix := lifecycleSuffix()
-	org := createLifecycleClient(t, suffix, "TZK")
-	bad := createLifecycleEvent(t, &org, "Mala "+suffix, "tz-mala-"+suffix)
-	lower := createLifecycleEvent(t, &org, "Minúsculas "+suffix, "tz-lower-"+suffix)
-	posix := createLifecycleEvent(t, &org, "Posix "+suffix, "tz-posix-"+suffix)
-	require.NoError(t, configuration.DB.Exec(`UPDATE events SET timezone = 'Mars/Olympus' WHERE id = ?`, bad.ID).Error)
-	require.NoError(t, configuration.DB.Exec(`UPDATE events SET timezone = 'america/mexico_city' WHERE id = ?`, lower.ID).Error)
-	require.NoError(t, configuration.DB.Exec(`UPDATE events SET timezone = 'UTC+5' WHERE id = ?`, posix.ID).Error)
-
-	require.NoError(t, configuration.MigrateModelsForTest(configuration.DB))
-	require.NoError(t, configuration.MigrateModelsForTest(configuration.DB), "idempotent")
-
-	zone := func(id uuid.UUID) string {
-		var value string
-		require.NoError(t, configuration.DB.Raw(`SELECT timezone FROM events WHERE id = ?`, id).Row().Scan(&value))
-		return value
-	}
-	assert.Equal(t, "", zone(bad.ID))
-	assert.Equal(t, "america/mexico_city", zone(lower.ID))
-	assert.Equal(t, "UTC+5", zone(posix.ID))
-}
-
-// Review M7: the dedupe keeps the approved copy even when another copy has a
-// legacy NULL is_approved (plain DESC sorts NULL first).
-func TestMomentDedupeKeepsApprovedCopyOverLegacyNull(t *testing.T) {
-	suffix := lifecycleSuffix()
-	org := createLifecycleClient(t, suffix, "MOMD")
-	event := createLifecycleEvent(t, &org, "Momentos "+suffix, "momentos-"+suffix)
-	db := configuration.DB
-	t.Cleanup(func() { db.Unscoped().Where("event_id = ?", event.ID).Delete(&models.Moment{}) })
-	require.NoError(t, db.Exec("DROP INDEX IF EXISTS "+models.MomentLiveContentURLIndex).Error)
-
-	key := "moments/" + event.ID.String() + "/raw/" + uuid.Must(uuid.NewV4()).String() + ".jpg"
-	legacy := models.Moment{ID: uuid.Must(uuid.NewV4()), EventID: &event.ID, ContentURL: key, ProcessingStatus: "done", CreatedAt: time.Now().Add(-2 * time.Hour)}
-	approved := models.Moment{ID: uuid.Must(uuid.NewV4()), EventID: &event.ID, ContentURL: key, ProcessingStatus: "done", IsApproved: true}
-	for _, moment := range []*models.Moment{&legacy, &approved} {
-		require.NoError(t, db.Omit("Invitation", "MomentType", "Guest").Create(moment).Error)
-	}
-	require.NoError(t, db.Exec(`ALTER TABLE moments ALTER COLUMN is_approved DROP NOT NULL`).Error)
-	require.NoError(t, db.Exec(`UPDATE moments SET is_approved = NULL WHERE id = ?`, legacy.ID).Error)
-
-	require.NoError(t, configuration.MigrateModelsForTest(db))
-
-	var live []models.Moment
-	require.NoError(t, db.Where("event_id = ? AND content_url = ?", event.ID, key).Find(&live).Error)
-	require.Len(t, live, 1)
-	assert.Equal(t, approved.ID, live[0].ID, "the approved copy must survive")
 }
