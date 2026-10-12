@@ -43,9 +43,11 @@ func operationalRootMayNotManageOrganization(c echo.Context, user *models.User) 
 
 // platformTeamManager decides whether a member write takes the platform path:
 // any organization, no membership required, and the *AsRoot service rules
-// that never assign, change or remove an Owner. Both root levels manage
-// teams (members:manage); a Root 2 is additionally kept away from
-// platform-root accounts by operationalRootMayNotManageRootTarget.
+// that never assign, change or remove an Owner and grant only roles within
+// the requester's own capabilities (so Root 2 never grants Admin, Event
+// manager or Editor). Both root levels manage teams (members:manage); a
+// Root 2 is additionally kept away from platform-root accounts by
+// operationalRootMayNotManageRootTarget.
 func platformTeamManager(user *models.User) bool {
 	return user.IsPlatformAdmin()
 }
@@ -318,7 +320,7 @@ func InviteUser(c echo.Context) error {
 	}
 	var rolePermissionErr error
 	if platformTeamManager(requester) {
-		rolePermissionErr = clientSvc.CanAssignClientRoleAsRoot(req.RoleID)
+		rolePermissionErr = clientSvc.CanAssignClientRoleAsRoot(requester, req.RoleID)
 	} else {
 		rolePermissionErr = clientSvc.CanAssignClientRole(req.ClientID, requester.ID, req.RoleID)
 	}
@@ -419,7 +421,7 @@ func CreateClientMember(c echo.Context) error {
 	}
 	var rolePermissionErr error
 	if platformTeamManager(requester) {
-		rolePermissionErr = clientSvc.CanAssignClientRoleAsRoot(req.RoleID)
+		rolePermissionErr = clientSvc.CanAssignClientRoleAsRoot(requester, req.RoleID)
 	} else {
 		rolePermissionErr = clientSvc.CanAssignClientRole(req.ClientID, requester.ID, req.RoleID)
 	}
@@ -580,7 +582,7 @@ func UpdateMemberRole(c echo.Context) error {
 
 	var updateErr error
 	if platformTeamManager(requester) {
-		updateErr = clientSvc.UpdateClientMemberRoleAsRoot(clientID, targetUserID, req.NewRoleID)
+		updateErr = clientSvc.UpdateClientMemberRoleAsRoot(requester, clientID, targetUserID, req.NewRoleID)
 	} else {
 		updateErr = clientSvc.UpdateClientMemberRole(clientID, requester.ID, targetUserID, req.NewRoleID)
 	}

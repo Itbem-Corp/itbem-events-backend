@@ -26,13 +26,18 @@ func (outsiderClientRepo) CheckAccessRecursive(uuid.UUID, uuid.UUID) (bool, stri
 	return false, ""
 }
 
-// seededRoleRepo mirrors seeds/ClientRoleSeed.go for the codes this test uses.
+// seededRoleRepo mirrors seeds/ClientRoleSeed.go.
 type seededRoleRepo struct{ ports.ClientRoleRepository }
 
 var seededRoles = []models.ClientRole{
 	{Code: "Owner", Hierarchy: 1},
 	{Code: "Admin", Hierarchy: 2},
+	{Code: "EVENT_MANAGER", Hierarchy: 3},
+	{Code: "EDITOR", Hierarchy: 4},
+	{Code: "CHECKIN", Hierarchy: 5},
+	{Code: "ANALYST", Hierarchy: 6},
 	{Code: "Member", Hierarchy: 7},
+	{Code: "Guest", Hierarchy: 8},
 }
 
 func (seededRoleRepo) GetByCode(code string) (*models.ClientRole, error) {
@@ -93,19 +98,37 @@ func roleCodes(t *testing.T, rec *httptest.ResponseRecorder) []string {
 	return codes
 }
 
-// Both platform-root levels manage teams in any organization, so both get
-// the roles below Owner without holding a membership there.
-func TestPlatformRootsListRolesBelowOwnerInAnyOrganization(t *testing.T) {
+// A primary root manages teams in any organization and holds every
+// capability, so it gets every role below Owner without a membership there.
+func TestPrimaryRootsListEveryRoleBelowOwnerInAnyOrganization(t *testing.T) {
 	for name, requester := range map[string]models.User{
 		"legacy is_root primary":   {ID: uuid.Must(uuid.NewV4()), IsRoot: true},
 		"explicit level 1 primary": {ID: uuid.Must(uuid.NewV4()), RootLevel: models.RootLevelPrimary},
-		"operational root":         {ID: uuid.Must(uuid.NewV4()), RootLevel: models.RootLevelOperational},
 	} {
 		t.Run(name, func(t *testing.T) {
 			rec := listRolesAs(t, requester)
 
 			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-			assert.Equal(t, []string{"Admin", "Member"}, roleCodes(t, rec), "Owner is never assignable from member management")
+			assert.Equal(t,
+				[]string{"Admin", "EVENT_MANAGER", "EDITOR", "CHECKIN", "ANALYST", "Member", "Guest"},
+				roleCodes(t, rec), "Owner is never assignable from member management")
+		})
+	}
+}
+
+// A Root 2 also manages teams in any organization, but the catalog offers
+// only the roles inside its own capabilities: never Admin, Event manager or
+// Editor, which carry event or organization powers it lacks.
+func TestOperationalRootListsOnlyRolesWithinItsCapabilities(t *testing.T) {
+	for name, requester := range map[string]models.User{
+		"operational root":                {ID: uuid.Must(uuid.NewV4()), RootLevel: models.RootLevelOperational},
+		"legacy is_root operational root": {ID: uuid.Must(uuid.NewV4()), IsRoot: true, RootLevel: models.RootLevelOperational},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := listRolesAs(t, requester)
+
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			assert.Equal(t, []string{"CHECKIN", "ANALYST", "Member", "Guest"}, roleCodes(t, rec))
 		})
 	}
 }

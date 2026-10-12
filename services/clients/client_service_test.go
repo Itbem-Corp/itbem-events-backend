@@ -686,8 +686,55 @@ func TestCanAssignClientRoleAsRoot_RejectsOwnerAndAllowsLowerRoles(t *testing.T)
 	}
 
 	svc := newClientService(nil, crr, nil)
-	require.Error(t, svc.CanAssignClientRoleAsRoot(ownerRoleID))
-	require.NoError(t, svc.CanAssignClientRoleAsRoot(memberRoleID))
+	for _, root := range []*models.User{
+		{IsRoot: true},
+		{RootLevel: models.RootLevelPrimary},
+		{RootLevel: models.RootLevelOperational},
+	} {
+		require.Error(t, svc.CanAssignClientRoleAsRoot(root, ownerRoleID))
+		require.NoError(t, svc.CanAssignClientRoleAsRoot(root, memberRoleID))
+	}
+}
+
+// rolesByID serves the seeded organization roles by ID.
+func rolesByID(roles ...*models.ClientRole) *mockClientRoleRepo {
+	return &mockClientRoleRepo{GetByIDFunc: func(id uuid.UUID) (*models.ClientRole, error) {
+		for _, role := range roles {
+			if role.ID == id {
+				return role, nil
+			}
+		}
+		return nil, errors.New("record not found")
+	}}
+}
+
+// A Root 2 assigns only roles within its own capabilities; a primary root
+// assigns every role below Owner; a non-root requester is never served by
+// the platform path.
+func TestCanAssignClientRoleAsRoot_LimitsOperationalRootToItsOwnCapabilities(t *testing.T) {
+	admin := &models.ClientRole{ID: uuid.Must(uuid.NewV4()), Code: "Admin", Hierarchy: 2}
+	eventManager := &models.ClientRole{ID: uuid.Must(uuid.NewV4()), Code: "EVENT_MANAGER", Hierarchy: 3}
+	editor := &models.ClientRole{ID: uuid.Must(uuid.NewV4()), Code: "EDITOR", Hierarchy: 4}
+	checkin := &models.ClientRole{ID: uuid.Must(uuid.NewV4()), Code: "CHECKIN", Hierarchy: 5}
+	analyst := &models.ClientRole{ID: uuid.Must(uuid.NewV4()), Code: "ANALYST", Hierarchy: 6}
+	member := &models.ClientRole{ID: uuid.Must(uuid.NewV4()), Code: "Member", Hierarchy: 7}
+	viewer := &models.ClientRole{ID: uuid.Must(uuid.NewV4()), Code: "Guest", Hierarchy: 8}
+	svc := newClientService(nil, rolesByID(admin, eventManager, editor, checkin, analyst, member, viewer), nil)
+
+	operational := &models.User{RootLevel: models.RootLevelOperational}
+	primary := &models.User{RootLevel: models.RootLevelPrimary}
+	for _, role := range []*models.ClientRole{admin, eventManager, editor} {
+		err := svc.CanAssignClientRoleAsRoot(operational, role.ID)
+		require.Error(t, err, role.Code)
+		assert.Contains(t, err.Error(), "permission denied")
+		require.NoError(t, svc.CanAssignClientRoleAsRoot(primary, role.ID), role.Code)
+	}
+	for _, role := range []*models.ClientRole{checkin, analyst, member, viewer} {
+		require.NoError(t, svc.CanAssignClientRoleAsRoot(operational, role.ID), role.Code)
+	}
+	for _, requester := range []*models.User{nil, {}} {
+		require.Error(t, svc.CanAssignClientRoleAsRoot(requester, member.ID))
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -998,9 +1045,35 @@ func TestUpdateClientMemberRoleAsRoot_ProtectsOwnerAndUpdatesMember(t *testing.T
 	crr := &mockClientRoleRepo{GetByIDFunc: func(uuid.UUID) (*models.ClientRole, error) { return adminRole(), nil }}
 
 	svc := newClientService(cr, crr, nil)
-	require.Error(t, svc.UpdateClientMemberRoleAsRoot(clientID, ownerID, adminRoleID))
-	require.NoError(t, svc.UpdateClientMemberRoleAsRoot(clientID, memberID, adminRoleID))
+	primary := &models.User{RootLevel: models.RootLevelPrimary}
+	require.Error(t, svc.UpdateClientMemberRoleAsRoot(primary, clientID, ownerID, adminRoleID))
+	require.NoError(t, svc.UpdateClientMemberRoleAsRoot(primary, clientID, memberID, adminRoleID))
 	assert.Equal(t, adminRoleID, updated)
+}
+
+// A Root 2 cannot promote a member to a role beyond its own capabilities
+// (here Admin); nothing is written.
+func TestUpdateClientMemberRoleAsRoot_OperationalRootCannotPromoteToAdmin(t *testing.T) {
+	clientID := uuid.Must(uuid.NewV4())
+	memberID := uuid.Must(uuid.NewV4())
+	admin := &models.ClientRole{ID: uuid.Must(uuid.NewV4()), Code: "Admin", Hierarchy: 2}
+	checkin := &models.ClientRole{ID: uuid.Must(uuid.NewV4()), Code: "CHECKIN", Hierarchy: 5}
+	writes := 0
+	cr := &mockClientRepo{
+		GetMemberRoleFunc: func(uuid.UUID, uuid.UUID) (*models.ClientRole, error) { return memberRole(), nil },
+		UpdateMemberRoleFunc: func(uuid.UUID, uuid.UUID, uuid.UUID) error {
+			writes++
+			return nil
+		},
+	}
+	svc := newClientService(cr, rolesByID(admin, checkin), nil)
+	operational := &models.User{RootLevel: models.RootLevelOperational}
+
+	require.Error(t, svc.UpdateClientMemberRoleAsRoot(operational, clientID, memberID, admin.ID))
+	assert.Zero(t, writes)
+
+	require.NoError(t, svc.UpdateClientMemberRoleAsRoot(operational, clientID, memberID, checkin.ID))
+	assert.Equal(t, 1, writes)
 }
 
 // ---------------------------------------------------------------------------

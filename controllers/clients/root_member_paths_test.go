@@ -2,6 +2,7 @@ package clients
 
 import (
 	"errors"
+	"events-stocks/dtos"
 	"events-stocks/internal/authz"
 	"events-stocks/models"
 	clientService "events-stocks/services/clients"
@@ -59,6 +60,17 @@ func (r *hierarchyRoleRepo) GetByID(id uuid.UUID) (*models.ClientRole, error) {
 	return role, nil
 }
 
+// countingAuthRepo records identity-provider accounts created by a request.
+type countingAuthRepo struct {
+	mockControllerAuthRepo
+	created int
+}
+
+func (r *countingAuthRepo) CreateUser(req dtos.CreateAuthUserRequest, provider string) (*dtos.AuthUser, error) {
+	r.created++
+	return r.mockControllerAuthRepo.CreateUser(req, provider)
+}
+
 type directoryUserRepo struct {
 	mockControllerUserRepo
 	users map[uuid.UUID]*models.User
@@ -80,11 +92,19 @@ type memberPathFixture struct {
 	// Owner role, which member management may never grant.
 	ownerID   uuid.UUID
 	ownerRole uuid.UUID
+	// adminRole, eventManagerRole and editorRole carry event or organization
+	// capabilities that Root 2 does not hold; checkinRole carries only
+	// capabilities it does hold.
+	adminRole        uuid.UUID
+	eventManagerRole uuid.UUID
+	editorRole       uuid.UUID
+	checkinRole      uuid.UUID
 	// primaryRootID and operationalRootID are platform-root accounts that
 	// also hold an ordinary membership in the organization.
 	primaryRootID     uuid.UUID
 	operationalRootID uuid.UUID
 	repo              *outsiderClientRepo
+	auth              *countingAuthRepo
 }
 
 // newMemberPathFixture wires an organization the requester is not a member
@@ -98,6 +118,10 @@ func newMemberPathFixture(t *testing.T, requester models.User) memberPathFixture
 		memberRole:        uuid.Must(uuid.NewV4()),
 		ownerID:           uuid.Must(uuid.NewV4()),
 		ownerRole:         uuid.Must(uuid.NewV4()),
+		adminRole:         uuid.Must(uuid.NewV4()),
+		eventManagerRole:  uuid.Must(uuid.NewV4()),
+		editorRole:        uuid.Must(uuid.NewV4()),
+		checkinRole:       uuid.Must(uuid.NewV4()),
 		primaryRootID:     uuid.Must(uuid.NewV4()),
 		operationalRootID: uuid.Must(uuid.NewV4()),
 	}
@@ -112,17 +136,22 @@ func newMemberPathFixture(t *testing.T, requester models.User) memberPathFixture
 
 	previousClientSvc := clientSvc
 	clientSvc = clientService.NewClientService(fixture.repo, &hierarchyRoleRepo{roles: map[uuid.UUID]*models.ClientRole{
-		fixture.memberRole: member,
-		fixture.ownerRole:  owner,
+		fixture.memberRole:       member,
+		fixture.ownerRole:        owner,
+		fixture.adminRole:        {ID: fixture.adminRole, Code: "Admin", Hierarchy: 2},
+		fixture.eventManagerRole: {ID: fixture.eventManagerRole, Code: "EVENT_MANAGER", Hierarchy: 3},
+		fixture.editorRole:       {ID: fixture.editorRole, Code: "EDITOR", Hierarchy: 4},
+		fixture.checkinRole:      {ID: fixture.checkinRole, Code: "CHECKIN", Hierarchy: 5},
 	}}, &mockClientTypeRepo{}, nil, nil, nil)
 	t.Cleanup(func() { clientSvc = previousClientSvc })
 
+	fixture.auth = &countingAuthRepo{}
 	usersService.SetDefaultUserService(usersService.NewUserService(&directoryUserRepo{users: map[uuid.UUID]*models.User{
 		fixture.targetID:          {ID: fixture.targetID, Email: "member@example.com"},
 		fixture.ownerID:           {ID: fixture.ownerID, Email: "owner@example.com"},
 		fixture.primaryRootID:     {ID: fixture.primaryRootID, Email: "root1@example.com", RootLevel: models.RootLevelPrimary},
 		fixture.operationalRootID: {ID: fixture.operationalRootID, Email: "root2@example.com", RootLevel: models.RootLevelOperational},
-	}}, &mockControllerAuthRepo{}, nil))
+	}}, fixture.auth, nil))
 	t.Cleanup(func() { usersService.SetDefaultUserService(nil) })
 
 	restore := authz.ReplaceHooksForTest(authz.Hooks{
@@ -253,6 +282,117 @@ func TestPlatformRootsNeverGrantOrTouchOwner(t *testing.T) {
 				assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 				assert.Zero(t, fixture.repo.writes, "no membership may change")
 			})
+		}
+	}
+}
+
+// grantWrites are the member writes that hand a role to an account: adding
+// an existing user, creating a new one, and re-roling a current member.
+func grantWrites(role func(memberPathFixture) uuid.UUID) []memberWrite {
+	return []memberWrite{
+		{name: "add existing user", request: func(f memberPathFixture) (echo.Context, *httptest.ResponseRecorder) {
+			return f.inviteUser(f.targetID, role(f))
+		}, handler: InviteUser},
+		{name: "create member", request: func(f memberPathFixture) (echo.Context, *httptest.ResponseRecorder) {
+			return f.createMemberWithRole(role(f))
+		}, handler: CreateClientMember},
+		{name: "change member role", request: func(f memberPathFixture) (echo.Context, *httptest.ResponseRecorder) {
+			return f.setRole(f.targetID, role(f))
+		}, handler: UpdateMemberRole},
+	}
+}
+
+type roleChoice struct {
+	name string
+	role func(memberPathFixture) uuid.UUID
+}
+
+// rolesBeyondOperationalRoot carry event or organization capabilities that a
+// Root 2 does not hold (event:create, event:manage, event:delete,
+// organization:manage).
+var rolesBeyondOperationalRoot = []roleChoice{
+	{name: "Admin", role: func(f memberPathFixture) uuid.UUID { return f.adminRole }},
+	{name: "Event manager", role: func(f memberPathFixture) uuid.UUID { return f.eventManagerRole }},
+	{name: "Editor", role: func(f memberPathFixture) uuid.UUID { return f.editorRole }},
+}
+
+var operationalRequesters = []struct {
+	name      string
+	requester models.User
+}{
+	{name: "operational root", requester: models.User{ID: uuid.Must(uuid.NewV4()), RootLevel: models.RootLevelOperational}},
+	{name: "legacy is_root operational root", requester: models.User{ID: uuid.Must(uuid.NewV4()), IsRoot: true, RootLevel: models.RootLevelOperational}},
+}
+
+// A Root 2 may not grant a role that carries capabilities its own level
+// lacks: otherwise it could add an account it controls as Admin, Event
+// manager or Editor and edit or delete events through it. No membership is
+// written and no account is created.
+func TestOperationalRootCannotGrantRolesBeyondItsOwnCapabilities(t *testing.T) {
+	for _, operational := range operationalRequesters {
+		for _, role := range rolesBeyondOperationalRoot {
+			for _, action := range grantWrites(role.role) {
+				t.Run(operational.name+" "+action.name+" as "+role.name, func(t *testing.T) {
+					fixture := newMemberPathFixture(t, operational.requester)
+					c, rec := action.request(fixture)
+
+					require.NoError(t, action.handler(c))
+
+					assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+					assert.Zero(t, fixture.repo.writes, "no membership may change")
+					assert.Zero(t, fixture.auth.created, "no account may be created")
+				})
+			}
+		}
+	}
+}
+
+// Root 2 still staffs teams with the roles inside its own capabilities.
+func TestOperationalRootGrantsRolesWithinItsOwnCapabilities(t *testing.T) {
+	roles := []roleChoice{
+		{name: "Member", role: func(f memberPathFixture) uuid.UUID { return f.memberRole }},
+		{name: "Check-in", role: func(f memberPathFixture) uuid.UUID { return f.checkinRole }},
+	}
+	for _, operational := range operationalRequesters {
+		for _, role := range roles {
+			for _, action := range grantWrites(role.role) {
+				t.Run(operational.name+" "+action.name+" as "+role.name, func(t *testing.T) {
+					fixture := newMemberPathFixture(t, operational.requester)
+					c, rec := action.request(fixture)
+
+					require.NoError(t, action.handler(c))
+
+					assert.Contains(t, []int{http.StatusOK, http.StatusCreated}, rec.Code, rec.Body.String())
+					assert.Equal(t, 1, fixture.repo.writes)
+				})
+			}
+		}
+	}
+}
+
+// A primary root holds every capability, so it still grants Admin, Event
+// manager and Editor in any organization.
+func TestPrimaryRootGrantsEveryRoleBelowOwner(t *testing.T) {
+	primary := []struct {
+		name      string
+		requester models.User
+	}{
+		{name: "legacy is_root primary", requester: models.User{ID: uuid.Must(uuid.NewV4()), IsRoot: true}},
+		{name: "explicit level 1 primary", requester: models.User{ID: uuid.Must(uuid.NewV4()), RootLevel: models.RootLevelPrimary}},
+	}
+	for _, root := range primary {
+		for _, role := range rolesBeyondOperationalRoot {
+			for _, action := range grantWrites(role.role) {
+				t.Run(root.name+" "+action.name+" as "+role.name, func(t *testing.T) {
+					fixture := newMemberPathFixture(t, root.requester)
+					c, rec := action.request(fixture)
+
+					require.NoError(t, action.handler(c))
+
+					assert.Contains(t, []int{http.StatusOK, http.StatusCreated}, rec.Code, rec.Body.String())
+					assert.Equal(t, 1, fixture.repo.writes)
+				})
+			}
 		}
 	}
 }

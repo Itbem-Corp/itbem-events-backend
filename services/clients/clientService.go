@@ -6,6 +6,7 @@ import (
 	"errors"
 	"events-stocks/configuration/constants"
 	"events-stocks/dtos"
+	"events-stocks/internal/authz"
 	"events-stocks/internal/products"
 	"events-stocks/models"
 	"events-stocks/services/cacheutil"
@@ -532,13 +533,22 @@ func (s *ClientService) CanAssignClientRole(clientID, requesterID, roleID uuid.U
 	return nil
 }
 
-func (s *ClientService) CanAssignClientRoleAsRoot(roleID uuid.UUID) error {
+// CanAssignClientRoleAsRoot is the platform-root counterpart of
+// CanAssignClientRole. No root assigns Owner from member management, and a
+// root assigns only roles whose capabilities its own level holds
+// (authz.PlatformRootMayGrantRole): a Root 2 can never hand an account it
+// controls the event or organization powers it lacks itself (Admin, Event
+// manager, Editor). A requester that is not a platform root is denied.
+func (s *ClientService) CanAssignClientRoleAsRoot(requester *models.User, roleID uuid.UUID) error {
 	targetRole, err := s.clientRoleRepo.GetByID(roleID)
 	if err != nil {
 		return fmt.Errorf("invalid role")
 	}
 	if targetRole.Hierarchy <= 1 {
 		return fmt.Errorf("permission denied: the owner role cannot be assigned from member management")
+	}
+	if !authz.PlatformRootMayGrantRole(requester, targetRole.Code) {
+		return fmt.Errorf("permission denied: your platform administrator level cannot assign a role with more capabilities than its own")
 	}
 	return nil
 }
@@ -728,7 +738,9 @@ func (s *ClientService) UpdateClientMemberRole(clientID, requesterID, targetUser
 	return nil
 }
 
-func (s *ClientService) UpdateClientMemberRoleAsRoot(clientID, targetUserID, newRoleID uuid.UUID) error {
+// UpdateClientMemberRoleAsRoot re-roles a member on the platform path: never
+// an Owner, and only to a role CanAssignClientRoleAsRoot lets requester grant.
+func (s *ClientService) UpdateClientMemberRoleAsRoot(requester *models.User, clientID, targetUserID, newRoleID uuid.UUID) error {
 	targetRole, err := s.clientRepo.GetMemberRole(clientID, targetUserID)
 	if err != nil {
 		return fmt.Errorf("target user is not a member")
@@ -736,7 +748,7 @@ func (s *ClientService) UpdateClientMemberRoleAsRoot(clientID, targetUserID, new
 	if targetRole.Hierarchy <= 1 {
 		return fmt.Errorf("permission denied: the organization owner cannot be modified")
 	}
-	if err := s.CanAssignClientRoleAsRoot(newRoleID); err != nil {
+	if err := s.CanAssignClientRoleAsRoot(requester, newRoleID); err != nil {
 		return err
 	}
 	if err := s.clientRepo.UpdateMemberRole(clientID, targetUserID, newRoleID); err != nil {

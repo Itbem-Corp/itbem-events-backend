@@ -45,8 +45,10 @@ func ListClientRoles(c echo.Context) error {
 		return utils.Error(c, http.StatusInternalServerError, "Service unavailable", "")
 	}
 
-	// Both platform-root levels manage teams in any organization and assign
-	// from just below Owner, matching CanAssignClientRoleAsRoot.
+	// Both platform-root levels manage teams in any organization. They start
+	// from the roles below Owner and keep only those within their own
+	// capabilities, matching CanAssignClientRoleAsRoot: Root 1 keeps them all,
+	// Root 2 never sees Admin, Event manager or Editor.
 	myRoleCode := "OWNER"
 	if !user.IsPlatformAdmin() {
 		myRoleCode, err = clientSvc.GetEffectiveMemberRole(user.ID, clientID)
@@ -59,6 +61,15 @@ func ListClientRoles(c echo.Context) error {
 	roles, err := clientRoleSvc.GetAllowedRolesToAssign(myRoleCode)
 	if err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Error fetching roles", err.Error())
+	}
+	if user.IsPlatformAdmin() {
+		grantable := roles[:0]
+		for _, role := range roles {
+			if authz.PlatformRootMayGrantRole(user, role.Code) {
+				grantable = append(grantable, role)
+			}
+		}
+		roles = grantable
 	}
 
 	return utils.Success(c, http.StatusOK, "Allowed roles", dtos.NewClientRoleResponses(roles))
