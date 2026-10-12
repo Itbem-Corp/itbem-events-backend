@@ -87,12 +87,32 @@ func GetByID[T any](model *T, id interface{}, preloads ...string) error {
 
 // Update actualiza un registro existente.
 // Usa Select("*") para que GORM persista valores cero (false, 0, "").
+// The database error is checked before RowsAffected: a rejected UPDATE
+// (unique, foreign key, invalid value) also affects zero rows, and reporting
+// it as "record not found" hid the real cause from callers.
 func Update[T any](model *T, id interface{}) error {
 	result := configuration.DB.Model(model).Where("id = ?", id).Select("*").Updates(model)
+	return updateResultError(result)
+}
+
+// UpdateOmitAssociations is Update without writing associations. With
+// Select("*") GORM saves loaded belongs-to associations first and copies each
+// association's primary key back into its foreign key, so a model loaded with
+// its associations keeps the OLD foreign keys when only the *ID fields were
+// changed. Use it for models whose handlers change foreign keys by ID.
+func UpdateOmitAssociations[T any](model *T, id interface{}) error {
+	result := configuration.DB.Model(model).Where("id = ?", id).Select("*").Omit(clause.Associations).Updates(model)
+	return updateResultError(result)
+}
+
+func updateResultError(result *gorm.DB) error {
+	if result.Error != nil {
+		return result.Error
+	}
 	if result.RowsAffected == 0 {
 		return errors.New("record not found")
 	}
-	return result.Error
+	return nil
 }
 
 func UpdateFields[T any](model *T, fields map[string]interface{}) error {
@@ -105,11 +125,7 @@ func UpdateFieldsByID[T any](id interface{}, fields map[string]interface{}, mode
 		Where("id = ?", id).
 		Updates(fields)
 
-	if result.RowsAffected == 0 {
-		return errors.New("record not found")
-	}
-
-	return result.Error
+	return updateResultError(result)
 }
 
 func UpdateMany[T any](models []T, fields []string) error {
