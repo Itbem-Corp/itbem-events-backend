@@ -27,9 +27,9 @@ import (
 
 var errAttendeeServiceUnavailable = errors.New("attendee service unavailable")
 
-// guestTableByID resolves the seating table named by a guest write's table_id
-// so it can be checked against the guest's event; tests replace it.
-var guestTableByID = eventtablerepository.GetEventTableByID
+// guestTablesInEvent counts how many of a guest write's table ids are live
+// tables of the guest's event, in one query per request; tests replace it.
+var guestTablesInEvent = eventtablerepository.CountEventTablesInEvent
 
 // guestStatusByID resolves the catalog status named by a bulk status change so
 // a check-in-only caller can be limited to the confirmed status; tests replace it.
@@ -513,7 +513,7 @@ func CreateGuest(c echo.Context) error {
 	if _, _, authErr := authz.RequireEventCapability(c, guest.EventID, authz.CapabilityGuestManage); authErr != nil {
 		return authz.Respond(c, authErr)
 	}
-	if err := checkGuestTable(guest.EventID, guest.TableID); err != nil {
+	if err := checkGuestTables(guest.EventID, []models.Guest{guest}); err != nil {
 		return respondGuestTableError(c, err)
 	}
 
@@ -563,19 +563,8 @@ func CreateGuests(c echo.Context) error {
 	if _, _, authErr := authz.RequireEventCapability(c, eventID, authz.CapabilityGuestManage); authErr != nil {
 		return authz.Respond(c, authErr)
 	}
-	checkedTables := make(map[uuid.UUID]struct{})
-	for i := range guests {
-		tableID := guests[i].TableID
-		if tableID == nil {
-			continue
-		}
-		if _, checked := checkedTables[*tableID]; checked {
-			continue
-		}
-		if err := checkGuestTable(eventID, tableID); err != nil {
-			return respondGuestTableError(c, err)
-		}
-		checkedTables[*tableID] = struct{}{}
+	if err := checkGuestTables(eventID, guests); err != nil {
+		return respondGuestTableError(c, err)
 	}
 
 	if err := guestSvc.CreateGuestsWithInvitations(guests); err != nil {
@@ -615,7 +604,7 @@ func UpdateGuest(c echo.Context) error {
 		return utils.Error(c, http.StatusBadRequest, "Validation error", err.Error())
 	}
 	if write.tableSet {
-		if err := checkGuestTable(guest.EventID, guest.TableID); err != nil {
+		if err := checkGuestTables(guest.EventID, []models.Guest{*guest}); err != nil {
 			return respondGuestTableError(c, err)
 		}
 	}
@@ -785,20 +774,31 @@ func guestWriteEventID(fields jsonRequestFields) uuid.UUID {
 	return eventID
 }
 
-// checkGuestTable makes sure a guest's table_id names a table of the guest's
-// own event; nil (no table) is always valid.
-func checkGuestTable(eventID uuid.UUID, tableID *uuid.UUID) error {
-	if tableID == nil {
+// checkGuestTables makes sure every table_id of a guest write names a live
+// (not soft-deleted) table of eventID; nil (no table) is always valid. The
+// distinct ids are checked with one query, so a batch of any size costs one
+// lookup.
+func checkGuestTables(eventID uuid.UUID, guests []models.Guest) error {
+	seen := make(map[uuid.UUID]struct{})
+	ids := make([]uuid.UUID, 0)
+	for i := range guests {
+		if guests[i].TableID == nil {
+			continue
+		}
+		if _, ok := seen[*guests[i].TableID]; ok {
+			continue
+		}
+		seen[*guests[i].TableID] = struct{}{}
+		ids = append(ids, *guests[i].TableID)
+	}
+	if len(ids) == 0 {
 		return nil
 	}
-	table, err := guestTableByID(*tableID)
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return errGuestTableOutsideEvent
-	}
+	count, err := guestTablesInEvent(eventID, ids)
 	if err != nil {
 		return err
 	}
-	if table == nil || table.EventID != eventID {
+	if count != int64(len(ids)) {
 		return errGuestTableOutsideEvent
 	}
 	return nil
@@ -806,7 +806,7 @@ func checkGuestTable(eventID uuid.UUID, tableID *uuid.UUID) error {
 
 func respondGuestTableError(c echo.Context, err error) error {
 	if errors.Is(err, errGuestTableOutsideEvent) {
-		return utils.Error(c, http.StatusBadRequest, "Invalid table_id", err.Error())
+		return utils.Error(c, http.StatusBadRequest, "Mesa inválida", "table_outside_event")
 	}
 	return utils.Error(c, http.StatusInternalServerError, "Error loading table", err.Error())
 }

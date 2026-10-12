@@ -16,30 +16,61 @@ import (
 	"gorm.io/gorm"
 )
 
-// useGuestTables replaces the table_id lookup with an in-memory table list.
-func useGuestTables(t *testing.T, tables ...models.EventTable) {
+// useGuestTables replaces the table_id lookup with an in-memory table list and
+// records the ids of every lookup. Like the real query it counts only tables
+// of the event that are not soft-deleted.
+func useGuestTables(t *testing.T, tables ...models.EventTable) *[][]uuid.UUID {
 	t.Helper()
-	original := guestTableByID
-	guestTableByID = func(id uuid.UUID) (*models.EventTable, error) {
-		for i := range tables {
-			if tables[i].ID == id {
-				return &tables[i], nil
+	var lookups [][]uuid.UUID
+	original := guestTablesInEvent
+	guestTablesInEvent = func(eventID uuid.UUID, ids []uuid.UUID) (int64, error) {
+		lookups = append(lookups, append([]uuid.UUID(nil), ids...))
+		var count int64
+		for _, id := range ids {
+			for i := range tables {
+				if tables[i].ID == id && tables[i].EventID == eventID && !tables[i].DeletedAt.Valid {
+					count++
+				}
 			}
 		}
-		return nil, gorm.ErrRecordNotFound
+		return count, nil
 	}
-	t.Cleanup(func() { guestTableByID = original })
+	t.Cleanup(func() { guestTablesInEvent = original })
+	return &lookups
+}
+
+// assertTableOutsideEvent checks the stable error of a table_id that is not a
+// live table of the guest's event.
+func assertTableOutsideEvent(t *testing.T, code int, body string) {
+	t.Helper()
+	assert.Equal(t, http.StatusBadRequest, code, body)
+	var envelope struct {
+		Message string `json:"message"`
+		Error   string `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &envelope), body)
+	assert.Equal(t, "Mesa inválida", envelope.Message)
+	assert.Equal(t, "table_outside_event", envelope.Error)
+}
+
+// countingTransactor counts the guest-create transactions the service opens.
+type countingTransactor struct{ calls int }
+
+func (m *countingTransactor) Transaction(func(tx *gorm.DB) error) error {
+	m.calls++
+	return nil
 }
 
 type recordingGuestInvitationRepo struct {
 	mockGuestInvitationRepo
+	eventID  uuid.UUID
 	lookedUp []uuid.UUID
 	updated  []models.Invitation
 }
 
 func (m *recordingGuestInvitationRepo) GetInvitationByIDLite(id uuid.UUID) (*models.Invitation, error) {
 	m.lookedUp = append(m.lookedUp, id)
-	return &models.Invitation{ID: id, MaxGuests: 1}, nil
+	return &models.Invitation{ID: id, EventID: m.eventID, MaxGuests: 1}, nil
 }
 
 func (m *recordingGuestInvitationRepo) UpdateInvitation(invitation *models.Invitation) error {
@@ -72,7 +103,7 @@ func newUpdateGuestFixture(t *testing.T) *updateGuestFixture {
 	existing := stored
 	fixture := &updateGuestFixture{
 		repo:        &captureUpdateGuestRepo{existing: &existing},
-		invitations: &recordingGuestInvitationRepo{},
+		invitations: &recordingGuestInvitationRepo{eventID: stored.EventID},
 		guestID:     guestID,
 		stored:      stored,
 	}
@@ -135,6 +166,47 @@ func TestUpdateGuest_MaxGuestsSyncUsesStoredInvitation(t *testing.T) {
 	assert.Equal(t, 5, f.invitations.updated[0].MaxGuests)
 }
 
+// A guest manager of one event who knows another event's invitation id cannot
+// relink a guest to it, raise its seat count or read its token through PUT.
+func TestUpdateGuest_ForeignInvitationKeepsStoredInvitationAndOwnPrettyToken(t *testing.T) {
+	f := newUpdateGuestFixture(t)
+	reloaded := f.stored
+	reloaded.PrettyToken = "OWN12345"
+	reloaded.MaxGuests = 3
+	f.repo.reloaded = &reloaded
+	foreign := uuid.Must(uuid.NewV4()).String()
+
+	code, body := f.put(t, `{"max_guests":3,"invitation_id":"`+foreign+`","invitationId":"`+foreign+`",
+		"InvitationID":"`+foreign+`","InvitationId":"`+foreign+`"}`)
+
+	require.Equal(t, http.StatusOK, code, body)
+	require.NotNil(t, f.repo.updated)
+	assert.Equal(t, f.stored.InvitationID, f.repo.updated.InvitationID)
+	assert.Equal(t, []uuid.UUID{*f.stored.InvitationID}, f.invitations.lookedUp, "only the stored invitation is loaded")
+	require.Len(t, f.invitations.updated, 1)
+	assert.Equal(t, *f.stored.InvitationID, f.invitations.updated[0].ID, "the foreign invitation's max_guests is never written")
+	var envelope struct {
+		Data dtos.GuestResponse `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &envelope))
+	assert.Equal(t, "OWN12345", envelope.Data.PrettyToken)
+	assert.Equal(t, f.stored.InvitationID, envelope.Data.InvitationID)
+}
+
+func TestUpdateGuest_RSVPTokenIDOfAnotherGuestIsIgnored(t *testing.T) {
+	for _, key := range []string{"rsvp_token_id", "rsvpTokenId", "rsvpTokenID", "RSVPTokenID", "RsvpTokenId"} {
+		t.Run(key, func(t *testing.T) {
+			f := newUpdateGuestFixture(t)
+
+			code, body := f.put(t, `{"first_name":"Bea","`+key+`":"`+uuid.Must(uuid.NewV4()).String()+`"}`)
+
+			require.Equal(t, http.StatusOK, code, body)
+			require.NotNil(t, f.repo.updated)
+			assert.Equal(t, f.stored.RSVPTokenID, f.repo.updated.RSVPTokenID)
+		})
+	}
+}
+
 func TestUpdateGuest_RejectsTableFromAnotherEvent(t *testing.T) {
 	f := newUpdateGuestFixture(t)
 	foreignTable := models.EventTable{ID: uuid.Must(uuid.NewV4()), EventID: uuid.Must(uuid.NewV4())}
@@ -142,8 +214,9 @@ func TestUpdateGuest_RejectsTableFromAnotherEvent(t *testing.T) {
 
 	code, body := f.put(t, `{"table_id":"`+foreignTable.ID.String()+`"}`)
 
-	assert.Equal(t, http.StatusBadRequest, code, body)
+	assertTableOutsideEvent(t, code, body)
 	assert.Nil(t, f.repo.updated)
+	assert.Empty(t, f.invitations.updated)
 }
 
 func TestUpdateGuest_RejectsUnknownTable(t *testing.T) {
@@ -152,8 +225,35 @@ func TestUpdateGuest_RejectsUnknownTable(t *testing.T) {
 
 	code, body := f.put(t, `{"tableId":"`+uuid.Must(uuid.NewV4()).String()+`"}`)
 
-	assert.Equal(t, http.StatusBadRequest, code, body)
+	assertTableOutsideEvent(t, code, body)
 	assert.Nil(t, f.repo.updated)
+}
+
+func TestUpdateGuest_RejectsSoftDeletedTableOfSameEvent(t *testing.T) {
+	f := newUpdateGuestFixture(t)
+	deleted := models.EventTable{ID: uuid.Must(uuid.NewV4()), EventID: f.stored.EventID, DeletedAt: gorm.DeletedAt{Time: time.Now(), Valid: true}}
+	useGuestTables(t, deleted)
+
+	code, body := f.put(t, `{"table_id":"`+deleted.ID.String()+`"}`)
+
+	assertTableOutsideEvent(t, code, body)
+	assert.Nil(t, f.repo.updated)
+}
+
+// A body without any table key keeps the stored table and looks nothing up.
+func TestUpdateGuest_AbsentTableKeyKeepsStoredTable(t *testing.T) {
+	f := newUpdateGuestFixture(t)
+	tableID := uuid.Must(uuid.NewV4())
+	f.stored.TableID = &tableID
+	f.repo.existing.TableID = &tableID
+	lookups := useGuestTables(t)
+
+	code, body := f.put(t, `{"first_name":"Bea","table_number":"7"}`)
+
+	require.Equal(t, http.StatusOK, code, body)
+	require.NotNil(t, f.repo.updated.TableID)
+	assert.Equal(t, tableID, *f.repo.updated.TableID)
+	assert.Empty(t, *lookups)
 }
 
 func TestUpdateGuest_RejectsMalformedTableID(t *testing.T) {
@@ -407,7 +507,24 @@ func TestCreateGuest_RejectsTableFromAnotherEvent(t *testing.T) {
 
 	code, _, raw := createGuestForTest(t, `{"first_name":"Ana","table_id":"`+foreignTable.ID.String()+`","event_id":"`+eventID.String()+`"}`, eventID)
 
-	assert.Equal(t, http.StatusBadRequest, code, raw)
+	assertTableOutsideEvent(t, code, raw)
+}
+
+// invitation_id and rsvp_token_id are server-owned on create: the service
+// creates the guest's own invitation and the body cannot link another one.
+func TestCreateGuest_IgnoresInvitationAndRSVPTokenIDs(t *testing.T) {
+	eventID := uuid.Must(uuid.NewV4())
+	foreign := uuid.Must(uuid.NewV4())
+	body := `{"first_name":"Ana","event_id":"` + eventID.String() + `","invitation_id":"` + foreign.String() + `",
+		"invitationId":"` + foreign.String() + `","InvitationID":"` + foreign.String() + `",
+		"rsvp_token_id":"` + foreign.String() + `","rsvpTokenId":"` + foreign.String() + `","RSVPTokenID":"` + foreign.String() + `"}`
+
+	code, guest, raw := createGuestForTest(t, body, eventID)
+
+	require.Equal(t, http.StatusCreated, code, raw)
+	require.NotNil(t, guest.InvitationID)
+	assert.NotEqual(t, foreign, *guest.InvitationID)
+	assert.Nil(t, guest.RSVPTokenID)
 }
 
 func TestCreateGuest_AcceptsTableFromSameEvent(t *testing.T) {
@@ -430,21 +547,95 @@ func (m *uniqueTokenRepo) GeneratePrettyToken(uuid.UUID, int) (string, error) {
 	return uuid.Must(uuid.NewV4()).String()[:8], nil
 }
 
-func TestCreateGuests_RejectsTableFromAnotherEvent(t *testing.T) {
-	svc := guestsService.NewGuestService(&mockGuestRepo{}, &uniqueTokenRepo{}, &mockCacheRepo{}, &mockTransactor{})
+// useBatchGuestService wires a guest service whose create transaction is
+// counted, so a test can prove a rejected batch writes nothing.
+func useBatchGuestService(t *testing.T) *countingTransactor {
+	t.Helper()
+	tx := &countingTransactor{}
+	svc := guestsService.NewGuestService(&mockGuestRepo{}, &uniqueTokenRepo{}, &mockCacheRepo{}, tx)
 	orig := guestSvc
 	guestSvc = svc
 	t.Cleanup(func() { guestSvc = orig })
-	eventID := uuid.Must(uuid.NewV4())
-	foreignTable := models.EventTable{ID: uuid.Must(uuid.NewV4()), EventID: uuid.Must(uuid.NewV4())}
-	useGuestTables(t, foreignTable)
+	return tx
+}
 
-	body := `[{"first_name":"Ana","event_id":"` + eventID.String() + `"},{"first_name":"Bob","event_id":"` + eventID.String() + `","table_id":"` + foreignTable.ID.String() + `"}]`
+func postGuestBatch(t *testing.T, eventID uuid.UUID, body string) (int, string) {
+	t.Helper()
 	c, rec := newEchoCtx(http.MethodPost, "/guests/batch", body)
 	setAuthzContext(t, c, eventID, nil)
-
 	require.NoError(t, CreateGuests(c))
-	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	return rec.Code, rec.Body.String()
+}
+
+func TestCreateGuests_RejectsTableFromAnotherEvent(t *testing.T) {
+	tx := useBatchGuestService(t)
+	eventID := uuid.Must(uuid.NewV4())
+	own := models.EventTable{ID: uuid.Must(uuid.NewV4()), EventID: eventID}
+	foreignTable := models.EventTable{ID: uuid.Must(uuid.NewV4()), EventID: uuid.Must(uuid.NewV4())}
+	useGuestTables(t, own, foreignTable)
+	event := eventID.String()
+
+	code, body := postGuestBatch(t, eventID, `[{"first_name":"Ana","event_id":"`+event+`","table_id":"`+own.ID.String()+`"},
+		{"first_name":"Bob","event_id":"`+event+`","table_id":"`+foreignTable.ID.String()+`"}]`)
+
+	assertTableOutsideEvent(t, code, body)
+	assert.Zero(t, tx.calls, "a rejected batch creates no guest, invitation or token")
+}
+
+// The distinct table ids of a batch are checked with one lookup per request,
+// however many guests share them.
+func TestCreateGuests_LoadsDistinctTableIDsOnce(t *testing.T) {
+	tx := useBatchGuestService(t)
+	eventID := uuid.Must(uuid.NewV4())
+	first := models.EventTable{ID: uuid.Must(uuid.NewV4()), EventID: eventID}
+	second := models.EventTable{ID: uuid.Must(uuid.NewV4()), EventID: eventID}
+	lookups := useGuestTables(t, first, second)
+	event := eventID.String()
+
+	code, body := postGuestBatch(t, eventID, `[{"first_name":"A","event_id":"`+event+`","table_id":"`+first.ID.String()+`"},
+		{"first_name":"B","event_id":"`+event+`","tableId":"`+first.ID.String()+`"},
+		{"first_name":"C","event_id":"`+event+`","table_id":"`+second.ID.String()+`"},
+		{"first_name":"D","event_id":"`+event+`","table_id":""},
+		{"first_name":"E","event_id":"`+event+`","TableID":"`+second.ID.String()+`"}]`)
+
+	require.Equal(t, http.StatusCreated, code, body)
+	require.Len(t, *lookups, 1)
+	assert.ElementsMatch(t, []uuid.UUID{first.ID, second.ID}, (*lookups)[0])
+	assert.Equal(t, 1, tx.calls)
+}
+
+func TestCreateGuests_SoftDeletedTableWritesNothing(t *testing.T) {
+	tx := useBatchGuestService(t)
+	eventID := uuid.Must(uuid.NewV4())
+	deleted := models.EventTable{ID: uuid.Must(uuid.NewV4()), EventID: eventID, DeletedAt: gorm.DeletedAt{Time: time.Now(), Valid: true}}
+	useGuestTables(t, deleted)
+
+	code, body := postGuestBatch(t, eventID, `[{"first_name":"Ana","event_id":"`+eventID.String()+`","table_id":"`+deleted.ID.String()+`"}]`)
+
+	assertTableOutsideEvent(t, code, body)
+	assert.Zero(t, tx.calls)
+}
+
+func TestCreateGuests_IgnoresInvitationAndRSVPTokenIDs(t *testing.T) {
+	useBatchGuestService(t)
+	eventID := uuid.Must(uuid.NewV4())
+	foreign := uuid.Must(uuid.NewV4()).String()
+	event := eventID.String()
+
+	code, body := postGuestBatch(t, eventID, `[{"first_name":"Ana","event_id":"`+event+`","invitation_id":"`+foreign+`","rsvp_token_id":"`+foreign+`"},
+		{"first_name":"Bob","event_id":"`+event+`","invitationId":"`+foreign+`","RSVPTokenID":"`+foreign+`"}]`)
+
+	require.Equal(t, http.StatusCreated, code, body)
+	var envelope struct {
+		Data []dtos.GuestResponse `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &envelope))
+	require.Len(t, envelope.Data, 2)
+	for _, guest := range envelope.Data {
+		require.NotNil(t, guest.InvitationID, guest.FirstName)
+		assert.NotEqual(t, foreign, guest.InvitationID.String(), guest.FirstName)
+		assert.Nil(t, guest.RSVPTokenID, guest.FirstName)
+	}
 }
 
 func TestCreateGuests_InvalidJSONReturns400(t *testing.T) {
