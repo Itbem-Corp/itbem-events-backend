@@ -298,6 +298,10 @@ func (s *InvitationService) ConfirmRSVPWithResult(prettyToken string, status str
 	previousStatus := normalizeRSVPStatus(guest.RSVPStatus)
 	analyticsEventID := rsvpAnalyticsEventID(invitation, guest)
 	guest.RSVPStatus = status
+	// GST-62: the guest's status follows the RSVP like a host change does,
+	// so exports, check-in filters and metrics that read guest_status_id do
+	// not keep showing "pending" after a web RSVP.
+	syncGuestStatusWithRSVP(s.guestRepo, guest, status)
 	guest.RSVPAt = &now
 	guest.RSVPMethod = method
 	guest.RSVPTokenID = &accessToken.ID
@@ -332,6 +336,25 @@ func (s *InvitationService) ConfirmRSVPWithResult(prettyToken string, status str
 		Guest:       guest,
 		PrettyToken: canonicalRSVPPrettyToken(accessToken, prettyToken),
 	}, nil
+}
+
+type guestStatusCatalog interface {
+	GuestStatusIDByCode(code string) (uuid.UUID, error)
+}
+
+// syncGuestStatusWithRSVP moves both status columns to the catalog status of
+// rsvpStatus. Repositories without the catalog leave them untouched.
+func syncGuestStatusWithRSVP(repo ports.GuestRepository, guest *models.Guest, rsvpStatus string) {
+	catalog, ok := repo.(guestStatusCatalog)
+	if !ok || guest == nil {
+		return
+	}
+	id, err := catalog.GuestStatusIDByCode(rsvpStatus)
+	if err != nil || id == uuid.Nil {
+		return
+	}
+	guest.GuestStatusID = id
+	guest.StatusID = id
 }
 
 // RSVPTextTooLongError is an RSVP whose free text is over its column limit.

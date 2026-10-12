@@ -10,8 +10,10 @@ import (
 	"events-stocks/repositories/gormrepository"
 	"events-stocks/repositories/gueststatusrepository"
 	"events-stocks/utils"
+	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gofrs/uuid"
@@ -36,6 +38,32 @@ func GetPendingStatusID() uuid.UUID {
 		pendingStatusID = status.ID
 	}
 	return pendingStatusID
+}
+
+// guestStatusIDsByCode caches the seeded guest status catalog (pending,
+// confirmed, declined); only successful lookups are cached.
+var guestStatusIDsByCode sync.Map
+
+// GuestStatusIDByCode returns the id of the guest status with this code
+// (uuid.Nil and an error when it is not in the catalog).
+func GuestStatusIDByCode(code string) (uuid.UUID, error) {
+	code = strings.ToLower(strings.TrimSpace(code))
+	if cached, ok := guestStatusIDsByCode.Load(code); ok {
+		return cached.(uuid.UUID), nil
+	}
+	status, err := gueststatusrepository.GetGuestStatusByCode(code)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if status == nil || status.ID == uuid.Nil {
+		return uuid.Nil, fmt.Errorf("guest status %q not found", code)
+	}
+	guestStatusIDsByCode.Store(code, status.ID)
+	return status.ID, nil
+}
+
+func (r *GuestRepo) GuestStatusIDByCode(code string) (uuid.UUID, error) {
+	return GuestStatusIDByCode(code)
 }
 
 func GetGuestByInvitationID(invitationID uuid.UUID) (*models.Guest, error) {
