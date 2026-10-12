@@ -88,13 +88,13 @@ func TestListClientsPaginatedApplicationScopeStopsAtForeignPortals(t *testing.T)
 	clientID := uuid.Must(uuid.NewV4())
 	boundary := `.*reachable_clients.*FROM applications other\s+WHERE LOWER\(other\.code\) = LOWER\(child\.code\) AND LOWER\(other\.code\) <> \$2`
 
-	mock.ExpectQuery(`(?s)SELECT COUNT` + boundary).
+	mock.ExpectQuery(`(?s)SELECT COUNT`+boundary).
 		WithArgs(userID, "eventiapp").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-	mock.ExpectQuery(`(?s)SELECT DISTINCT clients` + boundary).
+	mock.ExpectQuery(`(?s)SELECT DISTINCT clients`+boundary).
 		WithArgs(userID, "eventiapp", sqlmock.AnyArg()).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "name"}).AddRow(clientID, "EventiApp"))
-	mock.ExpectQuery(`SELECT scoped_access\.client_id` + boundary).
+	mock.ExpectQuery(`SELECT scoped_access\.client_id`+boundary).
 		WithArgs(userID, "eventiapp", clientID).
 		WillReturnRows(sqlmock.NewRows([]string{"client_id", "access_role"}).AddRow(clientID, "OWNER"))
 
@@ -104,6 +104,28 @@ func TestListClientsPaginatedApplicationScopeStopsAtForeignPortals(t *testing.T)
 	}
 	if len(clients) != 1 || clients[0].AccessRole != "OWNER" {
 		t.Fatalf("unexpected clients: %#v", clients)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReachableClientIDsInApplicationUsesTheApplicationBoundary(t *testing.T) {
+	mock := clientRepoTestDB(t)
+	userID := uuid.Must(uuid.NewV4())
+	inside := uuid.Must(uuid.NewV4())
+	portal := uuid.Must(uuid.NewV4())
+
+	mock.ExpectQuery(`(?s)SELECT "clients"\."id" FROM "clients".*FROM applications other.*WHERE clients\.id IN \(\$3,\$4\) AND clients\.deleted_at IS NULL`).
+		WithArgs(userID, "eventiapp", inside, portal).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(inside))
+
+	reachable, err := ReachableClientIDsInApplication(userID, "eventiapp", []uuid.UUID{inside, portal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reachable[inside] || reachable[portal] {
+		t.Fatalf("unexpected reach: %#v", reachable)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

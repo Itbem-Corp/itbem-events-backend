@@ -133,6 +133,27 @@ func ListClientsPaginated(userID *uuid.UUID, query dtos.ClientsListQuery) ([]mod
 	return clients, total, nil
 }
 
+// ReachableClientIDsInApplication returns which of ids the user reaches with
+// the application-scoped reach (see applicationScopedAccessJoin).
+func ReachableClientIDsInApplication(userID uuid.UUID, applicationCode string, ids []uuid.UUID) (map[uuid.UUID]bool, error) {
+	reachable := make(map[uuid.UUID]bool, len(ids))
+	if len(ids) == 0 {
+		return reachable, nil
+	}
+	join, args := scopedAccess(userID, applicationCode)
+	var found []uuid.UUID
+	if err := gormrepository.DB().Table("clients").
+		Joins(join, args...).
+		Where("clients.id IN ? AND clients.deleted_at IS NULL", ids).
+		Pluck("clients.id", &found).Error; err != nil {
+		return nil, err
+	}
+	for _, id := range found {
+		reachable[id] = true
+	}
+	return reachable, nil
+}
+
 // attachAccessRoles fills the read-only Client.AccessRole projection. The
 // field is `gorm:"-"` (it is never a column), so GORM drops the access_role
 // column of the list query when scanning; it is loaded here for the page's
@@ -470,6 +491,9 @@ func (r *ClientRepo) ListClientsPaginated(userID *uuid.UUID, query dtos.ClientsL
 }
 func (r *ClientRepo) GetChildrenClients(parentID uuid.UUID) ([]models.Client, error) {
 	return GetChildrenClients(parentID)
+}
+func (r *ClientRepo) ReachableClientIDsInApplication(userID uuid.UUID, applicationCode string, ids []uuid.UUID) (map[uuid.UUID]bool, error) {
+	return ReachableClientIDsInApplication(userID, applicationCode, ids)
 }
 func (r *ClientRepo) CheckAccessRecursive(userID, targetClientID uuid.UUID) (bool, string) {
 	return CheckAccessRecursive(userID, targetClientID)

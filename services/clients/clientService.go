@@ -42,8 +42,6 @@ var (
 	ErrClientLogoUpload          = errors.New("organization logo upload failed")
 )
 
-
-
 // _clientSvc is the package-level singleton set by internal/app.
 var _clientSvc *ClientService
 
@@ -591,6 +589,40 @@ func (s *ClientService) GetClientChildren(parentID, userID uuid.UUID) ([]models.
 		return nil, fmt.Errorf("access denied")
 	}
 	return s.clientRepo.GetChildrenClients(parentID)
+}
+
+// GetClientChildrenInApplication is GetClientChildren for a member of one
+// application session: the parent must be inside the application's reach
+// and children that are another application's portal (with their trees) are
+// left out, the same boundary as GET /api/clients (ROLES-N2).
+func (s *ClientService) GetClientChildrenInApplication(parentID, userID uuid.UUID, applicationCode string) ([]models.Client, error) {
+	children, err := s.GetClientChildren(parentID, userID)
+	if err != nil {
+		return nil, err
+	}
+	reach, ok := s.clientRepo.(ports.ApplicationClientReach)
+	if !ok || strings.TrimSpace(applicationCode) == "" {
+		return children, nil
+	}
+	ids := make([]uuid.UUID, 0, len(children)+1)
+	ids = append(ids, parentID)
+	for _, child := range children {
+		ids = append(ids, child.ID)
+	}
+	reachable, err := reach.ReachableClientIDsInApplication(userID, applicationCode, ids)
+	if err != nil {
+		return nil, err
+	}
+	if !reachable[parentID] {
+		return nil, fmt.Errorf("access denied")
+	}
+	scoped := make([]models.Client, 0, len(children))
+	for _, child := range children {
+		if reachable[child.ID] {
+			scoped = append(scoped, child)
+		}
+	}
+	return scoped, nil
 }
 
 func (s *ClientService) GetClientChildrenAsPrimaryRoot(parentID uuid.UUID) ([]models.Client, error) {

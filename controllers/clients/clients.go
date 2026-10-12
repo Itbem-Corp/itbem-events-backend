@@ -340,10 +340,16 @@ func GetMySubClients(c echo.Context) error {
 	}
 
 	var children []models.Client
-	if user.IsPrimaryRoot() {
+	switch {
+	case user.IsPrimaryRoot():
 		children, err = clientSvc.GetClientChildrenAsPrimaryRoot(parentID)
-	} else {
+	case user.IsPlatformAdmin():
 		children, err = clientSvc.GetClientChildren(parentID, user.ID)
+	default:
+		// Members stay inside their application session: no other product's
+		// portal organizations (ROLES-N2 follow-up).
+		tenantCode, _ := c.Get("tenant_code").(string)
+		children, err = clientSvc.GetClientChildrenInApplication(parentID, user.ID, sessionApplicationCode(c, strings.ToLower(strings.TrimSpace(tenantCode))))
 	}
 	if err != nil {
 		return utils.Error(c, http.StatusForbidden, "Access Denied", "You do not have permission to view children of this organization")

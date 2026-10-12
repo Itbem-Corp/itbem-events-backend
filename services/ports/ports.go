@@ -154,6 +154,14 @@ type EventMemberRepository interface {
 	Remove(eventID, userID uuid.UUID) error
 }
 
+// ApplicationClientReach is implemented by client repositories that can tell
+// which of ids a user reaches inside one application: direct memberships plus
+// Owner/Admin inheritance that stops at another application's portal
+// organization (the application session boundary).
+type ApplicationClientReach interface {
+	ReachableClientIDsInApplication(userID uuid.UUID, applicationCode string, ids []uuid.UUID) (map[uuid.UUID]bool, error)
+}
+
 // EventSectionRepository is the data access contract for EventSection records.
 type EventSectionRepository interface {
 	CreateEventSection(m *models.EventSection) error
