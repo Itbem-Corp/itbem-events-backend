@@ -22,11 +22,14 @@ func ListAllUsers() ([]models.User, error) {
 }
 
 func applyAdminUsersListFilters(db *gorm.DB, query dtos.AdminUsersListQuery) *gorm.DB {
-	search := strings.ToLower(strings.TrimSpace(query.Search))
+	// Collapse inner whitespace so "Juan  Pérez" matches the full name, and
+	// escape LIKE wildcards so "%" or "_" are searched literally.
+	search := strings.ToLower(strings.Join(strings.Fields(query.Search), " "))
 	if search != "" {
-		like := "%" + search + "%"
+		like := "%" + escapeLikePattern(search) + "%"
 		db = db.Where(
-			"LOWER(email) LIKE ? OR LOWER(first_name) LIKE ? OR LOWER(last_name) LIKE ?",
+			`LOWER(email) LIKE ? ESCAPE '\' OR LOWER(first_name) LIKE ? ESCAPE '\' OR LOWER(last_name) LIKE ? ESCAPE '\' OR LOWER(CONCAT_WS(' ', first_name, last_name)) LIKE ? ESCAPE '\'`,
+			like,
 			like,
 			like,
 			like,
@@ -47,6 +50,12 @@ func applyAdminUsersListFilters(db *gorm.DB, query dtos.AdminUsersListQuery) *go
 	}
 
 	return db
+}
+
+// escapeLikePattern escapes the LIKE metacharacters (backslash first) for use
+// with ESCAPE '\'.
+func escapeLikePattern(value string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(value)
 }
 
 func ListAllUsersPaginated(query dtos.AdminUsersListQuery) ([]models.User, int64, error) {
