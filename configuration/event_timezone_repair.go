@@ -1,8 +1,12 @@
 package configuration
 
 import (
+	"errors"
 	"fmt"
+	"log/slog"
 
+	"github.com/gofrs/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 )
 
@@ -14,26 +18,58 @@ import (
 // The API validates new values (dtos.ValidateEventTimezone); this cleans
 // values stored before that validation existed.
 //
-// Each distinct value is tested by PostgreSQL itself, so only zones it rejects
-// are touched (POSIX-style zones it accepts are left alone). A blank timezone
-// reads as UTC in SQL and as the default zone in the dashboard. Idempotent: a
-// second run finds nothing to repair. It does not change updated_at.
-const repairInvalidEventTimezonesStatement = `DO $$
-DECLARE
-  zone text;
-BEGIN
-  FOR zone IN SELECT DISTINCT timezone FROM events WHERE timezone IS NOT NULL AND btrim(timezone) <> '' LOOP
-    BEGIN
-      PERFORM now() AT TIME ZONE zone;
-    EXCEPTION WHEN invalid_parameter_value THEN
-      UPDATE events SET timezone = '' WHERE timezone = zone;
-    END;
-  END LOOP;
-END $$`
-
+// Each distinct value is tested by PostgreSQL itself (inside a savepoint, so
+// a rejected zone does not abort the migration transaction), and only zones
+// it rejects are touched (POSIX-style zones it accepts are left alone). A
+// blank timezone reads as UTC in SQL and as the default zone in the
+// dashboard. Every repair is logged at Info with the zone values, the count
+// and the event ids (no personal data), so the data change is auditable.
+// Idempotent: a second run finds nothing to repair. It does not change
+// updated_at.
 func repairInvalidEventTimezones(tx *gorm.DB) error {
-	if err := tx.Exec(repairInvalidEventTimezonesStatement).Error; err != nil {
-		return fmt.Errorf("repair invalid event timezones: %w", err)
+	var zones []string
+	if err := tx.Raw(`SELECT DISTINCT timezone FROM events WHERE timezone IS NOT NULL AND btrim(timezone) <> ''`).
+		Scan(&zones).Error; err != nil {
+		return fmt.Errorf("repair invalid event timezones: list zones: %w", err)
+	}
+	var invalidZones []string
+	var repairedIDs []uuid.UUID
+	for i, zone := range zones {
+		savepoint := fmt.Sprintf("event_timezone_check_%d", i)
+		if err := tx.Exec("SAVEPOINT " + savepoint).Error; err != nil {
+			return fmt.Errorf("repair invalid event timezones: savepoint: %w", err)
+		}
+		checkErr := tx.Exec(`SELECT now() AT TIME ZONE ?`, zone).Error
+		if checkErr == nil {
+			if err := tx.Exec("RELEASE SAVEPOINT " + savepoint).Error; err != nil {
+				return fmt.Errorf("repair invalid event timezones: release savepoint: %w", err)
+			}
+			continue
+		}
+		if err := tx.Exec("ROLLBACK TO SAVEPOINT " + savepoint).Error; err != nil {
+			return fmt.Errorf("repair invalid event timezones: rollback savepoint: %w", err)
+		}
+		if !isInvalidTimezoneError(checkErr) {
+			return fmt.Errorf("repair invalid event timezones: check zone: %w", checkErr)
+		}
+		var ids []uuid.UUID
+		if err := tx.Raw(`UPDATE events SET timezone = '' WHERE timezone = ? RETURNING id`, zone).
+			Scan(&ids).Error; err != nil {
+			return fmt.Errorf("repair invalid event timezones: blank zone: %w", err)
+		}
+		invalidZones = append(invalidZones, zone)
+		repairedIDs = append(repairedIDs, ids...)
+	}
+	if len(repairedIDs) > 0 {
+		slog.Info("event timezone repair: blanked timezones PostgreSQL rejects",
+			"count", len(repairedIDs), "zones", invalidZones, "event_ids", repairedIDs)
 	}
 	return nil
+}
+
+// isInvalidTimezoneError reports PostgreSQL's invalid_parameter_value (22023),
+// the error AT TIME ZONE raises for an unknown zone.
+func isInvalidTimezoneError(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "22023"
 }
