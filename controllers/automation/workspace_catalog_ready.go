@@ -42,7 +42,7 @@ func WorkspaceCatalogReady(c echo.Context) error {
 	seen := map[string]bool{}
 	for _, ready := range request.Ready {
 		entry, ok := entries[ready.ID]
-		if !ok || seen[ready.ID] || ready.Revision != entry.Revision || !ready.Readiness.Ready || !ready.Readiness.SandboxReady || ready.Readiness.ID != ready.ID || (ready.Readiness.IsolationMode != "docker" && ready.Readiness.IsolationMode != "firecracker") || !automationagent.CatalogRoleCapabilitiesAllowed(string(gateway.Role), ready.Capabilities) || validateWorkerWorkspaceReadiness([]automationWorkspaceHealth{{ID: ready.ID, Ready: ready.Readiness.Ready, QAReady: ready.Readiness.QAReady, VisualQAReady: ready.Readiness.VisualQAReady, PublicationReady: ready.Readiness.PublicationReady, ValidationCommandCount: ready.Readiness.ValidationCommandCount, QACommandCount: ready.Readiness.QACommandCount}}) != nil {
+		if !ok || seen[ready.ID] || ready.Revision != entry.Revision || !ready.Readiness.Ready || !ready.Readiness.SandboxReady || ready.Readiness.ID != ready.ID || (ready.Readiness.IsolationMode != "docker_container" && ready.Readiness.IsolationMode != "firecracker_microvm") || !automationagent.CatalogRoleCapabilitiesAllowed(string(gateway.Role), ready.Capabilities) || validateWorkerWorkspaceReadiness([]automationWorkspaceHealth{{ID: ready.ID, Ready: ready.Readiness.Ready, QAReady: ready.Readiness.QAReady, VisualQAReady: ready.Readiness.VisualQAReady, PublicationReady: ready.Readiness.PublicationReady, ValidationCommandCount: ready.Readiness.ValidationCommandCount, QACommandCount: ready.Readiness.QACommandCount}}) != nil {
 			return utils.Error(c, http.StatusBadRequest, "Workspace readiness does not match authorized catalog", "")
 		}
 		seen[ready.ID] = true
