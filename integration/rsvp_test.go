@@ -28,9 +28,13 @@ import (
 	gormlogger "gorm.io/gorm/logger"
 
 	"events-stocks/configuration"
+	guestsCtrl "events-stocks/controllers/guests"
 	invitationsCtrl "events-stocks/controllers/invitations"
+	momentsCtrl "events-stocks/controllers/moments"
+	"events-stocks/internal/authz"
 	customValidator "events-stocks/middleware/validator"
 	"events-stocks/models"
+	"events-stocks/repositories/gormrepository"
 	guestrepository "events-stocks/repositories/guestrepository"
 	invitationaccesstokenrepository "events-stocks/repositories/invitationaccesstokenrepository"
 	invitationlogrepository "events-stocks/repositories/invitationlogrepository"
@@ -478,4 +482,271 @@ func TestDoorCheckin_ProvenanceColumnsAreAddedToAnExistingGuestsTable(t *testing
 	assert.Equal(t, "confirmed", self.RSVPStatus)
 	assert.Equal(t, "web", self.RSVPMethod)
 	assertNoDoorCheckinColumns(t, self)
+}
+
+// referenceIntegrityFixture is two events, each with a guest, an invitation
+// with its token and a table. Event A also has a soft-deleted table and a
+// legacy guest still linked to event B's invitation (the shape the old PUT
+// could leave behind).
+type referenceIntegrityFixture struct {
+	eventA, eventB           models.Event
+	invitationA, invitationB models.Invitation
+	tokenA, tokenB           models.InvitationAccessToken
+	tableA, tableB, deletedA models.EventTable
+	guestA, guestB, legacy   models.Guest
+}
+
+func newReferenceIntegrityFixture(t *testing.T) referenceIntegrityFixture {
+	t.Helper()
+	db := configuration.DB
+	suffix := uuid.Must(uuid.NewV4()).String()[:8]
+	var pending models.GuestStatus
+	require.NoError(t, db.Where("code = ?", "pending").First(&pending).Error)
+	eventType := models.EventType{ID: uuid.Must(uuid.NewV4()), Name: "integrity-" + suffix, CreatedAt: time.Now(), UpdatedAt: time.Now()}
+	require.NoError(t, db.Create(&eventType).Error)
+
+	var f referenceIntegrityFixture
+	f.eventA = models.Event{ID: uuid.Must(uuid.NewV4()), Name: "A " + suffix, Identifier: "integrity-a-" + suffix, EventTypeID: eventType.ID, IsActive: true}
+	f.eventB = models.Event{ID: uuid.Must(uuid.NewV4()), Name: "B " + suffix, Identifier: "integrity-b-" + suffix, EventTypeID: eventType.ID, IsActive: true}
+	require.NoError(t, db.Create(&f.eventA).Error)
+	require.NoError(t, db.Create(&f.eventB).Error)
+	f.invitationA = models.Invitation{ID: uuid.Must(uuid.NewV4()), EventID: f.eventA.ID, MaxGuests: 1}
+	f.invitationB = models.Invitation{ID: uuid.Must(uuid.NewV4()), EventID: f.eventB.ID, MaxGuests: 2}
+	require.NoError(t, db.Create(&f.invitationA).Error)
+	require.NoError(t, db.Create(&f.invitationB).Error)
+	f.tokenA = models.InvitationAccessToken{ID: uuid.Must(uuid.NewV4()), InvitationID: f.invitationA.ID, Token: uuid.Must(uuid.NewV4()).String(), PrettyToken: "IA-" + suffix}
+	f.tokenB = models.InvitationAccessToken{ID: uuid.Must(uuid.NewV4()), InvitationID: f.invitationB.ID, Token: uuid.Must(uuid.NewV4()).String(), PrettyToken: "IB-" + suffix}
+	require.NoError(t, db.Create(&f.tokenA).Error)
+	require.NoError(t, db.Create(&f.tokenB).Error)
+	f.tableA = models.EventTable{ID: uuid.Must(uuid.NewV4()), EventID: f.eventA.ID, Name: "Mesa A", Capacity: 8}
+	f.tableB = models.EventTable{ID: uuid.Must(uuid.NewV4()), EventID: f.eventB.ID, Name: "Mesa B", Capacity: 8}
+	f.deletedA = models.EventTable{ID: uuid.Must(uuid.NewV4()), EventID: f.eventA.ID, Name: "Mesa borrada", Capacity: 8}
+	for _, table := range []*models.EventTable{&f.tableA, &f.tableB, &f.deletedA} {
+		require.NoError(t, db.Omit("Event").Create(table).Error)
+	}
+	require.NoError(t, db.Delete(&models.EventTable{}, "id = ?", f.deletedA.ID).Error)
+	f.guestA = models.Guest{ID: uuid.Must(uuid.NewV4()), EventID: f.eventA.ID, FirstName: "Ana", InvitationID: &f.invitationA.ID,
+		RSVPTokenID: &f.tokenA.ID, TableID: &f.tableA.ID, MaxGuests: 1, GuestStatusID: pending.ID}
+	f.guestB = models.Guest{ID: uuid.Must(uuid.NewV4()), EventID: f.eventB.ID, FirstName: "Beto", InvitationID: &f.invitationB.ID,
+		RSVPTokenID: &f.tokenB.ID, TableID: &f.tableB.ID, MaxGuests: 2, GuestStatusID: pending.ID}
+	f.legacy = models.Guest{ID: uuid.Must(uuid.NewV4()), EventID: f.eventA.ID, FirstName: "Legado", InvitationID: &f.invitationB.ID,
+		MaxGuests: 2, GuestStatusID: pending.ID}
+	for _, guest := range []*models.Guest{&f.guestA, &f.guestB, &f.legacy} {
+		require.NoError(t, db.Omit("Event", "Table", "Invitation", "GuestStatus").Create(guest).Error)
+	}
+
+	events := []uuid.UUID{f.eventA.ID, f.eventB.ID}
+	t.Cleanup(func() {
+		db.Unscoped().Where("event_id IN ?", events).Delete(&models.Moment{})
+		invitations := db.Model(&models.Invitation{}).Select("id").Where("event_id IN ?", events)
+		db.Unscoped().Where("invitation_id IN (?)", invitations).Delete(&models.InvitationLog{})
+		db.Unscoped().Where("invitation_id IN (?)", invitations).Delete(&models.InvitationAccessToken{})
+		db.Unscoped().Where("event_id IN ?", events).Delete(&models.Guest{})
+		db.Unscoped().Where("event_id IN ?", events).Delete(&models.Invitation{})
+		db.Unscoped().Where("event_id IN ?", events).Delete(&models.EventTable{})
+		db.Unscoped().Where("id IN ?", events).Delete(&models.Event{})
+		db.Unscoped().Where("id = ?", eventType.ID).Delete(&models.EventType{})
+	})
+	return f
+}
+
+// newReferenceIntegrityServer wires the real guest and moment handlers,
+// services and repositories behind a platform root caller.
+func newReferenceIntegrityServer(t *testing.T) *echo.Echo {
+	t.Helper()
+	db := configuration.DB
+	guestService := guestsSvc.NewGuestService(guestrepository.NewGuestRepo(), invitationaccesstokenrepository.NewAccessTokenRepo(),
+		redisrepository.NewRedisRepo(), gormrepository.NewGormTransactor(), invitationrepository.NewInvitationRepo())
+	guestsCtrl.InitGuestsController(guestService, nil)
+	momentsCtrl.InitMomentsController(momentsSvc.NewMomentService(momentrepository.NewMomentRepo(), redisrepository.NewRedisRepo()))
+	restore := authz.ReplaceHooksForTest(authz.Hooks{
+		SyncUser: func(string) (*models.User, error) {
+			return &models.User{ID: uuid.Must(uuid.NewV4()), IsRoot: true}, nil
+		},
+		GetEventByIDRaw: func(id uuid.UUID) (*models.Event, error) {
+			var event models.Event
+			return &event, db.Where("id = ?", id).First(&event).Error
+		},
+		GetGuestByID: guestrepository.GetGuestByID,
+	})
+	t.Cleanup(func() {
+		restore()
+		guestsCtrl.InitGuestsController(nil, nil)
+		momentsCtrl.InitMomentsController(nil)
+	})
+
+	e := echo.New()
+	e.HideBanner = true
+	e.Validator = customValidator.New()
+	e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			c.Set("cognito_sub", "integration-root")
+			return next(c)
+		}
+	})
+	e.POST("/api/guests", guestsCtrl.CreateGuest)
+	e.POST("/api/guests/batch", guestsCtrl.CreateGuests)
+	e.PUT("/api/guests/:id", guestsCtrl.UpdateGuest)
+	e.POST("/api/moments", momentsCtrl.CreateMoment)
+	return e
+}
+
+type integrityResponse struct {
+	Status  int             `json:"status"`
+	Message string          `json:"message"`
+	Error   string          `json:"error"`
+	Data    json.RawMessage `json:"data"`
+}
+
+func sendIntegrityRequest(t *testing.T, e *echo.Echo, method, path, body string) integrityResponse {
+	t.Helper()
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	var resp integrityResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
+	require.Equal(t, rec.Code, resp.Status, rec.Body.String())
+	return resp
+}
+
+func loadInvitation(t *testing.T, id uuid.UUID) models.Invitation {
+	t.Helper()
+	var invitation models.Invitation
+	require.NoError(t, configuration.DB.Where("id = ?", id).First(&invitation).Error)
+	return invitation
+}
+
+// TestReferenceIntegrity_GuestWritesStayInTheirEvent runs PUT /guests/:id and
+// POST /guests(/batch) on Postgres: no request can relink a guest to another
+// event's invitation, RSVP token or table (soft-deleted tables included), and
+// max_guests only ever reaches an invitation of the guest's own event.
+func TestReferenceIntegrity_GuestWritesStayInTheirEvent(t *testing.T) {
+	f := newReferenceIntegrityFixture(t)
+	e := newReferenceIntegrityServer(t)
+	guestPath := "/api/guests/" + f.guestA.ID.String()
+
+	resp := sendIntegrityRequest(t, e, http.MethodPut, guestPath, `{"max_guests":4,"invitation_id":"`+f.invitationB.ID.String()+
+		`","invitationId":"`+f.invitationB.ID.String()+`","rsvp_token_id":"`+f.tokenB.ID.String()+`","RSVPTokenID":"`+f.tokenB.ID.String()+`"}`)
+	require.Equal(t, http.StatusOK, resp.Status, resp.Message)
+	var updated struct {
+		PrettyToken string `json:"pretty_token"`
+	}
+	require.NoError(t, json.Unmarshal(resp.Data, &updated))
+	assert.Equal(t, f.tokenA.PrettyToken, updated.PrettyToken, "the response carries the guest's own token")
+	guest := reloadGuest(t, f.guestA.ID)
+	assert.Equal(t, f.invitationA.ID, *guest.InvitationID)
+	assert.Equal(t, f.tokenA.ID, *guest.RSVPTokenID)
+	assert.Equal(t, 4, loadInvitation(t, f.invitationA.ID).MaxGuests)
+	assert.Equal(t, 2, loadInvitation(t, f.invitationB.ID).MaxGuests, "event B's invitation is untouched")
+
+	for name, tableID := range map[string]uuid.UUID{"other event": f.tableB.ID, "soft-deleted": f.deletedA.ID, "unknown": uuid.Must(uuid.NewV4())} {
+		resp = sendIntegrityRequest(t, e, http.MethodPut, guestPath, `{"first_name":"Cambiada","table_id":"`+tableID.String()+`"}`)
+		assert.Equal(t, http.StatusBadRequest, resp.Status, name)
+		assert.Equal(t, "Mesa inválida", resp.Message, name)
+		assert.Equal(t, "table_outside_event", resp.Error, name)
+		guest = reloadGuest(t, f.guestA.ID)
+		assert.Equal(t, "Ana", guest.FirstName, name)
+		assert.Equal(t, f.tableA.ID, *guest.TableID, name)
+	}
+
+	resp = sendIntegrityRequest(t, e, http.MethodPut, guestPath, `{"first_name":"Ana María"}`)
+	require.Equal(t, http.StatusOK, resp.Status, resp.Message)
+	assert.Equal(t, f.tableA.ID, *reloadGuest(t, f.guestA.ID).TableID, "an absent table key keeps the table")
+	resp = sendIntegrityRequest(t, e, http.MethodPut, guestPath, `{"table_id":""}`)
+	require.Equal(t, http.StatusOK, resp.Status, resp.Message)
+	assert.Nil(t, reloadGuest(t, f.guestA.ID).TableID)
+	resp = sendIntegrityRequest(t, e, http.MethodPut, guestPath, `{"tableId":"`+f.tableA.ID.String()+`"}`)
+	require.Equal(t, http.StatusOK, resp.Status, resp.Message)
+	assert.Equal(t, f.tableA.ID, *reloadGuest(t, f.guestA.ID).TableID)
+
+	// max_guests is not a guest column (it is read from the invitation), so
+	// the only write it can cause is the invitation sync, which is skipped.
+	resp = sendIntegrityRequest(t, e, http.MethodPut, "/api/guests/"+f.legacy.ID.String(), `{"max_guests":9}`)
+	require.Equal(t, http.StatusOK, resp.Status, resp.Message)
+	assert.Equal(t, 2, loadInvitation(t, f.invitationB.ID).MaxGuests, "a legacy cross-event link never syncs max_guests")
+
+	countEventA := func(model any) int64 {
+		var count int64
+		require.NoError(t, configuration.DB.Model(model).Where("event_id = ?", f.eventA.ID).Count(&count).Error)
+		return count
+	}
+	guestsBefore, invitationsBefore := countEventA(&models.Guest{}), countEventA(&models.Invitation{})
+	event := f.eventA.ID.String()
+	for name, tableID := range map[string]uuid.UUID{"other event": f.tableB.ID, "soft-deleted": f.deletedA.ID} {
+		resp = sendIntegrityRequest(t, e, http.MethodPost, "/api/guests/batch", `[{"first_name":"Uno","event_id":"`+event+`","table_id":"`+f.tableA.ID.String()+`"},
+			{"first_name":"Dos","event_id":"`+event+`","table_id":"`+tableID.String()+`"}]`)
+		assert.Equal(t, http.StatusBadRequest, resp.Status, name)
+		assert.Equal(t, "table_outside_event", resp.Error, name)
+		assert.Equal(t, guestsBefore, countEventA(&models.Guest{}), name)
+		assert.Equal(t, invitationsBefore, countEventA(&models.Invitation{}), name)
+	}
+	resp = sendIntegrityRequest(t, e, http.MethodPost, "/api/guests", `{"first_name":"Tres","event_id":"`+event+`","table_id":"`+f.tableB.ID.String()+`"}`)
+	assert.Equal(t, http.StatusBadRequest, resp.Status)
+	assert.Equal(t, "table_outside_event", resp.Error)
+	assert.Equal(t, guestsBefore, countEventA(&models.Guest{}))
+
+	resp = sendIntegrityRequest(t, e, http.MethodPost, "/api/guests/batch", `[{"first_name":"Cuatro","event_id":"`+event+`","table_id":"`+f.tableA.ID.String()+
+		`","invitation_id":"`+f.invitationB.ID.String()+`","rsvp_token_id":"`+f.tokenB.ID.String()+`"}]`)
+	require.Equal(t, http.StatusCreated, resp.Status, resp.Message)
+	var created models.Guest
+	require.NoError(t, configuration.DB.Where("event_id = ? AND first_name = ?", f.eventA.ID, "Cuatro").First(&created).Error)
+	require.NotNil(t, created.InvitationID)
+	assert.NotEqual(t, f.invitationB.ID, *created.InvitationID)
+	assert.Equal(t, f.eventA.ID, loadInvitation(t, *created.InvitationID).EventID)
+	assert.Nil(t, created.RSVPTokenID)
+	assert.Equal(t, f.tableA.ID, *created.TableID)
+}
+
+// TestReferenceIntegrity_DashboardMomentStaysInItsEvent runs POST /moments on
+// Postgres: foreign guests, invitations and media keys are refused, and the
+// processing state, media variants and nested objects in the body never reach
+// the database.
+func TestReferenceIntegrity_DashboardMomentStaysInItsEvent(t *testing.T) {
+	f := newReferenceIntegrityFixture(t)
+	e := newReferenceIntegrityServer(t)
+	event := f.eventA.ID.String()
+	countMoments := func() int64 {
+		var count int64
+		require.NoError(t, configuration.DB.Model(&models.Moment{}).Where("event_id = ?", f.eventA.ID).Count(&count).Error)
+		return count
+	}
+
+	for name, body := range map[string]string{
+		"guest of event B":      `{"event_id":"` + event + `","guest_id":"` + f.guestB.ID.String() + `"}`,
+		"invitation of event B": `{"event_id":"` + event + `","invitation_id":"` + f.invitationB.ID.String() + `"}`,
+	} {
+		resp := sendIntegrityRequest(t, e, http.MethodPost, "/api/moments", body)
+		assert.Equal(t, http.StatusBadRequest, resp.Status, name)
+		assert.Equal(t, "reference_outside_event", resp.Error, name)
+	}
+	for _, key := range []string{"moments/" + f.eventB.ID.String() + "/photos/x.webp", "private/secret.jpg"} {
+		resp := sendIntegrityRequest(t, e, http.MethodPost, "/api/moments", `{"event_id":"`+event+`","content_url":"`+key+`"}`)
+		assert.Equal(t, http.StatusBadRequest, resp.Status, key)
+		assert.Equal(t, "moment_content_outside_event", resp.Error, key)
+	}
+	assert.Zero(t, countMoments())
+
+	org := uuid.Must(uuid.NewV4()).String()
+	key := "organizations/" + org + "/moments/" + event + "/photos/x.webp"
+	resp := sendIntegrityRequest(t, e, http.MethodPost, "/api/moments", `{"event_id":"`+event+`","guest_id":"`+f.guestA.ID.String()+
+		`","invitation_id":"`+f.invitationA.ID.String()+`","content_url":"`+key+`","title":"Brindis",
+		"processing_status":"done","processing_input_key":"private/x.jpg",
+		"media_variants":[{"object_key":"private/x.webp","width":320,"format":"webp","bytes":1}],
+		"guest":{"first_name":"Inyectado","event_id":"`+f.eventB.ID.String()+`"},
+		"invitation":{"event_id":"`+f.eventB.ID.String()+`","max_guests":40}}`)
+	require.Equal(t, http.StatusCreated, resp.Status, resp.Message)
+	var moment models.Moment
+	require.NoError(t, configuration.DB.Where("event_id = ?", f.eventA.ID).First(&moment).Error)
+	assert.Equal(t, key, moment.ContentURL)
+	assert.Equal(t, f.guestA.ID, *moment.GuestID)
+	assert.Equal(t, f.invitationA.ID, *moment.InvitationID)
+	assert.Empty(t, moment.ProcessingStatus)
+	assert.Empty(t, moment.ProcessingInputKey)
+	assert.Empty(t, moment.MediaVariants)
+	var injectedGuests, eventBInvitations int64
+	require.NoError(t, configuration.DB.Model(&models.Guest{}).Where("first_name = ?", "Inyectado").Count(&injectedGuests).Error)
+	require.NoError(t, configuration.DB.Model(&models.Invitation{}).Where("event_id = ?", f.eventB.ID).Count(&eventBInvitations).Error)
+	assert.Zero(t, injectedGuests, "a nested guest object is not inserted")
+	assert.Equal(t, int64(1), eventBInvitations, "a nested invitation object is not inserted")
 }
