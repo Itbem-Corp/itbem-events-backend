@@ -74,6 +74,22 @@ to hide a state change. Still audited:
 When reviewing the trail, the absence of organization-context rows during an
 idle session is expected; explicit switches and denials remain visible.
 
+## Event clients kill switch (`EVENT_CLIENT_ACCESS`)
+
+EventiApp event clients are off unless the GitHub Actions repository variable
+`EVENT_CLIENT_ACCESS` is `on`. The deploy workflow renders it into the runtime
+env file (`--optional EVENT_CLIENT_ACCESS`), so a change only takes effect after
+a `deploy-backend` run (workflow_dispatch with `confirm_production`). Rollback
+time is one full deploy; record the measured duration on the first toggle.
+
+- Off: grants are kept but ignored; clients get 403 (no organization) on their
+  next request after the deploy, and the event-client routes answer 404.
+- On: watch audit rows on `/api/events/:id/clients*` and
+  `/api/clients/:id/members/event-clients*`, the 403 rate, and the Owner
+  oversight list.
+- A revocation is live for per-event authorization immediately and for the
+  cached session within 15 s on other instances.
+
 ## Rust worker DLQ alarm
 
 Preserve the message and correlate its job ID, receive count, worker revision,

@@ -68,6 +68,32 @@ Only Owner and Administrator memberships propagate down an organization hierarch
 | Analytics view | Owner, Admin, Event manager, Editor, Member, Analyst | Aggregate event and RSVP metrics. |
 | Metrics view (`metrics:view`) | EventiApp: Owner and Admin (direct or inherited) plus roots 1 and 2. Cafetton House and ITBEM: Owner, Admin, Event manager, Editor, Analyst | Product-metrics portfolio (`GET /api/metrics/portfolio`). Not an event capability: event analytics stay on Analytics view. |
 | Members manage | Owner and Admin | Organization and event-team assignment. |
+| Event clients manage (`event:clients:manage`) | Owner, Admin (direct or inherited), Event manager (unless an event assignment narrows it), Root 1. Not Root 2 | Assign external event clients to an event (`/api/events/:id/clients*`). Reported as `false` while `EVENT_CLIENT_ACCESS` is off. |
+
+## Event authority precedence
+
+`internal/authz` resolves one authority per request and event
+(`resolveEventAuthority`, memoized in the Echo context by
+`RequireEventAccess`; `EnsureEventAccess` resolves fresh):
+
+1. Platform root (`platformHasCapability`).
+2. Organization access through `CheckAccessRecursiveE`
+   (`roleHasCapability`, then the `event_members` narrowing). A lookup error
+   is `500 Authorization error` and never reaches step 3.
+3. Event-client grant, only when `EVENT_CLIENT_ACCESS` is on (the
+   `HasEventClientGrant` hook is configured), the caller has no branded
+   `AuthTenantCode`, an active grant exists and the event's organization
+   resolves to EventiApp (`ResolveClientProduct`). Capability ceiling:
+   view, event:manage, guest:manage, checkin:run, analytics:view
+   (`EventClientCapabilityCeiling`). `event_members` is not consulted.
+4. `403 Access denied`.
+
+`RequireClientAccess` and `RequireClientCapability` never honour grants, and
+now surface organization lookup errors as 500 instead of a silent deny.
+`EventCapabilityForOrganizationEvents` evaluates one capability for many events
+of one organization with one organization lookup and one `event_members` batch
+(managers only, no grant path). `GET /api/events/:id/capabilities` answers 500
+when evaluation fails instead of reporting `false`.
 
 On EventiApp, `services/applications.applicationOrganizationCapabilities`
 removes `metrics:view` from every organization role except Owner/Admin, so the

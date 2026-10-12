@@ -53,6 +53,15 @@ requires an explicit HTTP(S) preview URL before QA can start.
 | `PageSpecService.go` | Public SDUI page spec assembly by token or event identifier |
 | `RepairService.go` | Event integrity repair workflow |
 
+### Event clients (`services/eventclients/`, EventiApp)
+
+| File | Purpose |
+|------|---------|
+| `EventClientService.go` | Event-client grants behind `EVENT_CLIENT_ACCESS`: hardened identity resolution (one live user with a matching, verified, enabled Cognito email; otherwise a tenant-branded invitation; `UsernameExists` resolves the Cognito account by email and mirrors it with `SyncUser`), eligibility (not self, not a root, active, no membership in the organization tree, EventiApp organization), grant/revoke in transactions, assignments, organization oversight and invitation resend. Collapses every enumeration-prone cause into `event_client_unavailable`. Invalidates the target's cached session after each change. |
+
+`services/applications/SessionService.go` gains `ConfigureEventClientAccess`
+(grant-only sessions, `event_access`) and `InvalidateCognitoSub`.
+
 ### Guests Domain (`services/guests/`)
 
 | File | Purpose |

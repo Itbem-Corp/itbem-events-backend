@@ -11,7 +11,13 @@ decides where that identity may enter and what it may do.
    an explicit application entitlement or allowed platform authority.
 2. Application access, organization membership, and event assignment are
    independent ceilings. A narrower layer can remove authority but cannot add
-   authority that a broader layer did not grant.
+   authority that a broader layer did not grant. The single exception is an
+   EventiApp event-client grant (`event_client_grants`, behind
+   `EVENT_CLIENT_ACCESS`): it is a separate authority for exactly one event,
+   used only when the caller has no organization access to that event's
+   organization, and it never opens organization reads. Precedence is
+   platform root > organization membership > event-client grant > deny, and
+   every lookup error fails closed (500, never a fall-through).
 3. Customer-branded portals strip platform-root authority. Root status never
    grants implicit access to Cafetton House or another customer portal.
 4. UI capabilities are advisory. API middleware and resource controllers
@@ -38,6 +44,35 @@ decides where that identity may enter and what it may do.
 | Guest | View | View | No | No | No | No |
 
 An optional event assignment can narrow this further for one event.
+
+### Event clients (EventiApp, `EVENT_CLIENT_ACCESS`)
+
+| Who | Organization/team | Event content | Guests | Check-in | Analytics | Metrics | Create / delete / duplicate / members / clients |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Event client (grant on one event) | No | Manage (that event) | Manage, including PII and CSV export | Run | View | No | No |
+
+- A grant is not an organization role: no `client_members` row, no
+  organization list, no `client_id`-scoped lists, no create, delete,
+  duplicate, move, team or event-member management, no metrics or audit.
+- A grant is void when the holder has any `client_members` row (active or
+  inactive) in the grant's organization, when the event is deleted or changes
+  organization, when the organization is inactive or deleted, when the caller
+  signed in through a branded tenant (`AuthTenantCode`), or when the
+  organization does not resolve to EventiApp (nearest branded ancestor).
+- Managers (Owner, Admin, Event manager unless narrowed by an event
+  assignment, Root 1) hold `event:clients:manage` and assign clients per
+  event; Root 2 does not. Owner/Admin (and both roots, through
+  `members:manage`) oversee and revoke every grant of their organization.
+
+### Event organization changes
+
+- Moving an event (`PUT /api/events/:id` with another `client_id`) requires
+  organization-level `event:manage` on both the source and the destination.
+  A grant never satisfies it. A move revokes the event's grants.
+- Detaching (`client_id: null`) is Root 1 only.
+- Duplicating (`POST /api/events/:id/duplicate`) requires organization-level
+  `event:manage` on the source organization in addition to `event:create`
+  on the destination.
 
 **Analytics** is event analytics (`analytics:view`, `GET /api/events/:id/analytics`).
 **Metrics** is the product-metrics portfolio (`metrics:view`,

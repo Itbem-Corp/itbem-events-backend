@@ -49,7 +49,7 @@
 ## Protected Routes (`/api`) — Require `Authorization: Bearer <token>`
 
 ### Session, audit trail and product metrics
-- `GET /api/session` → `sessions.GetSession` — application session: user, organizations with per-organization `capabilities`, top-level `capabilities`. On EventiApp `metrics:view` appears only on Owner/Admin organizations (direct or inherited) and, top-level, for roots 1/2 or a user with at least one Owner/Admin organization.
+- `GET /api/session` → `sessions.GetSession` — application session: user, organizations with per-organization `capabilities`, top-level `capabilities`. On EventiApp `metrics:view` appears only on Owner/Admin organizations (direct or inherited) and, top-level, for roots 1/2 or a user with at least one Owner/Admin organization. With `EVENT_CLIENT_ACCESS=on`, a non-root caller with active event-client grants also gets `event_access: {assigned_events, capabilities}` (events module only), and `organizations` may be `[]`; the grant capabilities are unioned into the top-level list before any policy intersection.
 - `POST /api/session/organization-context` → `sessions.IssueOrganizationContext` — issues the 5-minute signed `X-Organization-Context` credential for an organization in the session (403 otherwise). Audit: a successful re-issue for the organization the request already selected (`X-Organization-ID` equal to the body `organization_id`) writes no audit row (`audit.SkipOnSuccess`); switches, 400, 401, 403 and 503 are still audited.
 - `GET /api/audit-logs` → `auditlogs.List` — Root 1 only (`authz.RequirePrimaryRoot`); everyone else gets 403 `Primary platform administrator required`.
 - `GET /api/metrics/portfolio?from=&to=&client_id=` → `productmetrics.Portfolio` — surface gate `metrics:view`. With `client_id`: `analytics:view` on that organization, or `metrics:view` on EventiApp (Owner/Admin or root). Without `client_id`: platform roots only, otherwise 403 `Organization required`. Known gap: summaries with `client_id` are not filtered by tenant.
@@ -122,10 +122,11 @@ Legacy v1/v2 events remain auditable but cannot authorize a v3 action.
 
 ### Events
 - `GET /api/events/all` → `events.ListEvents` — compatibility path for dashboard list; requires auth and returns root/all or caller-access events
-- `GET /api/events` → `events.ListEvents` — Protected. Query params: `?client_id=UUID` (optional), `page`/`page_size`/`search`/`filter` (paged). Root users see all events; other users without `client_id` see the caller-access portfolio: organizations the application session lists for them (active, not deleted, membership enabled for the request application; direct memberships only). With `?client_id` returns events for that client (access-checked, inherited Owner/Admin included). See `docs/AUTHORIZATION_MODEL.md`.
+- `GET /api/events` → `events.ListEvents` — Protected. Query params: `?client_id=UUID` (optional), `page`/`page_size`/`search`/`filter` (paged). Root users see all events; other users without `client_id` see the caller-access portfolio: organizations the application session lists for them (active, not deleted, membership enabled for the request application; direct memberships only). With `?client_id` returns events for that client (access-checked, inherited Owner/Admin included; grants never satisfy it). See `docs/AUTHORIZATION_MODEL.md`. With `EVENT_CLIENT_ACCESS=on`, the caller-access portfolio (paged and unpaged, `/events/dashboard`, `/events/notifications`) also includes events reached through an active event-client grant (ORed into the same scope), and each portfolio row of `GET /api/events` carries `viewer_access: "organization" | "event_client"` (omitted for roots and `client_id`-scoped requests).
 - `GET /api/events/dashboard` → `events.GetDashboardOverview` and `GET /api/events/notifications` → `events.GetEventNotifications` — same scope rules as `GET /api/events`.
 - `POST /api/events` → `events.CreateEvent`
-- `PUT /api/events/:id` → `events.UpdateEvent`
+- `PUT /api/events/:id` → `events.UpdateEvent` — a `client_id` change needs organization-level `event:manage` on the source and the destination (403 `Your organization role cannot perform this action` otherwise) and revokes the event's client grants; `client_id: null` on an event with an organization is Root 1 only (403 `Only the primary platform administrator can detach an event from its organization`).
+- `POST /api/events/:id/duplicate` → `events.DuplicateEvent` — needs `event:manage` on the event, organization-level `event:manage` on the source organization (so event clients cannot copy an event out) and `event:create` on the destination.
 - `DELETE /api/events/:id` → `events.DeleteEvent`
 - `POST /api/events/:id/cover` → `events.UploadEventCover` — Stores a validated source, returns `202` plus a signed pending preview, and queues responsive processing. The previous public cover remains active until a generation-matched terminal callback succeeds. Local environments without SQS retain a synchronous fallback.
 - `DELETE /api/events/:id/cover` → `events.DeleteEventCover` — Clears `cover_image_url` and best-effort deletes the old S3 object.
@@ -188,6 +189,20 @@ Legacy v1/v2 events remain auditable but cannot authorize a v3 action.
 - `GET /api/clients/members` → `clients.ListClientMembers`
 - `PUT /api/clients/members/:user_id` → `clients.UpdateMemberRole` (?client_id=...)
 - `DELETE /api/clients/members/:user_id` → `clients.RemoveMember` (?client_id=...)
+- `GET /api/clients/:id/members/event-clients?page=&page_size=` → `eventclients.ListOrganizationGrants` — Owner/Admin (incl. inherited) and roots oversee every active event-client grant of the organization (`members:manage`; page size max 50). 404 `event_client_access_disabled` while `EVENT_CLIENT_ACCESS` is off or outside EventiApp.
+- `DELETE /api/clients/:id/members/event-clients/:user_id` → `eventclients.RevokeOrganizationUser` — revokes every grant of that person in the organization; `{revoked: n}`, 404 `event_client_not_found` when there is none.
+
+### Event clients (EventiApp, `EVENT_CLIENT_ACCESS`)
+
+Every route answers 404 `{message: "Función no disponible", error: "event_client_access_disabled"}` while the flag is off, then requires `event:clients:manage` on `:id` (Owner, Admin, Event manager unless narrowed, Root 1). Domain errors use a Spanish `message` and a stable `error` code (`invalid_request`, `invalid_email`, `event_client_not_found`, `event_client_is_org_member`, `event_client_self`, `event_client_unavailable`, `event_outside_organization`, `event_client_invitation_not_pending`, `event_client_invite_failed`, `event_client_grant_failed`, `event_client_resend_failed`). `event_client_unavailable` has one body for every cause (platform admin, inactive, unverified/changed/ambiguous email, unresolvable account, organization outside EventiApp).
+
+- `GET /api/events/:id/clients` → `eventclients.List` — active clients of the event (`granted_at` ascending).
+- `GET /api/events/:id/clients/candidates?search=` → `eventclients.Candidates` — people with grant history in the event's organization only (max 50).
+- `POST /api/events/:id/clients` → `eventclients.Create` — rate limited (`sensitiveRateLimiter`). Body: exactly one of `{email, first_name, last_name}` or `{user_id}`. A new email is invited through the standard tenant-branded Cognito invitation; an existing email must belong to exactly one live user with a matching, verified, enabled Cognito account. 201 new grant, 200 already active; `{client, account: created|existing, already_assigned}`. A grant failure after a fresh invitation deletes that account.
+- `DELETE /api/events/:id/clients/:user_id` → `eventclients.Revoke` — `{revoked: true}`; 404 when not active. The account is never deleted.
+- `POST /api/events/:id/clients/:user_id/resend-invitation` → `eventclients.ResendInvitation` — rate limited; re-sends the Cognito invitation (`AdminCreateUser MessageAction=RESEND`) only while the account is `FORCE_CHANGE_PASSWORD` (409 `event_client_invitation_not_pending` otherwise).
+- `GET /api/events/:id/clients/:user_id/assignments?search=&page=&page_size=` → `eventclients.ListAssignments` — the organization's events with `assigned` and `can_manage` (one capability batch); 404 for people without grant history in the organization.
+- `PATCH /api/events/:id/clients/:user_id/assignments` → `eventclients.UpdateAssignments` — `{assign, unassign}`, 1–100 distinct ids, disjoint; 422 `event_outside_organization` with `data.event_ids`, 403 when the caller cannot manage one target; all checks before writes, one transaction.
 
 ### Users (self + admin)
 - `GET /api/users` → `users.GetUser` (my profile)
