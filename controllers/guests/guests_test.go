@@ -1626,3 +1626,261 @@ func TestGetAttendees_Success_Returns200(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "Apasionada por la tecnología")
 	assert.Contains(t, rec.Body.String(), "Gracias por acompañarme")
 }
+
+// ── Check-in surfaces: door-only projection ──────────────────────────────────
+
+// checkinAuth describes the caller seen by the authz hooks: an organization
+// role, an optional event assignment that may narrow it, or a platform level.
+type checkinAuth struct {
+	orgRole   string
+	eventRole string
+	rootLevel int
+}
+
+func setCheckinAuth(t *testing.T, c echo.Context, auth checkinAuth) {
+	t.Helper()
+	userID := uuid.Must(uuid.NewV4())
+	clientID := uuid.Must(uuid.NewV4())
+	c.Set("cognito_sub", "test-sub")
+	restore := authz.ReplaceHooksForTest(authz.Hooks{
+		SyncUser: func(string) (*models.User, error) {
+			return &models.User{ID: userID, RootLevel: auth.rootLevel}, nil
+		},
+		GetEventByIDRaw: func(id uuid.UUID) (*models.Event, error) {
+			return &models.Event{ID: id, ClientID: &clientID, Name: "Boda Ana"}, nil
+		},
+		CheckAccessRecursive: func(gotUserID, gotClientID uuid.UUID) (bool, string) {
+			if gotUserID != userID || gotClientID != clientID || auth.orgRole == "" {
+				return false, ""
+			}
+			return true, auth.orgRole
+		},
+		GetEventMemberRole: func(uuid.UUID, uuid.UUID) (string, bool, error) {
+			return auth.eventRole, auth.eventRole != "", nil
+		},
+	})
+	t.Cleanup(restore)
+}
+
+type checkinStatusRepo struct{ statuses []models.GuestStatus }
+
+func (m *checkinStatusRepo) CreateGuestStatus(*models.GuestStatus) error { return nil }
+func (m *checkinStatusRepo) UpdateGuestStatus(*models.GuestStatus) error { return nil }
+func (m *checkinStatusRepo) DeleteGuestStatus(uuid.UUID) error           { return nil }
+func (m *checkinStatusRepo) GetGuestStatusByID(uuid.UUID) (*models.GuestStatus, error) {
+	return nil, nil
+}
+func (m *checkinStatusRepo) ListGuestStatuss() ([]models.GuestStatus, error) {
+	return m.statuses, nil
+}
+
+var _ ports.GuestStatusRepository = (*checkinStatusRepo)(nil)
+
+// doorCheckinGuestRepo returns one fully populated guest and records whether
+// the list was loaded, so denied callers can be shown to load nothing.
+type doorCheckinGuestRepo struct {
+	checkinSummaryGuestRepo
+	listed bool
+}
+
+func (m *doorCheckinGuestRepo) ListCheckinGuests(eventID uuid.UUID, query dtos.CheckinGuestsListQuery) ([]models.Guest, int64, error) {
+	m.listed = true
+	return m.checkinSummaryGuestRepo.ListCheckinGuests(eventID, query)
+}
+
+// Values that must never reach a check-in caller.
+var doorCheckinSecrets = []string{
+	"ana.door@example.com", "+525500000042", "PRETTY42", "Nota RSVP privada", "Nota interna privada", "Sin nueces",
+}
+
+var doorCheckinForbiddenKeys = []string{
+	"email", "phone", "pretty_token", "invitation_id", "rsvp_token_id", "notes", "rsvp_notes", "dietary_restrictions",
+	"bio", "nickname", "max_guests",
+}
+
+func newDoorCheckinGuestRepo(eventID uuid.UUID) *doorCheckinGuestRepo {
+	statusID := uuid.Must(uuid.NewV4())
+	tableID := uuid.Must(uuid.NewV4())
+	invitationID := uuid.Must(uuid.NewV4())
+	tokenID := uuid.Must(uuid.NewV4())
+	return &doorCheckinGuestRepo{checkinSummaryGuestRepo: checkinSummaryGuestRepo{
+		guest: models.Guest{
+			ID: uuid.Must(uuid.NewV4()), EventID: eventID, FirstName: "Ana", LastName: "Garcia", Nickname: "Anita",
+			Email: "ana.door@example.com", Phone: "+525500000042", PrettyToken: "PRETTY42",
+			InvitationID: &invitationID, RSVPTokenID: &tokenID, Bio: "Bio privada",
+			TableID: &tableID, Table: &models.EventTable{ID: tableID, EventID: eventID, Name: "Mesa VIP", Capacity: 8},
+			GuestStatusID: statusID, GuestStatus: models.GuestStatus{ID: statusID, Code: "pending", Label: "Pendiente"},
+			RSVPStatus: "pending", RSVPGuestCount: 2, GuestsCount: 2, MaxGuests: 4,
+			DietaryRestrictions: "Sin nueces", RSVPNotes: "Nota RSVP privada", Notes: "Nota interna privada",
+		},
+		summary: dtos.GuestSummary{Total: 1, Pending: 1},
+	}}
+}
+
+func withDoorCheckinServices(t *testing.T, repo *doorCheckinGuestRepo) {
+	t.Helper()
+	orig := guestSvc
+	guestSvc = guestsService.NewGuestService(repo, &mockTokenRepo{}, &mockCacheRepo{}, &mockTransactor{})
+	guestsService.SetDefaultGuestStatusService(guestsService.NewGuestStatusService(&checkinStatusRepo{
+		statuses: []models.GuestStatus{{ID: uuid.Must(uuid.NewV4()), Code: "confirmed", Label: "Confirmado"}},
+	}, nil))
+	t.Cleanup(func() {
+		guestSvc = orig
+		guestsService.SetDefaultGuestStatusService(nil)
+	})
+}
+
+func runCheckinList(t *testing.T, auth checkinAuth) (*httptest.ResponseRecorder, *doorCheckinGuestRepo) {
+	t.Helper()
+	eventID := uuid.Must(uuid.NewV4())
+	repo := newDoorCheckinGuestRepo(eventID)
+	withDoorCheckinServices(t, repo)
+
+	c, rec := newEchoCtx(http.MethodGet, "/guests/checkin:"+eventID.String()+"?page=1&page_size=60&filter=ALL", "")
+	c.SetParamNames("key")
+	c.SetParamValues("checkin:" + eventID.String())
+	setCheckinAuth(t, c, auth)
+
+	require.NoError(t, GetGuests(c))
+	return rec, repo
+}
+
+func runCheckinWorkspace(t *testing.T, auth checkinAuth) (*httptest.ResponseRecorder, *doorCheckinGuestRepo) {
+	t.Helper()
+	eventID := uuid.Must(uuid.NewV4())
+	repo := newDoorCheckinGuestRepo(eventID)
+	withDoorCheckinServices(t, repo)
+
+	c, rec := newEchoCtx(http.MethodGet, "/events/"+eventID.String()+"/checkin-workspace", "")
+	c.SetParamNames("id")
+	c.SetParamValues(eventID.String())
+	setCheckinAuth(t, c, auth)
+
+	require.NoError(t, GetCheckinWorkspace(c))
+	return rec, repo
+}
+
+func assertDoorCheckinGuest(t *testing.T, guest map[string]json.RawMessage, raw string) {
+	t.Helper()
+	assert.JSONEq(t, `"Ana"`, string(guest["first_name"]))
+	assert.JSONEq(t, `"Garcia"`, string(guest["last_name"]))
+	assert.JSONEq(t, `"pending"`, string(guest["rsvp_status"]))
+	assert.JSONEq(t, `2`, string(guest["rsvp_guest_count"]))
+	assert.Contains(t, string(guest["table"]), `"name":"Mesa VIP"`)
+	assert.Contains(t, string(guest["status"]), `"code":"pending"`)
+	for _, key := range doorCheckinForbiddenKeys {
+		assert.NotContains(t, guest, key)
+	}
+	for _, secret := range doorCheckinSecrets {
+		assert.NotContains(t, raw, secret)
+	}
+}
+
+// The check-in page reads name, table, party size and RSVP state, and resolves
+// a scanned QR on the server (the qr query), so no caller of the check-in list
+// needs contact data, notes or tokens; a door-only role must never get them.
+func TestGetGuests_CheckinListReturnsDoorProjection(t *testing.T) {
+	cases := map[string]checkinAuth{
+		"check-in org role":             {orgRole: "CHECKIN"},
+		"manager narrowed to checkin":   {orgRole: "EVENT_MANAGER", eventRole: "CHECKIN"},
+		"event manager org role":        {orgRole: "EVENT_MANAGER"},
+		"operational platform root (2)": {rootLevel: models.RootLevelOperational},
+	}
+	for name, auth := range cases {
+		t.Run(name, func(t *testing.T) {
+			rec, repo := runCheckinList(t, auth)
+
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			assert.True(t, repo.listed)
+			var body struct {
+				Data struct {
+					Data    []map[string]json.RawMessage `json:"data"`
+					Summary *dtos.GuestSummary           `json:"summary"`
+				} `json:"data"`
+			}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			require.Len(t, body.Data.Data, 1)
+			require.NotNil(t, body.Data.Summary)
+			assert.Equal(t, int64(1), body.Data.Summary.Total)
+			assertDoorCheckinGuest(t, body.Data.Data[0], rec.Body.String())
+		})
+	}
+}
+
+func TestGetCheckinWorkspace_ReturnsDoorProjection(t *testing.T) {
+	cases := map[string]checkinAuth{
+		"check-in org role":           {orgRole: "CHECKIN"},
+		"manager narrowed to checkin": {orgRole: "EVENT_MANAGER", eventRole: "CHECKIN"},
+		"event manager org role":      {orgRole: "EVENT_MANAGER"},
+	}
+	for name, auth := range cases {
+		t.Run(name, func(t *testing.T) {
+			rec, repo := runCheckinWorkspace(t, auth)
+
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			assert.True(t, repo.listed)
+			var body struct {
+				Data struct {
+					Event    dtos.EventResponse `json:"event"`
+					Statuses []json.RawMessage  `json:"statuses"`
+					Guests   struct {
+						Data    []map[string]json.RawMessage `json:"data"`
+						Summary *dtos.GuestSummary           `json:"summary"`
+					} `json:"guests"`
+				} `json:"data"`
+			}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			assert.Equal(t, "Boda Ana", body.Data.Event.Name)
+			assert.Len(t, body.Data.Statuses, 1)
+			require.NotNil(t, body.Data.Guests.Summary)
+			require.Len(t, body.Data.Guests.Data, 1)
+			assertDoorCheckinGuest(t, body.Data.Guests.Data[0], rec.Body.String())
+		})
+	}
+}
+
+func TestCheckinSurfaces_RejectCallersWithoutCheckinRun(t *testing.T) {
+	cases := map[string]checkinAuth{
+		"viewer org role":           {orgRole: "Guest"},
+		"analyst org role":          {orgRole: "ANALYST"},
+		"member org role":           {orgRole: "Member"},
+		"editor narrowed to viewer": {orgRole: "EDITOR", eventRole: "VIEWER"},
+		"caller outside the org":    {},
+	}
+	for name, auth := range cases {
+		t.Run(name+" list", func(t *testing.T) {
+			rec, repo := runCheckinList(t, auth)
+			assert.Equal(t, http.StatusForbidden, rec.Code)
+			assert.False(t, repo.listed)
+			assert.NotContains(t, rec.Body.String(), "Garcia")
+		})
+		t.Run(name+" workspace", func(t *testing.T) {
+			rec, repo := runCheckinWorkspace(t, auth)
+			assert.Equal(t, http.StatusForbidden, rec.Code)
+			assert.False(t, repo.listed)
+			assert.NotContains(t, rec.Body.String(), "Garcia")
+		})
+	}
+}
+
+// The guest-manager lists share the repository query with check-in but keep the
+// full guest record: the invitations view builds share links from pretty_token.
+func TestGetGuests_GuestManagerListsKeepFullRecord(t *testing.T) {
+	for _, prefix := range []string{"page:", "invitations:"} {
+		t.Run(prefix, func(t *testing.T) {
+			eventID := uuid.Must(uuid.NewV4())
+			repo := newDoorCheckinGuestRepo(eventID)
+			withDoorCheckinServices(t, repo)
+
+			c, rec := newEchoCtx(http.MethodGet, "/guests/"+prefix+eventID.String()+"?page=1&page_size=50", "")
+			c.SetParamNames("key")
+			c.SetParamValues(prefix + eventID.String())
+			setCheckinAuth(t, c, checkinAuth{orgRole: "EVENT_MANAGER"})
+
+			require.NoError(t, GetGuests(c))
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), `"email":"ana.door@example.com"`)
+			assert.Contains(t, rec.Body.String(), `"pretty_token":"PRETTY42"`)
+		})
+	}
+}

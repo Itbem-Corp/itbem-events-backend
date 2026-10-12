@@ -172,8 +172,8 @@ func GetCheckinWorkspace(c echo.Context) error {
 	}
 	total = summary.Total
 
-	page := dtos.CheckinGuestsPageResponse{
-		Data: dtos.NewGuestResponses(pageGuests), Total: total, Page: 1, PageSize: 60,
+	page := dtos.CheckinGuestListResponse{
+		Data: dtos.NewCheckinGuestResponses(pageGuests), Total: total, Page: 1, PageSize: 60,
 		TotalPages: int((total + 59) / 60), Summary: &summary,
 	}
 	return utils.Success(c, http.StatusOK, "Check-in workspace loaded", dtos.CheckinWorkspaceResponse{
@@ -257,7 +257,8 @@ func GetGuests(c echo.Context) error {
 	}
 
 	if strings.HasPrefix(keyParam, "checkin:") || strings.HasPrefix(keyParam, "page:") || strings.HasPrefix(keyParam, "invitations:") {
-		includeSummary := strings.HasPrefix(keyParam, "checkin:")
+		checkinView := strings.HasPrefix(keyParam, "checkin:")
+		includeSummary := checkinView
 		includeShareSummary := strings.HasPrefix(keyParam, "invitations:")
 		eventIDStr := strings.TrimPrefix(strings.TrimPrefix(strings.TrimPrefix(keyParam, "checkin:"), "page:"), "invitations:")
 		eventID, err := uuid.FromString(eventIDStr)
@@ -265,7 +266,7 @@ func GetGuests(c echo.Context) error {
 			return utils.Error(c, http.StatusBadRequest, "Invalid event UUID", err.Error())
 		}
 		capability := authz.CapabilityGuestManage
-		if strings.HasPrefix(keyParam, "checkin:") {
+		if checkinView {
 			capability = authz.CapabilityCheckin
 		}
 		if _, _, authErr := authz.RequireEventCapability(c, eventID, capability); authErr != nil {
@@ -348,6 +349,13 @@ func GetGuests(c echo.Context) error {
 			}
 		}
 		totalPages := int((total + int64(pageSize) - 1) / int64(pageSize))
+		if checkinView {
+			// checkin:run reaches door-only roles: no contact data, notes or tokens.
+			return utils.Success(c, http.StatusOK, "Check-in guests loaded", dtos.CheckinGuestListResponse{
+				Data: dtos.NewCheckinGuestResponses(guests), Total: total, Page: page, PageSize: pageSize, TotalPages: totalPages,
+				Summary: summary,
+			})
+		}
 		return utils.Success(c, http.StatusOK, "Check-in guests loaded", dtos.CheckinGuestsPageResponse{
 			Data: dtos.NewGuestResponses(guests), Total: total, Page: page, PageSize: pageSize, TotalPages: totalPages,
 			Summary: summary, ShareSummary: shareSummary,
