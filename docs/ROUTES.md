@@ -142,7 +142,9 @@ Legacy v1/v2 events remain auditable but cannot authorize a v3 action.
 - `POST /api/events/:id/tables`, `PUT /api/events/:id/tables/assign`, `PUT /api/events/:id/tables/plan`, `PUT /api/tables/:id`, `DELETE /api/tables/:id` → `eventtables.*` — Require `guest:manage`.
 
 ### Check-in
-- `GET /api/events/:id/checkin-workspace` → `guests.GetCheckinWorkspace` — Requires `checkin:run`.
+- `GET /api/events/:id/checkin-workspace` → `guests.GetCheckinWorkspace` — Requires `checkin:run`. Returns `{event, statuses, guests}`; `guests` is the first page (60) of the door projection `dtos.CheckinGuest` with the event summary: id, event_id, first/last name, table (`table_id`, `table`, `table_number`), `guest_status`/`status` with ids, `guests_count`, `rsvp_status`, `rsvp_guest_count`. No email, phone, notes, RSVP notes, dietary restrictions, `pretty_token`, `invitation_id` or `rsvp_token_id`, for any caller.
+- `GET /api/guests/checkin:<eventID>` → `guests.GetGuests` — Requires `checkin:run`. Paged (`page`, `page_size` 1-100, `search`, `filter`, `qr`, `sort`, `direction`) door projection, same fields as the workspace, plus `summary`. `qr` matches the guest id or invitation `pretty_token` exactly on the server, so the scanner never needs the token in the response. `search` still matches name, email, phone and table server side.
+- `PATCH /api/guests/bulk/status` → `guests.BulkUpdateGuestStatus` — Requires `checkin:run`. Body `{event_id, ids (1-100), status_id|guest_status_id, rsvp_status, rsvp_method: "host"}`; returns no guest data.
 
 ### Event Sections
 - `GET /api/events/:id/sections` → `eventsection.ListSectionsByEvent`
@@ -162,7 +164,7 @@ Legacy v1/v2 events remain auditable but cannot authorize a v3 action.
 - `POST /api/fonts/upload` → `fonts.UploadFonts` — root only
 
 ### Guests
-- `GET /api/guests/:key` → `guests.GetGuests` — protected; supports `all:<eventID>` or a guest UUID, access-checked before returning cached data
+- `GET /api/guests/:key` → `guests.GetGuests` — protected; supports `all:<eventID>`, `page:<eventID>`, `invitations:<eventID>`, `seating:<eventID>`, `analytics:<eventID>`, `share:<eventID>` and a guest UUID (all `guest:manage`), `summary:<eventID>` (`analytics:view`) and `checkin:<eventID>` (`checkin:run`, door projection; see Check-in). `page:` and `invitations:` return the full guest record, including `pretty_token`.
 - `POST /api/guests` → `guests.CreateGuest`
 - `POST /api/guests/batch` → `guests.CreateGuests` — atomic batch: creates guests + invitations + tokens in one transaction
 - `PUT /api/guests/:id` → `guests.UpdateGuest`
