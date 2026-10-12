@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   sbom:
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: github.event_name != 'pull_request'
     runs-on: [self-hosted, Linux, X64, itbem-org-ci]
     timeout-minutes: 45
     steps:
@@ -31,7 +31,7 @@ jobs:
           retention-days: 30
 
   analyze:
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: github.event_name != 'pull_request'
     runs-on: [self-hosted, Linux, X64, itbem-org-ci]
     timeout-minutes: 45
     permissions:
