@@ -2838,7 +2838,8 @@ func TestRequestPublicMomentUploadURL_UsesDefaultConfigWhenMissing(t *testing.T)
 	require.NoError(t, RequestPublicMomentUploadURL(c))
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 	assert.Equal(t, "RAW/123", tokenRepo.seen)
-	assert.Contains(t, rec.Body.String(), `"message":"Uploads are closed because the moments wall is already published"`)
+	// The default config has uploads off and (EVT-68) the wall unpublished.
+	assert.Contains(t, rec.Body.String(), `"message":"Uploads are disabled for this event"`)
 	assert.NotContains(t, rec.Body.String(), "Event config not found")
 }
 
