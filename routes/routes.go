@@ -604,8 +604,13 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	protected.DELETE("/users/avatar", users.DeleteAvatar)
 
 	// ── Cache ─────────────────────────────────
-	protected.GET("/cache/flush/:key", cache.FlushKey)
-	protected.GET("/cache/flush-all", cache.FlushAll)
+	// DELETE is the supported method: audit.Mutations records it. The GET
+	// aliases are deprecated (GET is never audited) and kept only for
+	// compatibility with existing scripts.
+	protected.DELETE("/cache/flush/:key", cache.FlushKey)
+	protected.DELETE("/cache/flush-all", cache.FlushAll)
+	protected.GET("/cache/flush/:key", cache.FlushKey) // Deprecated: use DELETE.
+	protected.GET("/cache/flush-all", cache.FlushAll)  // Deprecated: use DELETE.
 
 	// ── Catálogos ─────────────────────────────
 	protected.GET("/catalogs/client-types", clienttypes.ListClientTypes)

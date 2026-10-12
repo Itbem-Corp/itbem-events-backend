@@ -122,9 +122,9 @@ Legacy v1/v2 events remain auditable but cannot authorize a v3 action.
 - `DELETE /api/events/:id` → `events.DeleteEvent`
 - `POST /api/events/:id/cover` → `events.UploadEventCover` — Stores a validated source, returns `202` plus a signed pending preview, and queues responsive processing. The previous public cover remains active until a generation-matched terminal callback succeeds. Local environments without SQS retain a synchronous fallback.
 - `DELETE /api/events/:id/cover` → `events.DeleteEventCover` — Clears `cover_image_url` and best-effort deletes the old S3 object.
-- `POST /api/events/covers/backfill` → `events.BackfillEventCovers` — Root-only bounded/idempotent backfill for legacy covers without responsive variants.
+- `POST /api/events/covers/backfill` → `events.BackfillEventCovers` — Primary-root-only (level 1; Root 2, standard users and other-product sessions get `403`) bounded/idempotent backfill for legacy covers without responsive variants. The candidate scan is global across tenants.
 - `PUT /api/events/:id/cover/content` → `events.UpdateEventCoverContent` — Internal authenticated media callback; rejects stale generations with `409`.
-- `POST /api/moments/backfill` → `moments.BackfillMomentVariants` — Root-only bounded/idempotent discovery and requeue of legacy image moments without variants.
+- `POST /api/moments/backfill` → `moments.BackfillMomentVariants` — Primary-root-only (level 1; Root 2, standard users and other-product sessions get `403`) bounded/idempotent discovery and requeue of legacy image moments without variants. The candidate scan is global across tenants.
 - `POST /api/events/:identifier/performance` → `events.TrackPerformance` — Public aggregate-only RUM ingestion with anonymous five-minute operational histograms retained for 48 hours.
 - `GET /api/events/:id/analytics` → `events.GetEventAnalytics` — GetEventAnalytics — returns EventAnalytics for the event
 
@@ -159,6 +159,12 @@ Legacy v1/v2 events remain auditable but cannot authorize a v3 action.
 - `DELETE /api/guests/bulk` → `guests.BulkDeleteGuests` — body: `{"ids": ["uuid1", "uuid2"]}`. Soft-deletes multiple guests and invalidates per-event Redis cache.
 - `DELETE /api/guests/:id` → `guests.DeleteGuest`
 
+### Event Members (team assignments)
+- `GET /api/events/:id/capabilities` → `eventmembers.Capabilities` — the caller's effective event capabilities.
+- `GET /api/events/:id/members` → `eventmembers.List` — `members:manage` on the event.
+- `PUT /api/events/:id/members` → `eventmembers.Upsert` — body `{"user_id": UUID, "role": "EVENT_OWNER|MANAGER|EDITOR|CHECKIN|ANALYST|VIEWER"}`; `members:manage` plus `clients.AuthorizeMemberTarget` on the event's organization (same ranking as member application access). Denied → `403 Permission Denied`; target without organization access → `400`.
+- `DELETE /api/events/:id/members/:user_id` → `eventmembers.Remove` — same authorization as `Upsert`; a deleted account has no rank, so its stale assignment can still be removed.
+
 ### Moments
 - `GET /api/moments` → `moments.ListMoments` — supports `?event_id=<uuid>` to filter by event. When `event_id` is provided, only returns moments with `processing_status NOT IN ('pending','processing')` — i.e., fully optimized by Lambda or legacy uploads. S3 media keys in `content_url` / `thumbnail_url` are returned as presigned URLs for the dashboard.
 - `POST /api/moments/bulk-approve` → `moments.BulkApproveRejectMoments` — Bulk approve or reject moments. Body: `{"ids": ["uuid1", "uuid2"], "is_approved": true}`. Returns 200 OK. Invalidates Redis cache.
@@ -176,34 +182,39 @@ Legacy v1/v2 events remain auditable but cannot authorize a v3 action.
 - `GET /api/clients/:id` → `clients.GetClient` (recursive)
 - `PUT /api/clients/:id` → `clients.UpdateClient`
 - `DELETE /api/clients/:id` → `clients.DeleteClient` (recursive)
-- `POST /api/clients/invite` → `clients.InviteUser`
+- `POST /api/clients/invite` → `clients.InviteUser` — body `{"client_id", "user_id" or "email", "role_id"}`; adds an existing account. Besides the member-write rules below, the account is ranked with `clients.AuthorizeMemberTarget` on its effective (direct or inherited) role in `client_id`, because the new direct membership takes precedence over an Owner/Admin role inherited from a parent organization: an Owner/Admin may only add accounts ranked strictly below its own effective role (never itself), Root 2 anyone except an Owner, only a primary root an Owner; nobody but a primary root a platform-root account. Denied → `403 Permission Denied` with nothing written.
 - `POST /api/clients/members` → `clients.CreateClientMember`
 - `GET /api/clients/members` → `clients.ListClientMembers`
 - `PUT /api/clients/members/:user_id` → `clients.UpdateMemberRole` (?client_id=...)
 - `DELETE /api/clients/members/:user_id` → `clients.RemoveMember` (?client_id=...)
+- `GET /api/clients/:id/member-applications/:user_id` → `sessions.ListMemberApplications` — `members:manage` on the organization; Root 2 cannot inspect platform-root accounts (`403`).
+- `PUT /api/clients/:id/member-applications/:user_id/:application_code` → `sessions.SetMemberApplication` — body `{"is_active": bool}`; `members:manage` plus `clients.AuthorizeMemberTarget`: an Owner/Admin may only toggle members ranked strictly below its own effective role (never itself), Root 2 any member except an Owner, only a primary root an Owner; nobody but a primary root a platform-root account. Denied → `403 Permission Denied`; application not enabled for the organization → `409`.
+- Member writes (`InviteUser`, `CreateClientMember`, `UpdateMemberRole`, `RemoveMember`): both platform-root levels (`IsPlatformAdmin()`; level 1, level 2 and legacy `is_root` accounts) take the root path and manage teams in any organization, but can never assign, change or remove an Owner (`403`); Root 2 also cannot target platform-root accounts (`403`). A root grants (`InviteUser`, `CreateClientMember`, `UpdateMemberRole`) only roles within its own capabilities (`authz.PlatformRootMayGrantRole`): Root 1 any role below Owner, Root 2 only Check-in, Analyst, Member or Viewer; Admin, Event manager or Editor from Root 2 → `403` before any account is created or membership written. Everyone else must hold Owner/Admin (direct or inherited) in that organization and can only manage roles below its own. A root entering a branded product (e.g. Cafetton House) is scoped to an ordinary identity and takes the membership path.
 
 ### Users (self + admin)
 - `GET /api/users` → `users.GetUser` (my profile)
 - `PUT /api/users` → `users.UpdateUser`
-- `DELETE /api/users` → `users.DeleteUser`
+- `DELETE /api/users` → `users.DeleteUser` — closes the caller's own account (Cognito + local). A primary-root account (checked on the stored account, whatever product the caller entered through) gets `409 Protected account`.
 - `GET /api/users/all` → `users.ListAllUsers` — root only; paginated and filterable; query params: `?page=1&page_size=50&search=ana&status=active` (status: `active`, `inactive`, `root`; default page=1, page_size=50, max page_size=200)
 - `GET /api/users/:id` → `users.GetUserDetail` — root only
 - `GET /api/users/:id/clients` → `users.ListUserClients` — root only
 - `PUT /api/users/:id` → `users.UpdateUserDetail` — root only
-- `DELETE /api/users/:id` → `users.DeleteUserDetail` — root only
-- `PUT /api/users/:id/deactivate` → `users.DeactivateUser` — root only
-- `PUT /api/users/:id/activate` → `users.ActivateUser` — root only
+- `DELETE /api/users/:id` → `users.DeleteUserDetail` — primary root only; a primary-root target (another level 1, a legacy `is_root` account or the caller itself) → `409 Protected account`
+- `PUT /api/users/:id/deactivate` → `users.DeactivateUser` — root only; Root 2 cannot target platform-root accounts (`403`); a primary-root target, including the caller itself → `409 Protected account`
+- `PUT /api/users/:id/activate` → `users.ActivateUser` — root only; Root 2 cannot target platform-root accounts (`403`); re-activating a primary root stays allowed
+- `PUT /api/users/:id/root-level` → `users.UpdateUserRootLevel` — Primary-root-only (Root 2, standard users and other-product sessions get `403`). Body `{"root_level": 0|2}` grants or revokes operational Root 2 and returns the admin user summary. Level `1` is never assignable (`400`); a primary-root target (level 1 or a legacy `is_root` account, including the caller itself) is refused with `409 Protected account` because level 1 cannot be restored through the API; unknown user → `404`.
 - `POST /api/users/invite` → `users.InviteUser` — root only
 - `POST /api/users/avatar` → `users.UploadAvatar`
 - `DELETE /api/users/avatar` → `users.DeleteAvatar`
 
-### Cache Utilities (protected — root only)
-- `GET /api/cache/flush/:key` → `cache.FlushKey`
-- `GET /api/cache/flush-all` → `cache.FlushAll`
+### Cache Utilities (protected — primary root only)
+- `DELETE /api/cache/flush/:key` → `cache.FlushKey` — `authz.RequirePrimaryRoot`; Root 2 gets `403`. Audited by `middleware/audit`.
+- `DELETE /api/cache/flush-all` → `cache.FlushAll` — `authz.RequirePrimaryRoot`; Root 2 gets `403`. Audited by `middleware/audit`.
+- **Deprecated:** `GET /api/cache/flush/:key` and `GET /api/cache/flush-all` run the same handlers with the same guard, but `middleware/audit` records only `POST`/`PUT`/`PATCH`/`DELETE`, so a successful `GET` flush leaves no audit row. Use `DELETE`; the `GET` aliases stay only for compatibility until ops confirms no script depends on them.
 
 ### Catalogs
 - `GET /api/catalogs/client-types` → `clienttypes.ListClientTypes`
-- `GET /api/catalogs/roles` → `clientroles.ListClientRoles` (?client_id=...)
+- `GET /api/catalogs/roles` → `clientroles.ListClientRoles` (?client_id=...) — roles the caller may assign there: in any organization, a primary root gets every role below Owner and Root 2 only the roles within its own capabilities (Check-in, Analyst, Member, Viewer; never Admin, Event manager or Editor); everyone else needs a membership and gets the roles below its own (Owner/Admin only).
 - `GET /api/catalogs/design-templates` → `designtemplates.ListDesignTemplates` — list active design templates with color palettes and font sets
 - `GET /api/catalogs/design-templates/:id` → `designtemplates.GetDesignTemplate` — get single design template with full relations
 - `GET /api/catalogs/color-palettes` → `designtemplates.ListColorPalettes` — list color palettes with patterns and colors
@@ -247,6 +258,8 @@ cfg        := c.Get("config").(*models.Config)
 | `controllers/clienttypes/clientTypes.go` | `/api/catalogs/client-types` |
 | `controllers/clientroles/clientRoles.go` | `/api/catalogs/roles` |
 | `controllers/cache/cache.go` | `/api/cache*` |
+| `controllers/eventmembers/eventmembers.go` | `/api/events/:id/capabilities`, `/api/events/:id/members*` |
+| `controllers/sessions/sessions.go` | `/api/session*`, `/api/clients/:id/member-applications*` |
 | `controllers/health/health.go` | `/health` |
 | `controllers/eventconfig/eventconfig.go` | `/api/events/:id/config` |
 | `controllers/eventsection/eventsection.go` | `/api/events/:id/sections`, `/api/sections/:id` |
