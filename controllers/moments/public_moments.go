@@ -216,11 +216,6 @@ func getEventByIdentifier(identifier string) (*models.Event, error) {
 	return publicEventRepo.GetEventByIdentifier(identifier)
 }
 
-// uploadLimitKey returns the Redis key for tracking per-IP uploads for an event.
-func uploadLimitKey(eventID, ip string) string {
-	return fmt.Sprintf("moments:upload_count:%s:%s", eventID, ip)
-}
-
 const uploadWindowDays = 30
 
 // defaultMaxUploadsPerIP is the global fallback when EventConfig.MaxUploadsPerGuest is 0.
@@ -277,38 +272,6 @@ func maxUploadsForConfig(cfg *models.EventConfig) int {
 	return effectiveMaxUploads(cfg.MaxUploadsPerGuest)
 }
 
-// checkAndIncrementUploadLimit checks the per-IP upload counter.
-// maxUploads is the per-event configured limit; pass 0 to use the global default.
-// Returns (limitReached, currentCount, quotaReserved, error).
-func checkAndIncrementUploadLimit(ctx context.Context, eventID, ip string, maxUploads int) (bool, int64, bool, error) {
-	maxUploads = effectiveMaxUploads(maxUploads)
-	key := uploadLimitKey(eventID, ip)
-	if publicUploadCounter == nil {
-		return false, 0, false, nil
-	}
-	count, err := publicUploadCounter.Increment(ctx, key)
-	if err != nil {
-		// Redis unavailable — allow the upload rather than blocking
-		return false, 0, false, nil
-	}
-	// Set TTL on first increment
-	if count == 1 {
-		_ = publicUploadCounter.Expire(ctx, key, uploadWindowDays*24*time.Hour)
-	}
-	return count > int64(maxUploads), count, true, nil
-}
-
-func rollbackUploadLimit(eventID, ip string) {
-	if publicUploadCounter == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if _, err := publicUploadCounter.Decrement(ctx, uploadLimitKey(eventID, ip)); err != nil {
-		slog.Error("moment upload quota rollback failed", "event_id", eventID, "error", err)
-	}
-}
-
 func publicResourceServiceForEvent(event *models.Event) *resourcesService.ResourceService {
 	if publicResSvc == nil || event == nil {
 		return publicResSvc
@@ -316,7 +279,8 @@ func publicResourceServiceForEvent(event *models.Event) *resourcesService.Resour
 	return publicResSvc.WithBucket(event.MediaBucket).WithOrganization(event.ClientID)
 }
 
-func cleanupMomentUpload(eventID, ip, objectKey string, releaseQuota bool, scoped ...*resourcesService.ResourceService) {
+func cleanupMomentUpload(subject uploadQuotaSubject, objectKey string, releaseQuota bool, scoped ...*resourcesService.ResourceService) {
+	eventID := subject.eventID
 	svc := publicResSvc
 	if len(scoped) > 0 && scoped[0] != nil {
 		svc = scoped[0]
@@ -327,7 +291,7 @@ func cleanupMomentUpload(eventID, ip, objectKey string, releaseQuota bool, scope
 		}
 	}
 	if releaseQuota {
-		rollbackUploadLimit(eventID, ip)
+		rollbackUploadLimit(subject)
 	}
 }
 
@@ -342,7 +306,7 @@ func cleanupMultipartUpload(eventID, objectKey, uploadID string, scoped ...*reso
 	if err := svc.AbortMomentMultipartUpload(objectKey, uploadID); err != nil {
 		slog.Warn("multipart upload abort rollback failed", "event_id", eventID, "object_key", objectKey, "error", err)
 	}
-	cleanupMomentUpload(eventID, "", objectKey, false, svc)
+	cleanupMomentUpload(uploadQuotaSubject{eventID: eventID}, objectKey, false, svc)
 }
 
 const defaultPageLimit = 20
@@ -358,19 +322,7 @@ type uploadQuota struct {
 func getUploadQuota(c echo.Context, eventID uuid.UUID, cfg *models.EventConfig) uploadQuota {
 	limit := int64(maxUploadsForConfig(cfg))
 
-	var used int64
-	if publicUploadCounter != nil {
-		countStr, _ := publicUploadCounter.GetKey(c.Request().Context(), uploadLimitKey(eventID.String(), c.RealIP()))
-		fmt.Sscanf(countStr, "%d", &used)
-		if used < 0 {
-			used = 0
-		}
-	}
-
-	remaining := limit - used
-	if remaining < 0 {
-		remaining = 0
-	}
+	used, remaining := uploadSubjectUsage(c.Request().Context(), uploadQuotaSubjectFor(c, eventID.String()), maxUploadsForConfig(cfg))
 	return uploadQuota{Limit: limit, Used: used, Remaining: remaining}
 }
 
@@ -656,6 +608,7 @@ func allowMomentWallInvitation(c echo.Context, eventID uuid.UUID) (bool, error) 
 	if err != nil || inv == nil || inv.EventID != eventID {
 		return false, fmt.Errorf("token does not belong to this event")
 	}
+	setUploadQuotaInvitation(c, &token.InvitationID)
 	return true, nil
 }
 
@@ -868,6 +821,7 @@ func CreatePublicMoment(c echo.Context) error {
 	if err != nil || inv == nil || inv.EventID != event.ID {
 		return utils.Error(c, http.StatusUnauthorized, "Token does not belong to this event", "")
 	}
+	setUploadQuotaInvitation(c, &token.InvitationID)
 
 	// Per-IP upload limit — respect per-event config, fall back to global default.
 	// Check before reading the file, but only increment after a valid upload.
@@ -890,9 +844,10 @@ func CreatePublicMoment(c echo.Context) error {
 	if err != nil {
 		return respondMomentUploadError(c, "Error uploading file", err)
 	}
-	limitReached, uploadedCount, quotaReserved, _ := checkAndIncrementUploadLimit(c.Request().Context(), event.ID.String(), c.RealIP(), maxUploads)
+	quotaSubject := uploadQuotaSubjectFor(c, event.ID.String())
+	limitReached, uploadedCount, quotaReserved, _ := checkAndIncrementUploadLimit(c.Request().Context(), quotaSubject, maxUploads)
 	if limitReached {
-		cleanupMomentUpload(event.ID.String(), c.RealIP(), rawKey, quotaReserved, eventResSvc)
+		cleanupMomentUpload(quotaSubject, rawKey, quotaReserved, eventResSvc)
 		return writeUploadLimitReached(c, event.Name, maxUploads, uploadedCount)
 	}
 
@@ -912,7 +867,7 @@ func CreatePublicMoment(c echo.Context) error {
 	}
 
 	if err := momentsService.CreateMoment(&moment); err != nil {
-		cleanupMomentUpload(event.ID.String(), c.RealIP(), rawKey, quotaReserved, eventResSvc)
+		cleanupMomentUpload(quotaSubject, rawKey, quotaReserved, eventResSvc)
 		return utils.WriteFailed(c, "Error saving moment", err)
 	}
 
@@ -955,9 +910,10 @@ func CreateSharedMoment(c echo.Context) error {
 	if err != nil {
 		return respondMomentUploadError(c, "Error uploading file", err)
 	}
-	limitReached, uploadedCount, quotaReserved, _ := checkAndIncrementUploadLimit(c.Request().Context(), event.ID.String(), c.RealIP(), maxUploads)
+	quotaSubject := uploadQuotaSubjectFor(c, event.ID.String())
+	limitReached, uploadedCount, quotaReserved, _ := checkAndIncrementUploadLimit(c.Request().Context(), quotaSubject, maxUploads)
 	if limitReached {
-		cleanupMomentUpload(event.ID.String(), c.RealIP(), rawKey, quotaReserved, eventResSvc)
+		cleanupMomentUpload(quotaSubject, rawKey, quotaReserved, eventResSvc)
 		return writeUploadLimitReached(c, event.Name, maxUploads, uploadedCount)
 	}
 
@@ -975,7 +931,7 @@ func CreateSharedMoment(c echo.Context) error {
 	}
 
 	if err := momentsService.CreateMoment(&moment); err != nil {
-		cleanupMomentUpload(event.ID.String(), c.RealIP(), rawKey, quotaReserved, eventResSvc)
+		cleanupMomentUpload(quotaSubject, rawKey, quotaReserved, eventResSvc)
 		return utils.WriteFailed(c, "Error saving moment", err)
 	}
 
@@ -1295,6 +1251,7 @@ func validatePersonalUploadRequest(c echo.Context, identifier, prettyToken strin
 	if cfg != nil && cfg.HasAuthPasswordPreview() && !publicaccessproof.Validate(utils.PublicEventAccessToken(c), event.ID, eventsService.EventConfigAccessVersion(cfg)) {
 		return nil, nil, nil, newPublicUploadRequestError(http.StatusUnauthorized, "Event password required", "")
 	}
+	setUploadQuotaInvitation(c, &token.InvitationID)
 	return event, cfg, &token.InvitationID, nil
 }
 
@@ -1348,11 +1305,13 @@ func ensureUploadSlots(c echo.Context, event *models.Event, cfg *models.EventCon
 		return true, nil
 	}
 	maxUploads := maxUploadsForConfig(cfg)
-	countStr, _ := publicUploadCounter.GetKey(c.Request().Context(), uploadLimitKey(event.ID.String(), c.RealIP()))
-	var uploadedCount int64
-	fmt.Sscanf(countStr, "%d", &uploadedCount)
-	if uploadedCount+int64(requested) <= int64(maxUploads) {
+	uploadedCount, remaining := uploadSubjectUsage(c.Request().Context(), uploadQuotaSubjectFor(c, event.ID.String()), maxUploads)
+	if int64(requested) <= remaining {
 		return true, nil
+	}
+	if remaining <= 0 && uploadedCount < int64(maxUploads) {
+		// Only the per-IP backstop is exhausted.
+		uploadedCount = int64(maxUploads)
 	}
 	return false, writeUploadLimitReached(c, event.Name, maxUploads, uploadedCount)
 }
@@ -1424,17 +1383,18 @@ func confirmPresignedMoment(c echo.Context, event *models.Event, cfg *models.Eve
 	}
 	verifiedContentType, verifyErr := eventResSvc.VerifyMomentUploadSize(objectKey, contentType, expectedSize)
 	if verifyErr != nil {
-		cleanupMomentUpload(event.ID.String(), c.RealIP(), objectKey, false, eventResSvc)
+		cleanupMomentUpload(uploadQuotaSubject{eventID: event.ID.String()}, objectKey, false, eventResSvc)
 		return nil, respondMomentUploadError(c, "Upload verification failed", verifyErr)
 	}
 	contentType = verifiedContentType
 
 	maxUploads := maxUploadsForConfig(cfg)
-	ip := c.RealIP()
+	setUploadQuotaInvitation(c, invitationID)
+	quotaSubject := uploadQuotaSubjectFor(c, event.ID.String())
 	ctx := c.Request().Context()
-	limitReached, uploadedCount, quotaReserved, _ := checkAndIncrementUploadLimit(ctx, event.ID.String(), ip, maxUploads)
+	limitReached, uploadedCount, quotaReserved, _ := checkAndIncrementUploadLimit(ctx, quotaSubject, maxUploads)
 	if limitReached {
-		cleanupMomentUpload(event.ID.String(), ip, objectKey, quotaReserved, eventResSvc)
+		cleanupMomentUpload(quotaSubject, objectKey, quotaReserved, eventResSvc)
 		return nil, writeUploadLimitReached(c, event.Name, maxUploads, uploadedCount)
 	}
 
@@ -1455,14 +1415,14 @@ func confirmPresignedMoment(c echo.Context, event *models.Event, cfg *models.Eve
 			// MOM-6: a concurrent confirm of this upload won. Keep its object,
 			// give back this request's quota slot and answer with its moment.
 			if quotaReserved {
-				rollbackUploadLimit(event.ID.String(), ip)
+				rollbackUploadLimit(quotaSubject)
 			}
 			if existing, lookupErr := findConfirmedMoment(event.ID, objectKey); lookupErr == nil && existing != nil {
 				return existing, nil
 			}
 			return nil, utils.Error(c, http.StatusConflict, "Upload already confirmed", "")
 		}
-		cleanupMomentUpload(event.ID.String(), ip, objectKey, quotaReserved, eventResSvc)
+		cleanupMomentUpload(quotaSubject, objectKey, quotaReserved, eventResSvc)
 		return nil, utils.Error(c, http.StatusInternalServerError, "Error saving moment", "")
 	}
 	if tagErr := eventResSvc.MarkMomentUploadConfirmed(ctx, objectKey); tagErr != nil {
