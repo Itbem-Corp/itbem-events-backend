@@ -166,6 +166,7 @@ func (s *EventService) ListEventPage(clientID *uuid.UUID, caller *dtos.EventCall
 		}
 	}
 
+	sortEventListPage(filtered, query.Filter)
 	total := len(filtered)
 	start := (query.Page - 1) * query.PageSize
 	if start >= total {

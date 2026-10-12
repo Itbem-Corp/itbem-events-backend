@@ -328,7 +328,7 @@ func ListEventPage(clientID *uuid.UUID, caller *dtos.EventCallerAccess, query dt
 				AND moments.processing_status NOT IN ('pending', 'processing')
 		) AS pending_moment_count`).
 			Joins("EventType").
-			Order("events.event_date_time DESC").
+			Order(eventListOrder(query)).
 			Limit(query.PageSize).
 			Offset((query.Page - 1) * query.PageSize).
 			Find(&events).Error

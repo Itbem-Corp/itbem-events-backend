@@ -271,3 +271,19 @@ func TestStartupRepairsInvalidEventTimezonesSoListsLoad(t *testing.T) {
 	assert.Equal(t, "", badZone)
 	assert.Equal(t, "America/Mexico_City", goodZone)
 }
+
+// EVT-15: "Próximos" lists the soonest event first on the real SQL page.
+func TestListEventPageUpcomingIsSoonestFirst(t *testing.T) {
+	suffix := lifecycleSuffix()
+	org := createLifecycleClient(t, suffix, "ORDER")
+	far := createLifecycleEvent(t, &org, "Lejos "+suffix, "lejos-"+suffix)
+	soon := createLifecycleEvent(t, &org, "Pronto "+suffix, "pronto-"+suffix)
+	require.NoError(t, configuration.DB.Exec(`UPDATE events SET event_date_time = now() + interval '300 days' WHERE id = ?`, far.ID).Error)
+	require.NoError(t, configuration.DB.Exec(`UPDATE events SET event_date_time = now() + interval '5 days' WHERE id = ?`, soon.ID).Error)
+
+	events, _, _, err := ListEventPage(&org, nil, dtos.EventListQuery{Page: 1, PageSize: 12, Filter: "upcoming", Now: time.Now()})
+	require.NoError(t, err)
+	require.Len(t, events, 2)
+	assert.Equal(t, soon.ID, events[0].ID)
+	assert.Equal(t, far.ID, events[1].ID)
+}
