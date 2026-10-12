@@ -46,8 +46,8 @@ func expectApplicationWithModules(mock sqlmock.Sqlmock, code string, allowsPlatf
 }
 
 func expectOrganizations(mock sqlmock.Sqlmock, applicationID, userID uuid.UUID, rows *sqlmock.Rows) {
-	mock.ExpectQuery(`SELECT DISTINCT\s+clients.id`).
-		WithArgs(applicationID, userID).
+	mock.ExpectQuery(`WITH RECURSIVE direct_access`).
+		WithArgs(applicationID, userID, applicationID).
 		WillReturnRows(rows)
 }
 
@@ -408,5 +408,32 @@ func TestEventiAppEditorOnlySessionHasNoMetrics(t *testing.T) {
 	assert.NotContains(t, session.Capabilities, "metrics:view")
 	assert.NotContains(t, session.Organizations[0].Capabilities, "metrics:view")
 	assert.Contains(t, session.Capabilities, "analytics:view")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// ROLES-81: a parent-organization Owner may select the child organization as
+// workspace (organization-context issuance uses AllowsOrganization), with the
+// inherited role's capabilities; the query excludes other products' portals.
+func TestResolveIncludesInheritedChildOrganizations(t *testing.T) {
+	db, mock := applicationServiceTestDB(t)
+	userID := uuid.Must(uuid.NewV4())
+	parentID := uuid.Must(uuid.NewV4())
+	childID := uuid.Must(uuid.NewV4())
+	appID := expectApplication(mock, "cafettonhouse", false)
+	expectOrganizations(mock, appID, userID, sqlmock.NewRows([]string{"id", "name", "code", "logo", "access_role"}).
+		AddRow(parentID, "Cafetton House", "cafettonhouse", "", "Owner").
+		AddRow(childID, "Sucursal", "sucursal", "", "INHERITED_Owner"))
+	expectNoUserApplicationPolicy(mock, userID, appID)
+	service := NewSessionService(db, func(string) (*models.User, error) {
+		return &models.User{ID: userID, IsActive: true}, nil
+	})
+
+	session, err := service.Resolve("owner-sub", "cafettonhouse")
+	require.NoError(t, err)
+
+	assert.True(t, session.AllowsOrganization(childID))
+	require.Len(t, session.Organizations, 2)
+	assert.Equal(t, "INHERITED_Owner", session.Organizations[1].AccessRole)
+	assert.Contains(t, session.Organizations[1].Capabilities, "organizations:manage")
 	require.NoError(t, mock.ExpectationsWereMet())
 }

@@ -480,6 +480,11 @@ func TestEventAnalyticsStayAvailableToAnalyticsRolesOnEventiApp(t *testing.T) {
 				GetEventByIDRaw:      func(uuid.UUID) (*models.Event, error) { return &models.Event{ID: eventID, ClientID: &clientID}, nil },
 				CheckAccessRecursive: func(uuid.UUID, uuid.UUID) (bool, string) { return true, role },
 				GetEventMemberRole:   func(uuid.UUID, uuid.UUID) (string, bool, error) { return "", false, nil },
+				// The member's organization is inside the EventiApp session
+				// (organization checks by id stay in the session application).
+				ReachableClientIDsInApplication: func(_ uuid.UUID, _ string, ids []uuid.UUID) (map[uuid.UUID]bool, error) {
+					return map[uuid.UUID]bool{clientID: true}, nil
+				},
 			})
 			t.Cleanup(restore)
 

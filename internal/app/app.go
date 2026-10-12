@@ -454,19 +454,20 @@ func wireDependencies(cfg *models.Config) {
 	eventClientAccess := eventiapp.ParseEventClientAccess(cfg.EventClientAccess)
 	eventiapp.SetEventClientAccess(eventClientAccess)
 	authzHooks := authz.Hooks{
-		SyncUser:              userSvc.SyncUser,
-		CheckAccessRecursive:  clientRepo.CheckAccessRecursive,
-		CheckAccessRecursiveE: clientRepo.CheckAccessRecursiveE,
-		ResolveClientProduct:  clientRepo.ResolveClientProduct,
-		GetClientByID:         clientRepo.GetClientByID,
-		GetEventByIDRaw:       eventsRepo.GetEventByIDRaw,
-		GetEventSectionByID:   eventSectionRepo.GetEventSectionByID,
-		GetMomentByID:         momentRepo.GetMomentByID,
-		GetGuestByID:          guestRepo.GetGuestByID,
-		GetInvitationByIDLite: invitationRepo.GetInvitationByIDLite,
-		GetResourceByID:       resourceRepo.GetResourceByID,
-		GetEventMemberRole:    eventMemberRepo.RoleForUser,
-		GetEventMemberRoles:   eventMemberRepo.RolesForUser,
+		SyncUser:                        userSvc.SyncUser,
+		CheckAccessRecursive:            clientRepo.CheckAccessRecursive,
+		CheckAccessRecursiveE:           clientRepo.CheckAccessRecursiveE,
+		ResolveClientProduct:            clientRepo.ResolveClientProduct,
+		GetClientByID:                   clientRepo.GetClientByID,
+		GetEventByIDRaw:                 eventsRepo.GetEventByIDRaw,
+		GetEventSectionByID:             eventSectionRepo.GetEventSectionByID,
+		GetMomentByID:                   momentRepo.GetMomentByID,
+		GetGuestByID:                    guestRepo.GetGuestByID,
+		GetInvitationByIDLite:           invitationRepo.GetInvitationByIDLite,
+		GetResourceByID:                 resourceRepo.GetResourceByID,
+		GetEventMemberRole:              eventMemberRepo.RoleForUser,
+		GetEventMemberRoles:             eventMemberRepo.RolesForUser,
+		ReachableClientIDsInApplication: clientRepo.ReachableClientIDsInApplication,
 	}
 	if eventClientAccess {
 		// EVENT_CLIENT_ACCESS=on: the grant authority path, the grant-only
