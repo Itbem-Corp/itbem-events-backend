@@ -72,6 +72,7 @@ func TestVerifyEventAccess_RateLimitsGuessesPerEventAndIP(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(body), &payload))
 	assert.Equal(t, float64(http.StatusTooManyRequests), payload["status"])
 	assert.Equal(t, "too_many_attempts", payload["code"])
+	assert.Equal(t, "too_many_attempts", payload["error"])
 	assert.Equal(t, "Demasiados intentos. Espera unos minutos e inténtalo de nuevo.", payload["message"])
 	assert.Equal(t, "600", header.Get("Retry-After"))
 	assert.NotContains(t, body, "accessToken")

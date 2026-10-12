@@ -177,6 +177,8 @@ const (
 	EventPasswordRequiredMessage = "Esta invitación está protegida con contraseña."
 	EventUnavailableCode         = "event_unavailable"
 	EventUnavailableMessage      = "Esta invitación no está disponible en este momento."
+	EventGoneCode                = "event_gone"
+	EventGoneMessage             = "Este evento ya no está disponible"
 )
 
 func publicAccessFromRequest(c echo.Context) invitationsService.PublicAccess {
@@ -189,19 +191,17 @@ func publicAccessFromRequest(c echo.Context) invitationsService.PublicAccess {
 // eventUnavailable: the event is inactive or its access window is closed
 // (EVT-54). Message kept in Spanish; code for the public site.
 func eventUnavailable(c echo.Context) error {
-	return c.JSON(http.StatusForbidden, dtos.PublicErrorResponse{
-		Status:  http.StatusForbidden,
-		Message: EventUnavailableMessage,
-		Code:    EventUnavailableCode,
-	})
+	return c.JSON(http.StatusForbidden, dtos.NewPublicError(http.StatusForbidden, EventUnavailableMessage, EventUnavailableCode))
+}
+
+// eventGone: the invitation's event was deleted (410, same envelope and code
+// as page-spec).
+func eventGone(c echo.Context) error {
+	return c.JSON(http.StatusGone, dtos.NewPublicError(http.StatusGone, EventGoneMessage, EventGoneCode))
 }
 
 func eventPasswordRequired(c echo.Context) error {
-	return c.JSON(http.StatusUnauthorized, dtos.PublicErrorResponse{
-		Status:  http.StatusUnauthorized,
-		Message: EventPasswordRequiredMessage,
-		Code:    EventPasswordRequiredCode,
-	})
+	return c.JSON(http.StatusUnauthorized, dtos.NewPublicError(http.StatusUnauthorized, EventPasswordRequiredMessage, EventPasswordRequiredCode))
 }
 
 func GetInvitationByToken(c echo.Context) error {
@@ -212,7 +212,7 @@ func GetInvitationByToken(c echo.Context) error {
 	result, err := invitationSvc.GetInvitationByTokenWithAccess(token, publicAccessFromRequest(c))
 	if err != nil {
 		if errors.Is(err, invitationsService.ErrInvitationEventGone) {
-			return utils.Error(c, http.StatusGone, "Este evento ya no está disponible", "event_gone")
+			return eventGone(c)
 		}
 		if errors.Is(err, invitationsService.ErrInvitationPasswordRequired) {
 			return eventPasswordRequired(c)
@@ -262,17 +262,13 @@ func ConfirmRSVP(c echo.Context) error {
 	confirmation, err := invitationSvc.ConfirmRSVPWithAccess(publicAccessFromRequest(c), token, req.Status, req.Method, req.guestCount(), dietaryRestrictions, noteArgs...)
 	if err != nil {
 		if errors.Is(err, invitationsService.ErrInvitationEventGone) {
-			return utils.Error(c, http.StatusGone, "Este evento ya no está disponible", "event_gone")
+			return eventGone(c)
 		}
 		if errors.Is(err, invitationsService.ErrInvitationPasswordRequired) {
 			return eventPasswordRequired(c)
 		}
 		if errors.Is(err, invitationsService.ErrRSVPClosed) {
-			return c.JSON(http.StatusForbidden, dtos.PublicErrorResponse{
-				Status:  http.StatusForbidden,
-				Message: RSVPClosedMessage,
-				Code:    RSVPClosedCode,
-			})
+			return c.JSON(http.StatusForbidden, dtos.NewPublicError(http.StatusForbidden, RSVPClosedMessage, RSVPClosedCode))
 		}
 		if errors.Is(err, invitationsService.ErrInvitationEventUnavailable) {
 			return eventUnavailable(c)

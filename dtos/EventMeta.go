@@ -87,10 +87,17 @@ type EventRepairResponse struct {
 
 // PublicErrorResponse is the error envelope for public EventiApp endpoints that
 // need a machine-readable reason the public site can branch on. It keeps the
-// standard {status, message, error} keys and adds code.
+// standard {status, message, error} keys and adds code; build it with
+// NewPublicError so the code is always in both "code" and "error".
 type PublicErrorResponse struct {
 	Status  int    `json:"status"`
 	Message string `json:"message"`
 	Code    string `json:"code"`
 	Error   string `json:"error,omitempty"`
+}
+
+// NewPublicError builds a PublicErrorResponse with the stable lower_snake code
+// in both "code" and "error" (the convention of every public error).
+func NewPublicError(status int, message, code string) PublicErrorResponse {
+	return PublicErrorResponse{Status: status, Message: message, Code: code, Error: code}
 }

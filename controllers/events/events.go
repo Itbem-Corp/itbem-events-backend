@@ -763,7 +763,7 @@ const (
 )
 
 func pageSpecError(c echo.Context, status int, message, code string) error {
-	return c.JSON(status, dtos.PublicErrorResponse{Status: status, Message: message, Code: code, Error: code})
+	return c.JSON(status, dtos.NewPublicError(status, message, code))
 }
 
 // respondPageSpecAccessError maps the page-spec access errors shared by the
@@ -1028,11 +1028,7 @@ func tooManyPasswordAttempts(c echo.Context, retry time.Duration) error {
 		seconds = 1
 	}
 	c.Response().Header().Set("Retry-After", strconv.Itoa(seconds))
-	return c.JSON(http.StatusTooManyRequests, dtos.PublicErrorResponse{
-		Status:  http.StatusTooManyRequests,
-		Message: eventPasswordTooManyAttemptsMessage,
-		Code:    eventPasswordTooManyAttemptsCode,
-	})
+	return c.JSON(http.StatusTooManyRequests, dtos.NewPublicError(http.StatusTooManyRequests, eventPasswordTooManyAttemptsMessage, eventPasswordTooManyAttemptsCode))
 }
 
 func GetEventMeta(c echo.Context) error {

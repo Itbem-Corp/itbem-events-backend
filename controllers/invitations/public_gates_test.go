@@ -66,6 +66,7 @@ func TestConfirmRSVP_AfterDeadlineReturns403RSVPClosed(t *testing.T) {
 	payload := decodePublicError(t, rec.Body.Bytes())
 	assert.Equal(t, float64(403), payload["status"])
 	assert.Equal(t, "rsvp_closed", payload["code"])
+	assert.Equal(t, "rsvp_closed", payload["error"], "the code is also in error (S1)")
 	assert.Equal(t, "Las confirmaciones para este evento ya están cerradas.", payload["message"])
 	assert.False(t, *updated)
 }
@@ -79,6 +80,7 @@ func TestConfirmRSVP_PasswordEventWithoutProofReturns401(t *testing.T) {
 	require.NoError(t, ConfirmRSVP(c))
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	assert.Equal(t, "event_password_required", decodePublicError(t, rec.Body.Bytes())["code"])
+	assert.Equal(t, "event_password_required", decodePublicError(t, rec.Body.Bytes())["error"])
 	assert.False(t, *updated)
 
 	proof, _, err := publicaccessproof.Generate(eventID, eventsService.EventConfigAccessVersion(cfg), time.Hour)
@@ -123,4 +125,14 @@ func TestConfirmRSVP_ClosedAccessWindowReturnsEventUnavailable(t *testing.T) {
 	assert.Equal(t, EventUnavailableCode, payload["code"])
 	assert.Equal(t, EventUnavailableMessage, payload["message"])
 	assert.False(t, *updated)
+}
+
+func TestEventGoneUsesThePublicEnvelope(t *testing.T) {
+	c, rec := newEchoCtx(http.MethodGet, "/invitations/ByToken/ABC123", "")
+	require.NoError(t, eventGone(c))
+	assert.Equal(t, http.StatusGone, rec.Code)
+	payload := decodePublicError(t, rec.Body.Bytes())
+	assert.Equal(t, "event_gone", payload["code"])
+	assert.Equal(t, "event_gone", payload["error"])
+	assert.Equal(t, "Este evento ya no está disponible", payload["message"])
 }
