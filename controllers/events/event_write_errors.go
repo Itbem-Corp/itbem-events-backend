@@ -20,6 +20,7 @@ const (
 	eventErrorNameTaken       = "event_name_taken"
 	eventErrorIdentifierTaken = "event_identifier_taken"
 	eventErrorInvalidTimezone = "invalid_timezone"
+	eventErrorNameTooLong     = "event_name_too_long"
 	// eventErrorListFailed is the code of a failed event read (list,
 	// dashboard, notifications). The cause is logged, never returned: driver
 	// errors carry SQL and column names (ROLES-68).
@@ -44,6 +45,9 @@ func respondEventReadError(c echo.Context, err error, what string) error {
 // respondEventPayloadError answers a payload that could not be applied to an
 // event: 400 always, with a Spanish message for the cases the form can fix.
 func respondEventPayloadError(c echo.Context, err error) error {
+	if errors.Is(err, dtos.ErrEventNameTooLong) {
+		return utils.Error(c, http.StatusBadRequest, "El nombre del evento admite máximo 120 caracteres.", eventErrorNameTooLong)
+	}
 	if errors.Is(err, dtos.ErrInvalidEventTimezone) {
 		return utils.Error(c, http.StatusBadRequest, "Zona horaria inválida", eventErrorInvalidTimezone)
 	}

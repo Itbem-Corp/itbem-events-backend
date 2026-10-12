@@ -352,3 +352,11 @@ func TestDuplicateNameRequested(t *testing.T) {
 	assert.False(t, duplicateNameRequested(dtos.EventPayload{Name: &blank}))
 	assert.True(t, duplicateNameRequested(dtos.EventPayload{Name: &name}))
 }
+
+func TestDuplicateShiftDatesDefaultsToTrue(t *testing.T) {
+	off := false
+	on := true
+	assert.True(t, duplicateShiftDates(dtos.EventPayload{}))
+	assert.True(t, duplicateShiftDates(dtos.EventPayload{ShiftDates: &on}))
+	assert.False(t, duplicateShiftDates(dtos.EventPayload{ShiftDates: &off}))
+}

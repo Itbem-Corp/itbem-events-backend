@@ -3,6 +3,7 @@ package dtos
 import (
 	"encoding/json"
 	"events-stocks/models"
+	"strings"
 	"testing"
 	"time"
 
@@ -265,4 +266,28 @@ func TestEventPayloadApplyToRejectsInvalidTimezone(t *testing.T) {
 	err := payload.ApplyTo(&event)
 	assert.ErrorIs(t, err, ErrInvalidEventTimezone)
 	assert.Equal(t, "America/Mexico_City", event.Timezone, "the stored value must not change")
+}
+
+func TestEventPayloadApplyToCapsNewEventName(t *testing.T) {
+	long := strings.Repeat("a", EventNameMaxChars+1)
+	var event models.Event
+	err := EventPayload{Name: &long}.ApplyTo(&event)
+	assert.ErrorIs(t, err, ErrEventNameTooLong)
+
+	exact := strings.Repeat("ñ", EventNameMaxChars)
+	assert.NoError(t, EventPayload{Name: &exact}.ApplyTo(&event))
+
+	// A legacy over-long name sent back unchanged keeps saving.
+	legacy := models.Event{Name: long}
+	assert.NoError(t, EventPayload{Name: &long}.ApplyTo(&legacy))
+}
+
+func TestEventPayloadReadsShiftDatesAliases(t *testing.T) {
+	for _, body := range []string{`{"shift_dates":false}`, `{"shiftDates":false}`, `{"ShiftDates":false}`} {
+		var payload EventPayload
+		assert.NoError(t, json.Unmarshal([]byte(body), &payload))
+		if assert.NotNil(t, payload.ShiftDates, body) {
+			assert.False(t, *payload.ShiftDates)
+		}
+	}
 }

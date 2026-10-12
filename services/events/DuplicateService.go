@@ -117,7 +117,7 @@ func (s *DuplicateService) DuplicateEventByID(sourceID uuid.UUID, payload dtos.E
 			return err
 		}
 
-		config, err := duplicateEventConfig(tx, sourceID, duplicate.ID, duplicate.EventDateTime.Sub(source.EventDateTime), time.Now())
+		config, err := duplicateEventConfig(tx, sourceID, duplicate.ID, duplicateShiftDates(payload), duplicate.EventDateTime.Sub(source.EventDateTime), time.Now())
 		if err != nil {
 			return err
 		}
@@ -257,6 +257,12 @@ func duplicateNameRequested(payload dtos.EventPayload) bool {
 	return payload.Name != nil && strings.TrimSpace(*payload.Name) != ""
 }
 
+// duplicateShiftDates reads shift_dates (default true). With false the copy
+// keeps the source's window and RSVP deadline exactly as they are.
+func duplicateShiftDates(payload dtos.EventPayload) bool {
+	return payload.ShiftDates == nil || *payload.ShiftDates
+}
+
 func eventNameExists(tx *gorm.DB, clientID *uuid.UUID, name string) (bool, error) {
 	return eventsrepository.EventNameTakenFold(tx, clientID, name, uuid.Nil)
 }
@@ -288,7 +294,7 @@ func eventIdentifierExists(tx *gorm.DB, identifier string) (bool, error) {
 	return count > 0, nil
 }
 
-func duplicateEventConfig(tx *gorm.DB, sourceID, duplicateID uuid.UUID, dateShift time.Duration, now time.Time) (models.EventConfig, error) {
+func duplicateEventConfig(tx *gorm.DB, sourceID, duplicateID uuid.UUID, shiftDates bool, dateShift time.Duration, now time.Time) (models.EventConfig, error) {
 	var sourceConfig models.EventConfig
 	if err := tx.First(&sourceConfig, "id = ?", sourceID).Error; err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -302,7 +308,9 @@ func duplicateEventConfig(tx *gorm.DB, sourceID, duplicateID uuid.UUID, dateShif
 	}
 
 	config := copyEventConfigForDuplicate(&sourceConfig, duplicateID)
-	shiftDuplicateConfigDates(&config, dateShift, now)
+	if shiftDates {
+		shiftDuplicateConfigDates(&config, dateShift, now)
+	}
 	if err := tx.Create(&config).Error; err != nil {
 		return models.EventConfig{}, err
 	}

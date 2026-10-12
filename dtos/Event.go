@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 	// Embed the IANA database so timezone validation does not depend on the
 	// image's /usr/share/zoneinfo (the runtime image is debian-slim).
 	_ "time/tzdata"
@@ -34,6 +35,10 @@ type EventPayload struct {
 	AllowGuestAccess *bool           `json:"allow_guest_access"`
 	SlugLocked       *bool           `json:"slug_locked"`
 	IsActive         *bool           `json:"is_active"`
+	// ShiftDates is read only by POST /events/:id/duplicate (default true):
+	// shift the copy's access window and RSVP deadline by the event-date
+	// offset. ApplyTo ignores it.
+	ShiftDates *bool `json:"shift_dates"`
 }
 
 func (p *EventPayload) UnmarshalJSON(data []byte) error {
@@ -94,6 +99,9 @@ func (p *EventPayload) UnmarshalJSON(data []byte) error {
 	if next.IsActive, err = eventPayloadBool(fields, "is_active", "isActive", "IsActive"); err != nil {
 		return fieldError("is_active", err)
 	}
+	if next.ShiftDates, err = eventPayloadBool(fields, "shift_dates", "shiftDates", "ShiftDates"); err != nil {
+		return fieldError("shift_dates", err)
+	}
 
 	*p = next
 	return nil
@@ -144,7 +152,13 @@ func (p EventPayload) ApplyTo(event *models.Event) error {
 		}
 	}
 	if p.Name != nil {
-		event.Name = strings.TrimSpace(*p.Name)
+		name := strings.TrimSpace(*p.Name)
+		// A new or changed name is capped; a stored longer name that is sent
+		// back unchanged keeps saving (events created before the cap).
+		if utf8.RuneCountInString(name) > EventNameMaxChars && name != event.Name {
+			return ErrEventNameTooLong
+		}
+		event.Name = name
 	}
 	if p.Identifier != nil {
 		event.Identifier = strings.TrimSpace(*p.Identifier)
@@ -454,6 +468,13 @@ func NewEventResponses(events []models.Event) []EventResponse {
 // used to be stored and then broke every list, count and overview query that
 // does `event_date_time AT TIME ZONE events.timezone` (EVT-3, SET-16).
 var ErrInvalidEventTimezone = errors.New("zona horaria inválida")
+
+// EventNameMaxChars caps an event name (characters, after trimming).
+const EventNameMaxChars = 120
+
+// ErrEventNameTooLong: a new or changed event name over EventNameMaxChars
+// (400 event_name_too_long).
+var ErrEventNameTooLong = errors.New("event name exceeds 120 characters")
 
 // ValidateEventTimezone accepts "" (the default zone is applied later) and any
 // IANA zone name time.LoadLocation knows, such as "America/Mexico_City" or
