@@ -216,6 +216,10 @@ func TestEventAssignmentCanNarrowButNeverElevateOrganizationPermissions(t *testi
 		CheckAccessRecursive: func(uuid.UUID, uuid.UUID) (bool, string) { return true, "Guest" },
 	})
 	t.Cleanup(restoreGuestRole)
+	// The organization authority is memoized per request, so the changed
+	// organization role is observed by a new request context.
+	c = e.NewContext(httptest.NewRequest(http.MethodPut, "/api/events/event-id", nil), httptest.NewRecorder())
+	c.Set("cognito_sub", "event-member")
 	_, _, err = RequireEventCapability(c, eventID, CapabilityEventManage)
 	require.Error(t, err)
 }

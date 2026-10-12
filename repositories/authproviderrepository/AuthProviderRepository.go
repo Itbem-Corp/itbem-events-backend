@@ -101,6 +101,20 @@ func InviteUserForTenant(email, firstName, lastName, tenantCode, provider string
 	}
 }
 
+func ResendInvitation(username string, provider string) error {
+	ctx := context.Background()
+	if provider == "" {
+		provider = DefaultProvider
+	}
+
+	switch strings.ToLower(provider) {
+	case "cognito", "aws":
+		return awsrepository.ResendCognitoInvitation(ctx, username)
+	default:
+		return fmt.Errorf("unsupported auth provider: %s", provider)
+	}
+}
+
 // AuthProviderRepo implements ports.AuthProviderRepository.
 type AuthProviderRepo struct{}
 
@@ -123,6 +137,9 @@ func (r *AuthProviderRepo) SetUserEnabled(sub string, enabled bool, provider str
 }
 func (r *AuthProviderRepo) InviteUser(email, firstName, lastName, provider string) (*dtos.AuthUser, error) {
 	return InviteUser(email, firstName, lastName, provider)
+}
+func (r *AuthProviderRepo) ResendInvitation(username string, provider string) error {
+	return ResendInvitation(username, provider)
 }
 func (r *AuthProviderRepo) InviteUserForTenant(email, firstName, lastName, tenantCode, provider string) (*dtos.AuthUser, error) {
 	return InviteUserForTenant(email, firstName, lastName, tenantCode, provider)

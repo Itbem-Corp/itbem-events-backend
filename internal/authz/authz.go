@@ -27,6 +27,18 @@ type Hooks struct {
 	GetInvitationByIDLite func(invitationID uuid.UUID) (*models.Invitation, error)
 	GetResourceByID       func(resourceID uuid.UUID) (*models.Resource, error)
 	GetEventMemberRole    func(eventID, userID uuid.UUID) (role string, found bool, err error)
+	// CheckAccessRecursiveE is the error-returning organization lookup. When
+	// configured it replaces CheckAccessRecursive so a database failure is a
+	// 500, never a silent deny or a fall-through to the event-client path.
+	CheckAccessRecursiveE func(userID, targetClientID uuid.UUID) (bool, string, error)
+	// HasEventClientGrant is configured only while EVENT_CLIENT_ACCESS is on.
+	// A nil hook disables the event-client authority path entirely.
+	HasEventClientGrant func(eventID, userID uuid.UUID) (bool, error)
+	// ResolveClientProduct returns the product code of the nearest branded
+	// ancestor of an organization ("" when unresolved).
+	ResolveClientProduct func(clientID uuid.UUID) (string, error)
+	// GetEventMemberRoles batches GetEventMemberRole for one user.
+	GetEventMemberRoles func(eventIDs []uuid.UUID, userID uuid.UUID) (map[uuid.UUID]string, error)
 }
 
 var hooks Hooks
@@ -67,6 +79,18 @@ func ReplaceHooksForTest(replacement Hooks) func() {
 	if replacement.GetEventMemberRole != nil {
 		hooks.GetEventMemberRole = replacement.GetEventMemberRole
 	}
+	if replacement.CheckAccessRecursiveE != nil {
+		hooks.CheckAccessRecursiveE = replacement.CheckAccessRecursiveE
+	}
+	if replacement.HasEventClientGrant != nil {
+		hooks.HasEventClientGrant = replacement.HasEventClientGrant
+	}
+	if replacement.ResolveClientProduct != nil {
+		hooks.ResolveClientProduct = replacement.ResolveClientProduct
+	}
+	if replacement.GetEventMemberRoles != nil {
+		hooks.GetEventMemberRoles = replacement.GetEventMemberRoles
+	}
 	return func() {
 		hooks = previous
 	}
@@ -96,6 +120,9 @@ const (
 	// Owner/Admin (direct or inherited) and platform roots hold it; callers
 	// that do not reserve the metrics module keep using analytics:view.
 	CapabilityMetricsView Capability = "metrics:view"
+	// CapabilityEventClientsManage lets an organization manager assign
+	// external event clients (event_client_grants) to an event.
+	CapabilityEventClientsManage Capability = "event:clients:manage"
 )
 
 func (e *Failure) Error() string {
@@ -209,10 +236,10 @@ func RequireClientAccess(user *models.User, clientID uuid.UUID) error {
 	if user.IsPlatformAdmin() {
 		return nil
 	}
-	if hooks.CheckAccessRecursive == nil {
-		return dependencyFailure("CheckAccessRecursive")
+	allowed, _, err := checkOrganizationAccess(user.ID, clientID)
+	if err != nil {
+		return err
 	}
-	allowed, _ := hooks.CheckAccessRecursive(user.ID, clientID)
 	if !allowed {
 		return &Failure{
 			Status:  http.StatusForbidden,
@@ -236,14 +263,32 @@ func RequireClientCapability(user *models.User, clientID uuid.UUID, capability C
 		}
 		return &Failure{Status: http.StatusForbidden, Message: "Access denied", Detail: "Your platform administrator level cannot perform this action"}
 	}
-	if hooks.CheckAccessRecursive == nil {
-		return dependencyFailure("CheckAccessRecursive")
+	allowed, role, err := checkOrganizationAccess(user.ID, clientID)
+	if err != nil {
+		return err
 	}
-	allowed, role := hooks.CheckAccessRecursive(user.ID, clientID)
 	if !allowed || !roleHasCapability(role, capability) {
 		return &Failure{Status: http.StatusForbidden, Message: "Access denied", Detail: "Your organization role cannot perform this action"}
 	}
 	return nil
+}
+
+// checkOrganizationAccess prefers the error-returning lookup. The legacy
+// boolean hook remains a fallback for callers (and tests) that only configure
+// it; it cannot distinguish a lookup failure from a deny.
+func checkOrganizationAccess(userID, clientID uuid.UUID) (bool, string, error) {
+	if hooks.CheckAccessRecursiveE != nil {
+		allowed, role, err := hooks.CheckAccessRecursiveE(userID, clientID)
+		if err != nil {
+			return false, "", &Failure{Status: http.StatusInternalServerError, Message: "Authorization error", Detail: "organization access lookup failed"}
+		}
+		return allowed, role, nil
+	}
+	if hooks.CheckAccessRecursive == nil {
+		return false, "", dependencyFailure("CheckAccessRecursive")
+	}
+	allowed, role := hooks.CheckAccessRecursive(userID, clientID)
+	return allowed, role, nil
 }
 
 func requireTenantClientBoundary(user *models.User, clientID uuid.UUID) error {
@@ -308,6 +353,8 @@ func roleHasCapability(role string, capability Capability) bool {
 		return code == "EVENT_MANAGER" || code == "CHECKIN"
 	case CapabilityAnalyticsView:
 		return code == "EVENT_MANAGER" || code == "EDITOR" || code == "ANALYST"
+	case CapabilityEventClientsManage:
+		return code == "EVENT_MANAGER"
 	case CapabilityMembersManage, CapabilityOrgManage, CapabilityMetricsView:
 		return false
 	default:
@@ -345,7 +392,7 @@ func RequireEventAccess(c echo.Context, eventID uuid.UUID) (*models.User, *model
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := EnsureEventAccess(user, event); err != nil {
+	if _, err := memoizedEventAuthority(c, user, event); err != nil {
 		return nil, nil, err
 	}
 	if event.ClientID != nil {
@@ -440,18 +487,11 @@ func loadEventAccessInputs(
 	return user.user, event.event, nil
 }
 
+// EnsureEventAccess has no request context, so it resolves the authority
+// fresh. It honours the same precedence as RequireEventAccess.
 func EnsureEventAccess(user *models.User, event *models.Event) error {
-	if user.IsPlatformAdmin() {
-		return nil
-	}
-	if event.ClientID == nil {
-		return &Failure{
-			Status:  http.StatusForbidden,
-			Message: "Access denied",
-			Detail:  "Event is not linked to a client",
-		}
-	}
-	return RequireClientAccess(user, *event.ClientID)
+	_, err := resolveEventAuthority(user, event)
+	return err
 }
 
 func RequireEventCapability(c echo.Context, eventID uuid.UUID, capability Capability) (*models.User, *models.Event, error) {
@@ -459,17 +499,24 @@ func RequireEventCapability(c echo.Context, eventID uuid.UUID, capability Capabi
 	if err != nil {
 		return nil, nil, err
 	}
-	if user.IsPlatformAdmin() {
+	authority, err := memoizedEventAuthority(c, user, event)
+	if err != nil {
+		return nil, nil, err
+	}
+	switch authority.kind {
+	case authorityPlatform:
 		if platformHasCapability(user, capability) {
 			return user, event, nil
 		}
 		return nil, nil, &Failure{Status: http.StatusForbidden, Message: "Access denied", Detail: "Your platform administrator level cannot perform this action"}
+	case authorityEventClient:
+		if eventClientHasCapability(capability) {
+			return user, event, nil
+		}
+		return nil, nil, &Failure{Status: http.StatusForbidden, Message: "Access denied", Detail: "Your event client access cannot perform this action"}
 	}
-	if event.ClientID == nil {
-		return nil, nil, &Failure{Status: http.StatusForbidden, Message: "Access denied", Detail: "Event is not linked to a client"}
-	}
-	if err := RequireClientCapability(user, *event.ClientID, capability); err != nil {
-		return nil, nil, err
+	if !roleHasCapability(authority.role, capability) {
+		return nil, nil, &Failure{Status: http.StatusForbidden, Message: "Access denied", Detail: "Your organization role cannot perform this action"}
 	}
 	if hooks.GetEventMemberRole != nil {
 		role, found, memberErr := hooks.GetEventMemberRole(eventID, user.ID)
@@ -780,12 +827,24 @@ func RequireResourceSectionForCreate(user *models.User, sectionID *uuid.UUID) er
 	return nil
 }
 
+// RequireClientMoveAccess authorizes an organization change of an event.
+// Both sides need organization-level event:manage, so an event-client grant
+// (which never satisfies an organization check) can never move an event, and
+// only the primary platform administrator may detach an event entirely.
 func RequireClientMoveAccess(user *models.User, oldClientID, newClientID *uuid.UUID) error {
 	if newClientID == nil {
-		return nil
+		if oldClientID == nil || user.IsPrimaryRoot() {
+			return nil
+		}
+		return &Failure{Status: http.StatusForbidden, Message: "Access denied", Detail: "Only the primary platform administrator can detach an event from its organization"}
 	}
 	if oldClientID != nil && *oldClientID == *newClientID {
 		return nil
+	}
+	if oldClientID != nil {
+		if err := RequireClientCapability(user, *oldClientID, CapabilityEventManage); err != nil {
+			return err
+		}
 	}
 	if err := RequireClientCapability(user, *newClientID, CapabilityEventManage); err != nil {
 		return err

@@ -44,13 +44,27 @@ type Session struct {
 	User          dtos.UserProfileResponse `json:"user"`
 	Organizations []OrganizationAccess     `json:"organizations"`
 	Capabilities  []string                 `json:"capabilities"`
+	// EventAccess is present only when the caller holds active EventiApp
+	// event-client grants (EVENT_CLIENT_ACCESS on, events module, non-root).
+	EventAccess *EventAccess `json:"event_access,omitempty"`
 }
+
+// EventAccess summarizes event-client grants: event-scoped powers on the
+// assigned events only, never organization access.
+type EventAccess struct {
+	AssignedEvents int      `json:"assigned_events"`
+	Capabilities   []string `json:"capabilities"`
+}
+
+// EventClientAccessFunc counts the caller's active event-client grants.
+type EventClientAccessFunc func(userID uuid.UUID) (int, error)
 
 type SessionService struct {
 	db              *gorm.DB
 	syncUser        UserSyncFunc
 	profileImageURL ProfileImageURLFunc
 	localBootstrap  LocalIdentityBootstrapFunc
+	eventAccess     EventClientAccessFunc
 	cacheMu         sync.RWMutex
 	cache           map[string]cachedSession
 }
@@ -76,6 +90,14 @@ func NewSessionService(db *gorm.DB, syncUser UserSyncFunc, profileImageURL ...Pr
 func (service *SessionService) ConfigureLocalBootstrap(bootstrap LocalIdentityBootstrapFunc) {
 	if service != nil {
 		service.localBootstrap = bootstrap
+	}
+}
+
+// ConfigureEventClientAccess enables the grant-only session path. It is only
+// configured while EVENT_CLIENT_ACCESS is on.
+func (service *SessionService) ConfigureEventClientAccess(count EventClientAccessFunc) {
+	if service != nil {
+		service.eventAccess = count
 	}
 }
 
@@ -135,7 +157,18 @@ func (service *SessionService) Resolve(cognitoSub, tenantCode string) (*Session,
 	if policyExists && !policy.IsActive {
 		return nil, fmt.Errorf("%w: application policy is inactive", ErrApplicationAccessDenied)
 	}
-	if (!application.AllowsPlatformAdmin || !user.IsPlatformAdmin()) && len(organizations) == 0 {
+	platformAuthority := application.AllowsPlatformAdmin && user.IsPlatformAdmin()
+	var eventAccess *EventAccess
+	if service.eventAccess != nil && moduleEnabled(application.Modules, "events") && !platformAuthority {
+		assigned, countErr := service.eventAccess(user.ID)
+		if countErr != nil {
+			return nil, fmt.Errorf("load event client access: %w", countErr)
+		}
+		if assigned > 0 {
+			eventAccess = &EventAccess{AssignedEvents: assigned, Capabilities: eventClientCapabilities()}
+		}
+	}
+	if !platformAuthority && len(organizations) == 0 && eventAccess == nil {
 		return nil, fmt.Errorf("%w: no eligible organization", ErrApplicationAccessDenied)
 	}
 	for index := range organizations {
@@ -150,6 +183,13 @@ func (service *SessionService) Resolve(cognitoSub, tenantCode string) (*Session,
 		profileImage = service.profileImageURL(user)
 	}
 	capabilities := effectiveApplicationCapabilities(application, user, organizations)
+	if eventAccess != nil {
+		// eventAccess only exists with the events module, so the module
+		// removals in effectiveApplicationCapabilities cannot apply to it.
+		union := newCapabilitySet(capabilities...)
+		union.add(eventAccess.Capabilities...)
+		capabilities = union.values()
+	}
 	if policyExists {
 		capabilities = intersectCapabilities(capabilities, policy.Capabilities)
 	}
@@ -158,6 +198,7 @@ func (service *SessionService) Resolve(cognitoSub, tenantCode string) (*Session,
 		User:          dtos.NewUserProfileResponse(user, profileImage),
 		Organizations: organizations,
 		Capabilities:  capabilities,
+		EventAccess:   eventAccess,
 	}
 	service.cacheMu.Lock()
 	service.cache[cacheKey] = cachedSession{session: session, expiresAt: time.Now().Add(sessionCacheTTL)}
@@ -315,6 +356,14 @@ func (service *SessionService) SetMemberApplicationAccess(
 	return nil
 }
 
+// InvalidateCognitoSub drops every cached session of one identity in this
+// process. Other API instances converge within sessionCacheTTL.
+func (service *SessionService) InvalidateCognitoSub(cognitoSub string) {
+	if service != nil {
+		service.invalidateCognitoSub(cognitoSub)
+	}
+}
+
 func (service *SessionService) invalidateCognitoSub(cognitoSub string) {
 	if strings.TrimSpace(cognitoSub) == "" {
 		return
@@ -443,6 +492,16 @@ func effectiveApplicationCapabilities(
 	}
 	return capabilities.values()
 }
+
+// eventClientCapabilities is the session projection of the authz
+// event-client ceiling (view, event:manage, guest:manage, checkin:run,
+// analytics:view). Parity is tested in an external test package.
+func eventClientCapabilities() []string {
+	return []string{"analytics:view", "checkin:run", "events:manage", "events:view", "guests:manage"}
+}
+
+// EventClientCapabilities exposes the projection for parity tests.
+func EventClientCapabilities() []string { return eventClientCapabilities() }
 
 func organizationCapabilities(role string) []string {
 	code := strings.TrimPrefix(strings.ToUpper(strings.TrimSpace(role)), "INHERITED_")

@@ -147,51 +147,14 @@ func IsMember(userID, clientID uuid.UUID) (bool, string) {
 }
 
 // CheckAccessRecursive verifica si el usuario tiene acceso directo o heredado
-// sobre targetClientID usando una única CTE recursiva de PostgreSQL.
-// Reemplaza la implementación recursiva anterior que generaba hasta 6 queries.
+// sobre targetClientID. Legacy wrapper: a lookup error reads as "no access".
+// Authorization uses CheckAccessRecursiveE so a failure is never a silent deny.
 func CheckAccessRecursive(userID, targetClientID uuid.UUID) (bool, string) {
-	type result struct {
-		RoleCode string
-		Level    int
-	}
-	var row result
-
-	err := gormrepository.DB().Raw(`
-		WITH RECURSIVE anc AS (
-			SELECT id, parent_id, 0 AS level
-			FROM clients
-			WHERE id = ? AND deleted_at IS NULL
-			UNION ALL
-			SELECT c.id, c.parent_id, a.level + 1
-			FROM clients c
-			INNER JOIN anc a ON c.id = a.parent_id
-			WHERE c.deleted_at IS NULL
-		)
-		SELECT cr.code AS role_code, anc.level
-		FROM anc
-		JOIN client_members cm ON cm.client_id = anc.id
-			AND cm.user_id = ?
-			AND cm.is_active = true
-		JOIN client_roles cr ON cr.id = cm.client_role_id
-		ORDER BY anc.level ASC
-		LIMIT 1
-	`, targetClientID, userID).Scan(&row).Error
-
-	if err != nil || row.RoleCode == "" {
+	allowed, role, err := CheckAccessRecursiveE(userID, targetClientID)
+	if err != nil {
 		return false, ""
 	}
-
-	// Membresía directa (nivel 0): retornar rol tal cual
-	if row.Level == 0 {
-		return true, row.RoleCode
-	}
-
-	// Heredado desde un ancestro: solo OWNER y ADMIN propagan acceso
-	roleUpper := strings.ToUpper(row.RoleCode)
-	if roleUpper == "OWNER" || roleUpper == "ADMIN" {
-		return true, "INHERITED_" + roleUpper
-	}
-	return false, ""
+	return allowed, role
 }
 
 // 🔥 NUEVO: GetChildrenClients
@@ -355,6 +318,12 @@ func (r *ClientRepo) GetChildrenClients(parentID uuid.UUID) ([]models.Client, er
 }
 func (r *ClientRepo) CheckAccessRecursive(userID, targetClientID uuid.UUID) (bool, string) {
 	return CheckAccessRecursive(userID, targetClientID)
+}
+func (r *ClientRepo) CheckAccessRecursiveE(userID, targetClientID uuid.UUID) (bool, string, error) {
+	return CheckAccessRecursiveE(userID, targetClientID)
+}
+func (r *ClientRepo) ResolveClientProduct(clientID uuid.UUID) (string, error) {
+	return ResolveClientProduct(clientID)
 }
 func (r *ClientRepo) IsMember(userID, clientID uuid.UUID) (bool, string) {
 	return IsMember(userID, clientID)
