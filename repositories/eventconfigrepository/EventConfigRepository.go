@@ -14,7 +14,7 @@ func CreateEventConfig(m *models.EventConfig) error {
 }
 
 func UpdateEventConfig(m *models.EventConfig) error {
-	return gormrepository.Update(m, m.ID)
+	return gormrepository.UpdateOmitAssociations(m, m.ID)
 }
 
 func DeleteEventConfig(id uuid.UUID) error {

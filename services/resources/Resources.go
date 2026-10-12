@@ -898,6 +898,9 @@ func (rs *ResourceService) VerifyMomentUploadSize(s3Key, requestedContentType st
 	if metadataReader, ok := storage.(ports.ObjectStorageMetadataReader); ok {
 		metadata, metadataErr := metadataReader.GetObjectMetadata(filename, folder, rs.Bucket, rs.Provider)
 		if metadataErr != nil {
+			if errors.Is(metadataErr, ports.ErrObjectNotFound) {
+				return "", fmt.Errorf("%w: %s", ErrUploadNotFound, s3Key)
+			}
 			return "", fmt.Errorf("failed to verify uploaded object: %w", metadataErr)
 		}
 		if metadata.Size <= 0 {
@@ -928,7 +931,7 @@ func (rs *ResourceService) VerifyMomentUploadSize(s3Key, requestedContentType st
 		return "", fmt.Errorf("failed to verify uploaded object: %w", existsErr)
 	}
 	if !exists {
-		return "", services.ValidationError{Msg: "uploaded file was not found; wait for the upload to finish and retry"}
+		return "", fmt.Errorf("%w: %s", ErrUploadNotFound, s3Key)
 	}
 	return contentType, nil
 }
@@ -1262,7 +1265,10 @@ func (rs *ResourceService) sanitizeAndOptimizeUpload(
 
 	optimized, newContentType, err := rs.Optimizer.OptimizeIfImage(file, header, contentType)
 	if err != nil {
-		return nil, "", "", fmt.Errorf("failed to optimize image: %w", err)
+		// The allowlisted type passed but libvips could not decode the bytes
+		// (corrupt or mislabeled file): the file is the problem, not the
+		// service (STU-43). Other optimizer failures are server errors.
+		return nil, "", "", optimizerUploadError(contentType, err)
 	}
 
 	// Usa filename forzado o genera UUID
@@ -1274,6 +1280,27 @@ func (rs *ResourceService) sanitizeAndOptimizeUpload(
 
 	finalName = updateFilenameExtension(baseName, newContentType)
 	return optimized, finalName, newContentType, nil
+}
+
+// optimizerUploadError maps an optimizer failure: only a decode failure is
+// the file's fault (400 invalid_media_file); I/O, missing format support or a
+// processing failure stays a server error with the generic upload message.
+func optimizerUploadError(contentType string, err error) error {
+	if errors.Is(err, ErrImageDecode) {
+		return InvalidMediaFileError{Reason: fmt.Sprintf("decode %s: %v", contentType, err)}
+	}
+	return fmt.Errorf("failed to optimize image: %w", err)
+}
+
+// mediaKindMismatch reports a declared raster image or video whose sniffed
+// content has another top-level type. SVG is text by nature and is skipped.
+func mediaKindMismatch(declared, detected string) bool {
+	declaredKind, _, _ := strings.Cut(declared, "/")
+	if (declaredKind != "image" && declaredKind != "video") || declared == "image/svg+xml" {
+		return false
+	}
+	detectedKind, _, _ := strings.Cut(detected, "/")
+	return detectedKind != declaredKind
 }
 
 func detectUploadContentType(file multipart.File, header *multipart.FileHeader) (string, error) {
@@ -1308,6 +1335,12 @@ func detectUploadContentType(file multipart.File, header *multipart.FileHeader) 
 		}
 		if AllowedMimeTypes[detected] || detected == "text/html; charset=utf-8" || detected == "text/html" {
 			return detected, nil
+		}
+		// The bytes are recognizably something else (text, PDF, an audio
+		// file...) than the photo or video the name and header claim, e.g. a
+		// text file renamed .png (STU-43).
+		if mediaKindMismatch(declared, detected) {
+			return "", InvalidMediaFileError{Reason: fmt.Sprintf("declared %s, content is %s", declared, detected)}
 		}
 	}
 	return declared, nil

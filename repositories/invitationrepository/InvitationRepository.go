@@ -77,7 +77,22 @@ func ListInvitations() ([]models.Invitation, error) {
 // InvitationRepo implements ports.InvitationRepository.
 type InvitationRepo struct{}
 
+// InvitationHasLiveGuest reports whether a non-deleted guest holds the
+// invitation. Public token checks use it so a deleted guest's link stops
+// granting access, including guests deleted before revocation existed.
+func InvitationHasLiveGuest(invitationID uuid.UUID) (bool, error) {
+	var exists bool
+	err := configuration.DB.
+		Raw("SELECT EXISTS (SELECT 1 FROM guests WHERE guests.invitation_id = ? AND guests.deleted_at IS NULL)", invitationID).
+		Scan(&exists).Error
+	return exists, err
+}
+
 func NewInvitationRepo() *InvitationRepo { return &InvitationRepo{} }
+
+func (r *InvitationRepo) InvitationHasLiveGuest(invitationID uuid.UUID) (bool, error) {
+	return InvitationHasLiveGuest(invitationID)
+}
 
 func (r *InvitationRepo) CreateInvitation(m *models.Invitation) error { return CreateInvitation(m) }
 func (r *InvitationRepo) UpdateInvitation(m *models.Invitation) error { return UpdateInvitation(m) }

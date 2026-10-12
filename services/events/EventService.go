@@ -7,6 +7,7 @@ import (
 	"events-stocks/dtos"
 	"events-stocks/internal/storagekeys"
 	"events-stocks/models"
+	"events-stocks/repositories/eventsrepository"
 	sqsrepository "events-stocks/repositories/sqsrepository"
 	"events-stocks/services/cacheutil"
 	"events-stocks/services/ports"
@@ -166,6 +167,7 @@ func (s *EventService) ListEventPage(clientID *uuid.UUID, caller *dtos.EventCall
 		}
 	}
 
+	sortEventListPage(filtered, query.Filter)
 	total := len(filtered)
 	start := (query.Page - 1) * query.PageSize
 	if start >= total {
@@ -249,7 +251,37 @@ func dashboardCalendarDaysUntil(eventTime time.Time, timeZone string, now time.T
 	return int(eventDay.Sub(today) / (24 * time.Hour))
 }
 
+// eventNameAvailabilityRepository is implemented by the production events
+// repository; lightweight adapters without it skip the case-insensitive check
+// and rely on the exact unique index.
+type eventNameAvailabilityRepository interface {
+	EventNameTaken(clientID *uuid.UUID, name string, excludeID uuid.UUID) (bool, error)
+}
+
+// EnsureEventNameAvailable rejects a name another live event of the same
+// organization already uses, ignoring case (EVT-22): "Boda" and "boda" are the
+// same event name for the organizer. excludeID is the event being renamed.
+// The error wraps eventsrepository.ErrEventNameAlreadyExists (409
+// event_name_taken).
+func (s *EventService) EnsureEventNameAvailable(clientID *uuid.UUID, name string, excludeID uuid.UUID) error {
+	repo, ok := s.repo.(eventNameAvailabilityRepository)
+	if !ok || strings.TrimSpace(name) == "" {
+		return nil
+	}
+	taken, err := repo.EventNameTaken(clientID, name, excludeID)
+	if err != nil {
+		return err
+	}
+	if taken {
+		return fmt.Errorf("%w: %q differs only in letter case or spacing", eventsrepository.ErrEventNameAlreadyExists, name)
+	}
+	return nil
+}
+
 func (s *EventService) CreateEvent(obj *models.Event) error {
+	if err := s.EnsureEventNameAvailable(obj.ClientID, obj.Name, uuid.Nil); err != nil {
+		return err
+	}
 	if obj.Identifier == "" && obj.Name != "" {
 		obj.Identifier = s.generateUniqueIdentifier(obj.Name)
 	}

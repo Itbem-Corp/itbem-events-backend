@@ -22,6 +22,7 @@ import (
 	"events-stocks/utils"
 
 	"github.com/gofrs/uuid"
+	"gorm.io/gorm"
 )
 
 var ErrInvalidMomentProcessingStatus = errors.New("invalid moment processing status")
@@ -275,6 +276,10 @@ func (s *MomentService) ApplyMediaProcessingCallback(callback dtos.MediaProcessi
 	}
 
 	moment, err := s.repo.GetMomentByID(momentID)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		// Deleted while its job ran (MOM-4): a terminal no-op, never a 500.
+		return s.deletedMomentCallback(momentID)
+	}
 	if err != nil {
 		return err
 	}

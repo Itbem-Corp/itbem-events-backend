@@ -7,6 +7,7 @@ import (
 	invitationsService "events-stocks/services/invitations"
 	"events-stocks/utils"
 	"github.com/labstack/echo/v4"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -168,15 +169,56 @@ func (r RSVPRequest) rsvpTextFields() (dietaryRestrictions string, notes string,
 	return "", "", false
 }
 
+// Public error codes the public site branches on.
+const (
+	RSVPClosedCode               = "rsvp_closed"
+	RSVPClosedMessage            = "Las confirmaciones para este evento ya están cerradas."
+	EventPasswordRequiredCode    = "event_password_required"
+	EventPasswordRequiredMessage = "Esta invitación está protegida con contraseña."
+	EventUnavailableCode         = "event_unavailable"
+	EventUnavailableMessage      = "Esta invitación no está disponible en este momento."
+	EventGoneCode                = "event_gone"
+	EventGoneMessage             = "Este evento ya no está disponible"
+)
+
+func publicAccessFromRequest(c echo.Context) invitationsService.PublicAccess {
+	return invitationsService.PublicAccess{
+		PasswordProof: utils.PublicEventAccessToken(c),
+		PreviewToken:  utils.PublicPreviewToken(c),
+	}
+}
+
+// eventUnavailable: the event is inactive or its access window is closed
+// (EVT-54). Message kept in Spanish; code for the public site.
+func eventUnavailable(c echo.Context) error {
+	return c.JSON(http.StatusForbidden, dtos.NewPublicError(http.StatusForbidden, EventUnavailableMessage, EventUnavailableCode))
+}
+
+// eventGone: the invitation's event was deleted (410, same envelope and code
+// as page-spec).
+func eventGone(c echo.Context) error {
+	return c.JSON(http.StatusGone, dtos.NewPublicError(http.StatusGone, EventGoneMessage, EventGoneCode))
+}
+
+func eventPasswordRequired(c echo.Context) error {
+	return c.JSON(http.StatusUnauthorized, dtos.NewPublicError(http.StatusUnauthorized, EventPasswordRequiredMessage, EventPasswordRequiredCode))
+}
+
 func GetInvitationByToken(c echo.Context) error {
 	token := utils.PublicInvitationToken(c)
 	if token == "" {
 		return utils.Error(c, http.StatusBadRequest, "Missing token", "")
 	}
-	result, err := invitationSvc.GetInvitationByToken(token)
+	result, err := invitationSvc.GetInvitationByTokenWithAccess(token, publicAccessFromRequest(c))
 	if err != nil {
+		if errors.Is(err, invitationsService.ErrInvitationEventGone) {
+			return eventGone(c)
+		}
+		if errors.Is(err, invitationsService.ErrInvitationPasswordRequired) {
+			return eventPasswordRequired(c)
+		}
 		if errors.Is(err, invitationsService.ErrInvitationEventUnavailable) {
-			return utils.Error(c, http.StatusForbidden, "Event is not public", "")
+			return eventUnavailable(c)
 		}
 		if errors.Is(err, invitationsService.ErrInvitationEventAccessFailed) {
 			return utils.Error(c, http.StatusInternalServerError, "Error loading event access", err.Error())
@@ -217,18 +259,36 @@ func ConfirmRSVP(c echo.Context) error {
 	if hasSeparateNotes {
 		noteArgs = append(noteArgs, notes)
 	}
-	confirmation, err := invitationSvc.ConfirmRSVPWithResult(token, req.Status, req.Method, req.guestCount(), dietaryRestrictions, noteArgs...)
+	confirmation, err := invitationSvc.ConfirmRSVPWithAccess(publicAccessFromRequest(c), token, req.Status, req.Method, req.guestCount(), dietaryRestrictions, noteArgs...)
 	if err != nil {
+		if errors.Is(err, invitationsService.ErrInvitationEventGone) {
+			return eventGone(c)
+		}
+		if errors.Is(err, invitationsService.ErrInvitationPasswordRequired) {
+			return eventPasswordRequired(c)
+		}
+		if errors.Is(err, invitationsService.ErrRSVPClosed) {
+			return c.JSON(http.StatusForbidden, dtos.NewPublicError(http.StatusForbidden, RSVPClosedMessage, RSVPClosedCode))
+		}
 		if errors.Is(err, invitationsService.ErrInvitationEventUnavailable) {
-			return utils.Error(c, http.StatusForbidden, "Event is not public", "")
+			return eventUnavailable(c)
 		}
 		if errors.Is(err, invitationsService.ErrInvitationEventAccessFailed) {
 			return utils.Error(c, http.StatusInternalServerError, "Error loading event access", err.Error())
 		}
+		var tooLong *invitationsService.RSVPTextTooLongError
+		if errors.As(err, &tooLong) {
+			return utils.Error(c, http.StatusBadRequest, tooLong.Message(), "rsvp_text_too_long")
+		}
 		if errors.Is(err, invitationsService.ErrInvalidRSVPRequest) {
 			return utils.Error(c, http.StatusBadRequest, "Invalid RSVP request", err.Error())
 		}
-		return utils.Error(c, http.StatusUnauthorized, "RSVP confirmation failed", err.Error())
+		if errors.Is(err, invitationsService.ErrInvalidRSVPToken) {
+			return utils.Error(c, http.StatusUnauthorized, "RSVP confirmation failed", invitationsService.ErrInvalidRSVPToken.Error())
+		}
+		// Anything else is a persistence failure: log it, never echo it.
+		slog.Error("rsvp confirmation failed", "error", err)
+		return utils.Error(c, http.StatusInternalServerError, "No pudimos guardar tu respuesta. Intenta de nuevo en unos minutos.", "rsvp_save_failed")
 	}
 
 	return utils.Success(c, http.StatusOK, "RSVP confirmed", dtos.NewRSVPConfirmationResponse(confirmation.Guest, confirmation.PrettyToken))

@@ -180,9 +180,12 @@ func TestMomentByEventIDAndContentURLQueryScopesIdempotencyToEventAndActiveRecor
 	stmt := momentByEventIDAndContentURLQuery(db, eventID, contentURL).First(&moment).Statement
 	sqlText := strings.ToLower(stmt.SQL.String())
 
-	assert.Contains(t, sqlText, "event_id = $1 and content_url = $2")
+	// The raw key also matches processing_input_key once processing replaced
+	// content_url, so a late confirm retry finds the same moment (MOM-6).
+	assert.Contains(t, sqlText, "event_id = $1 and (content_url = $2 or processing_input_key = $3)")
 	assert.Contains(t, sqlText, "deleted_at")
-	assert.Equal(t, []interface{}{eventID, contentURL, 1}, stmt.Vars)
+	assert.Contains(t, sqlText, "order by created_at asc")
+	assert.Equal(t, []interface{}{eventID, contentURL, contentURL, 1}, stmt.Vars)
 }
 
 func TestLoadPublicWallPageStartsCountAndItemsConcurrently(t *testing.T) {
