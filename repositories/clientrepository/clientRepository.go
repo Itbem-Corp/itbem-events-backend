@@ -85,7 +85,46 @@ func ListClientsPaginated(userID *uuid.UUID, query dtos.ClientsListQuery) ([]mod
 	if err := group.Wait(); err != nil {
 		return nil, 0, err
 	}
+	if userID != nil {
+		if err := attachAccessRoles(*userID, clients); err != nil {
+			return nil, 0, err
+		}
+	}
 	return clients, total, nil
+}
+
+// attachAccessRoles fills the read-only Client.AccessRole projection. The
+// field is `gorm:"-"` (it is never a column), so GORM drops the access_role
+// column of the list query when scanning; it is loaded here for the page's
+// ids from the same scoped reach. Without it every row looked direct
+// (inherited=false) and owner-based checks saw no role at all.
+func attachAccessRoles(userID uuid.UUID, clients []models.Client) error {
+	if len(clients) == 0 {
+		return nil
+	}
+	ids := make([]uuid.UUID, len(clients))
+	for i := range clients {
+		ids[i] = clients[i].ID
+	}
+	var rows []struct {
+		ClientID   uuid.UUID
+		AccessRole string
+	}
+	if err := gormrepository.DB().Table("clients").
+		Joins(scopedAccessJoin, userID).
+		Where("clients.id IN ?", ids).
+		Select("scoped_access.client_id AS client_id, scoped_access.access_role AS access_role").
+		Scan(&rows).Error; err != nil {
+		return err
+	}
+	roles := make(map[uuid.UUID]string, len(rows))
+	for _, row := range rows {
+		roles[row.ClientID] = row.AccessRole
+	}
+	for i := range clients {
+		clients[i].AccessRole = roles[clients[i].ID]
+	}
+	return nil
 }
 
 // CountUserClientStatuses counts the organizations the user can reach over
