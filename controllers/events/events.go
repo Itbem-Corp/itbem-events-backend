@@ -981,17 +981,20 @@ func VerifyEventAccess(c echo.Context) error {
 		})
 	}
 
+	// Only failures count per IP: the slot is reserved before the compare (so
+	// parallel bursts cannot overshoot) and refunded on success. When the
+	// event-wide failure budget is spent the per-IP cap is tightened instead of
+	// blocking every guest of the event.
 	clientIP := c.RealIP()
-	if ok, retry := eventPasswordLimiter.ReserveIPAttempt(event.ID, clientIP); !ok {
-		return tooManyPasswordAttempts(c, retry)
-	}
-	if exceeded, retry := eventPasswordLimiter.EventFailuresExceeded(event.ID); exceeded {
+	underAttack, _ := eventPasswordLimiter.EventFailuresExceeded(event.ID)
+	if ok, retry := eventPasswordLimiter.ReserveIPFailure(event.ID, clientIP, underAttack); !ok {
 		return tooManyPasswordAttempts(c, retry)
 	}
 	if !publicaccessproof.PasswordMatches(cfg.NormalizedAuthPasswordPreview(), password) {
 		eventPasswordLimiter.RecordFailure(event.ID)
 		return utils.Error(c, http.StatusUnauthorized, "Contraseña incorrecta", "")
 	}
+	eventPasswordLimiter.RefundIPFailure(event.ID, clientIP)
 
 	accessVersion := eventsService.EventConfigAccessVersion(cfg)
 	accessToken, expiresAt, err := publicaccessproof.Generate(event.ID, accessVersion, eventPasswordAccessTTL)
@@ -1008,7 +1011,8 @@ func VerifyEventAccess(c echo.Context) error {
 	})
 }
 
-// eventPasswordLimiter caps verify-access guesses per event+IP and per event.
+// eventPasswordLimiter caps failed verify-access guesses per event+IP, with a
+// tighter per-IP cap while the event-wide failure budget is spent.
 var eventPasswordLimiter = publicaccessproof.NewAttemptLimiter(func() *redis.Client {
 	return configuration.RedisClient
 }, nil)

@@ -81,18 +81,58 @@ func TestVerifyEventAccess_RateLimitsGuessesPerEventAndIP(t *testing.T) {
 	assert.Contains(t, body, `"accessToken"`)
 }
 
-func TestVerifyEventAccess_RateLimitsFailuresPerEventAcrossIPs(t *testing.T) {
+func TestVerifyEventAccess_EventWideFailuresTightenPerIPCapWithoutBlockingGuests(t *testing.T) {
 	setupVerifyAccessLimitTest(t)
 
+	// A distributed guesser spends the event-wide failure budget from many IPs.
 	for i := 0; i < publicaccessproof.PasswordFailuresPerEvent; i++ {
 		code, _, _ := verifyAccessFrom(t, fmt.Sprintf("10.0.%d.%d", i/250, i%250+1), "wrong-pass")
 		require.Equal(t, http.StatusUnauthorized, code, "failure %d", i+1)
 	}
 
-	code, body, header := verifyAccessFrom(t, "192.0.2.200", "secreto")
+	// A guest with the right password is never blocked by other IPs' failures.
+	code, body, _ := verifyAccessFrom(t, "192.0.2.200", "secreto")
+	assert.Equal(t, http.StatusOK, code)
+	assert.Contains(t, body, `"accessToken"`)
+
+	// A new guessing IP is now held to the tightened cap.
+	for i := 0; i < publicaccessproof.PasswordFailuresPerIPUnderAttack; i++ {
+		code, _, _ := verifyAccessFrom(t, "192.0.2.201", "wrong-pass")
+		require.Equal(t, http.StatusUnauthorized, code, "tightened failure %d", i+1)
+	}
+	code, body, header := verifyAccessFrom(t, "192.0.2.201", "wrong-pass")
 	assert.Equal(t, http.StatusTooManyRequests, code)
 	assert.Contains(t, body, `"code":"too_many_attempts"`)
-	assert.Equal(t, "900", header.Get("Retry-After"))
+	assert.Equal(t, "600", header.Get("Retry-After"))
+}
+
+func TestVerifyEventAccess_CorrectLoginsFromOneIPAreNeverLimited(t *testing.T) {
+	setupVerifyAccessLimitTest(t)
+
+	for i := 0; i < publicaccessproof.PasswordAttemptsPerIP*3; i++ {
+		code, _, _ := verifyAccessFrom(t, "203.0.113.50", "secreto")
+		require.Equal(t, http.StatusOK, code, "guest %d on a shared venue IP", i+1)
+	}
+	// Some failures from the same IP still leave room for correct logins.
+	for i := 0; i < publicaccessproof.PasswordAttemptsPerIP-1; i++ {
+		code, _, _ := verifyAccessFrom(t, "203.0.113.50", "typo")
+		require.Equal(t, http.StatusUnauthorized, code)
+	}
+	code, _, _ := verifyAccessFrom(t, "203.0.113.50", "secreto")
+	assert.Equal(t, http.StatusOK, code)
+}
+
+func TestVerifyEventAccess_IPv6AddressesInOne64ShareTheBudget(t *testing.T) {
+	setupVerifyAccessLimitTest(t)
+
+	for i := 0; i < publicaccessproof.PasswordAttemptsPerIP; i++ {
+		code, _, _ := verifyAccessFrom(t, fmt.Sprintf("2001:db8:aa:bb::%x", i+1), "wrong-pass")
+		require.Equal(t, http.StatusUnauthorized, code, "failure %d", i+1)
+	}
+	code, _, _ := verifyAccessFrom(t, "2001:db8:aa:bb::ffff", "wrong-pass")
+	assert.Equal(t, http.StatusTooManyRequests, code, "rotating inside one /64 does not reset the budget")
+	code, _, _ = verifyAccessFrom(t, "2001:db8:aa:cc::1", "secreto")
+	assert.Equal(t, http.StatusOK, code)
 }
 
 func TestVerifyEventAccess_SuccessfulGuestsDoNotConsumeEventBudget(t *testing.T) {
