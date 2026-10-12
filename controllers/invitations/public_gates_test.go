@@ -108,3 +108,19 @@ func TestGetInvitationByToken_PasswordEventWithoutProofReturns401(t *testing.T) 
 	assert.Contains(t, rec.Body.String(), `"rsvp_open":true`)
 	assert.Contains(t, rec.Body.String(), `"rsvp_deadline":null`)
 }
+
+// EVT-54: RSVP with the access window closed answers a Spanish message and
+// the event_unavailable code instead of "Event is not public".
+func TestConfirmRSVP_ClosedAccessWindowReturnsEventUnavailable(t *testing.T) {
+	ended := time.Now().Add(-time.Hour)
+	_, updated := installGateService(t, &models.EventConfig{ID: uuid.Must(uuid.NewV4()), ActiveUntil: &ended})
+
+	c, rec := newEchoCtx(http.MethodPost, "/rsvp", `{"pretty_token":"ABC123","status":"confirmed","guest_count":1}`)
+	require.NoError(t, ConfirmRSVP(c))
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	payload := decodePublicError(t, rec.Body.Bytes())
+	assert.Equal(t, EventUnavailableCode, payload["code"])
+	assert.Equal(t, EventUnavailableMessage, payload["message"])
+	assert.False(t, *updated)
+}

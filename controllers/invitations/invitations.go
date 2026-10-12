@@ -175,6 +175,8 @@ const (
 	RSVPClosedMessage            = "Las confirmaciones para este evento ya están cerradas."
 	EventPasswordRequiredCode    = "event_password_required"
 	EventPasswordRequiredMessage = "Esta invitación está protegida con contraseña."
+	EventUnavailableCode         = "event_unavailable"
+	EventUnavailableMessage      = "Esta invitación no está disponible en este momento."
 )
 
 func publicAccessFromRequest(c echo.Context) invitationsService.PublicAccess {
@@ -182,6 +184,16 @@ func publicAccessFromRequest(c echo.Context) invitationsService.PublicAccess {
 		PasswordProof: utils.PublicEventAccessToken(c),
 		PreviewToken:  utils.PublicPreviewToken(c),
 	}
+}
+
+// eventUnavailable: the event is inactive or its access window is closed
+// (EVT-54). Message kept in Spanish; code for the public site.
+func eventUnavailable(c echo.Context) error {
+	return c.JSON(http.StatusForbidden, dtos.PublicErrorResponse{
+		Status:  http.StatusForbidden,
+		Message: EventUnavailableMessage,
+		Code:    EventUnavailableCode,
+	})
 }
 
 func eventPasswordRequired(c echo.Context) error {
@@ -206,7 +218,7 @@ func GetInvitationByToken(c echo.Context) error {
 			return eventPasswordRequired(c)
 		}
 		if errors.Is(err, invitationsService.ErrInvitationEventUnavailable) {
-			return utils.Error(c, http.StatusForbidden, "Event is not public", "")
+			return eventUnavailable(c)
 		}
 		if errors.Is(err, invitationsService.ErrInvitationEventAccessFailed) {
 			return utils.Error(c, http.StatusInternalServerError, "Error loading event access", err.Error())
@@ -263,7 +275,7 @@ func ConfirmRSVP(c echo.Context) error {
 			})
 		}
 		if errors.Is(err, invitationsService.ErrInvitationEventUnavailable) {
-			return utils.Error(c, http.StatusForbidden, "Event is not public", "")
+			return eventUnavailable(c)
 		}
 		if errors.Is(err, invitationsService.ErrInvitationEventAccessFailed) {
 			return utils.Error(c, http.StatusInternalServerError, "Error loading event access", err.Error())
