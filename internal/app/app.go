@@ -465,15 +465,16 @@ func wireDependencies(cfg *models.Config) {
 			access, err := clientRepo.CheckApplicationAccessRecursive(userID, clientID, application)
 			return authz.ApplicationAccess(access), err
 		},
-		GetClientByID:         clientRepo.GetClientByID,
-		GetEventByIDRaw:       eventsRepo.GetEventByIDRaw,
-		GetEventSectionByID:   eventSectionRepo.GetEventSectionByID,
-		GetMomentByID:         momentRepo.GetMomentByID,
-		GetGuestByID:          guestRepo.GetGuestByID,
-		GetInvitationByIDLite: invitationRepo.GetInvitationByIDLite,
-		GetResourceByID:       resourceRepo.GetResourceByID,
-		GetEventMemberRole:    eventMemberRepo.RoleForUser,
-		GetEventMemberRoles:   eventMemberRepo.RolesForUser,
+		GetClientByID:                   clientRepo.GetClientByID,
+		GetEventByIDRaw:                 eventsRepo.GetEventByIDRaw,
+		GetEventSectionByID:             eventSectionRepo.GetEventSectionByID,
+		GetMomentByID:                   momentRepo.GetMomentByID,
+		GetGuestByID:                    guestRepo.GetGuestByID,
+		GetInvitationByIDLite:           invitationRepo.GetInvitationByIDLite,
+		GetResourceByID:                 resourceRepo.GetResourceByID,
+		GetEventMemberRole:              eventMemberRepo.RoleForUser,
+		GetEventMemberRoles:             eventMemberRepo.RolesForUser,
+		ReachableClientIDsInApplication: clientRepo.ReachableClientIDsInApplication,
 	}
 	if eventClientAccess {
 		// EVENT_CLIENT_ACCESS=on: the grant authority path, the grant-only

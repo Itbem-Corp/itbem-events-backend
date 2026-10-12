@@ -837,8 +837,8 @@ func TestGetEvents_ReturnsPublicEventWithoutRedisCache(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	var body struct {
-		Message string               `json:"message"`
-		Data    []dtos.EventResponse `json:"data"`
+		Message string                     `json:"message"`
+		Data    []dtos.PublicEventResponse `json:"data"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.Equal(t, "Event loaded", body.Message)
@@ -917,6 +917,228 @@ func TestGetEvents_AllowsPrivateEventWithInvitationToken(t *testing.T) {
 	require.NoError(t, GetEvents(c))
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"name":"Privado"`)
+}
+
+// publicEventReadAllowedKeys is the whole anonymous contract of
+// GET /api/events/:key; anything else is organizer, organization or internal data.
+var publicEventReadAllowedKeys = map[string]bool{
+	"id": true, "name": true, "identifier": true, "description": true,
+	"cover_image_url": true, "cover_view_url": true, "cover_view_url_expires_at": true,
+	"view_url": true, "view_url_expires_at": true, "event_date_time": true,
+	"address": true, "second_address": true, "timezone": true, "language": true,
+	"organizer_name": true,
+}
+
+// eventWithPrivateFields carries every field an anonymous visitor must not see.
+func eventWithPrivateFields(eventID uuid.UUID, identifier string, active bool) *models.Event {
+	clientID := uuid.Must(uuid.NewV4())
+	maxGuests := 150
+	return &models.Event{
+		ID:                   eventID,
+		ClientID:             &clientID,
+		Client:               &models.Client{ID: clientID, Name: "Organizacion Privada"},
+		Name:                 "Boda Protegida",
+		Identifier:           identifier,
+		Address:              "Calle Privada 123",
+		CoverImageURL:        "events/protegida/cover.webp",
+		CoverPendingURL:      "events/protegida/pending.webp",
+		CoverProcessingJobID: "job-private-123",
+		CoverProcessingError: "internal processing failure",
+		CustomDomain:         "boda.example.test",
+		OrganizerName:        "Ana",
+		OrganizerEmail:       "ana@example.test",
+		OrganizerPhone:       "+525500000000",
+		MaxGuests:            &maxGuests,
+		IsActive:             active,
+		EventConfig:          models.EventConfig{ID: eventID, AuthPasswordPreview: "secreto"},
+	}
+}
+
+func stubPublicEventRead(t *testing.T, event *models.Event, cfg *models.EventConfig) {
+	t.Helper()
+	restoreEventSvc := eventSvc
+	restoreEventConfigSvc := eventConfigSvc
+	restoreCoverResourceSvc := coverResourceSvc
+	restoreTokenRepo := eventAccessTokenRepo
+	restoreInvitationRepo := eventInvitationRepo
+	t.Cleanup(func() {
+		eventSvc = restoreEventSvc
+		eventConfigSvc = restoreEventConfigSvc
+		coverResourceSvc = restoreCoverResourceSvc
+		eventAccessTokenRepo = restoreTokenRepo
+		eventInvitationRepo = restoreInvitationRepo
+	})
+	eventSvc = eventsService.NewEventService(&mockEventsRepo{
+		GetEventByIdentifierFunc: func(identifier string) (*models.Event, error) {
+			copied := *event
+			return &copied, nil
+		},
+	}, &mockCacheRepo{})
+	eventConfigSvc = eventsService.NewEventConfigService(&mockEventConfigRepo{cfg: cfg}, &mockCacheRepo{})
+	eventAccessTokenRepo = nil
+	eventInvitationRepo = nil
+	coverResourceSvc = nil
+}
+
+func getPublicEvent(t *testing.T, target string, header map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	c, rec := newEchoCtx(http.MethodGet, target, "")
+	for name, value := range header {
+		c.Request().Header.Set(name, value)
+	}
+	c.SetParamNames("key")
+	c.SetParamValues(strings.TrimPrefix(strings.SplitN(target, "?", 2)[0], "/api/events/"))
+	require.NoError(t, GetEvents(c))
+	return rec
+}
+
+func assertNoPrivateEventData(t *testing.T, body string) {
+	t.Helper()
+	for _, private := range []string{
+		"Organizacion Privada", "ana@example.test", "+525500000000", "boda.example.test",
+		"job-private-123", "internal processing failure", "pending.webp", "secreto",
+	} {
+		assert.NotContains(t, body, private)
+	}
+}
+
+func TestGetEvents_PublicEventReturnsOnlyPublicFields(t *testing.T) {
+	eventID := uuid.Must(uuid.NewV4())
+	event := eventWithPrivateFields(eventID, "boda-publica", true)
+	stubPublicEventRead(t, event, &models.EventConfig{ID: eventID, IsPublic: true})
+
+	rec := getPublicEvent(t, "/api/events/boda-publica", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var body struct {
+		Message string                       `json:"message"`
+		Data    []map[string]json.RawMessage `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, "Event loaded", body.Message)
+	require.Len(t, body.Data, 1, "the legacy array envelope is kept")
+	for key := range body.Data[0] {
+		assert.True(t, publicEventReadAllowedKeys[key], "unexpected public key %q", key)
+	}
+	assert.JSONEq(t, `"Boda Protegida"`, string(body.Data[0]["name"]))
+	assert.JSONEq(t, `"`+eventID.String()+`"`, string(body.Data[0]["id"]))
+	assert.JSONEq(t, `"events/protegida/cover.webp"`, string(body.Data[0]["cover_image_url"]))
+	assertNoPrivateEventData(t, rec.Body.String())
+}
+
+func TestGetEvents_BlocksPasswordProtectedEventWithoutProof(t *testing.T) {
+	t.Setenv("EVENT_ACCESS_SECRET", "test-secret")
+	eventID := uuid.Must(uuid.NewV4())
+	event := eventWithPrivateFields(eventID, "boda-protegida", true)
+	stubPublicEventRead(t, event, &models.EventConfig{ID: eventID, IsPublic: true, AuthPasswordPreview: "secreto"})
+
+	for _, tc := range []struct {
+		name   string
+		target string
+		header map[string]string
+	}{
+		{name: "no proof", target: "/api/events/boda-protegida"},
+		{name: "forged proof header", target: "/api/events/boda-protegida", header: map[string]string{"X-Event-Access-Token": "forged"}},
+		{name: "forged proof query", target: "/api/events/boda-protegida?event_access_token=forged"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := getPublicEvent(t, tc.target, tc.header)
+			assert.Equal(t, http.StatusForbidden, rec.Code)
+			assert.Contains(t, rec.Body.String(), `"message":"Event is not public"`)
+			assert.NotContains(t, rec.Body.String(), "Calle Privada 123")
+			assertNoPrivateEventData(t, rec.Body.String())
+		})
+	}
+}
+
+func TestGetEvents_InvitationTokenDoesNotSkipPasswordProof(t *testing.T) {
+	t.Setenv("EVENT_ACCESS_SECRET", "test-secret")
+	eventID := uuid.Must(uuid.NewV4())
+	invitationID := uuid.Must(uuid.NewV4())
+	event := eventWithPrivateFields(eventID, "boda-protegida", true)
+	stubPublicEventRead(t, event, &models.EventConfig{ID: eventID, IsPublic: false, AuthPasswordPreview: "secreto"})
+	eventAccessTokenRepo = &mockAccessTokenRepo{token: &models.InvitationAccessToken{InvitationID: invitationID}}
+	eventInvitationRepo = &mockInvitationRepo{invitation: &models.Invitation{ID: invitationID, EventID: eventID}}
+
+	rec := getPublicEvent(t, "/api/events/boda-protegida?token=ABC123", nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.NotContains(t, rec.Body.String(), "Calle Privada 123")
+	assertNoPrivateEventData(t, rec.Body.String())
+}
+
+func TestGetEvents_AllowsPasswordProtectedEventWithProof(t *testing.T) {
+	t.Setenv("EVENT_ACCESS_SECRET", "test-secret")
+	eventID := uuid.Must(uuid.NewV4())
+	cfg := &models.EventConfig{ID: eventID, IsPublic: true, AuthPasswordPreview: "secreto"}
+	stubPublicEventRead(t, eventWithPrivateFields(eventID, "boda-protegida", true), cfg)
+	proof, _, err := publicaccessproof.Generate(eventID, eventsService.EventConfigAccessVersion(cfg), time.Minute)
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name   string
+		target string
+		header map[string]string
+	}{
+		{name: "proof header", target: "/api/events/boda-protegida", header: map[string]string{"X-Event-Access-Token": proof}},
+		{name: "proof query", target: "/api/events/boda-protegida?event_access_token=" + proof},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := getPublicEvent(t, tc.target, tc.header)
+			require.Equal(t, http.StatusOK, rec.Code)
+			assert.Contains(t, rec.Body.String(), `"address":"Calle Privada 123"`)
+			assertNoPrivateEventData(t, rec.Body.String())
+		})
+	}
+}
+
+func TestGetEvents_BlocksInactiveOrClosedWindowEvent(t *testing.T) {
+	past := time.Now().Add(-time.Hour)
+	for _, tc := range []struct {
+		name   string
+		active bool
+		cfg    func(uuid.UUID) *models.EventConfig
+	}{
+		{name: "inactive", active: false, cfg: func(id uuid.UUID) *models.EventConfig {
+			return &models.EventConfig{ID: id, IsPublic: true}
+		}},
+		{name: "window not open yet", active: true, cfg: func(id uuid.UUID) *models.EventConfig {
+			return &models.EventConfig{ID: id, IsPublic: true, ActiveFrom: time.Now().Add(time.Hour)}
+		}},
+		{name: "window closed", active: true, cfg: func(id uuid.UUID) *models.EventConfig {
+			return &models.EventConfig{ID: id, IsPublic: true, ActiveUntil: &past}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			eventID := uuid.Must(uuid.NewV4())
+			stubPublicEventRead(t, eventWithPrivateFields(eventID, "boda", tc.active), tc.cfg(eventID))
+
+			rec := getPublicEvent(t, "/api/events/boda", nil)
+			assert.Equal(t, http.StatusForbidden, rec.Code)
+			assert.Contains(t, rec.Body.String(), `"message":"Event is not public"`)
+			assertNoPrivateEventData(t, rec.Body.String())
+		})
+	}
+}
+
+func TestGetEvents_PreviewTokenOpensInactivePasswordProtectedEvent(t *testing.T) {
+	t.Setenv("EVENT_PREVIEW_SECRET", "test-preview-secret")
+	t.Setenv("EVENT_ACCESS_SECRET", "test-secret")
+	eventID := uuid.Must(uuid.NewV4())
+	past := time.Now().Add(-time.Hour)
+	cfg := &models.EventConfig{ID: eventID, IsPublic: false, AuthPasswordPreview: "secreto", ActiveUntil: &past}
+	stubPublicEventRead(t, eventWithPrivateFields(eventID, "boda", false), cfg)
+	preview, err := previewtoken.Generate(eventID, time.Minute)
+	require.NoError(t, err)
+
+	rec := getPublicEvent(t, "/api/events/boda?preview_token="+preview, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"name":"Boda Protegida"`)
+	assertNoPrivateEventData(t, rec.Body.String())
+
+	otherEventPreview, err := previewtoken.Generate(uuid.Must(uuid.NewV4()), time.Minute)
+	require.NoError(t, err)
+	rec = getPublicEvent(t, "/api/events/boda?preview_token="+otherEventPreview, nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
 
 func TestCreateEvent_InvalidJSON_Returns400(t *testing.T) {

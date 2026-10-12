@@ -45,6 +45,9 @@ type Hooks struct {
 	ResolveClientProduct func(clientID uuid.UUID) (string, error)
 	// GetEventMemberRoles batches GetEventMemberRole for one user.
 	GetEventMemberRoles func(eventIDs []uuid.UUID, userID uuid.UUID) (map[uuid.UUID]string, error)
+	// ReachableClientIDsInApplication is the application-scoped reach used by
+	// the organization lists and the session (portal stop, ROLES-N2).
+	ReachableClientIDsInApplication func(userID uuid.UUID, applicationCode string, ids []uuid.UUID) (map[uuid.UUID]bool, error)
 }
 
 var hooks Hooks
@@ -102,6 +105,9 @@ func ReplaceHooksForTest(replacement Hooks) func() {
 	}
 	if replacement.GetEventMemberRoles != nil {
 		hooks.GetEventMemberRoles = replacement.GetEventMemberRoles
+	}
+	if replacement.ReachableClientIDsInApplication != nil {
+		hooks.ReachableClientIDsInApplication = replacement.ReachableClientIDsInApplication
 	}
 	return func() {
 		hooks = previous
@@ -191,14 +197,21 @@ func CurrentUser(c echo.Context) (*models.User, error) {
 // cosmetic hostname. Platform-root authority exists on EventiApp and the ITBEM
 // control plane; branded customer portals use explicit memberships and roles.
 //
-// The returned user is always a per-request copy stamped with the application
+// The returned user is always a per-request copy (never the synced user)
+// stamped with the session application (so organization checks by id apply
+// the same product boundary as the lists and the session), the application
 // policy ceiling and the request authorization memo (see enforcement.go).
+// An empty tenant leaves the session application unset and keeps platform
+// authority, as before.
 func scopeUserToTenant(c echo.Context, user *models.User) *models.User {
 	if user == nil {
 		return nil
 	}
 	tenantCode, _ := c.Get("tenant_code").(string)
 	scoped := *user
+	if definition, ok := products.Resolve(tenantCode); ok {
+		scoped.SessionApplicationCode = definition.Code.String()
+	}
 	if tenantCode != "" && !products.AllowsPlatformAuthority(tenantCode) {
 		scoped.IsRoot = false
 		scoped.RootLevel = models.RootLevelNone
@@ -287,6 +300,12 @@ func requireClientAccess(user *models.User, clientID uuid.UUID, scope accessScop
 			Detail:  "You do not have access to this client",
 		}
 	}
+	// Both boundaries must pass: the application reach (a live deny, checked
+	// first so shadow entitlement logs only count requests that would
+	// otherwise succeed), then the product entitlement.
+	if err := requireSessionApplicationReach(user, clientID); err != nil {
+		return err
+	}
 	return enforceProductEntitlement(user, clientID, CapabilityView, access)
 }
 
@@ -318,7 +337,36 @@ func requireClientCapability(user *models.User, clientID uuid.UUID, capability C
 	if !access.Allowed || !roleHasCapability(access.Role, capability) {
 		return &Failure{Status: http.StatusForbidden, Message: "Access denied", Detail: "Your organization role cannot perform this action"}
 	}
+	// Application reach first (see requireClientAccess), then product
+	// entitlement and the application policy ceiling.
+	if err := requireSessionApplicationReach(user, clientID); err != nil {
+		return err
+	}
 	return finalizeAuthorityDecision(user, clientID, capability, access)
+}
+
+// requireSessionApplicationReach keeps organization checks by id inside the
+// session application: CheckAccessRecursive follows Owner/Admin inheritance
+// into every descendant, including another application's portal tree (an
+// EventiApp platform-org Owner would reach the ITBEM or Cafetton House portal
+// orgs). The target must also be in the application-scoped reach that the
+// organization lists and the session use. Platform admins never get here.
+func requireSessionApplicationReach(user *models.User, clientID uuid.UUID) error {
+	applicationCode := strings.TrimSpace(user.SessionApplicationCode)
+	if applicationCode == "" {
+		return nil
+	}
+	if hooks.ReachableClientIDsInApplication == nil {
+		return dependencyFailure("ReachableClientIDsInApplication")
+	}
+	reachable, err := hooks.ReachableClientIDsInApplication(user.ID, applicationCode, []uuid.UUID{clientID})
+	if err != nil {
+		return &Failure{Status: http.StatusInternalServerError, Message: "Authorization error", Detail: "application reach lookup failed"}
+	}
+	if !reachable[clientID] {
+		return &Failure{Status: http.StatusForbidden, Message: "Access denied", Detail: "Client is outside the current application"}
+	}
+	return nil
 }
 
 func requireTenantClientBoundary(user *models.User, clientID uuid.UUID) error {

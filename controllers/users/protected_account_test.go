@@ -70,7 +70,7 @@ func newAccountFixture(t *testing.T, requester models.User, users ...models.User
 	}
 	previousUserSvc, previousAdminSvc := userSvc, adminSvc
 	userSvc = userService.NewUserService(fixture.repo, fixture.auth, nil)
-	adminSvc = userService.NewAdminUserService(fixture.repo, nil, fixture.auth)
+	adminSvc = userService.NewAdminUserService(fixture.repo, &guardClientRepo{}, fixture.auth)
 	t.Cleanup(func() { userSvc, adminSvc = previousUserSvc, previousAdminSvc })
 	t.Cleanup(authz.ReplaceHooksForTest(authz.Hooks{
 		SyncUser: func(string) (*models.User, error) {

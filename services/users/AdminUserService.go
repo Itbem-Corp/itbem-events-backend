@@ -6,6 +6,7 @@ import (
 	"events-stocks/models"
 	"events-stocks/services/ports"
 	"fmt"
+	"log/slog"
 	"net/mail"
 	"strings"
 
@@ -14,6 +15,18 @@ import (
 )
 
 var ErrInvalidInviteIdentity = errors.New("invalid invitation identity")
+
+// Guard errors for destructive admin actions on user accounts (ADM-9). The
+// dashboard hides these actions, but the backend is the enforcement point.
+var (
+	ErrAdminUserNotFound     = errors.New("usuario no encontrado")
+	ErrAdminCannotTargetSelf = errors.New("no puedes realizar esta acción sobre tu propia cuenta")
+	// ErrAdminPrimaryRootProtected wraps ErrProtectedRootAccount, so every
+	// primary-root refusal answers with the one contract of #285 (409
+	// "Protected account", error USER_PRIMARY_ROOT_PROTECTED).
+	ErrAdminPrimaryRootProtected    = fmt.Errorf("%w: una cuenta raíz principal no puede eliminarse ni desactivarse", ErrProtectedRootAccount)
+	ErrAdminUserHasActiveMembership = errors.New("el usuario todavía pertenece a una o más organizaciones; quítalo de ellas antes de eliminarlo")
+)
 
 func normalizeInviteIdentity(email, firstName, lastName string) (string, string, string, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
@@ -113,8 +126,7 @@ func (s *AdminUserService) ListUserClients(userID uuid.UUID) ([]models.Client, e
 func (s *AdminUserService) ListUserClientsPage(userID uuid.UUID, query dtos.ClientsListQuery) (dtos.ClientsPageResponse, error) {
 	var clients []models.Client
 	var total int64
-	var active int64
-	var inactive int64
+	var counts dtos.UserClientCounts
 	group := new(errgroup.Group)
 	group.Go(func() error {
 		loaded, count, err := s.clientRepo.ListClientsPaginated(&userID, query)
@@ -123,14 +135,14 @@ func (s *AdminUserService) ListUserClientsPage(userID uuid.UUID, query dtos.Clie
 	})
 	if stats, ok := s.clientRepo.(ports.UserClientStatusRepository); ok {
 		group.Go(func() error {
-			active, inactive, _ = stats.CountUserClientStatuses(userID)
+			counts, _ = stats.CountUserClientStatuses(userID)
 			return nil
 		})
 	}
 	if err := group.Wait(); err != nil {
 		return dtos.ClientsPageResponse{}, err
 	}
-	response := dtos.ClientsPageResponse{Data: dtos.NewClientResponses(clients), Total: total, Active: active, Inactive: inactive, Page: query.Page, PageSize: query.PageSize, TotalPages: int((total + int64(query.PageSize) - 1) / int64(query.PageSize))}
+	response := dtos.ClientsPageResponse{Data: dtos.NewClientResponses(clients), Total: total, Active: counts.Active, Inactive: counts.Inactive, Direct: counts.Direct, Inherited: counts.Inherited, Page: query.Page, PageSize: query.PageSize, TotalPages: int((total + int64(query.PageSize) - 1) / int64(query.PageSize))}
 	return response, nil
 }
 
@@ -198,21 +210,80 @@ func (s *AdminUserService) UpdateUserInformation(userID uuid.UUID, firstName, la
 	return user, nil
 }
 
-// DeleteUser refuses primary roots (ErrProtectedRootAccount) for the same
-// reason as SetUserActive; callers are primary roots, so this covers self.
-func (s *AdminUserService) DeleteUser(userID uuid.UUID) error {
+// guardDestructiveTarget rejects acting on a primary root (root_level 1, or a
+// legacy is_root account without an explicit level) and on yourself. The
+// primary-root check runs first so a primary root acting on itself gets the
+// #285 contract (409 "Protected account"); the self check covers any other
+// actor the route may admit.
+func guardDestructiveTarget(actorID uuid.UUID, target *models.User) error {
+	if target.IsPrimaryRoot() {
+		return ErrAdminPrimaryRootProtected
+	}
+	if target.ID == actorID {
+		return ErrAdminCannotTargetSelf
+	}
+	return nil
+}
+
+// DeactivateUser disables a user account on behalf of actorID after the
+// self / primary-root guards.
+func (s *AdminUserService) DeactivateUser(actorID, userID uuid.UUID) (*models.User, error) {
 	user, err := s.userRepo.GetUserByID(userID)
 	if err != nil {
-		return fmt.Errorf("usuario no encontrado")
+		return nil, ErrAdminUserNotFound
 	}
-	if user.IsPrimaryRoot() {
-		return fmt.Errorf("%w: a primary root cannot be deleted", ErrProtectedRootAccount)
+	if err := guardDestructiveTarget(actorID, user); err != nil {
+		return nil, err
 	}
-	if err := s.authRepo.DeleteUser(user.CognitoSub, "cognito"); err != nil {
-		return fmt.Errorf("error eliminando usuario en cognito: %w", err)
+	return s.SetUserActive(userID, false)
+}
+
+// DeleteUser removes a user account on behalf of actorID.
+//
+// Guards: not yourself, not a primary root, and no active organization
+// membership left (the admin must remove the memberships first).
+//
+// Order (chosen so a failure never leaves a local user without a usable
+// Cognito identity, nor a Cognito identity that can sign in without a local
+// user):
+//  1. Disable the Cognito user (reversible). On failure nothing changed.
+//  2. Delete the local user and its relations in one transaction. On failure
+//     re-enable Cognito if the user was active before, and return the error.
+//  3. Delete the Cognito user. On failure the local user is already gone and
+//     the Cognito identity stays disabled (it cannot sign in); this is logged
+//     for manual cleanup and the request still succeeds.
+func (s *AdminUserService) DeleteUser(actorID, userID uuid.UUID) error {
+	user, err := s.userRepo.GetUserByID(userID)
+	if err != nil {
+		return ErrAdminUserNotFound
+	}
+	if err := guardDestructiveTarget(actorID, user); err != nil {
+		return err
+	}
+	if s.clientRepo == nil {
+		return fmt.Errorf("no se pudo verificar las membresías del usuario")
+	}
+	memberships, err := s.clientRepo.ListClientsByUser(userID)
+	if err != nil {
+		return fmt.Errorf("no se pudo verificar las membresías del usuario: %w", err)
+	}
+	if len(memberships) > 0 {
+		return ErrAdminUserHasActiveMembership
+	}
+
+	if err := s.authRepo.SetUserEnabled(user.CognitoSub, false, "cognito"); err != nil {
+		return fmt.Errorf("error deshabilitando usuario en cognito: %w", err)
 	}
 	if err := s.userRepo.DeleteUser(userID); err != nil {
+		if user.IsActive {
+			if restoreErr := s.authRepo.SetUserEnabled(user.CognitoSub, true, "cognito"); restoreErr != nil {
+				slog.Error("admin user delete: could not re-enable cognito user after local delete failed", "user_id", userID, "error", restoreErr)
+			}
+		}
 		return fmt.Errorf("error eliminando usuario local: %w", err)
+	}
+	if err := s.authRepo.DeleteUser(user.CognitoSub, "cognito"); err != nil {
+		slog.Error("admin user delete: local user deleted but cognito user could not be deleted; it remains disabled and needs manual cleanup", "user_id", userID, "error", err)
 	}
 	return nil
 }

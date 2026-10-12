@@ -76,7 +76,7 @@ func shouldPersist(c echo.Context, method string, status int) bool {
 	}
 	succeeded := status >= 200 && status < 400
 	renewal := strings.EqualFold(strings.TrimSpace(method), http.MethodPost) && c.Path() == skipOnSuccessRoute
-	return !(succeeded && renewal && SkipOnSuccessRequested(c))
+	return !succeeded || !renewal || !SkipOnSuccessRequested(c)
 }
 
 func shouldAudit(method string, status int) bool {

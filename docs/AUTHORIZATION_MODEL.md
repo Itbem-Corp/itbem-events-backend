@@ -27,6 +27,8 @@ Historical `is_root=true` accounts are treated as level 1 until explicitly migra
 
 Only Owner and Administrator memberships propagate down an organization hierarchy. A child organization can never grant access back to its parent.
 
+Inheritance is the same on every surface: direct API calls (`CheckAccessRecursive`), the organization lists (`GET /api/clients`, a user's organizations, marked `inherited`), and the application session. The session lists each descendant of an Owner/Admin membership as a workspace (`access_role` `INHERITED_OWNER`/`INHERITED_ADMIN`), so `POST /api/session/organization-context` issues a context for a child organization to the parent's Owner/Admin. Descent stops at an organization that is another application's portal (its code is an application code), so a platform Owner never gets another product's subtree as a workspace. The session also stops at inactive or deleted organizations (an inactive organization and its subtree are never inherited). Checks by organization id apply the same portal stop: for members (not platform admins) `authz.RequireClientAccess`/`RequireClientCapability` and the client service (request-scoped with `WithApplicationScope`) require the target in `ReachableClientIDsInApplication` for the session application (`User.SessionApplicationCode`, set by `authz.CurrentUser` from the Cognito tenant), else 403; a missing reach dependency fails closed.
+
 ### Event lists without an organization (caller-access)
 
 `GET /api/events`, `/api/events/all`, `/api/events/dashboard` and
@@ -48,6 +50,10 @@ Only Owner and Administrator memberships propagate down an organization hierarch
   `authz.RequireClientAccess` authorizes as before.
 - Without an application session the handlers answer 503
   `Application session unavailable` and run no query.
+
+### Organization hierarchy
+
+Types nest Platform › Agency › Customer; a Customer cannot have sub-organizations (400 `CLIENT_HIERARCHY_LIMIT`). Only a Primary root creates top-level (Platform) organizations. An Owner of an organization (direct or inherited) may create, rename and delete organizations below it; this applies in every product whose contract enables the `organizations` module (ITBEM, Cafetton House). EventiApp's contract does not enable that module, so no EventiApp session carries `organizations:manage` and organization management is not available there. An organization's `code` is assigned once at creation and never changes on rename: it is matched against application codes and used by integrations.
 
 ## Delegation invariants
 

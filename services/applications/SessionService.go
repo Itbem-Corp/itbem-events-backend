@@ -426,29 +426,69 @@ func (service *SessionService) invalidateCognitoSub(cognitoSub string) {
 	}
 }
 
+// organizationAccess lists the workspaces a user may enter in one
+// application: organizations with a direct membership enabled for the
+// application, plus — for Owner/Admin memberships — every descendant
+// organization (access_role INHERITED_*), the same inheritance
+// CheckAccessRecursive applies to direct API calls. Descent stops at an
+// organization whose code is another application's portal, so a platform
+// Owner never receives another product's subtree as a workspace, and at an
+// inactive or deleted organization: neither it nor its subtree is inherited
+// (a deactivated membership seed hands nothing down either).
 func (service *SessionService) organizationAccess(userID, applicationID uuid.UUID) ([]OrganizationAccess, error) {
 	organizations := make([]OrganizationAccess, 0)
 	err := service.db.Raw(`
-		SELECT DISTINCT
+		WITH RECURSIVE direct_access AS (
+			SELECT client_members.client_id, client_roles.code AS role_code
+			FROM client_member_applications access
+			JOIN client_members
+				ON client_members.id = access.client_member_id
+				AND client_members.is_active = true
+			JOIN client_roles ON client_roles.id = client_members.client_role_id
+			JOIN clients seed
+				ON seed.id = client_members.client_id
+				AND seed.deleted_at IS NULL
+				AND seed.is_active = true
+			WHERE access.application_id = ?
+				AND access.is_active = true
+				AND client_members.user_id = ?
+		),
+		reachable AS (
+			SELECT client_id, role_code, 0 AS depth FROM direct_access
+			UNION ALL
+			SELECT child.id, reachable.role_code, reachable.depth + 1
+			FROM clients child
+			JOIN reachable ON child.parent_id = reachable.client_id
+			WHERE child.deleted_at IS NULL
+				AND child.is_active = true
+				AND UPPER(reachable.role_code) IN ('OWNER', 'ADMIN')
+				AND reachable.depth < 31
+				AND NOT EXISTS (
+					SELECT 1 FROM applications other
+					WHERE LOWER(other.code) = LOWER(child.code) AND other.id <> ?
+				)
+		),
+		ranked AS (
+			SELECT DISTINCT ON (reachable.client_id)
+				reachable.client_id,
+				CASE WHEN reachable.depth = 0 THEN reachable.role_code
+					ELSE 'INHERITED_' || reachable.role_code END AS access_role
+			FROM reachable
+			ORDER BY reachable.client_id, reachable.depth ASC
+		)
+		SELECT
 			clients.id,
 			clients.name,
 			clients.code,
 			clients.logo,
-			client_roles.code AS access_role
-		FROM client_member_applications access
-		JOIN client_members
-			ON client_members.id = access.client_member_id
-			AND client_members.is_active = true
+			ranked.access_role
+		FROM ranked
 		JOIN clients
-			ON clients.id = client_members.client_id
+			ON clients.id = ranked.client_id
 			AND clients.deleted_at IS NULL
 			AND clients.is_active = true
-		JOIN client_roles ON client_roles.id = client_members.client_role_id
-		WHERE access.application_id = ?
-			AND access.is_active = true
-			AND client_members.user_id = ?
 		ORDER BY clients.name ASC
-	`, applicationID, userID).Scan(&organizations).Error
+	`, applicationID, userID, applicationID).Scan(&organizations).Error
 	if err != nil {
 		return nil, fmt.Errorf("load application organizations: %w", err)
 	}

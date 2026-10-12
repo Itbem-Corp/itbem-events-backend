@@ -29,6 +29,9 @@ type User struct {
 	AuthPolicyCapabilities map[string]struct{} `gorm:"-" json:"-"`
 	// AuthRequestMemo is owned by internal/authz (per-request lookup memo).
 	AuthRequestMemo any `gorm:"-" json:"-"`
+	// SessionApplicationCode is the product of the authenticated request
+	// (from the Cognito audience). Request-scoped, never stored.
+	SessionApplicationCode string `gorm:"-" json:"-"`
 	// Relaciones (Has Many)
 	EventMembers  []EventMember  `gorm:"foreignKey:UserID" json:"event_members,omitempty"`
 	ClientMembers []ClientMember `gorm:"foreignKey:UserID" json:"client_members,omitempty"`
