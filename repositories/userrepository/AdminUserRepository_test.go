@@ -67,3 +67,25 @@ func TestEscapeLikePattern(t *testing.T) {
 	assert.Equal(t, `a\%b\_c\\d`, escapeLikePattern(`a%b_c\d`))
 	assert.Equal(t, "plain", escapeLikePattern("plain"))
 }
+
+// ROLES-94: Root 2's directory hides roots AND still honours "inactive".
+func TestAdminUsersFilters_ExcludeRootsKeepsInactiveFilter(t *testing.T) {
+	var users []models.User
+	stmt := applyAdminUsersListFilters(dryRunDB(t).Model(&models.User{}), dtos.AdminUsersListQuery{
+		Status:       "inactive",
+		ExcludeRoots: true,
+	}).Find(&users).Statement
+	sql := stmt.SQL.String()
+
+	assert.Contains(t, sql, "is_active =")
+	assert.Contains(t, sql, "root_level =")
+	assert.Contains(t, stmt.Vars, false)
+}
+
+func TestAdminUsersFilters_ActiveWithoutExcludeRootsHasNoRootClause(t *testing.T) {
+	var users []models.User
+	stmt := applyAdminUsersListFilters(dryRunDB(t).Model(&models.User{}), dtos.AdminUsersListQuery{Status: "active"}).
+		Find(&users).Statement
+	assert.Contains(t, stmt.SQL.String(), "is_active =")
+	assert.NotContains(t, stmt.SQL.String(), "root_level")
+}

@@ -44,12 +44,19 @@ func applyAdminUsersListFilters(db *gorm.DB, query dtos.AdminUsersListQuery) *go
 	case "root":
 		db = db.Where("is_root = ? OR root_level > ?", true, models.RootLevelNone)
 	case "non_root":
-		// Keep the support directory free of both new root-level accounts and
-		// legacy records that still rely on is_root.
-		db = db.Where("(is_root = ? OR is_root IS NULL) AND (root_level = ? OR root_level IS NULL)", false, models.RootLevelNone)
+		db = excludeRootAccounts(db)
+	}
+	if query.ExcludeRoots {
+		db = excludeRootAccounts(db)
 	}
 
 	return db
+}
+
+// excludeRootAccounts keeps the support directory free of both new root-level
+// accounts and legacy records that still rely on is_root.
+func excludeRootAccounts(db *gorm.DB) *gorm.DB {
+	return db.Where("(is_root = ? OR is_root IS NULL) AND (root_level = ? OR root_level IS NULL)", false, models.RootLevelNone)
 }
 
 // escapeLikePattern escapes the LIKE metacharacters (backslash first) for use

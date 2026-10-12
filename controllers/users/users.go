@@ -303,18 +303,21 @@ func ListAllUsers(c echo.Context) error {
 	}
 	page, _ := strconv.Atoi(c.QueryParam("page"))
 	pageSize, _ := strconv.Atoi(c.QueryParam("page_size"))
-	status := c.QueryParam("status")
+	status := strings.ToLower(strings.TrimSpace(c.QueryParam("status")))
 	// A Root 2 account uses this directory to support ordinary users. It must
 	// never enumerate platform administrators, including by requesting the
-	// root-only filter explicitly.
-	if !requester.IsPrimaryRoot() {
+	// root-only filter explicitly, but its active/inactive filter must still
+	// apply (it used to be overwritten, so "Inactivos" listed active users).
+	excludeRoots := !requester.IsPrimaryRoot()
+	if excludeRoots && status == "root" {
 		status = "non_root"
 	}
 	list, err := adminSvc.ListAllUsers(dtos.AdminUsersListQuery{
-		Page:     page,
-		PageSize: pageSize,
-		Search:   c.QueryParam("search"),
-		Status:   status,
+		Page:         page,
+		PageSize:     pageSize,
+		Search:       c.QueryParam("search"),
+		Status:       status,
+		ExcludeRoots: excludeRoots,
 	})
 	if err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Error listing users", err.Error())
