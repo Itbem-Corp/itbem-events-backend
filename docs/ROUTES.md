@@ -182,7 +182,7 @@ Legacy v1/v2 events remain auditable but cannot authorize a v3 action.
 - `GET /api/clients/:id` → `clients.GetClient` (recursive)
 - `PUT /api/clients/:id` → `clients.UpdateClient`
 - `DELETE /api/clients/:id` → `clients.DeleteClient` (recursive)
-- `POST /api/clients/invite` → `clients.InviteUser`
+- `POST /api/clients/invite` → `clients.InviteUser` — body `{"client_id", "user_id" or "email", "role_id"}`; adds an existing account. Besides the member-write rules below, the account is ranked with `clients.AuthorizeMemberTarget` on its effective (direct or inherited) role in `client_id`, because the new direct membership takes precedence over an Owner/Admin role inherited from a parent organization: an Owner/Admin may only add accounts ranked strictly below its own effective role (never itself), Root 2 anyone except an Owner, only a primary root an Owner; nobody but a primary root a platform-root account. Denied → `403 Permission Denied` with nothing written.
 - `POST /api/clients/members` → `clients.CreateClientMember`
 - `GET /api/clients/members` → `clients.ListClientMembers`
 - `PUT /api/clients/members/:user_id` → `clients.UpdateMemberRole` (?client_id=...)

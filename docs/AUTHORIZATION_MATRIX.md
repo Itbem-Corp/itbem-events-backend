@@ -42,8 +42,9 @@ decides where that identity may enter and what it may do.
 An optional event assignment can narrow this further for one event.
 
 Team management (member roles, member application access, event
-assignments) only reaches members ranked strictly below the actor's own
-organization role; Root 2 reaches every member except an Owner and never a
+assignments, adding an existing account) only reaches members ranked strictly
+below the actor's own organization role, counting roles inherited from a parent
+organization; Root 2 reaches every member except an Owner and never a
 platform-root account. Only Root 1 may change an Owner's or a root account's
 application access or event assignments, and nobody assigns, re-roles or
 removes an Owner through member management. A root grants only roles whose
