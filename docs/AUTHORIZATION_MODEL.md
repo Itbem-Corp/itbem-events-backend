@@ -7,7 +7,7 @@ Authorization is evaluated server-side from the current user, the organization t
 | Level | Role | Authority |
 | --- | --- | --- |
 | 1 | Primary root | Full platform governance. The only level that can grant or revoke level 2. |
-| 2 | Operational root | Global visibility and support: guests, check-in and analytics. Its user directory is restricted to standard users; it cannot inspect other root accounts or their organization assignments, edit event structure, manage teams, alter organization hierarchy, create another root, grant owner access, or change root levels. |
+| 2 | Operational root | Global visibility and support: guests, check-in and analytics, plus team management in any organization (add, invite and re-role members into the roles within its own capabilities: Check-in, Analyst, Member or Viewer; remove members below Owner; member application access; event assignments). Its user directory is restricted to standard users; it cannot inspect or change other root accounts or their organization assignments, touch an Owner, grant Owner, Admin, Event manager, Editor or root, edit event structure (directly or through an account it grants a role to), alter organization hierarchy, create another root, or change root levels. |
 | 0 | Standard user | Access only through organization and event assignments. |
 
 Historical `is_root=true` accounts are treated as level 1 until explicitly migrated.
@@ -20,7 +20,7 @@ Historical `is_root=true` accounts are treated as level 1 until explicitly migra
 | Administrator | Members below owner, organization operations, all events. |
 | Event manager | Create and operate events, guests, check-in and analytics. |
 | Editor | Edit event and guest content. |
-| Check-in | Check-in and RSVP operations only. |
+| Check-in | Check-in operations only; it can mark guests confirmed at the door and undo door check-ins, but cannot otherwise rewrite a guest's RSVP (not the guest's own answer, not an organizer's confirmation). |
 | Analyst | Read event and guest analytics only. |
 | Member | Standard event collaboration. |
 | Viewer | Read-only access. |
@@ -53,8 +53,11 @@ Only Owner and Administrator memberships propagate down an organization hierarch
 
 - A role can grant, change, or remove only roles below its hierarchy.
 - An Owner cannot be assigned or removed through ordinary member management.
-- A platform root cannot assign Owner through member management.
-- Only a Primary root can set `root_level`; it may set only `0` or `2`.
+- A platform root (level 1 or 2) cannot assign Owner, change an Owner's role or remove an Owner through member management.
+- A platform root grants (adds, invites or re-roles into) only roles whose capabilities its own level holds (`authz.PlatformRootMayGrantRole`), so it can never act through an account it controls beyond its own powers. A Primary root may grant any role below Owner. A level-2 root may grant only Check-in, Analyst, Member or Viewer, never Admin, Event manager or Editor, which carry event creation, editing or deletion or organization management (`403`; `GET /api/catalogs/roles` does not offer them).
+- Changing another member's access without changing their organization role (member application access, event assignments), and adding an existing account to an organization (`POST /api/clients/invite`, whose new direct membership takes precedence over an Owner/Admin role inherited from a parent organization), follow the same ranking against the target's effective (direct or inherited) role: an Owner/Admin may act only on members whose effective role ranks strictly below its own (never itself), a level-2 root on any member except an Owner, and only a Primary root on an Owner. Nobody but a Primary root may act on a platform-root account.
+- Only a Primary root can set `root_level`; it may set only `0` or `2`, and never on a Primary-root account (including itself), which is refused with `409 Protected account` because level 1 cannot be restored through the API.
+- A Primary-root account cannot be deleted (`DELETE /api/users/:id`) or deactivated (`PUT /api/users/:id/deactivate`) by anyone, itself included, and cannot close itself through `DELETE /api/users`: all return `409 Protected account`, so the platform cannot lose its last Primary root through the API. Re-activation stays allowed.
 - Event permissions are a ceiling from the organization role. An event assignment may reduce access, never elevate it.
 
 ## Event capabilities and privacy
@@ -62,12 +65,14 @@ Only Owner and Administrator memberships propagate down an organization hierarch
 | Capability | Typical roles | What it covers |
 | --- | --- | --- |
 | View | All assigned roles | Event metadata and read-only workspace access. |
-| Event manage | Owner, Admin, Event manager, Editor, Member | Event configuration, sections, media and moments. |
+| Event create | Owner, Admin, Event manager | New events in the organization. |
+| Event manage | Owner, Admin, Event manager, Editor | Event configuration, sections, media and moments. |
+| Event delete | Owner, Admin | Deleting events. |
 | Guest manage | Owner, Admin, Event manager, Editor, Member | Guest directory, seating, invitations, RSVP links and exports. This is the boundary for guest PII. |
-| Check-in | Guest-managing roles and Check-in | The check-in workspace and status operations. |
-| Analytics view | Owner, Admin, Event manager, Editor, Member, Analyst | Aggregate event and RSVP metrics. |
+| Check-in | Guest-managing roles and Check-in | The check-in workspace and the check-in status operation. Its reads return the door projection (`dtos.CheckinGuest`, see below), never the full guest record. Without Guest manage, `PATCH /api/guests/bulk/status` only marks guests confirmed (the door check-in, with or without `action: checkin`) and, with `action: undo_checkin`, gives a door-checked-in guest back the RSVP they had before. Only door check-ins record provenance and can be undone: a guest manager's confirmation without `action: checkin` (the guests panel's bulk Confirmar, or `PUT /api/guests/:id`) and the guest's own confirmation answer 409, and declining or any other RSVP rewrite needs Guest manage. |
+| Analytics view | Owner, Admin, Event manager, Editor, Analyst | Aggregate event and RSVP metrics. |
 | Metrics view (`metrics:view`) | EventiApp: Owner and Admin (direct or inherited) plus roots 1 and 2. Cafetton House and ITBEM: Owner, Admin, Event manager, Editor, Analyst | Product-metrics portfolio (`GET /api/metrics/portfolio`). Not an event capability: event analytics stay on Analytics view. |
-| Members manage | Owner and Admin | Organization and event-team assignment. |
+| Members manage | Owner and Admin (and both platform-root levels) | Organization and event-team assignment, limited to members ranked below the actor (see Delegation invariants). |
 
 On EventiApp, `services/applications.applicationOrganizationCapabilities`
 removes `metrics:view` from every organization role except Owner/Admin, so the
@@ -78,3 +83,14 @@ requires `authz.CapabilityMetricsView` on that organization
 `analytics:view` there.
 
 An Analyst can read aggregate analytics, but cannot retrieve guest-level data such as emails, invitation tokens, dietary restrictions or exports. A Check-in role can work in the dedicated check-in workspace without gaining access to the complete guest-management surface.
+
+View access never includes the event access password or a guest's invitation token, and Check-in never includes guest contact data, notes or tokens. Read routes that would carry them either require the capability, redact the field or return a narrower projection:
+
+| Payload | Rule |
+| --- | --- |
+| `GET /events/:id/config`, `GET /events/:id/studio-workspace` (full config with `auth_password_preview`) | Require Event manage. |
+| `GET /events/:id/seating-workspace` (guest emails and RSVP state) | Requires Guest manage. |
+| `GET /events/:id/detail` | View access; `auth_password_preview` is blanked without Event manage and `guest_share_summary.first_pending` (email and invitation token) is omitted without Guest manage. A failed capability lookup redacts. |
+| `GET /events/:id/checkin-workspace`, `GET /guests/checkin:<event>` | Require Check-in and return the door projection (`dtos.CheckinGuest`): name, table, party size and RSVP status only, plus `checked_in_at` while a door check-in is in place (so the page knows which guests it may undo; who checked them in and the previous RSVP stay server-side). No email, phone, notes, dietary restrictions or invitation/RSVP token, for any caller. A QR scan is resolved on the server (`qr` query). The `search` query matches name and table by substring but email and phone only by their complete value, so which guests match never reveals part of a contact field. |
+
+The role lists in the capability table above describe intent. The enforced role-to-capability mapping is `roleHasCapability` and `eventRoleHasCapability` in `internal/authz/authz.go`, which `GET /events/:id/capabilities` and the dashboard follow.

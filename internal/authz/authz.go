@@ -98,6 +98,22 @@ const (
 	CapabilityMetricsView Capability = "metrics:view"
 )
 
+// allCapabilities lists every Capability above. PlatformRootMayGrantRole
+// checks each one, so a new capability must be added here too
+// (TestAllCapabilitiesListsEveryDeclaredCapability enforces it).
+var allCapabilities = []Capability{
+	CapabilityView,
+	CapabilityEventCreate,
+	CapabilityEventManage,
+	CapabilityEventDelete,
+	CapabilityGuestManage,
+	CapabilityCheckin,
+	CapabilityAnalyticsView,
+	CapabilityMembersManage,
+	CapabilityOrgManage,
+	CapabilityMetricsView,
+}
+
 func (e *Failure) Error() string {
 	if e.Detail != "" {
 		return e.Detail
@@ -271,8 +287,14 @@ func requireTenantClientBoundary(user *models.User, clientID uuid.UUID) error {
 }
 
 // platformHasCapability makes Root 2 useful for cross-account operational
-// support without treating it as a second superuser. Root 1 remains the only
-// level allowed to change event structure, teams, or organization governance.
+// support without treating it as a second superuser. Root 2 may operate
+// guests, check-in and analytics and manage teams (members:manage: event
+// assignments, member application access, member roles), but never an Owner
+// or a platform-root account (clients.AuthorizeMemberTarget, the *AsRoot
+// member rules), and it grants only roles within these capabilities
+// (PlatformRootMayGrantRole). Root 1 remains the only level allowed to
+// change event structure or organization governance, directly or by
+// granting a role that can.
 func platformHasCapability(user *models.User, capability Capability) bool {
 	if user.IsPrimaryRoot() {
 		return true
@@ -286,6 +308,27 @@ func platformHasCapability(user *models.User, capability Capability) bool {
 	default:
 		return false
 	}
+}
+
+// PlatformRootMayGrantRole reports whether a platform root may hand the
+// organization role roleCode to an account through member management. A
+// root grants a role only when its own level holds every capability that
+// role carries, so it can never obtain through an account it controls what
+// it may not do itself. Root 1 holds every capability. Root 2 may grant
+// Check-in, Analyst, Member and Viewer, never Admin, Event manager or Editor
+// (they carry event:create, event:manage, event:delete or
+// organization:manage). Anyone who is not a platform root gets false. The
+// member-management rules exclude Owner separately, for every level.
+func PlatformRootMayGrantRole(user *models.User, roleCode string) bool {
+	if !user.IsPlatformAdmin() {
+		return false
+	}
+	for _, capability := range allCapabilities {
+		if roleHasCapability(roleCode, capability) && !platformHasCapability(user, capability) {
+			return false
+		}
+	}
+	return true
 }
 
 func roleHasCapability(role string, capability Capability) bool {

@@ -3,8 +3,10 @@ package guestrepository
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"events-stocks/dtos"
+	"events-stocks/models"
 	"github.com/gofrs/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -116,4 +118,170 @@ func TestAnalyticsGuestsQueryKeepsLegacyTablesStorageForRollbackCompatibility(t 
 	assert.Contains(t, sqlText, "btrim(tables.name)")
 	assert.NotContains(t, sqlText, "event_tables")
 	assert.Equal(t, []interface{}{eventID}, stmt.Vars)
+}
+
+// checkinGuestsWhereSQL renders the check-in list filter offline and returns its
+// WHERE clause (lower-cased, whitespace collapsed) and the bound values.
+func checkinGuestsWhereSQL(t *testing.T, query dtos.CheckinGuestsListQuery) (string, []interface{}) {
+	t.Helper()
+	db, err := gorm.Open(postgres.Open("host=localhost user=test dbname=test sslmode=disable"), &gorm.Config{
+		DryRun:               true,
+		DisableAutomaticPing: true,
+	})
+	require.NoError(t, err)
+
+	var total int64
+	stmt := checkinGuestsBaseQuery(db, uuid.Must(uuid.NewV4()), query).Count(&total).Statement
+	sqlText := strings.ToLower(strings.Join(strings.Fields(stmt.SQL.String()), " "))
+	where := strings.Index(sqlText, " where ")
+	require.GreaterOrEqual(t, where, 0, sqlText)
+	return sqlText[where:], stmt.Vars
+}
+
+const (
+	guestManagerSearchSQL = `lower(concat_ws(' ', guests.first_name, guests.last_name, guests.email, guests.phone, guests.table_number, "table".name)) like`
+	doorGuestSearchSQL    = `lower(concat_ws(' ', guests.first_name, guests.last_name, guests.table_number, "table".name)) like`
+)
+
+// A check-in caller never sees email or phone, so the door search must not let
+// it read them back from which guests match a substring ("@gmail.com", or the
+// visible name followed by one more character of the email at a time).
+func TestCheckinGuestsQuery_DoorSearchMatchesContactOnlyByCompleteValue(t *testing.T) {
+	where, vars := checkinGuestsWhereSQL(t, dtos.CheckinGuestsListQuery{Search: " Ana@Gmail.com ", DoorSearch: true})
+
+	assert.Contains(t, where, doorGuestSearchSQL)
+	assert.NotContains(t, where, guestManagerSearchSQL)
+	assert.Equal(t, 1, strings.Count(where, " like "), where)
+	assert.Contains(t, where, "lower(btrim(guests.email)) = lower(")
+	assert.NotContains(t, where, "guests.phone", "a search that is not a phone number never touches the phone")
+	assert.Contains(t, vars, "%ana@gmail.com%")
+	assert.Contains(t, vars, "Ana@Gmail.com")
+}
+
+func TestCheckinGuestsQuery_DoorSearchMatchesPhoneOnlyByFullNormalizedNumber(t *testing.T) {
+	where, vars := checkinGuestsWhereSQL(t, dtos.CheckinGuestsListQuery{Search: "+52 (55) 1234-5678", DoorSearch: true})
+
+	assert.Contains(t, where, doorGuestSearchSQL)
+	assert.Equal(t, 1, strings.Count(where, " like "), where)
+	assert.Contains(t, where, `regexp_replace(guests.phone, '[^0-9]', '', 'g') = $`)
+	assert.Contains(t, vars, "525512345678")
+	assert.NotContains(t, where, "guests.phone like")
+}
+
+func TestCheckinGuestsQuery_DoorSearchMatchesLikeWildcardsLiterally(t *testing.T) {
+	where, vars := checkinGuestsWhereSQL(t, dtos.CheckinGuestsListQuery{Search: `Mesa_1%\`, DoorSearch: true})
+
+	assert.Regexp(t, `like \$\d+ escape '[\\]'`, where)
+	// _ % and \ are escaped with \ so they only match themselves.
+	assert.Contains(t, vars, `%mesa\_1\%\\%`)
+}
+
+// The guest-manager pages and the CSV export are read by guest:manage, which
+// already sees contact data: their substring search is unchanged.
+func TestCheckinGuestsQuery_GuestManagerSearchKeepsSubstringOverContactFields(t *testing.T) {
+	where, vars := checkinGuestsWhereSQL(t, dtos.CheckinGuestsListQuery{Search: "@gmail.com"})
+
+	assert.Contains(t, where, guestManagerSearchSQL)
+	assert.NotContains(t, where, "escape")
+	assert.NotContains(t, where, "regexp_replace")
+	assert.Contains(t, vars, "%@gmail.com%")
+}
+
+// A scanned QR is matched exactly and takes precedence over any search.
+func TestCheckinGuestsQuery_QRIgnoresSearch(t *testing.T) {
+	where, vars := checkinGuestsWhereSQL(t, dtos.CheckinGuestsListQuery{QR: "PRETTY42", Search: "ana", DoorSearch: true})
+
+	assert.Contains(t, where, "cast(guests.id as text) = $")
+	assert.Contains(t, where, "invitation_access_tokens.pretty_token = $")
+	assert.NotContains(t, where, " like ")
+	assert.Contains(t, vars, "PRETTY42")
+}
+
+func TestLockGuestsForStatusTransitionLocksLiveGuestsOfTheEventInIDOrder(t *testing.T) {
+	db, err := gorm.Open(postgres.Open("host=localhost user=test dbname=test sslmode=disable"), &gorm.Config{
+		DryRun:               true,
+		DisableAutomaticPing: true,
+	})
+	require.NoError(t, err)
+
+	eventID := uuid.Must(uuid.NewV4())
+	ids := []uuid.UUID{uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())}
+	var guests []models.Guest
+	stmt := lockGuestsForStatusTransition(db, eventID, ids).Find(&guests).Statement
+	sqlText := strings.ToLower(strings.Join(strings.Fields(stmt.SQL.String()), " "))
+
+	assert.Contains(t, sqlText, "from \"guests\"")
+	assert.Contains(t, sqlText, "event_id = $1 and id in ($2,$3)")
+	assert.Contains(t, sqlText, "\"guests\".\"deleted_at\" is null")
+	assert.Contains(t, sqlText, "order by id")
+	assert.True(t, strings.HasSuffix(sqlText, "for update"), sqlText)
+	assert.Equal(t, []interface{}{eventID, ids[0], ids[1]}, stmt.Vars)
+}
+
+func TestGuestStatusTransitionValuesWritesOnlyRSVPColumnsWithSQLNulls(t *testing.T) {
+	statusID := uuid.Must(uuid.NewV4())
+	guest := models.Guest{
+		ID: uuid.Must(uuid.NewV4()), FirstName: "Ana", Email: "ana@example.com",
+		GuestStatusID: statusID, RSVPStatus: "pending", RSVPMethod: "host",
+	}
+
+	values := guestStatusTransitionValues(&guest)
+
+	assert.Equal(t, statusID, values["guest_status_id"])
+	assert.Equal(t, "pending", values["rsvp_status"])
+	assert.Equal(t, "host", values["rsvp_method"])
+	for _, column := range []string{
+		"rsvp_at", "checked_in_at", "checked_in_by_user_id", "checkin_previous_rsvp_status",
+		"checkin_previous_guest_status_id", "checkin_previous_rsvp_method", "checkin_previous_rsvp_at",
+	} {
+		value, present := values[column]
+		assert.True(t, present, column)
+		assert.Nil(t, value, column+": a nil pointer must reach the driver as an untyped NULL")
+	}
+	assert.Len(t, values, 10)
+	for _, column := range []string{"first_name", "email", "event_id", "id", "table_id"} {
+		assert.NotContains(t, values, column)
+	}
+}
+
+func TestGuestStatusTransitionValuesCarriesDoorCheckinProvenance(t *testing.T) {
+	checkedInAt := time.Date(2026, time.May, 1, 20, 0, 0, 0, time.UTC)
+	answeredAt := checkedInAt.Add(-48 * time.Hour)
+	staff, previousStatusID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
+	previousStatus, previousMethod := "confirmed", "web"
+	guest := models.Guest{
+		RSVPStatus: "confirmed", RSVPMethod: "host", RSVPAt: &answeredAt,
+		CheckedInAt: &checkedInAt, CheckedInByUserID: &staff,
+		CheckinPreviousRSVPStatus: &previousStatus, CheckinPreviousGuestStatusID: &previousStatusID,
+		CheckinPreviousRSVPMethod: &previousMethod, CheckinPreviousRSVPAt: &answeredAt,
+	}
+
+	values := guestStatusTransitionValues(&guest)
+
+	assert.Equal(t, answeredAt, values["rsvp_at"])
+	assert.Equal(t, checkedInAt, values["checked_in_at"])
+	assert.Equal(t, staff, values["checked_in_by_user_id"])
+	assert.Equal(t, "confirmed", values["checkin_previous_rsvp_status"])
+	assert.Equal(t, previousStatusID, values["checkin_previous_guest_status_id"])
+	assert.Equal(t, "web", values["checkin_previous_rsvp_method"])
+	assert.Equal(t, answeredAt, values["checkin_previous_rsvp_at"])
+}
+
+// Every column the transition writes must exist on the model, or GORM would
+// silently drop it from the UPDATE.
+func TestGuestStatusTransitionValuesNamesRealGuestColumns(t *testing.T) {
+	db, err := gorm.Open(postgres.Open("host=localhost user=test dbname=test sslmode=disable"), &gorm.Config{
+		DryRun:               true,
+		DisableAutomaticPing: true,
+	})
+	require.NoError(t, err)
+	stmt := &gorm.Statement{DB: db}
+	require.NoError(t, stmt.Parse(&models.Guest{}))
+
+	for column := range guestStatusTransitionValues(&models.Guest{}) {
+		field := stmt.Schema.LookUpField(column)
+		if assert.NotNil(t, field, column) {
+			assert.Equal(t, column, field.DBName)
+		}
+	}
 }

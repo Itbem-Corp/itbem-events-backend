@@ -60,9 +60,7 @@ func setAuthzContext(t *testing.T, c echo.Context, eventID uuid.UUID, guest *mod
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
 
-type mockGuestRepo struct {
-	bulkUpdateGuestStatusFunc func(eventID uuid.UUID, ids []uuid.UUID, statusID uuid.UUID, rsvpStatus, rsvpMethod string) error
-}
+type mockGuestRepo struct{}
 
 func (m *mockGuestRepo) CreateGuest(obj *models.Guest) error              { return nil }
 func (m *mockGuestRepo) UpdateGuest(g *models.Guest) error                { return nil }
@@ -70,12 +68,6 @@ func (m *mockGuestRepo) DeleteGuest(id uuid.UUID) error                   { retu
 func (m *mockGuestRepo) GetGuestByID(id uuid.UUID) (*models.Guest, error) { return nil, nil }
 func (m *mockGuestRepo) CreateGuests(guests []models.Guest) error         { return nil }
 func (m *mockGuestRepo) BulkDeleteGuests(ids []uuid.UUID) error           { return nil }
-func (m *mockGuestRepo) BulkUpdateGuestStatus(eventID uuid.UUID, ids []uuid.UUID, statusID uuid.UUID, rsvpStatus, rsvpMethod string) error {
-	if m.bulkUpdateGuestStatusFunc != nil {
-		return m.bulkUpdateGuestStatusFunc(eventID, ids, statusID, rsvpStatus, rsvpMethod)
-	}
-	return nil
-}
 func (m *mockGuestRepo) ListGuestsByEventID(eventID uuid.UUID) ([]models.Guest, error) {
 	return nil, nil
 }
@@ -238,7 +230,7 @@ func TestExportGuestsCSV_InvitationViewIncludesRSVPColumns(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Header().Get(echo.HeaderContentDisposition), "invitaciones.csv")
 	assert.Contains(t, rec.Body.String(), "Estado RSVP,Fecha respuesta,Método,Acompañantes")
-	assert.Contains(t, rec.Body.String(), "Ana López,ana@example.com,+52 555,CONFIRMED,2026-07-12T00:30:00Z,web,1")
+	assert.Contains(t, rec.Body.String(), "Ana López,ana@example.com,'+52 555,CONFIRMED,2026-07-12T00:30:00Z,web,1")
 }
 
 func TestExportGuestsCSV_RSVPViewIncludesCompleteAuditColumns(t *testing.T) {
@@ -1039,23 +1031,11 @@ func TestCreateGuests_ValidBody_Returns201(t *testing.T) {
 
 func TestBulkUpdateGuestStatus_UpdatesSelectionInOneServiceCall(t *testing.T) {
 	eventID := uuid.Must(uuid.NewV4())
-	statusID := uuid.Must(uuid.NewV4())
+	catalog := newBulkStatusCatalog()
+	stubGuestStatusLookup(t, catalog)
+	statusID := catalog.confirmed.ID
 	guestIDs := []uuid.UUID{uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())}
-	var capturedIDs []uuid.UUID
-	repo := &mockGuestRepo{
-		bulkUpdateGuestStatusFunc: func(gotEventID uuid.UUID, ids []uuid.UUID, gotStatusID uuid.UUID, rsvpStatus, rsvpMethod string) error {
-			assert.Equal(t, eventID, gotEventID)
-			assert.Equal(t, statusID, gotStatusID)
-			assert.Equal(t, "confirmed", rsvpStatus)
-			assert.Equal(t, "host", rsvpMethod)
-			capturedIDs = append([]uuid.UUID(nil), ids...)
-			return nil
-		},
-	}
-	svc := guestsService.NewGuestService(repo, &mockTokenRepo{}, &mockCacheRepo{}, &mockTransactor{})
-	orig := guestSvc
-	guestSvc = svc
-	defer func() { guestSvc = orig }()
+	store := useBulkStatusStore(t)
 
 	body := `{"event_id":"` + eventID.String() + `","ids":["` + guestIDs[0].String() + `","` + guestIDs[1].String() + `"],"status_id":"` + statusID.String() + `","rsvp_status":"confirmed","rsvp_method":"host"}`
 	c, rec := newEchoCtx(http.MethodPatch, "/guests/bulk/status", body)
@@ -1063,7 +1043,10 @@ func TestBulkUpdateGuestStatus_UpdatesSelectionInOneServiceCall(t *testing.T) {
 
 	require.NoError(t, BulkUpdateGuestStatus(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, guestIDs, capturedIDs)
+	assert.Equal(t, 1, store.writes())
+	for _, id := range guestIDs {
+		assertGuestRSVP(t, store.get(id), catalog.confirmed, "confirmed", "host")
+	}
 }
 
 // ── GetAttendees ──────────────────────────────────────────────────────────────
@@ -1625,4 +1608,316 @@ func TestGetAttendees_Success_Returns200(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "Ingeniería en Sistemas")
 	assert.Contains(t, rec.Body.String(), "Apasionada por la tecnología")
 	assert.Contains(t, rec.Body.String(), "Gracias por acompañarme")
+}
+
+// ── Check-in surfaces: door-only projection ──────────────────────────────────
+
+// checkinAuth describes the caller seen by the authz hooks: an organization
+// role, an optional event assignment that may narrow it, or a platform level.
+type checkinAuth struct {
+	orgRole   string
+	eventRole string
+	rootLevel int
+}
+
+func setCheckinAuth(t *testing.T, c echo.Context, auth checkinAuth) {
+	t.Helper()
+	userID := uuid.Must(uuid.NewV4())
+	clientID := uuid.Must(uuid.NewV4())
+	c.Set("cognito_sub", "test-sub")
+	restore := authz.ReplaceHooksForTest(authz.Hooks{
+		SyncUser: func(string) (*models.User, error) {
+			return &models.User{ID: userID, RootLevel: auth.rootLevel}, nil
+		},
+		GetEventByIDRaw: func(id uuid.UUID) (*models.Event, error) {
+			return &models.Event{ID: id, ClientID: &clientID, Name: "Boda Ana"}, nil
+		},
+		CheckAccessRecursive: func(gotUserID, gotClientID uuid.UUID) (bool, string) {
+			if gotUserID != userID || gotClientID != clientID || auth.orgRole == "" {
+				return false, ""
+			}
+			return true, auth.orgRole
+		},
+		GetEventMemberRole: func(uuid.UUID, uuid.UUID) (string, bool, error) {
+			return auth.eventRole, auth.eventRole != "", nil
+		},
+	})
+	t.Cleanup(restore)
+}
+
+type checkinStatusRepo struct{ statuses []models.GuestStatus }
+
+func (m *checkinStatusRepo) CreateGuestStatus(*models.GuestStatus) error { return nil }
+func (m *checkinStatusRepo) UpdateGuestStatus(*models.GuestStatus) error { return nil }
+func (m *checkinStatusRepo) DeleteGuestStatus(uuid.UUID) error           { return nil }
+func (m *checkinStatusRepo) GetGuestStatusByID(uuid.UUID) (*models.GuestStatus, error) {
+	return nil, nil
+}
+func (m *checkinStatusRepo) ListGuestStatuss() ([]models.GuestStatus, error) {
+	return m.statuses, nil
+}
+
+var _ ports.GuestStatusRepository = (*checkinStatusRepo)(nil)
+
+// doorCheckinGuestRepo returns one fully populated guest and records whether
+// the list was loaded, so denied callers can be shown to load nothing, and the
+// query it was loaded with.
+type doorCheckinGuestRepo struct {
+	checkinSummaryGuestRepo
+	listed bool
+	query  dtos.CheckinGuestsListQuery
+}
+
+func (m *doorCheckinGuestRepo) ListCheckinGuests(eventID uuid.UUID, query dtos.CheckinGuestsListQuery) ([]models.Guest, int64, error) {
+	m.listed = true
+	m.query = query
+	return m.checkinSummaryGuestRepo.ListCheckinGuests(eventID, query)
+}
+
+// Values that must never reach a check-in caller.
+var doorCheckinSecrets = []string{
+	"ana.door@example.com", "+525500000042", "PRETTY42", "Nota RSVP privada", "Nota interna privada", "Sin nueces",
+}
+
+var doorCheckinForbiddenKeys = []string{
+	"email", "phone", "pretty_token", "invitation_id", "rsvp_token_id", "notes", "rsvp_notes", "dietary_restrictions",
+	"bio", "nickname", "max_guests",
+}
+
+func newDoorCheckinGuestRepo(eventID uuid.UUID) *doorCheckinGuestRepo {
+	statusID := uuid.Must(uuid.NewV4())
+	tableID := uuid.Must(uuid.NewV4())
+	invitationID := uuid.Must(uuid.NewV4())
+	tokenID := uuid.Must(uuid.NewV4())
+	return &doorCheckinGuestRepo{checkinSummaryGuestRepo: checkinSummaryGuestRepo{
+		guest: models.Guest{
+			ID: uuid.Must(uuid.NewV4()), EventID: eventID, FirstName: "Ana", LastName: "Garcia", Nickname: "Anita",
+			Email: "ana.door@example.com", Phone: "+525500000042", PrettyToken: "PRETTY42",
+			InvitationID: &invitationID, RSVPTokenID: &tokenID, Bio: "Bio privada",
+			TableID: &tableID, Table: &models.EventTable{ID: tableID, EventID: eventID, Name: "Mesa VIP", Capacity: 8},
+			GuestStatusID: statusID, GuestStatus: models.GuestStatus{ID: statusID, Code: "pending", Label: "Pendiente"},
+			RSVPStatus: "pending", RSVPGuestCount: 2, GuestsCount: 2, MaxGuests: 4,
+			DietaryRestrictions: "Sin nueces", RSVPNotes: "Nota RSVP privada", Notes: "Nota interna privada",
+		},
+		summary: dtos.GuestSummary{Total: 1, Pending: 1},
+	}}
+}
+
+func withDoorCheckinServices(t *testing.T, repo *doorCheckinGuestRepo) {
+	t.Helper()
+	orig := guestSvc
+	guestSvc = guestsService.NewGuestService(repo, &mockTokenRepo{}, &mockCacheRepo{}, &mockTransactor{})
+	guestsService.SetDefaultGuestStatusService(guestsService.NewGuestStatusService(&checkinStatusRepo{
+		statuses: []models.GuestStatus{{ID: uuid.Must(uuid.NewV4()), Code: "confirmed", Label: "Confirmado"}},
+	}, nil))
+	t.Cleanup(func() {
+		guestSvc = orig
+		guestsService.SetDefaultGuestStatusService(nil)
+	})
+}
+
+func runCheckinList(t *testing.T, auth checkinAuth) (*httptest.ResponseRecorder, *doorCheckinGuestRepo) {
+	t.Helper()
+	eventID := uuid.Must(uuid.NewV4())
+	repo := newDoorCheckinGuestRepo(eventID)
+	withDoorCheckinServices(t, repo)
+
+	c, rec := newEchoCtx(http.MethodGet, "/guests/checkin:"+eventID.String()+"?page=1&page_size=60&filter=ALL", "")
+	c.SetParamNames("key")
+	c.SetParamValues("checkin:" + eventID.String())
+	setCheckinAuth(t, c, auth)
+
+	require.NoError(t, GetGuests(c))
+	return rec, repo
+}
+
+func runCheckinWorkspace(t *testing.T, auth checkinAuth) (*httptest.ResponseRecorder, *doorCheckinGuestRepo) {
+	t.Helper()
+	eventID := uuid.Must(uuid.NewV4())
+	repo := newDoorCheckinGuestRepo(eventID)
+	withDoorCheckinServices(t, repo)
+
+	c, rec := newEchoCtx(http.MethodGet, "/events/"+eventID.String()+"/checkin-workspace", "")
+	c.SetParamNames("id")
+	c.SetParamValues(eventID.String())
+	setCheckinAuth(t, c, auth)
+
+	require.NoError(t, GetCheckinWorkspace(c))
+	return rec, repo
+}
+
+func assertDoorCheckinGuest(t *testing.T, guest map[string]json.RawMessage, raw string) {
+	t.Helper()
+	assert.JSONEq(t, `"Ana"`, string(guest["first_name"]))
+	assert.JSONEq(t, `"Garcia"`, string(guest["last_name"]))
+	assert.JSONEq(t, `"pending"`, string(guest["rsvp_status"]))
+	assert.JSONEq(t, `2`, string(guest["rsvp_guest_count"]))
+	assert.Contains(t, string(guest["table"]), `"name":"Mesa VIP"`)
+	assert.Contains(t, string(guest["status"]), `"code":"pending"`)
+	for _, key := range doorCheckinForbiddenKeys {
+		assert.NotContains(t, guest, key)
+	}
+	for _, secret := range doorCheckinSecrets {
+		assert.NotContains(t, raw, secret)
+	}
+}
+
+// The check-in page reads name, table, party size and RSVP state, and resolves
+// a scanned QR on the server (the qr query), so no caller of the check-in list
+// needs contact data, notes or tokens; a door-only role must never get them.
+func TestGetGuests_CheckinListReturnsDoorProjection(t *testing.T) {
+	cases := map[string]checkinAuth{
+		"check-in org role":             {orgRole: "CHECKIN"},
+		"manager narrowed to checkin":   {orgRole: "EVENT_MANAGER", eventRole: "CHECKIN"},
+		"event manager org role":        {orgRole: "EVENT_MANAGER"},
+		"operational platform root (2)": {rootLevel: models.RootLevelOperational},
+	}
+	for name, auth := range cases {
+		t.Run(name, func(t *testing.T) {
+			rec, repo := runCheckinList(t, auth)
+
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			assert.True(t, repo.listed)
+			var body struct {
+				Data struct {
+					Data    []map[string]json.RawMessage `json:"data"`
+					Summary *dtos.GuestSummary           `json:"summary"`
+				} `json:"data"`
+			}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			require.Len(t, body.Data.Data, 1)
+			require.NotNil(t, body.Data.Summary)
+			assert.Equal(t, int64(1), body.Data.Summary.Total)
+			assertDoorCheckinGuest(t, body.Data.Data[0], rec.Body.String())
+		})
+	}
+}
+
+func TestGetCheckinWorkspace_ReturnsDoorProjection(t *testing.T) {
+	cases := map[string]checkinAuth{
+		"check-in org role":           {orgRole: "CHECKIN"},
+		"manager narrowed to checkin": {orgRole: "EVENT_MANAGER", eventRole: "CHECKIN"},
+		"event manager org role":      {orgRole: "EVENT_MANAGER"},
+	}
+	for name, auth := range cases {
+		t.Run(name, func(t *testing.T) {
+			rec, repo := runCheckinWorkspace(t, auth)
+
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			assert.True(t, repo.listed)
+			var body struct {
+				Data struct {
+					Event    dtos.EventResponse `json:"event"`
+					Statuses []json.RawMessage  `json:"statuses"`
+					Guests   struct {
+						Data    []map[string]json.RawMessage `json:"data"`
+						Summary *dtos.GuestSummary           `json:"summary"`
+					} `json:"guests"`
+				} `json:"data"`
+			}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			assert.Equal(t, "Boda Ana", body.Data.Event.Name)
+			assert.Len(t, body.Data.Statuses, 1)
+			require.NotNil(t, body.Data.Guests.Summary)
+			require.Len(t, body.Data.Guests.Data, 1)
+			assertDoorCheckinGuest(t, body.Data.Guests.Data[0], rec.Body.String())
+		})
+	}
+}
+
+func TestCheckinSurfaces_RejectCallersWithoutCheckinRun(t *testing.T) {
+	cases := map[string]checkinAuth{
+		"viewer org role":           {orgRole: "Guest"},
+		"analyst org role":          {orgRole: "ANALYST"},
+		"member org role":           {orgRole: "Member"},
+		"editor narrowed to viewer": {orgRole: "EDITOR", eventRole: "VIEWER"},
+		"caller outside the org":    {},
+	}
+	for name, auth := range cases {
+		t.Run(name+" list", func(t *testing.T) {
+			rec, repo := runCheckinList(t, auth)
+			assert.Equal(t, http.StatusForbidden, rec.Code)
+			assert.False(t, repo.listed)
+			assert.NotContains(t, rec.Body.String(), "Garcia")
+		})
+		t.Run(name+" workspace", func(t *testing.T) {
+			rec, repo := runCheckinWorkspace(t, auth)
+			assert.Equal(t, http.StatusForbidden, rec.Code)
+			assert.False(t, repo.listed)
+			assert.NotContains(t, rec.Body.String(), "Garcia")
+		})
+	}
+}
+
+// The guest-manager lists share the repository query with check-in but keep the
+// full guest record: the invitations view builds share links from pretty_token.
+func TestGetGuests_GuestManagerListsKeepFullRecord(t *testing.T) {
+	for _, prefix := range []string{"page:", "invitations:"} {
+		t.Run(prefix, func(t *testing.T) {
+			eventID := uuid.Must(uuid.NewV4())
+			repo := newDoorCheckinGuestRepo(eventID)
+			withDoorCheckinServices(t, repo)
+
+			c, rec := newEchoCtx(http.MethodGet, "/guests/"+prefix+eventID.String()+"?page=1&page_size=50", "")
+			c.SetParamNames("key")
+			c.SetParamValues(prefix + eventID.String())
+			setCheckinAuth(t, c, checkinAuth{orgRole: "EVENT_MANAGER"})
+
+			require.NoError(t, GetGuests(c))
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), `"email":"ana.door@example.com"`)
+			assert.Contains(t, rec.Body.String(), `"pretty_token":"PRETTY42"`)
+		})
+	}
+}
+
+// The check-in surfaces search with the door search (email and phone only by
+// their complete value); the guest-manager lists and the CSV export keep the
+// substring search over contact data, which their callers already see.
+func TestGuestLists_OnlyCheckinSurfacesUseDoorSearch(t *testing.T) {
+	for _, tc := range []struct {
+		prefix string
+		door   bool
+	}{{"checkin:", true}, {"page:", false}, {"invitations:", false}} {
+		t.Run(tc.prefix, func(t *testing.T) {
+			eventID := uuid.Must(uuid.NewV4())
+			repo := newDoorCheckinGuestRepo(eventID)
+			withDoorCheckinServices(t, repo)
+
+			c, rec := newEchoCtx(http.MethodGet, "/guests/"+tc.prefix+eventID.String()+"?page=1&page_size=50&search=ana%40gmail.com", "")
+			c.SetParamNames("key")
+			c.SetParamValues(tc.prefix + eventID.String())
+			setCheckinAuth(t, c, checkinAuth{orgRole: "EVENT_MANAGER"})
+
+			require.NoError(t, GetGuests(c))
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			require.True(t, repo.listed)
+			assert.Equal(t, "ana@gmail.com", repo.query.Search)
+			assert.Equal(t, tc.door, repo.query.DoorSearch)
+		})
+	}
+
+	t.Run("check-in workspace", func(t *testing.T) {
+		rec, repo := runCheckinWorkspace(t, checkinAuth{orgRole: "CHECKIN"})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		require.True(t, repo.listed)
+		assert.True(t, repo.query.DoorSearch)
+	})
+
+	t.Run("csv export", func(t *testing.T) {
+		eventID := uuid.Must(uuid.NewV4())
+		repo := newDoorCheckinGuestRepo(eventID)
+		withDoorCheckinServices(t, repo)
+
+		c, rec := newEchoCtx(http.MethodGet, "/events/"+eventID.String()+"/guests/export?search=ana%40gmail.com", "")
+		c.SetParamNames("id")
+		c.SetParamValues(eventID.String())
+		setCheckinAuth(t, c, checkinAuth{orgRole: "EVENT_MANAGER"})
+
+		require.NoError(t, ExportGuestsCSV(c))
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		require.True(t, repo.listed)
+		assert.Equal(t, "ana@gmail.com", repo.query.Search)
+		assert.False(t, repo.query.DoorSearch)
+	})
 }
