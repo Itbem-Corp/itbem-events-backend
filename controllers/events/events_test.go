@@ -1663,6 +1663,7 @@ func TestGetEventMeta_ReturnsPublicOgContract(t *testing.T) {
 	assert.Equal(t, "events/boda-demo/cover.webp", body.Data.CoverImageURL)
 	assert.Equal(t, "events/boda-demo/cover.webp", body.Data.CoverViewURL)
 	assert.Equal(t, "events/boda-demo/cover.webp", body.Data.ViewURL)
+	assert.Equal(t, "/api/events/boda-demo/cover-image", body.Data.OGImageURL)
 	assert.Nil(t, body.Data.CoverViewURLExpiresAt)
 	assert.Nil(t, body.Data.ViewURLExpiresAt)
 	require.NotNil(t, body.Data.EventDateTime)

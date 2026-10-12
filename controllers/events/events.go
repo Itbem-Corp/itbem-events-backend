@@ -1073,6 +1073,7 @@ func GetEventMeta(c echo.Context) error {
 		CoverViewURLExpiresAt: coverURLExpiresAt,
 		ViewURL:               coverURL,
 		ViewURLExpiresAt:      coverURLExpiresAt,
+		OGImageURL:            ogImageURL(event.Identifier, event.CoverImageURL),
 		EventDateTime:         eventDateTime,
 		Address:               event.Address,
 		SecondAddress:         event.SecondAddress,

@@ -38,16 +38,20 @@ type EventMeta struct {
 	CoverViewURLExpiresAt *time.Time `json:"cover_view_url_expires_at,omitempty"`
 	ViewURL               string     `json:"view_url,omitempty"`
 	ViewURLExpiresAt      *time.Time `json:"view_url_expires_at,omitempty"`
-	EventDateTime         *time.Time `json:"event_date_time,omitempty"`
-	Address               string     `json:"address,omitempty"`
-	SecondAddress         string     `json:"second_address,omitempty"`
-	Timezone              string     `json:"timezone,omitempty"`
-	Language              string     `json:"language,omitempty"`
-	OrganizerName         string     `json:"organizer_name,omitempty"`
-	EventType             string     `json:"event_type,omitempty"`
-	ContentVersion        string     `json:"content_version,omitempty"`
-	RSVPDeadline          *time.Time `json:"rsvp_deadline"`
-	RSVPOpen              bool       `json:"rsvp_open"`
+	// OGImageURL is a stable path (relative to the API origin) that redirects
+	// to a fresh cover URL; use it for og:image instead of the expiring
+	// cover_view_url (STU-49). Empty when the event has no cover.
+	OGImageURL     string     `json:"og_image_url,omitempty"`
+	EventDateTime  *time.Time `json:"event_date_time,omitempty"`
+	Address        string     `json:"address,omitempty"`
+	SecondAddress  string     `json:"second_address,omitempty"`
+	Timezone       string     `json:"timezone,omitempty"`
+	Language       string     `json:"language,omitempty"`
+	OrganizerName  string     `json:"organizer_name,omitempty"`
+	EventType      string     `json:"event_type,omitempty"`
+	ContentVersion string     `json:"content_version,omitempty"`
+	RSVPDeadline   *time.Time `json:"rsvp_deadline"`
+	RSVPOpen       bool       `json:"rsvp_open"`
 }
 
 type PreviewTokenResponse struct {
