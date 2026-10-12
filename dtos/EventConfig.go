@@ -30,6 +30,7 @@ type EventConfigResponse struct {
 	FontSet                     *FontSetResponse        `json:"font_set,omitempty"`
 	ActiveFrom                  *time.Time              `json:"active_from,omitempty"`
 	ActiveUntil                 *time.Time              `json:"active_until,omitempty"`
+	RSVPDeadline                *time.Time              `json:"rsvp_deadline"`
 	DefaultWelcomeMessage       string                  `json:"default_welcome_message"`
 	DefaultMomentRequestMessage string                  `json:"default_moment_request_message"`
 	DefaultThankYouMessage      string                  `json:"default_thank_you_message"`
@@ -80,6 +81,7 @@ func NewEventConfigResponse(config *models.EventConfig, eventID uuid.UUID) Event
 		FontSet:                     fontSetResponsePtr(config.FontSet),
 		ActiveFrom:                  eventConfigResponseTime(config.ActiveFrom),
 		ActiveUntil:                 eventConfigResponseTimePtr(config.ActiveUntil),
+		RSVPDeadline:                eventConfigResponseTimePtr(config.RSVPDeadline),
 		DefaultWelcomeMessage:       config.DefaultWelcomeMessage,
 		DefaultMomentRequestMessage: config.DefaultMomentRequestMessage,
 		DefaultThankYouMessage:      config.DefaultThankYouMessage,
@@ -193,6 +195,10 @@ func (p EventConfigPatch) ApplyTo(config *models.EventConfig) error {
 			}
 		case "active_until":
 			if err := decodeTimePointer(raw, &config.ActiveUntil); err != nil {
+				return fieldError(field, err)
+			}
+		case "rsvp_deadline":
+			if err := decodeTimePointer(raw, &config.RSVPDeadline); err != nil {
 				return fieldError(field, err)
 			}
 		case "default_welcome_message", "welcome_message":
@@ -373,6 +379,8 @@ func normalizeEventConfigPatchField(field string) string {
 		return "active_from"
 	case "activeUntil", "ActiveUntil":
 		return "active_until"
+	case "rsvpDeadline", "RSVPDeadline", "RsvpDeadline":
+		return "rsvp_deadline"
 	case "defaultWelcomeMessage", "DefaultWelcomeMessage":
 		return "default_welcome_message"
 	case "defaultMomentRequestMessage", "DefaultMomentRequestMessage":

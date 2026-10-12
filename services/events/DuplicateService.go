@@ -320,6 +320,7 @@ func copyEventConfigForDuplicate(source *models.EventConfig, duplicateID uuid.UU
 	config.ColorPaletteID = cloneUUIDPointer(source.ColorPaletteID)
 	config.FontSetID = cloneUUIDPointer(source.FontSetID)
 	config.ActiveUntil = cloneTimePointer(source.ActiveUntil)
+	config.RSVPDeadline = cloneTimePointer(source.RSVPDeadline)
 	config.DesignTemplate = nil
 	config.ColorPalette = nil
 	config.FontSet = nil
