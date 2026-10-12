@@ -5,9 +5,11 @@ import (
 	"net/http"
 
 	"events-stocks/dtos"
+	"events-stocks/models"
 	"events-stocks/repositories/eventsrepository"
 	"events-stocks/utils"
 
+	"github.com/gofrs/uuid"
 	"github.com/labstack/echo/v4"
 )
 
@@ -42,4 +44,15 @@ func respondEventWriteError(c echo.Context, err error, fallback string) error {
 		return utils.Error(c, http.StatusNotFound, "Evento no encontrado", "")
 	}
 	return utils.Error(c, http.StatusInternalServerError, fallback, err.Error())
+}
+
+// keepClientWhenCleared treats client_id: null (or "") on an update as
+// "unchanged": the dashboard sends null when the organization picker is empty,
+// and storing it orphaned the event (EVT-4). Moving to another organization
+// still goes through authz.RequireClientMoveAccess.
+func keepClientWhenCleared(event *models.Event, originalClientID *uuid.UUID) {
+	if event.ClientID == nil && originalClientID != nil {
+		clientID := *originalClientID
+		event.ClientID = &clientID
+	}
 }

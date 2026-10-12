@@ -669,6 +669,7 @@ func UpdateEvent(c echo.Context) error {
 	if err := payload.ApplyTo(existing); err != nil {
 		return respondEventPayloadError(c, err)
 	}
+	keepClientWhenCleared(existing, originalClientID)
 	if err := c.Validate(existing); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Validation error", err.Error())
 	}

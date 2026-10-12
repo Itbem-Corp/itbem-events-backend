@@ -130,3 +130,24 @@ func TestCreateAndUpdateEvent_InvalidTimezoneReturns400(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Equal(t, eventErrorInvalidTimezone, decodeAPIError(t, rec.Body.Bytes()).Error)
 }
+
+// EVT-4: client_id null on update must keep the organization.
+func TestUpdateEvent_NullClientKeepsTheOrganization(t *testing.T) {
+	clientID := uuid.Must(uuid.NewV4())
+	var saved *models.Event
+	useEventService(t, &mockEventsRepo{
+		UpdateEventFunc: func(event *models.Event) error { saved = event; return nil },
+	})
+	eventID := uuid.Must(uuid.NewV4())
+	c, rec := newEchoCtx(http.MethodPut, "/events/"+eventID.String(), `{"name":"Renombrado","client_id":null}`)
+	c.SetParamNames("id")
+	c.SetParamValues(eventID.String())
+	setRootAuthWithEvent(t, c, &clientID)
+
+	require.NoError(t, UpdateEvent(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	require.NotNil(t, saved)
+	require.NotNil(t, saved.ClientID)
+	assert.Equal(t, clientID, *saved.ClientID)
+	assert.Equal(t, "Renombrado", saved.Name)
+}
