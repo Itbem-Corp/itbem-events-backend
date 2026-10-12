@@ -56,6 +56,22 @@ func guestCSVStatus(guest models.Guest) string {
 	return status
 }
 
+// guestCSVStatusLabel is the Spanish value written to the export's status
+// column (GST-84). The dashboard import maps both these labels and the
+// English codes. Unknown codes are written as they are.
+func guestCSVStatusLabel(guest models.Guest) string {
+	switch status := guestCSVStatus(guest); status {
+	case "PENDING":
+		return "Pendiente"
+	case "CONFIRMED":
+		return "Confirmado"
+	case "DECLINED":
+		return "Declinado"
+	default:
+		return status
+	}
+}
+
 func guestCSVTable(guest models.Guest) string {
 	if guest.Table != nil && strings.TrimSpace(guest.Table.Name) != "" {
 		return strings.TrimSpace(guest.Table.Name)
@@ -144,7 +160,7 @@ func ExportGuestsCSV(c echo.Context) error {
 				respondedAt = guest.UpdatedAt.UTC().Format(time.RFC3339)
 			}
 			writeGuestCSVRow(writer,
-				strings.TrimSpace(guest.FirstName+" "+guest.LastName), guest.Email, guest.Phone, guestCSVStatus(guest),
+				strings.TrimSpace(guest.FirstName+" "+guest.LastName), guest.Email, guest.Phone, guestCSVStatusLabel(guest),
 				guest.RSVPMethod, strconv.Itoa(max(partySize-1, 0)), respondedAt, guest.CreatedAt.UTC().Format(time.RFC3339),
 			)
 		} else if invitationView {
@@ -153,13 +169,13 @@ func ExportGuestsCSV(c echo.Context) error {
 				respondedAt = guest.RSVPAt.UTC().Format(time.RFC3339)
 			}
 			writeGuestCSVRow(writer,
-				strings.TrimSpace(guest.FirstName+" "+guest.LastName), guest.Email, guest.Phone, guestCSVStatus(guest),
+				strings.TrimSpace(guest.FirstName+" "+guest.LastName), guest.Email, guest.Phone, guestCSVStatusLabel(guest),
 				respondedAt, guest.RSVPMethod, strconv.Itoa(max(partySize-1, 0)),
 			)
 		} else {
 			writeGuestCSVRow(writer,
 				guest.FirstName, guest.LastName, guest.Email, guest.Phone, guestCSVTable(guest), strconv.Itoa(partySize),
-				strconv.Itoa(max(partySize-1, 0)), guestCSVStatus(guest), guest.DietaryRestrictions, guest.RSVPNotes, guest.Notes,
+				strconv.Itoa(max(partySize-1, 0)), guestCSVStatusLabel(guest), guest.DietaryRestrictions, guest.RSVPNotes, guest.Notes,
 			)
 		}
 	}
