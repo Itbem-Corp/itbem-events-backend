@@ -642,7 +642,7 @@ func CreateEvent(c echo.Context) error {
 	}
 
 	if err := eventSvc.CreateEvent(&event); err != nil {
-		return utils.Error(c, http.StatusInternalServerError, "Error creating event", err.Error())
+		return respondEventWriteError(c, err, "Error creating event")
 	}
 
 	return utils.Success(c, http.StatusCreated, "Event created", dtos.NewEventResponse(&event))
@@ -678,7 +678,7 @@ func UpdateEvent(c echo.Context) error {
 
 	existing.ID = id
 	if err := eventSvc.UpdateEvent(existing); err != nil {
-		return utils.Error(c, http.StatusInternalServerError, "Error updating event", err.Error())
+		return respondEventWriteError(c, err, "Error updating event")
 	}
 
 	return utils.Success(c, http.StatusOK, "Event updated", eventResponseWithCoverView(existing))

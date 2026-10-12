@@ -176,3 +176,71 @@ func TestEventWithoutTypeIsStoredAsNullOnCreateAndUpdate(t *testing.T) {
 	require.NoError(t, db.First(&cleared, "id = ?", typed.ID).Error)
 	assert.Nil(t, cleared.EventTypeID)
 }
+
+func createLifecycleClient(t *testing.T, suffix, label string) uuid.UUID {
+	t.Helper()
+	clientType := models.ClientType{ID: uuid.Must(uuid.NewV4()), Name: "QA", Code: "QA-" + label + "-" + suffix}
+	require.NoError(t, configuration.DB.Create(&clientType).Error)
+	client := models.Client{ID: uuid.Must(uuid.NewV4()), Name: "QA " + label + " " + suffix, Code: "qa-" + label + "-" + suffix, ClientTypeID: clientType.ID, IsActive: true}
+	require.NoError(t, configuration.DB.Omit("ClientType").Create(&client).Error)
+	return client.ID
+}
+
+func eventIndexDefinition(t *testing.T, name string) string {
+	t.Helper()
+	var definition string
+	configuration.DB.Raw(`SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() AND indexname = ?`, name).Scan(&definition)
+	return definition
+}
+
+// EVT-2 / EVT-6 / SET-15: names are unique per organization among live
+// events, identifiers platform-wide among live events, and a deleted event
+// releases both.
+func TestEventNameAndIdentifierUniquenessIsPerOrganizationAndIgnoresDeletedRows(t *testing.T) {
+	suffix := lifecycleSuffix()
+	orgA := createLifecycleClient(t, suffix, "A")
+	orgB := createLifecycleClient(t, suffix, "B")
+	name := "XV años de Sofía " + suffix
+
+	createLifecycleEvent(t, &orgA, name, "xv-sofia-a-"+suffix)
+	// Another organization may use the same name.
+	createLifecycleEvent(t, &orgB, name, "xv-sofia-b-"+suffix)
+
+	// The same organization may not.
+	duplicate := models.Event{ID: uuid.Must(uuid.NewV4()), ClientID: &orgA, Name: name, Identifier: "xv-sofia-a2-" + suffix, Timezone: "UTC"}
+	assert.ErrorIs(t, CreateEvent(&duplicate), ErrEventNameAlreadyExists)
+
+	// A live identifier is unique across organizations.
+	slugClash := models.Event{ID: uuid.Must(uuid.NewV4()), ClientID: &orgB, Name: "Otro " + suffix, Identifier: "xv-sofia-a-" + suffix, Timezone: "UTC"}
+	assert.ErrorIs(t, CreateEvent(&slugClash), ErrEventIdentifierAlreadyExists)
+
+	// Update maps the same violation (it used to be "record not found").
+	other := createLifecycleEvent(t, &orgA, "Fiesta "+suffix, "fiesta-"+suffix)
+	other.Name = name
+	assert.ErrorIs(t, UpdateEvent(&other), ErrEventNameAlreadyExists)
+
+	// Delete then recreate the same name and slug in the same organization.
+	deleted := createLifecycleEvent(t, &orgA, "Boda Ana "+suffix, "boda-ana-"+suffix)
+	require.NoError(t, DeleteEvent(deleted.ID))
+	assert.False(t, IdentifierExists("boda-ana-"+suffix), "the slug generator must see the slug as free")
+	createLifecycleEvent(t, &orgA, "Boda Ana "+suffix, "boda-ana-"+suffix)
+}
+
+func TestEventIdentityMigrationReplacesGlobalIndexesAndIsIdempotent(t *testing.T) {
+	assert.Empty(t, eventIndexDefinition(t, "idx_events_name"), "the global name index must be dropped")
+	assert.Empty(t, eventIndexDefinition(t, "idx_events_identifier"), "the global identifier index must be dropped")
+	assert.Contains(t, eventIndexDefinition(t, configuration.EventClientNameLiveIndex), "(client_id, name) WHERE (deleted_at IS NULL)")
+	assert.Contains(t, eventIndexDefinition(t, configuration.EventIdentifierLiveIndex), "(identifier) WHERE (deleted_at IS NULL)")
+
+	// A database still at the previous schema: the old global indexes exist.
+	// They are recreated without UNIQUE because the previous test stored the
+	// same name in two organizations, which a global UNIQUE index rejects (the
+	// reason a rollback to the old binary needs deduplication first).
+	require.NoError(t, configuration.DB.Exec(`CREATE INDEX IF NOT EXISTS idx_events_name ON events (name)`).Error)
+	require.NoError(t, configuration.DB.Exec(`CREATE INDEX IF NOT EXISTS idx_events_identifier ON events (identifier)`).Error)
+	require.NoError(t, configuration.MigrateModelsForTest(configuration.DB))
+	require.NoError(t, configuration.MigrateModelsForTest(configuration.DB), "a second boot must be a no-op")
+	assert.Empty(t, eventIndexDefinition(t, "idx_events_name"))
+	assert.Empty(t, eventIndexDefinition(t, "idx_events_identifier"))
+	assert.NotEmpty(t, eventIndexDefinition(t, configuration.EventClientNameLiveIndex))
+}

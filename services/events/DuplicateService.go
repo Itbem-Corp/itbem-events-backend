@@ -82,7 +82,7 @@ func (s *DuplicateService) DuplicateEventByID(sourceID uuid.UUID, payload dtos.E
 		}
 		normalizeDuplicateEventForCreate(&duplicate)
 
-		name, err := generateUniqueEventName(tx, duplicate.Name)
+		name, err := generateUniqueEventName(tx, duplicate.ClientID, duplicate.Name)
 		if err != nil {
 			return err
 		}
@@ -215,7 +215,9 @@ func cloneIntPointer(value *int) *int {
 	return &copyValue
 }
 
-func generateUniqueEventName(tx *gorm.DB, baseName string) (string, error) {
+// generateUniqueEventName picks a name that is free among the live events of
+// the same organization, matching configuration.EventClientNameLiveIndex.
+func generateUniqueEventName(tx *gorm.DB, clientID *uuid.UUID, baseName string) (string, error) {
 	base := strings.TrimSpace(baseName)
 	if base == "" {
 		base = defaultDuplicateName("")
@@ -223,7 +225,7 @@ func generateUniqueEventName(tx *gorm.DB, baseName string) (string, error) {
 
 	candidate := base
 	for i := 2; ; i++ {
-		exists, err := eventNameExists(tx, candidate)
+		exists, err := eventNameExists(tx, clientID, candidate)
 		if err != nil {
 			return "", err
 		}
@@ -234,9 +236,15 @@ func generateUniqueEventName(tx *gorm.DB, baseName string) (string, error) {
 	}
 }
 
-func eventNameExists(tx *gorm.DB, name string) (bool, error) {
+func eventNameExists(tx *gorm.DB, clientID *uuid.UUID, name string) (bool, error) {
 	var count int64
-	if err := tx.Model(&models.Event{}).Where("name = ?", name).Count(&count).Error; err != nil {
+	query := tx.Model(&models.Event{}).Where("name = ?", name)
+	if clientID == nil {
+		query = query.Where("client_id IS NULL")
+	} else {
+		query = query.Where("client_id = ?", *clientID)
+	}
+	if err := query.Count(&count).Error; err != nil {
 		return false, err
 	}
 	return count > 0, nil
