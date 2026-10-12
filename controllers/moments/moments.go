@@ -7,12 +7,15 @@ import (
 	"events-stocks/dtos"
 	"events-stocks/internal/authz"
 	"events-stocks/models"
+	"events-stocks/repositories/guestrepository"
+	"events-stocks/repositories/invitationrepository"
 	eventsService "events-stocks/services/events"
 	momentsService "events-stocks/services/moments"
 	resourcesService "events-stocks/services/resources"
 	"events-stocks/utils"
 	"github.com/gofrs/uuid"
 	"github.com/labstack/echo/v4"
+	"gorm.io/gorm"
 	"net/http"
 	"os"
 	"strconv"
@@ -517,12 +520,91 @@ func BackfillMomentVariants(c echo.Context) error {
 	return utils.Success(c, http.StatusAccepted, "Moment variant backfill batch evaluated", dtos.MomentBatchResultResponse{Succeeded: succeeded, Skipped: skipped, Failed: failed})
 }
 
+// momentGuestByID and momentInvitationByID resolve the guest and invitation a
+// dashboard-created moment names, so they can be checked against its event;
+// tests replace them.
+var (
+	momentGuestByID      = guestrepository.GetGuestByID
+	momentInvitationByID = invitationrepository.GetInvitationByIDLite
+)
+
+var errMomentReferenceOutsideEvent = errors.New("guest_id or invitation_id does not belong to this event")
+
+// momentCreatePayload is the allowlist of moment columns POST /moments
+// accepts, under the same keys c.Bind read from models.Moment. Server-owned
+// columns (id, media bucket, processing_*, media_variants, error and size
+// metrics, timestamps) and the nested invitation, guest and moment_type
+// objects are absent: a dashboard create cannot claim a processed state,
+// point a variant at a foreign key, or insert rows through GORM associations.
+type momentCreatePayload struct {
+	EventID      *uuid.UUID `json:"event_id"`
+	InvitationID *uuid.UUID `json:"invitation_id"`
+	MomentTypeID *uuid.UUID `json:"moment_type_id"`
+	GuestID      *uuid.UUID `json:"guest_id"`
+	Title        string     `json:"title"`
+	Description  string     `json:"description"`
+	ContentURL   string     `json:"content_url"`
+	ThumbnailURL string     `json:"thumbnail_url"`
+	ContentType  string     `json:"content_type"`
+	IsApproved   bool       `json:"is_approved"`
+	Order        int        `json:"order"`
+}
+
+func (p momentCreatePayload) moment() models.Moment {
+	return models.Moment{
+		EventID:      nonNilUUID(p.EventID),
+		InvitationID: nonNilUUID(p.InvitationID),
+		MomentTypeID: nonNilUUID(p.MomentTypeID),
+		GuestID:      nonNilUUID(p.GuestID),
+		Title:        p.Title,
+		Description:  p.Description,
+		ContentURL:   strings.TrimSpace(p.ContentURL),
+		ThumbnailURL: strings.TrimSpace(p.ThumbnailURL),
+		ContentType:  p.ContentType,
+		IsApproved:   p.IsApproved,
+		Order:        p.Order,
+	}
+}
+
+// nonNilUUID treats the nil UUID as an absent reference.
+func nonNilUUID(id *uuid.UUID) *uuid.UUID {
+	if id == nil || *id == uuid.Nil {
+		return nil
+	}
+	return id
+}
+
+// checkMomentReferences makes sure a moment only names a guest or invitation
+// of its own event; an id that does not exist is rejected the same way.
+func checkMomentReferences(eventID uuid.UUID, guestID, invitationID *uuid.UUID) error {
+	if guestID != nil {
+		guest, err := momentGuestByID(*guestID)
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		if err != nil || guest == nil || guest.EventID != eventID {
+			return errMomentReferenceOutsideEvent
+		}
+	}
+	if invitationID != nil {
+		invitation, err := momentInvitationByID(*invitationID)
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		if err != nil || invitation == nil || invitation.EventID != eventID {
+			return errMomentReferenceOutsideEvent
+		}
+	}
+	return nil
+}
+
 // POST /moments
 func CreateMoment(c echo.Context) error {
-	var moment models.Moment
-	if err := c.Bind(&moment); err != nil {
+	var payload momentCreatePayload
+	if err := c.Bind(&payload); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
 	}
+	moment := payload.moment()
 	if err := c.Validate(&moment); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Validation error", err.Error())
 	}
@@ -531,6 +613,19 @@ func CreateMoment(c echo.Context) error {
 	}
 	if _, _, authErr := authz.RequireEventCapability(c, *moment.EventID, authz.CapabilityEventManage); authErr != nil {
 		return authz.Respond(c, authErr)
+	}
+	// Admin responses presign content_url and thumbnail_url, so only keys of
+	// this event's moments are stored.
+	for _, key := range []string{moment.ContentURL, moment.ThumbnailURL} {
+		if key != "" && !momentsService.IsEventMomentKey(*moment.EventID, key) {
+			return utils.Error(c, http.StatusBadRequest, "Archivo inválido", "moment_content_outside_event")
+		}
+	}
+	if err := checkMomentReferences(*moment.EventID, moment.GuestID, moment.InvitationID); err != nil {
+		if errors.Is(err, errMomentReferenceOutsideEvent) {
+			return utils.Error(c, http.StatusBadRequest, "Referencia inválida", "reference_outside_event")
+		}
+		return utils.Error(c, http.StatusInternalServerError, "Error loading moment references", err.Error())
 	}
 
 	if err := momentSvc.CreateMoment(&moment); err != nil {

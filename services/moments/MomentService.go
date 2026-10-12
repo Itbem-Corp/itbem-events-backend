@@ -429,6 +429,40 @@ func validateMediaCallbackKeys(moment *models.Moment, status, objectKey, thumbna
 	return nil
 }
 
+// IsEventMomentKey reports whether key is a storage key of eventID's moments:
+// moments/<eventID>/<something>, bare or under an organization namespace
+// (organizations/<uuid>/), the layouts ValidateMomentRawKey and the processing
+// callbacks produce. Absolute URLs, other prefixes or namespaces, ".." and
+// backslashes are rejected, so a key that passes can only be presigned for an
+// object of this event.
+func IsEventMomentKey(eventID uuid.UUID, key string) bool {
+	key = strings.TrimSpace(key)
+	if eventID == uuid.Nil || key == "" || strings.Contains(key, "..") || strings.Contains(key, `\`) {
+		return false
+	}
+	namespace := storagekeys.Namespace(key)
+	if namespace != "" && !isOrganizationNamespace(namespace) {
+		return false
+	}
+	prefix := "moments/" + eventID.String() + "/"
+	rest := strings.TrimPrefix(key, namespace)
+	return strings.HasPrefix(rest, prefix) && len(rest) > len(prefix)
+}
+
+// isOrganizationNamespace accepts exactly organizations/<canonical uuid>/.
+func isOrganizationNamespace(namespace string) bool {
+	id, ok := strings.CutPrefix(namespace, "organizations/")
+	if !ok {
+		return false
+	}
+	id, ok = strings.CutSuffix(id, "/")
+	if !ok {
+		return false
+	}
+	parsed, err := uuid.FromString(id)
+	return err == nil && parsed != uuid.Nil && parsed.String() == id
+}
+
 func normalizeMomentProcessingStatus(value string) (string, error) {
 	status := strings.ToLower(strings.TrimSpace(value))
 	switch status {
