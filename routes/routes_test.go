@@ -163,8 +163,12 @@ func TestConfigurarRutasRegistersFrontendContractRoutes(t *testing.T) {
 		"PUT /api/internal/automation/gateway/objects/write",
 		"POST /api/users/avatar",
 		"DELETE /api/users/avatar",
+		// Deprecated GET aliases: kept for compatibility, but GET skips
+		// audit.Mutations. Clients must use the DELETE routes below.
 		"GET /api/cache/flush/:key",
 		"GET /api/cache/flush-all",
+		"DELETE /api/cache/flush/:key",
+		"DELETE /api/cache/flush-all",
 		"POST /api/fonts/upload",
 		"GET /api/catalogs/client-types",
 		"GET /api/catalogs/roles",
@@ -195,6 +199,8 @@ func TestConfigurarRutasKeepsStaticDashboardRoutesAheadOfPublicParams(t *testing
 		{method: http.MethodGet, target: "/api/events/phrases", path: "/api/events/phrases"},
 		{method: http.MethodGet, target: "/api/events/page-spec", path: "/api/events/page-spec"},
 		{method: http.MethodGet, target: "/api/cache/flush-all", path: "/api/cache/flush-all"},
+		{method: http.MethodDelete, target: "/api/cache/flush-all", path: "/api/cache/flush-all"},
+		{method: http.MethodDelete, target: "/api/cache/flush/events", path: "/api/cache/flush/:key"},
 		{method: http.MethodGet, target: "/api/invitations/ByToken", path: "/api/invitations/ByToken"},
 	} {
 		req := httptest.NewRequest(tc.method, tc.target, nil)
@@ -204,6 +210,24 @@ func TestConfigurarRutasKeepsStaticDashboardRoutesAheadOfPublicParams(t *testing
 		e.Router().Find(tc.method, tc.target, c)
 
 		assert.Equal(t, tc.path, c.Path(), tc.target)
+	}
+}
+
+// The audited DELETE cache routes must run exactly the handlers of the
+// deprecated GET routes, so moving a client over changes nothing but the
+// audit trail.
+func TestCacheFlushDeleteRoutesShareTheDeprecatedGetHandlers(t *testing.T) {
+	e := echo.New()
+	ConfigurarRutas(e, &models.Config{})
+
+	handlers := map[string]string{}
+	for _, route := range e.Routes() {
+		handlers[route.Method+" "+route.Path] = route.Name
+	}
+	for _, path := range []string{"/api/cache/flush/:key", "/api/cache/flush-all"} {
+		get, del := handlers[http.MethodGet+" "+path], handlers[http.MethodDelete+" "+path]
+		require.NotEmpty(t, get, path)
+		assert.Equal(t, get, del, path)
 	}
 }
 

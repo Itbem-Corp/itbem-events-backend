@@ -1,6 +1,7 @@
 package clients
 
 import (
+	"errors"
 	"events-stocks/dtos"
 	"events-stocks/internal/authz"
 	"events-stocks/internal/products"
@@ -37,8 +38,19 @@ func operationalRootMayNotManageOrganization(c echo.Context, user *models.User) 
 	if user.EffectiveRootLevel() != models.RootLevelOperational {
 		return false
 	}
-	_ = utils.Error(c, http.StatusForbidden, "Permission Denied", "Operational roots cannot change organization structure or teams")
+	_ = utils.Error(c, http.StatusForbidden, "Permission Denied", "Operational roots cannot change organization structure")
 	return true
+}
+
+// platformTeamManager decides whether a member write takes the platform path:
+// any organization, no membership required, and the *AsRoot service rules
+// that never assign, change or remove an Owner and grant only roles within
+// the requester's own capabilities (so Root 2 never grants Admin, Event
+// manager or Editor). Both root levels manage teams (members:manage); a
+// Root 2 is additionally kept away from platform-root accounts by
+// operationalRootMayNotManageRootTarget.
+func platformTeamManager(user *models.User) bool {
+	return user.IsPlatformAdmin()
 }
 
 func operationalRootMayNotManageRootTarget(c echo.Context, requester *models.User, targetUserID uuid.UUID) bool {
@@ -302,14 +314,14 @@ func InviteUser(c echo.Context) error {
 		return utils.Error(c, http.StatusBadRequest, "Invalid data", "role_id is required")
 	}
 
-	if !requester.IsRoot {
+	if !platformTeamManager(requester) {
 		if err := clientSvc.CanManageClientMembers(req.ClientID, requester.ID); err != nil {
 			return utils.Error(c, http.StatusForbidden, "Permission Denied", "You cannot add members to this client")
 		}
 	}
 	var rolePermissionErr error
-	if requester.IsRoot {
-		rolePermissionErr = clientSvc.CanAssignClientRoleAsRoot(req.RoleID)
+	if platformTeamManager(requester) {
+		rolePermissionErr = clientSvc.CanAssignClientRoleAsRoot(requester, req.RoleID)
 	} else {
 		rolePermissionErr = clientSvc.CanAssignClientRole(req.ClientID, requester.ID, req.RoleID)
 	}
@@ -331,6 +343,16 @@ func InviteUser(c echo.Context) error {
 	}
 	if operationalRootMayNotManageRootTarget(c, requester, targetUserID) {
 		return nil
+	}
+	// A direct membership takes precedence over access inherited from a parent
+	// organization, so adding an existing account can demote an inherited
+	// Owner or Admin here and in every organization below. Apply the same
+	// target ranking as every other member write.
+	if err := clientSvc.AuthorizeMemberTarget(requester, req.ClientID, targetUserID, users.GetUserByID); err != nil {
+		if errors.Is(err, clients.ErrMemberTargetDenied) {
+			return utils.Error(c, http.StatusForbidden, "Permission Denied", err.Error())
+		}
+		return utils.Error(c, http.StatusInternalServerError, "Authorization error", err.Error())
 	}
 
 	if err := clientSvc.AddUserToClient(req.ClientID, targetUserID, req.RoleID); err != nil {
@@ -403,14 +425,14 @@ func CreateClientMember(c echo.Context) error {
 		return utils.Error(c, http.StatusBadRequest, "Invalid data", err.Error())
 	}
 
-	if !requester.IsRoot {
+	if !platformTeamManager(requester) {
 		if err := clientSvc.CanManageClientMembers(req.ClientID, requester.ID); err != nil {
 			return utils.Error(c, http.StatusForbidden, "Permission Denied", "You cannot add members to this client")
 		}
 	}
 	var rolePermissionErr error
-	if requester.IsRoot {
-		rolePermissionErr = clientSvc.CanAssignClientRoleAsRoot(req.RoleID)
+	if platformTeamManager(requester) {
+		rolePermissionErr = clientSvc.CanAssignClientRoleAsRoot(requester, req.RoleID)
 	} else {
 		rolePermissionErr = clientSvc.CanAssignClientRole(req.ClientID, requester.ID, req.RoleID)
 	}
@@ -521,7 +543,7 @@ func RemoveMember(c echo.Context) error {
 	}
 
 	var removeErr error
-	if requester.IsRoot {
+	if platformTeamManager(requester) {
 		removeErr = clientSvc.RemoveClientMemberAsRoot(clientID, targetUserID)
 	} else {
 		removeErr = clientSvc.RemoveClientMember(clientID, requester.ID, targetUserID)
@@ -570,8 +592,8 @@ func UpdateMemberRole(c echo.Context) error {
 	}
 
 	var updateErr error
-	if requester.IsRoot {
-		updateErr = clientSvc.UpdateClientMemberRoleAsRoot(clientID, targetUserID, req.NewRoleID)
+	if platformTeamManager(requester) {
+		updateErr = clientSvc.UpdateClientMemberRoleAsRoot(requester, clientID, targetUserID, req.NewRoleID)
 	} else {
 		updateErr = clientSvc.UpdateClientMemberRole(clientID, requester.ID, targetUserID, req.NewRoleID)
 	}

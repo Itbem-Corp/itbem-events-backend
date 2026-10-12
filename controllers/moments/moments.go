@@ -493,7 +493,9 @@ func BatchReoptimizeMoments(c echo.Context) error {
 // reuses the monotonic reoptimization flow. Repeated calls skip queued/done
 // variant rows, so operators can drain history without a one-shot migration.
 func BackfillMomentVariants(c echo.Context) error {
-	if _, err := authz.RequireRoot(c); err != nil {
+	// The candidate scan is global and requeues media for every tenant, so
+	// it is platform governance (level 1), not operational support (level 2).
+	if _, err := authz.RequirePrimaryRoot(c); err != nil {
 		return authz.Respond(c, err)
 	}
 	var body struct {

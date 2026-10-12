@@ -70,7 +70,7 @@ requires an explicit HTTP(S) preview URL before QA can start.
 
 | File | Purpose |
 |------|---------|
-| `clientService.go` | Multi-tenant client CRUD, hierarchy |
+| `clientService.go` | Multi-tenant client CRUD, hierarchy, member management and member-target ranking (`AuthorizeMemberTarget`) |
 
 ### Client Roles/Types (`services/clientroles/`, `services/clienttypes/`)
 
@@ -83,8 +83,8 @@ requires an explicit HTTP(S) preview URL before QA can start.
 
 | File | Purpose |
 |------|---------|
-| `UserService.go` | User profile, Cognito sync, avatar |
-| `AdminUserService.go` | Admin user management (list, activate, deactivate) |
+| `UserService.go` | User profile, Cognito sync, avatar, root-level delegation (`SetUserRootLevel`) |
+| `AdminUserService.go` | Admin user management (list, activate, deactivate, delete); refuses to delete or deactivate primary roots |
 
 ### Resources Domain (`services/resources/`)
 
@@ -183,6 +183,14 @@ Every service has an injectable struct with a constructor. The structs are used 
 | `ResourceService` | `NewResourceService(cfg, deps...)` | `ports.ResourceRepository`, `ports.ObjectStorageRepository`, `ports.CacheRepository` |
 
 > **`AdminUserService.ListAllUsers(query dtos.AdminUsersListQuery)`** - accepts pagination plus optional `search` and `status` filters. Returns typed rows with `data`, `total`, `page`, `page_size`, `total_pages`. Page defaults to 1, page_size defaults to 50, max 200, and filtering/pagination happens in the repository query.
+
+> **`UserService.SetUserRootLevel(userID, level)`** - accepts only `0` or `2` (anything else is an error mapped to `400`), writes `root_level=level` and clears the legacy `is_root` flag. It returns `gorm.ErrRecordNotFound` for an unknown user (`404`) and the sentinel `users.ErrProtectedRootAccount` when the target is a primary root (`IsPrimaryRoot()`: level 1 or a legacy `is_root` account), which the controller maps to `409 Protected account`. Level 1 cannot be restored through the API, so this also blocks self-demotion and losing the last primary root. Callers are gated by `authz.RequirePrimaryRoot`.
+
+> **`AdminUserService.DeleteUser(userID)` / `AdminUserService.SetUserActive(userID, false)` / `UserService.DeleteFullAccount(cognitoSub)`** - return the sentinel `users.ErrProtectedRootAccount` (wrapped) when the stored account is a primary root (`IsPrimaryRoot()`), before touching Cognito or the database; the controllers map it to `409 Protected account`. `SetUserActive(userID, true)` stays allowed for primary roots so a disabled one can be recovered.
+
+> **`ClientService.AuthorizeMemberTarget(requester, clientID, targetUserID, lookupUser)`** (package entry `clients.AuthorizeMemberTarget`) - delegation check for actions that change another member's access without changing their organization role (member application toggles in `controllers/sessions`, event assignments in `controllers/eventmembers`) and for adding an existing account (`controllers/clients` `InviteUser`, since the new direct membership takes precedence over an inherited Owner/Admin role). Callers check `members:manage` first. A primary root may act on anyone; nobody else on a platform-root account; Root 2 on anyone except an Owner (effective role hierarchy 1); an Owner/Admin only on members whose effective (direct or `INHERITED_`) role ranks strictly below its own, never itself. A target with no user row or no access to `clientID` has no rank. Denials wrap `clients.ErrMemberTargetDenied` (`403`); lookup or role-resolution failures are returned unwrapped (`500`). `lookupUser` is `users.GetUserByID` in production.
+
+> **`ClientService.CanAssignClientRoleAsRoot(requester, roleID)` / `ClientService.UpdateClientMemberRoleAsRoot(requester, clientID, targetUserID, newRoleID)`** - platform-root member path (`controllers/clients` `InviteUser`, `CreateClientMember`, `UpdateMemberRole`). Never assigns Owner (hierarchy 1) and never re-roles an Owner. The role must also pass `authz.PlatformRootMayGrantRole(requester, role.Code)`: the requester's root level must hold every capability the role carries, so Root 1 may grant any role below Owner and Root 2 only Check-in, Analyst, Member or Viewer (never Admin, Event manager or Editor). A requester that is not a platform root is denied. `GET /api/catalogs/roles` filters the platform-root catalog with the same predicate.
 
 All interfaces are defined in `services/ports/ports.go`.
 

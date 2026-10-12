@@ -154,10 +154,16 @@ func (s *AdminUserService) GetUserClientsPage(userID uuid.UUID, query dtos.Clien
 	return dtos.UserClientsPageResponse{ClientsPageResponse: clientsPage, User: dtos.NewAdminUserResponse(user)}, nil
 }
 
+// SetUserActive refuses to disable a primary root (ErrProtectedRootAccount):
+// level 1 cannot be granted through the API, so disabling one could leave the
+// platform without a primary root. Re-enabling is always allowed.
 func (s *AdminUserService) SetUserActive(userID uuid.UUID, active bool) (*models.User, error) {
 	user, err := s.userRepo.GetUserByID(userID)
 	if err != nil {
 		return nil, fmt.Errorf("usuario no encontrado")
+	}
+	if !active && user.IsPrimaryRoot() {
+		return nil, fmt.Errorf("%w: a primary root cannot be deactivated", ErrProtectedRootAccount)
 	}
 	if err := s.authRepo.SetUserEnabled(user.CognitoSub, active, "cognito"); err != nil {
 		return nil, fmt.Errorf("error actualizando estado en cognito: %w", err)
@@ -192,10 +198,15 @@ func (s *AdminUserService) UpdateUserInformation(userID uuid.UUID, firstName, la
 	return user, nil
 }
 
+// DeleteUser refuses primary roots (ErrProtectedRootAccount) for the same
+// reason as SetUserActive; callers are primary roots, so this covers self.
 func (s *AdminUserService) DeleteUser(userID uuid.UUID) error {
 	user, err := s.userRepo.GetUserByID(userID)
 	if err != nil {
 		return fmt.Errorf("usuario no encontrado")
+	}
+	if user.IsPrimaryRoot() {
+		return fmt.Errorf("%w: a primary root cannot be deleted", ErrProtectedRootAccount)
 	}
 	if err := s.authRepo.DeleteUser(user.CognitoSub, "cognito"); err != nil {
 		return fmt.Errorf("error eliminando usuario en cognito: %w", err)
