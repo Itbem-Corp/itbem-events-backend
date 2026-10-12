@@ -207,6 +207,40 @@ func TestConfigurarRutasKeepsStaticDashboardRoutesAheadOfPublicParams(t *testing
 	}
 }
 
+// The anonymous single-event read stays in the public group: tenant-host gate
+// first, then the public rate limiter, before events.GetEvents runs.
+func TestPublicBareEventReadKeepsTenantHostGateAndRateLimit(t *testing.T) {
+	e := echo.New()
+	ConfigurarRutas(e, &models.Config{TenantHostMap: "api.eventiapp.com.mx=eventiapp,api.itbem.com.mx=itbem"})
+
+	c := e.NewContext(httptest.NewRequest(http.MethodGet, "/api/events/boda-demo", nil), httptest.NewRecorder())
+	e.Router().Find(http.MethodGet, "/api/events/boda-demo", c)
+	require.Equal(t, "/api/events/:key", c.Path())
+
+	for _, host := range []string{"api.itbem.com.mx", "unknown.example.com"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/events/boda-demo", nil)
+		req.Host = host
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusForbidden, rec.Code, host)
+		assert.Contains(t, rec.Body.String(), "Tenant hostname mismatch", host)
+	}
+
+	var rec *httptest.ResponseRecorder
+	for i := 0; i < 41; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/api/events/boda-demo", nil)
+		req.Host = "api.eventiapp.com.mx"
+		req.Header.Set(echo.HeaderXRealIP, "203.0.113.77")
+		rec = httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		if i < 40 {
+			require.NotEqual(t, http.StatusTooManyRequests, rec.Code, "request %d", i)
+		}
+	}
+	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
+	assert.Contains(t, rec.Body.String(), "Too many requests, please slow down")
+}
+
 func TestPublicRateLimiterDenyHandlerUsesAPIResponseEnvelope(t *testing.T) {
 	e := echo.New()
 	e.GET("/limited", func(c echo.Context) error {
