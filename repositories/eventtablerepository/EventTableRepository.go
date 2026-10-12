@@ -96,6 +96,19 @@ func AssignGuestsToTables(eventID uuid.UUID, assignments map[uuid.UUID]*uuid.UUI
 			}
 		}
 
+		guestIDs := make([]uuid.UUID, 0, len(assignments))
+		for guestID := range assignments {
+			guestIDs = append(guestIDs, guestID)
+		}
+		current, err := guestTableIDs(tx, eventID, guestIDs)
+		if err != nil {
+			return err
+		}
+		gaining := tablesGainingGuests(current, assignments)
+		if err := lockTables(tx, eventID, gaining); err != nil {
+			return err
+		}
+
 		for guestID, tableID := range assignments {
 			result := tx.Model(&models.Guest{}).
 				Where("id = ? AND event_id = ?", guestID, eventID).
@@ -107,7 +120,7 @@ func AssignGuestsToTables(eventID uuid.UUID, assignments map[uuid.UUID]*uuid.UUI
 				return fmt.Errorf("guest %s does not belong to event", guestID)
 			}
 		}
-		return nil
+		return checkTableCapacity(tx, eventID, gaining)
 	})
 }
 
@@ -131,6 +144,12 @@ func SaveSeatingPlan(eventID uuid.UUID, plan dtos.SeatingPlanSaveRequest) ([]mod
 			tempIDs[tempID] = table.ID
 		}
 
+		previousCapacity, err := tableCapacities(tx, eventID, plan.Updated)
+		if err != nil {
+			return err
+		}
+		// Tables whose capacity this plan lowers are capacity-checked too.
+		capacityLowered := make([]uuid.UUID, 0)
 		for _, item := range plan.Updated {
 			tableID, err := uuid.FromString(strings.TrimSpace(item.ID))
 			if err != nil {
@@ -148,6 +167,9 @@ func SaveSeatingPlan(eventID uuid.UUID, plan dtos.SeatingPlanSaveRequest) ([]mod
 			}
 			if result.RowsAffected == 0 {
 				return fmt.Errorf("table %s does not belong to event", tableID)
+			}
+			if previous, ok := previousCapacity[tableID]; ok && item.Capacity < previous {
+				capacityLowered = append(capacityLowered, tableID)
 			}
 		}
 
@@ -209,6 +231,7 @@ func SaveSeatingPlan(eventID uuid.UUID, plan dtos.SeatingPlanSaveRequest) ([]mod
 				return fmt.Errorf("one or more assignment tables do not belong to event")
 			}
 		}
+		capacityChecked := append([]uuid.UUID(nil), capacityLowered...)
 		if len(resolvedAssignments) > 0 {
 			guestIDs := make([]uuid.UUID, 0, len(resolvedAssignments))
 			values := make([]string, 0, len(resolvedAssignments))
@@ -222,12 +245,20 @@ func SaveSeatingPlan(eventID uuid.UUID, plan dtos.SeatingPlanSaveRequest) ([]mod
 				}
 				args = append(args, assignment.guestID, tableValue)
 			}
-			var guestCount int64
-			if err := tx.Model(&models.Guest{}).Where("event_id = ? AND id IN ?", eventID, guestIDs).Count(&guestCount).Error; err != nil {
+			current, err := guestTableIDs(tx, eventID, guestIDs)
+			if err != nil {
 				return err
 			}
-			if guestCount != int64(len(guestIDs)) {
+			if len(current) != len(guestIDs) {
 				return fmt.Errorf("one or more guests do not belong to event")
+			}
+			next := make(map[uuid.UUID]*uuid.UUID, len(resolvedAssignments))
+			for _, assignment := range resolvedAssignments {
+				next[assignment.guestID] = assignment.tableID
+			}
+			capacityChecked = append(capacityChecked, tablesGainingGuests(current, next)...)
+			if err := lockTables(tx, eventID, capacityChecked); err != nil {
+				return err
 			}
 			args = append(args, eventID)
 			query := `UPDATE guests AS guest
@@ -252,9 +283,41 @@ func SaveSeatingPlan(eventID uuid.UUID, plan dtos.SeatingPlanSaveRequest) ([]mod
 			}
 		}
 
+		// A table whose capacity was lowered is already row-locked by its UPDATE.
+		if err := checkTableCapacity(tx, eventID, capacityChecked); err != nil {
+			return err
+		}
+
 		return tx.Where("event_id = ?", eventID).Order("sort_order ASC").Order("created_at ASC").Find(&saved).Error
 	})
 	return saved, err
+}
+
+// tableCapacities reads the stored capacity of the plan's updated tables that
+// belong to the event (invalid ids are reported later by the update loop).
+func tableCapacities(tx *gorm.DB, eventID uuid.UUID, updated []dtos.SeatingPlanUpdateTable) (map[uuid.UUID]int, error) {
+	ids := make([]uuid.UUID, 0, len(updated))
+	for _, item := range updated {
+		if id, err := uuid.FromString(strings.TrimSpace(item.ID)); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	capacities := make(map[uuid.UUID]int, len(ids))
+	if len(ids) == 0 {
+		return capacities, nil
+	}
+	var rows []struct {
+		ID       uuid.UUID
+		Capacity int
+	}
+	if err := tx.Model(&models.EventTable{}).Select("id, capacity").
+		Where("event_id = ? AND id IN ?", eventID, ids).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		capacities[row.ID] = row.Capacity
+	}
+	return capacities, nil
 }
 
 func (r *EventTableRepo) CreateEventTable(table *models.EventTable) error {

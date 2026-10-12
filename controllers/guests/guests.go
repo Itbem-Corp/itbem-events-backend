@@ -519,6 +519,9 @@ func CreateGuest(c echo.Context) error {
 	if err := checkGuestTables(guest.EventID, []models.Guest{guest}); err != nil {
 		return respondGuestTableError(c, err)
 	}
+	if err := checkNewGuestSeats(guest.EventID, []models.Guest{guest}); err != nil {
+		return respondGuestSeatsError(c, err)
+	}
 
 	guests := []models.Guest{guest}
 	if err := guestSvc.CreateGuestsWithInvitations(guests); err != nil {
@@ -581,6 +584,9 @@ func CreateGuests(c echo.Context) error {
 	if err := checkGuestTables(eventID, guests); err != nil {
 		return respondGuestTableError(c, err)
 	}
+	if err := checkNewGuestSeats(eventID, guests); err != nil {
+		return respondGuestSeatsError(c, err)
+	}
 
 	if err := guestSvc.CreateGuestsWithInvitations(guests); err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Error creating guests with invitations", err.Error())
@@ -626,6 +632,9 @@ func UpdateGuest(c echo.Context) error {
 		if err := checkGuestTables(guest.EventID, []models.Guest{*guest}); err != nil {
 			return respondGuestTableError(c, err)
 		}
+	}
+	if err := checkUpdatedGuestSeats(&stored, guest); err != nil {
+		return respondGuestSeatsError(c, err)
 	}
 	if err := guestSvc.UpdateGuest(guest); err != nil {
 		return utils.WriteFailed(c, "Error updating guest", err)

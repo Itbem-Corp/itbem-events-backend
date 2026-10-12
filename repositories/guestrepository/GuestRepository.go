@@ -6,6 +6,7 @@ import (
 	"events-stocks/configuration"
 	"events-stocks/dtos"
 	"events-stocks/models"
+	"events-stocks/repositories/eventtablerepository"
 	"events-stocks/repositories/gormrepository"
 	"events-stocks/repositories/gueststatusrepository"
 	"events-stocks/utils"
@@ -244,14 +245,9 @@ func ListSeatingGuestsByEventID(eventID uuid.UUID) ([]dtos.SeatingGuest, error) 
 			guests.last_name,
 			guests.email,
 			guests.table_id,
-			LOWER(BTRIM(COALESCE(NULLIF(BTRIM(guests.rsvp_status), ''), guest_statuses.code, 'pending'))) AS rsvp_status,
+			`+eventtablerepository.SeatingEffectiveStatusSQL+` AS rsvp_status,
 			guests.rsvp_guest_count,
-			CASE
-				WHEN LOWER(BTRIM(COALESCE(NULLIF(BTRIM(guests.rsvp_status), ''), guest_statuses.code, 'pending'))) = 'declined' THEN 0
-				WHEN guests.rsvp_guest_count > 0 THEN guests.rsvp_guest_count
-				WHEN invitations.max_guests > 0 THEN invitations.max_guests
-				ELSE 1
-			END AS guests_count`).
+			`+eventtablerepository.SeatingPartySizeSQL+` AS guests_count`).
 		Joins("LEFT JOIN guest_statuses ON guest_statuses.id = guests.guest_status_id").
 		Joins("LEFT JOIN invitations ON invitations.id = guests.invitation_id").
 		Where("guests.event_id = ? AND guests.deleted_at IS NULL", eventID).
