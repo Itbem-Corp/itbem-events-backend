@@ -1013,11 +1013,11 @@ func GetEventMeta(c echo.Context) error {
 	if err != nil || event == nil {
 		return utils.Error(c, http.StatusNotFound, "Event not found", "")
 	}
-	allowed, err := allowPublicEventReadWithProof(c, event)
+	access, err := allowPublicEventReadWithProofAndConfig(c, event)
 	if err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Error loading event config", err.Error())
 	}
-	if !allowed {
+	if !access.Allowed {
 		return utils.Error(c, http.StatusForbidden, "Event is not public", "")
 	}
 	eventType := ""
@@ -1054,6 +1054,8 @@ func GetEventMeta(c echo.Context) error {
 		OrganizerName:         event.OrganizerName,
 		EventType:             eventType,
 		ContentVersion:        contentVersion,
+		RSVPDeadline:          eventsService.RSVPDeadline(access.Config),
+		RSVPOpen:              eventsService.RSVPOpen(access.Config, time.Now()),
 	})
 }
 
@@ -1070,14 +1072,19 @@ func allowPublicEventRead(event *models.Event, previewToken, invitationToken str
 // (/meta and the bare /events/:key): it also requires the verify-access proof
 // (X-Event-Access-Token or event_access_token) for password-protected events.
 func allowPublicEventReadWithProof(c echo.Context, event *models.Event) (bool, error) {
+	result, err := allowPublicEventReadWithProofAndConfig(c, event)
+	return result.Allowed, err
+}
+
+func allowPublicEventReadWithProofAndConfig(c echo.Context, event *models.Event) (publicaccess.EventReadResult, error) {
 	if event == nil {
-		return false, nil
+		return publicaccess.EventReadResult{}, nil
 	}
 	deps := eventPublicReadDeps(func(uuid.UUID) (bool, error) {
 		return event.IsActive, nil
 	})
 	deps.RequirePasswordProof = true
-	return publicaccess.AllowEventReadFromRequest(c, event.ID, deps)
+	return publicaccess.AllowEventReadFromRequestWithConfig(c, event.ID, deps)
 }
 
 func allowPublicViewTracking(event *models.Event, invitationToken, accessToken string) (bool, error) {

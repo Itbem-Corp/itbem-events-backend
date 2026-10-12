@@ -212,6 +212,8 @@ func buildPageSpecFromEventWithConfig(event *models.Event, deps buildSpecDeps, c
 		EventType:      event.EventType.Name,
 		ContentVersion: pageSpecContentVersion(event, cfg, sections, resourceUpdatedAt, guestUpdatedAt, momentUpdatedAt),
 		Access:         access,
+		RSVPDeadline:   RSVPDeadline(cfg),
+		RSVPOpen:       RSVPOpen(cfg, pageSpecBuildNow(deps.now)),
 		FooterVisible:  cfg == nil || cfg.ShowFooter,
 		Theme:          buildPageSpecTheme(cfg),
 	}
@@ -238,6 +240,9 @@ func buildPageSpecFromEventWithConfig(event *models.Event, deps buildSpecDeps, c
 		config := dtos.EventSectionConfigRaw(s.Config)
 
 		config = injectRuntimeSectionConfig(s.ComponentType, config, event, cfg)
+		if pageSpecSectionKind(s.ComponentType) == "RSVPConfirmation" {
+			config = injectRSVPAvailability(config, cfg, pageSpecBuildNow(deps.now))
+		}
 
 		specSections = append(specSections, dtos.PageSpecSection{
 			Type:      s.ComponentType,
@@ -550,6 +555,25 @@ func injectRuntimeSectionConfig(componentType string, config json.RawMessage, ev
 		}
 	}
 
+	if updated, err := json.Marshal(configMap); err == nil {
+		return json.RawMessage(updated)
+	}
+	return config
+}
+
+// injectRSVPAvailability adds rsvp_open and rsvp_deadline (RFC3339 or null) to
+// the RSVP section config so the card can render "confirmaciones cerradas".
+func injectRSVPAvailability(config json.RawMessage, cfg *models.EventConfig, now time.Time) json.RawMessage {
+	var configMap map[string]interface{}
+	if err := json.Unmarshal(config, &configMap); err != nil || configMap == nil {
+		configMap = map[string]interface{}{}
+	}
+	configMap["rsvp_open"] = RSVPOpen(cfg, now)
+	if deadline := RSVPDeadline(cfg); deadline != nil {
+		configMap["rsvp_deadline"] = deadline.Format(time.RFC3339)
+	} else {
+		configMap["rsvp_deadline"] = nil
+	}
 	if updated, err := json.Marshal(configMap); err == nil {
 		return json.RawMessage(updated)
 	}

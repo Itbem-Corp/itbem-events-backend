@@ -46,6 +46,8 @@ type EventMeta struct {
 	OrganizerName         string     `json:"organizer_name,omitempty"`
 	EventType             string     `json:"event_type,omitempty"`
 	ContentVersion        string     `json:"content_version,omitempty"`
+	RSVPDeadline          *time.Time `json:"rsvp_deadline"`
+	RSVPOpen              bool       `json:"rsvp_open"`
 }
 
 type PreviewTokenResponse struct {

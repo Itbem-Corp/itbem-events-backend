@@ -169,15 +169,41 @@ func (r RSVPRequest) rsvpTextFields() (dietaryRestrictions string, notes string,
 	return "", "", false
 }
 
+// Public error codes the public site branches on.
+const (
+	RSVPClosedCode               = "rsvp_closed"
+	RSVPClosedMessage            = "Las confirmaciones para este evento ya están cerradas."
+	EventPasswordRequiredCode    = "event_password_required"
+	EventPasswordRequiredMessage = "Esta invitación está protegida con contraseña."
+)
+
+func publicAccessFromRequest(c echo.Context) invitationsService.PublicAccess {
+	return invitationsService.PublicAccess{
+		PasswordProof: utils.PublicEventAccessToken(c),
+		PreviewToken:  utils.PublicPreviewToken(c),
+	}
+}
+
+func eventPasswordRequired(c echo.Context) error {
+	return c.JSON(http.StatusUnauthorized, dtos.PublicErrorResponse{
+		Status:  http.StatusUnauthorized,
+		Message: EventPasswordRequiredMessage,
+		Code:    EventPasswordRequiredCode,
+	})
+}
+
 func GetInvitationByToken(c echo.Context) error {
 	token := utils.PublicInvitationToken(c)
 	if token == "" {
 		return utils.Error(c, http.StatusBadRequest, "Missing token", "")
 	}
-	result, err := invitationSvc.GetInvitationByToken(token)
+	result, err := invitationSvc.GetInvitationByTokenWithAccess(token, publicAccessFromRequest(c))
 	if err != nil {
 		if errors.Is(err, invitationsService.ErrInvitationEventGone) {
 			return utils.Error(c, http.StatusGone, "Este evento ya no está disponible", "event_gone")
+		}
+		if errors.Is(err, invitationsService.ErrInvitationPasswordRequired) {
+			return eventPasswordRequired(c)
 		}
 		if errors.Is(err, invitationsService.ErrInvitationEventUnavailable) {
 			return utils.Error(c, http.StatusForbidden, "Event is not public", "")
@@ -221,10 +247,20 @@ func ConfirmRSVP(c echo.Context) error {
 	if hasSeparateNotes {
 		noteArgs = append(noteArgs, notes)
 	}
-	confirmation, err := invitationSvc.ConfirmRSVPWithResult(token, req.Status, req.Method, req.guestCount(), dietaryRestrictions, noteArgs...)
+	confirmation, err := invitationSvc.ConfirmRSVPWithAccess(publicAccessFromRequest(c), token, req.Status, req.Method, req.guestCount(), dietaryRestrictions, noteArgs...)
 	if err != nil {
 		if errors.Is(err, invitationsService.ErrInvitationEventGone) {
 			return utils.Error(c, http.StatusGone, "Este evento ya no está disponible", "event_gone")
+		}
+		if errors.Is(err, invitationsService.ErrInvitationPasswordRequired) {
+			return eventPasswordRequired(c)
+		}
+		if errors.Is(err, invitationsService.ErrRSVPClosed) {
+			return c.JSON(http.StatusForbidden, dtos.PublicErrorResponse{
+				Status:  http.StatusForbidden,
+				Message: RSVPClosedMessage,
+				Code:    RSVPClosedCode,
+			})
 		}
 		if errors.Is(err, invitationsService.ErrInvitationEventUnavailable) {
 			return utils.Error(c, http.StatusForbidden, "Event is not public", "")

@@ -64,6 +64,8 @@ type PageSpecMeta struct {
 	EventType              string               `json:"eventType,omitempty"`
 	ContentVersion         string               `json:"contentVersion,omitempty"`
 	Access                 *PageSpecAccess      `json:"access,omitempty"`
+	RSVPDeadline           *time.Time           `json:"rsvp_deadline"`
+	RSVPOpen               bool                 `json:"rsvp_open"`
 	FooterVisible          bool                 `json:"footerVisible"`
 	Theme                  *PageSpecTheme       `json:"theme,omitempty"`
 }
