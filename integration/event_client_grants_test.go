@@ -29,6 +29,7 @@ type eventClientWorld struct {
 	root       models.Client
 	cafetton   models.Client
 	eventType  models.EventType
+	eventiApp  models.Application
 }
 
 func newEventClientWorld(t *testing.T) *eventClientWorld {
@@ -46,6 +47,9 @@ func newEventClientWorld(t *testing.T) *eventClientWorld {
 	for _, code := range []string{"eventiapp", "cafettonhouse"} {
 		app := models.Application{Code: code, Name: code, IsActive: true}
 		require.NoError(t, db.Where(models.Application{Code: code}).FirstOrCreate(&app).Error)
+		if code == "eventiapp" {
+			w.eventiApp = app
+		}
 	}
 	w.root = w.client(t, "eventiapp", nil)
 	w.cafetton = w.client(t, "cafettonhouse", nil)
@@ -88,13 +92,22 @@ func (w *eventClientWorld) event(t *testing.T, org models.Client, name string) m
 	return event
 }
 
-func (w *eventClientWorld) member(t *testing.T, org models.Client, user models.User, role string, active bool) {
+func (w *eventClientWorld) member(t *testing.T, org models.Client, user models.User, role string, active bool) models.ClientMember {
 	t.Helper()
 	member := models.ClientMember{ClientID: org.ID, UserID: user.ID, ClientRoleID: w.roles[role].ID, IsActive: true}
 	require.NoError(t, w.db.Create(&member).Error)
 	if !active {
 		require.NoError(t, w.db.Model(&member).Update("is_active", false).Error)
 	}
+	return member
+}
+
+// memberApplication gives a membership an active access row for the EventiApp
+// application, which the caller-access event lists require.
+func (w *eventClientWorld) memberApplication(t *testing.T, member models.ClientMember) {
+	t.Helper()
+	access := models.ClientMemberApplication{ClientMemberID: member.ID, ApplicationID: w.eventiApp.ID, IsActive: true}
+	require.NoError(t, w.db.Create(&access).Error)
 }
 
 func (w *eventClientWorld) grant(t *testing.T, event models.Event, user, actor models.User) {
@@ -253,7 +266,8 @@ func TestEventListScopeIncludesGrantsOnlyWhenEnabled(t *testing.T) {
 	ownOrg := w.client(t, "own", &w.root)
 	manager := w.user(t, "m-"+w.suffix+"@ejemplo.mx")
 	client := w.user(t, "c-"+w.suffix+"@ejemplo.mx")
-	w.member(t, ownOrg, client, "EDITOR", true)
+	w.memberApplication(t, w.member(t, ownOrg, client, "EDITOR", true))
+	caller := dtos.EventCallerAccess{UserID: client.ID, ApplicationID: w.eventiApp.ID}
 	granted := w.event(t, org, "granted")
 	notGranted := w.event(t, org, "not-granted")
 	own := w.event(t, ownOrg, "own")
@@ -262,21 +276,21 @@ func TestEventListScopeIncludesGrantsOnlyWhenEnabled(t *testing.T) {
 	query := dtos.EventListQuery{Page: 1, PageSize: 50, Filter: "all", Now: time.Now()}
 	eventsrepository.ConfigureEventClientScope(false)
 	t.Cleanup(func() { eventsrepository.ConfigureEventClientScope(false) })
-	events, total, counts, err := eventsrepository.ListEventPage(nil, &client.ID, query)
+	events, total, counts, err := eventsrepository.ListEventPage(nil, &caller, query)
 	require.NoError(t, err)
 	assert.Equal(t, []uuid.UUID{own.ID}, eventIDs(events))
 	assert.Equal(t, 1, total)
 	assert.Equal(t, 1, counts.All)
 
 	eventsrepository.ConfigureEventClientScope(true)
-	events, total, counts, err = eventsrepository.ListEventPage(nil, &client.ID, query)
+	events, total, counts, err = eventsrepository.ListEventPage(nil, &caller, query)
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []uuid.UUID{own.ID, granted.ID}, eventIDs(events))
 	assert.NotContains(t, eventIDs(events), notGranted.ID)
 	assert.Equal(t, 2, total)
 	assert.Equal(t, 2, counts.All)
 
-	all, err := eventsrepository.GetEventsForUser(client.ID)
+	all, err := eventsrepository.GetEventsForUser(caller)
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []uuid.UUID{own.ID, granted.ID}, eventIDs(all), "each event once")
 
@@ -287,7 +301,7 @@ func TestEventListScopeIncludesGrantsOnlyWhenEnabled(t *testing.T) {
 	// Revocation removes the row from the list.
 	_, err = w.repo.Revoke(nil, granted.ID, client.ID, manager.ID)
 	require.NoError(t, err)
-	events, _, _, err = eventsrepository.ListEventPage(nil, &client.ID, query)
+	events, _, _, err = eventsrepository.ListEventPage(nil, &caller, query)
 	require.NoError(t, err)
 	assert.Equal(t, []uuid.UUID{own.ID}, eventIDs(events))
 }

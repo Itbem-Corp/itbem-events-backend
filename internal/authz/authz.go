@@ -139,6 +139,7 @@ var allCapabilities = []Capability{
 	CapabilityMembersManage,
 	CapabilityOrgManage,
 	CapabilityMetricsView,
+	CapabilityEventClientsManage,
 }
 
 func (e *Failure) Error() string {
