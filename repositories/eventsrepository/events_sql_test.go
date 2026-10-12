@@ -1,9 +1,12 @@
 package eventsrepository
 
 import (
+	"regexp"
 	"testing"
 
 	"events-stocks/configuration"
+	"events-stocks/dtos"
+	"events-stocks/models"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/stretchr/testify/require"
@@ -25,4 +28,16 @@ func useMockDB(t *testing.T) sqlmock.Sqlmock {
 		_ = sqlDB.Close()
 	})
 	return mock
+}
+
+func TestEventListSearchUsesAccentFold(t *testing.T) {
+	mock := useMockDB(t)
+	mock.ExpectQuery(regexp.QuoteMeta(`lower(translate(COALESCE(events.name, ''),`)).
+		WithArgs("%nandu%", "%nandu%", "%nandu%").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+
+	var total int64
+	err := applyEventListFilters(configuration.DB.Model(&models.Event{}), dtos.EventListQuery{Search: "Ñandú"}).Count(&total).Error
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
 }

@@ -256,9 +256,11 @@ func GetEventDashboardOverview(clientID *uuid.UUID, caller *dtos.EventCallerAcce
 
 func applyEventListFilters(query *gorm.DB, listQuery dtos.EventListQuery) *gorm.DB {
 	if search := strings.TrimSpace(listQuery.Search); search != "" {
-		pattern := "%" + search + "%"
+		pattern := "%" + foldSearchText(search) + "%"
 		query = query.Where(
-			"events.name ILIKE ? OR events.address ILIKE ? OR events.organizer_name ILIKE ?",
+			foldedSearchColumn("events.name")+" LIKE ? OR "+
+				foldedSearchColumn("events.address")+" LIKE ? OR "+
+				foldedSearchColumn("events.organizer_name")+" LIKE ?",
 			pattern,
 			pattern,
 			pattern,
@@ -276,6 +278,37 @@ func applyEventListFilters(query *gorm.DB, listQuery dtos.EventListQuery) *gorm.
 		query = query.Where(calendarDate+" < "+today, listQuery.Now)
 	}
 	return query
+}
+
+// Accent folding for the dashboard event search (EVT-10): "nandu" finds
+// "Ñandú". Postgres has no unaccent extension enabled here, so both sides go
+// through the same fixed translate() table of Spanish/Portuguese/French
+// accented letters (upper and lower case, so the fold does not depend on the
+// database ctype) and then lower(). Nothing is indexed for this search, as
+// with the ILIKE '%term%' it replaces.
+const (
+	searchFoldFrom = "ÁÀÄÂÃÉÈËÊÍÌÏÎÓÒÖÔÕÚÙÜÛÑÇáàäâãéèëêíìïîóòöôõúùüûñç"
+	searchFoldTo   = "AAAAAEEEEIIIIOOOOOUUUUNCaaaaaeeeeiiiiooooouuuunc"
+)
+
+var searchFoldReplacer = func() *strings.Replacer {
+	from := []rune(searchFoldFrom)
+	to := []rune(searchFoldTo)
+	pairs := make([]string, 0, len(from)*2)
+	for i := range from {
+		pairs = append(pairs, string(from[i]), string(to[i]))
+	}
+	return strings.NewReplacer(pairs...)
+}()
+
+func foldedSearchColumn(column string) string {
+	return "lower(translate(COALESCE(" + column + ", ''), '" + searchFoldFrom + "', '" + searchFoldTo + "'))"
+}
+
+// foldSearchText applies the same fold as foldedSearchColumn to the user's
+// search term.
+func foldSearchText(value string) string {
+	return strings.ToLower(searchFoldReplacer.Replace(value))
 }
 
 func eventListNeedsFilteredTotal(query dtos.EventListQuery) bool {
