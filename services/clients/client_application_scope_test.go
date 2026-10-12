@@ -78,3 +78,13 @@ func TestApplicationScopedServiceFailsClosedWithoutReach(t *testing.T) {
 	_, err := scoped.GetClientDetails(uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4()))
 	assert.Error(t, err)
 }
+
+// Review S4: access denials are a sentinel, not a message to match.
+func TestClientAccessDenialsAreSentinels(t *testing.T) {
+	repo := &mockClientRepo{CheckAccessRecursiveFunc: func(uuid.UUID, uuid.UUID) (bool, string) { return false, "" }}
+	svc := NewClientService(repo, &mockClientRoleRepo{}, &mockClientTypeRepo{}, nil, nil, nil)
+	_, err := svc.GetClientDetails(uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4()))
+	assert.ErrorIs(t, err, ErrClientAccessDenied)
+	_, err = svc.GetClientChildren(uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4()))
+	assert.ErrorIs(t, err, ErrClientAccessDenied)
+}

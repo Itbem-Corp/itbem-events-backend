@@ -214,7 +214,7 @@ func GetClient(c echo.Context) error {
 		client, err = clientAuthzService(c, user).GetClientDetails(clientID, user.ID)
 	}
 	if err != nil {
-		if err.Error() == "access denied: user is not a member of this client hierarchy" {
+		if errors.Is(err, clients.ErrClientAccessDenied) {
 			return utils.Error(c, http.StatusForbidden, "Access Denied", "You do not have permission to view this organization")
 		}
 		return utils.Error(c, http.StatusInternalServerError, "Error fetching client", err.Error())

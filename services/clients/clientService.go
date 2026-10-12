@@ -406,7 +406,7 @@ func containsFold(values []string, expected string) bool {
 func (s *ClientService) GetClientDetails(clientID, userID uuid.UUID) (*models.Client, error) {
 	allowed, _ := s.checkAccess(userID, clientID)
 	if !allowed {
-		return nil, fmt.Errorf("access denied: user is not a member of this client hierarchy")
+		return nil, fmt.Errorf("%w: user is not a member of this client hierarchy", ErrClientAccessDenied)
 	}
 	return s.clientRepo.GetClientByID(clientID)
 }
@@ -623,7 +623,7 @@ func (s *ClientService) GetClientChildren(parentID, userID uuid.UUID) ([]models.
 	allowed, role := s.checkAccess(userID, parentID)
 	role = strings.TrimPrefix(strings.ToUpper(role), "INHERITED_")
 	if !allowed || (role != "OWNER" && role != "ADMIN") {
-		return nil, fmt.Errorf("access denied")
+		return nil, ErrClientAccessDenied
 	}
 	return s.clientRepo.GetChildrenClients(parentID)
 }
@@ -651,7 +651,7 @@ func (s *ClientService) GetClientChildrenInApplication(parentID, userID uuid.UUI
 		return nil, err
 	}
 	if !reachable[parentID] {
-		return nil, fmt.Errorf("access denied")
+		return nil, ErrClientAccessDenied
 	}
 	scoped := make([]models.Client, 0, len(children))
 	for _, child := range children {
