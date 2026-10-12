@@ -47,8 +47,16 @@ func (s *ImageOptimizerService) OptimizeIfImage(file multipart.File, header *mul
 		return nil, "", fmt.Errorf("failed to read image: %w", err)
 	}
 
-	// Procesar con bimg
+	// Procesar con bimg. Reading the header first separates a file libvips
+	// cannot decode (the upload's fault, 400) from a failure of the
+	// optimization itself (the service's fault, 5xx).
 	image := bimg.NewImage(buf)
+	if _, metaErr := image.Metadata(); metaErr != nil {
+		if strings.Contains(metaErr.Error(), "Unsupported") {
+			return nil, "", fmt.Errorf("image format not supported on this system: %s", contentType)
+		}
+		return nil, "", fmt.Errorf("%w: %v", ErrImageDecode, metaErr)
+	}
 	options := bimg.Options{
 		// WebP 84 keeps fine detail in event photography while compression 6
 		// avoids the steep CPU/latency cost of the maximum effort setting.

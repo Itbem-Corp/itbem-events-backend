@@ -27,7 +27,7 @@ Event     Event          `gorm:"foreignKey:EventID" json:"event,omitempty"`
 ### Event
 - **File**: `models/Event.go`
 - **Purpose**: Main event entity
-- **Key fields**: `ClientID *uuid.UUID` (nullable, FK to Client — added Phase 1), `client_id` JSON tag, `Identifier string` (unique slug, auto-generated from Name if empty on create)
+- **Key fields**: `ClientID *uuid.UUID` (nullable, FK to Client — added Phase 1), `client_id` JSON tag, `Identifier string` (slug, auto-generated from Name if empty on create; unique among non-deleted events, index `idx_events_identifier_live`), `Name` (unique per `client_id` among non-deleted events, index `idx_events_client_name_live`; both partial indexes come from `configuration/event_identity_integrity.go`), `EventTypeID *uuid.UUID` (optional, NULL when the event has no type), `Timezone` (IANA zone or empty; invalid stored values are blanked on boot by `configuration/event_timezone_repair.go`)
 - **Relationships**: HasMany Guests, HasMany Invitations, HasMany Resources, BelongsTo Client (optional), BelongsTo EventType
 
 ### EventType
@@ -38,7 +38,7 @@ Event     Event          `gorm:"foreignKey:EventID" json:"event,omitempty"`
 ### EventConfig
 - **File**: `models/EventConfig.go`
 - **Purpose**: Per-event configuration (design settings, sections order, MomentWall gating)
-- **Key fields**: `show_moment_wall bool` (gates public visibility and closes guest uploads when published), `visibility_configured bool` (marks section toggles as explicit so all-false visibility is preserved while legacy all-false configs still receive defaults), `allow_uploads bool` (global uploads gate), `share_uploads_enabled bool` (enables QR-code upload page without personal token when `allow_uploads` is also true and `show_moment_wall` is false), `allow_messages bool`, `active_from time.Time` and `active_until *time.Time` (public page availability window; `active_until` must be after `active_from` when both are set), `max_uploads_per_guest int` (per-IP upload limit, default 30; set to 0 for global default), `auto_approve_uploads bool` (auto-approves all incoming moments, default false), `design_template_id *uuid.UUID` (nullable FK to DesignTemplate)
+- **Key fields**: `show_moment_wall bool` (gates public visibility and closes guest uploads when published), `visibility_configured bool` (marks section toggles as explicit so all-false visibility is preserved while legacy all-false configs still receive defaults), `allow_uploads bool` (global uploads gate), `share_uploads_enabled bool` (enables QR-code upload page without personal token when `allow_uploads` is also true and `show_moment_wall` is false), `allow_messages bool`, `active_from time.Time` and `active_until *time.Time` (public page availability window; `active_until` must be after `active_from` when both are set), `max_uploads_per_guest int` (per-IP upload limit, default 30; set to 0 for global default), `auto_approve_uploads bool` (auto-approves all incoming moments, default false), `design_template_id *uuid.UUID` (nullable FK to DesignTemplate), `rsvp_deadline *time.Time` (`timestamptz`; closes the public RSVP after this instant with 403 `rsvp_closed`; NULL = no deadline; host edits are unaffected; exposed as `rsvp_deadline`/`rsvp_open` on meta, page-spec and ByToken). New configs start with `show_moment_wall=false`.
 - **Relationships**: BelongsTo Event, BelongsTo DesignTemplate (optional — nullable FK)
 - **Auto-create**: `GetEventConfigByID` auto-creates a default config if none exists for the event
 

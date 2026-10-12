@@ -105,7 +105,7 @@ func UpdateUser(c echo.Context) error {
 
 	updatedUser, err := userSvc.UpdateUserInformation(user.ID, req.FirstName, req.LastName)
 	if err != nil {
-		return utils.Error(c, http.StatusInternalServerError, "Error updating profile", err.Error())
+		return utils.WriteFailed(c, "Error updating profile", err)
 	}
 
 	return utils.Success(c, http.StatusOK, "Profile updated", userProfileResponse(updatedUser))
@@ -180,7 +180,7 @@ func UploadAvatar(c echo.Context) error {
 		if cleanupErr := scopedResourceSvc.DeleteObjectByPath(newAvatarPath); cleanupErr != nil {
 			slog.Error("new avatar rollback failed", "user_id", user.ID, "path", newAvatarPath, "error", cleanupErr)
 		}
-		return utils.Error(c, http.StatusInternalServerError, "Error saving changes", err.Error())
+		return utils.WriteFailed(c, "Error saving changes", err)
 	}
 	if oldAvatarPath := strings.TrimSpace(user.ProfileImage); oldAvatarPath != "" && oldAvatarPath != newAvatarPath {
 		if cleanupErr := resourceSvc.WithBucket(user.ProfileImageBucket).DeleteObjectByPath(oldAvatarPath); cleanupErr != nil {
@@ -422,7 +422,7 @@ func UpdateUserDetail(c echo.Context) error {
 
 	user, err := adminSvc.UpdateUserInformation(userID, req.FirstName, req.LastName)
 	if err != nil {
-		return utils.Error(c, http.StatusInternalServerError, "Error updating user", err.Error())
+		return utils.WriteFailed(c, "Error updating user", err)
 	}
 
 	return utils.Success(c, http.StatusOK, "User updated", dtos.NewAdminUserResponse(user))

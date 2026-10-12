@@ -6,6 +6,8 @@ import (
 	"errors"
 	"events-stocks/dtos"
 	"events-stocks/internal/accesstoken"
+	"events-stocks/internal/previewtoken"
+	"events-stocks/internal/publicaccessproof"
 	"events-stocks/models"
 	eventsService "events-stocks/services/events"
 	"events-stocks/services/ports"
@@ -16,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gofrs/uuid"
+	"gorm.io/gorm"
 )
 
 type InvitationWithGuest = dtos.InvitationLookup
@@ -30,8 +33,29 @@ type EventCoverViewURLFunc func(path, bucket string) (string, *time.Time)
 var (
 	ErrInvitationEventUnavailable  = errors.New("invitation event is unavailable")
 	ErrInvitationEventAccessFailed = errors.New("invitation event access check failed")
-	ErrInvalidRSVPRequest          = errors.New("invalid RSVP request")
+	// ErrInvitationEventGone: the invitation's event was deleted (soft
+	// delete hides it from reads). A guest with an old link gets 410, not a
+	// 500 "access check failed" (EVT-9).
+	ErrInvitationEventGone = errors.New("invitation event no longer exists")
+	ErrInvalidRSVPRequest  = errors.New("invalid RSVP request")
+	// ErrInvalidRSVPToken covers an unknown or expired token and a token whose
+	// invitation or guest is gone: the caller answers 401.
+	ErrInvalidRSVPToken = errors.New("invalid or expired token")
+	// ErrInvitationPasswordRequired: the event has a password and the request
+	// carries no valid verify-access proof (X-Event-Access-Token).
+	ErrInvitationPasswordRequired = errors.New("event password required")
+	// ErrRSVPClosed: the RSVP block is hidden or rsvp_deadline has passed.
+	ErrRSVPClosed = errors.New("rsvp closed")
 )
+
+// PublicAccess carries the caller's public credentials besides the invitation
+// token: the verify-access proof and an optional Studio preview token. A valid
+// preview token bypasses only the password proof here; the active flag, the
+// access window and the RSVP deadline still apply.
+type PublicAccess struct {
+	PasswordProof string
+	PreviewToken  string
+}
 
 // _invitationSvc is the package-level singleton set by internal/app.
 var _invitationSvc *InvitationService
@@ -112,6 +136,12 @@ func NewInvitationServiceWithDeps(deps InvitationServiceDeps) *InvitationService
 }
 
 func (s *InvitationService) GetInvitationByToken(token string) (*InvitationWithGuest, error) {
+	return s.GetInvitationByTokenWithAccess(token, PublicAccess{})
+}
+
+// GetInvitationByTokenWithAccess is the public ByToken read: the same gates as
+// the event page (active, access window, password proof) apply.
+func (s *InvitationService) GetInvitationByTokenWithAccess(token string, access PublicAccess) (*InvitationWithGuest, error) {
 	now := s.invitationEventNow()
 	accessToken, err := accesstoken.Lookup(s.tokenRepo, token)
 	if err != nil {
@@ -130,7 +160,8 @@ func (s *InvitationService) GetInvitationByToken(token string) (*InvitationWithG
 	if invitation == nil {
 		return nil, fmt.Errorf("invitation not found for token")
 	}
-	if err := s.ensureInvitationEventAvailable(invitation); err != nil {
+	cfg, err := s.checkInvitationEventAccess(invitation, access)
+	if err != nil {
 		return nil, err
 	}
 	guest, err := s.guestRepo.GetGuestByInvitationID(accessToken.InvitationID)
@@ -155,7 +186,12 @@ func (s *InvitationService) GetInvitationByToken(token string) (*InvitationWithG
 	if responseToken == "" {
 		responseToken = strings.TrimSpace(token)
 	}
-	return s.buildInvitationLookup(invitation, guest, responseToken), nil
+	result := s.buildInvitationLookup(invitation, guest, responseToken)
+	if result.Event != nil {
+		result.Event.RSVPDeadline = eventsService.RSVPDeadline(cfg)
+		result.Event.RSVPOpen = eventsService.RSVPOpen(cfg, now)
+	}
+	return result, nil
 }
 
 func (s *InvitationService) buildInvitationLookup(invitation *models.Invitation, guest *models.Guest, prettyToken string) *dtos.InvitationLookup {
@@ -245,25 +281,40 @@ func (s *InvitationService) ConfirmRSVP(prettyToken string, status string, metho
 }
 
 func (s *InvitationService) ConfirmRSVPWithResult(prettyToken string, status string, method string, guestCount int, dietaryRestrictions string, rsvpNotes ...string) (*RSVPConfirmationResult, error) {
+	return s.ConfirmRSVPWithAccess(PublicAccess{}, prettyToken, status, method, guestCount, dietaryRestrictions, rsvpNotes...)
+}
+
+// ConfirmRSVPWithAccess is the public RSVP submit: event gates (active, window,
+// password proof) first, then the RSVP availability (block shown, deadline).
+func (s *InvitationService) ConfirmRSVPWithAccess(access PublicAccess, prettyToken string, status string, method string, guestCount int, dietaryRestrictions string, rsvpNotes ...string) (*RSVPConfirmationResult, error) {
 	status = normalizeRSVPStatus(status)
 	method = normalizeRSVPMethod(method)
 	now := s.invitationEventNow()
 	if !isValidRSVPStatus(status) {
 		return nil, fmt.Errorf("%w: invalid RSVP status", ErrInvalidRSVPRequest)
 	}
+	// Bound the free text before any lookup: dietary_restrictions is
+	// varchar(255), and an over-long value must be a 400, never a failed write.
+	if err := checkRSVPTextLengths(dietaryRestrictions, rsvpNotes...); err != nil {
+		return nil, err
+	}
 	accessToken, err := accesstoken.Lookup(s.tokenRepo, prettyToken)
 	if err != nil || accessToken == nil {
-		return nil, fmt.Errorf("invalid or expired token")
+		return nil, ErrInvalidRSVPToken
 	}
 	if isExpiredAccessToken(accessToken, now) {
-		return nil, fmt.Errorf("invalid or expired token")
+		return nil, ErrInvalidRSVPToken
 	}
 	invitation, err := s.repo.GetInvitationByIDLite(accessToken.InvitationID)
 	if err != nil || invitation == nil {
-		return nil, fmt.Errorf("invitation not found for token")
+		return nil, fmt.Errorf("%w: invitation not found for token", ErrInvalidRSVPToken)
 	}
-	if err := s.ensureInvitationEventAvailable(invitation); err != nil {
+	cfg, err := s.checkInvitationEventAccess(invitation, access)
+	if err != nil {
 		return nil, err
+	}
+	if !eventsService.RSVPOpen(cfg, now) {
+		return nil, ErrRSVPClosed
 	}
 	if guestCount < 0 {
 		return nil, fmt.Errorf("%w: guest count cannot be negative", ErrInvalidRSVPRequest)
@@ -277,7 +328,7 @@ func (s *InvitationService) ConfirmRSVPWithResult(prettyToken string, status str
 	}
 	guest, err := s.guestRepo.GetGuestByInvitationID(accessToken.InvitationID)
 	if err != nil || guest == nil {
-		return nil, fmt.Errorf("guest not found for token")
+		return nil, fmt.Errorf("%w: guest not found for token", ErrInvalidRSVPToken)
 	}
 	if guest.EventID == uuid.Nil && invitation.EventID != uuid.Nil {
 		guest.EventID = invitation.EventID
@@ -285,6 +336,10 @@ func (s *InvitationService) ConfirmRSVPWithResult(prettyToken string, status str
 	previousStatus := normalizeRSVPStatus(guest.RSVPStatus)
 	analyticsEventID := rsvpAnalyticsEventID(invitation, guest)
 	guest.RSVPStatus = status
+	// GST-62: the guest's status follows the RSVP like a host change does,
+	// so exports, check-in filters and metrics that read guest_status_id do
+	// not keep showing "pending" after a web RSVP.
+	syncGuestStatusWithRSVP(s.guestRepo, guest, status)
 	guest.RSVPAt = &now
 	guest.RSVPMethod = method
 	guest.RSVPTokenID = &accessToken.ID
@@ -321,6 +376,55 @@ func (s *InvitationService) ConfirmRSVPWithResult(prettyToken string, status str
 	}, nil
 }
 
+type guestStatusCatalog interface {
+	GuestStatusIDByCode(code string) (uuid.UUID, error)
+}
+
+// syncGuestStatusWithRSVP moves both status columns to the catalog status of
+// rsvpStatus. Repositories without the catalog leave them untouched.
+func syncGuestStatusWithRSVP(repo ports.GuestRepository, guest *models.Guest, rsvpStatus string) {
+	catalog, ok := repo.(guestStatusCatalog)
+	if !ok || guest == nil {
+		return
+	}
+	id, err := catalog.GuestStatusIDByCode(rsvpStatus)
+	if err != nil || id == uuid.Nil {
+		return
+	}
+	guest.GuestStatusID = id
+	guest.StatusID = id
+}
+
+// RSVPTextTooLongError is an RSVP whose free text is over its column limit.
+// It wraps ErrInvalidRSVPRequest; Message is the Spanish text for the guest.
+type RSVPTextTooLongError struct {
+	Field *models.GuestFieldTooLongError
+}
+
+func (e *RSVPTextTooLongError) Error() string {
+	return ErrInvalidRSVPRequest.Error() + ": " + e.Field.Error()
+}
+
+func (e *RSVPTextTooLongError) Unwrap() error { return ErrInvalidRSVPRequest }
+
+func (e *RSVPTextTooLongError) Message() string { return e.Field.Message() }
+
+func checkRSVPTextLengths(dietaryRestrictions string, rsvpNotes ...string) error {
+	checks := []error{
+		models.CheckTextLength("dietary_restrictions", "Restricciones alimentarias", dietaryRestrictions, models.GuestDietaryRestrictionsMaxChars),
+	}
+	if len(rsvpNotes) > 0 {
+		checks = append(checks, models.CheckTextLength("rsvp_notes", "Notas", rsvpNotes[0], models.GuestRSVPNotesMaxChars))
+	}
+	for _, err := range checks {
+		var tooLong *models.GuestFieldTooLongError
+		if errors.As(err, &tooLong) {
+			return &RSVPTextTooLongError{Field: tooLong}
+		}
+	}
+	return nil
+}
+
 func effectiveInvitationMaxGuests(maxGuests int) int {
 	if maxGuests > 0 {
 		return maxGuests
@@ -345,29 +449,40 @@ func isExpiredAccessToken(accessToken *models.InvitationAccessToken, now time.Ti
 	return accessToken != nil && accessToken.ExpiresAt != nil && now.After(*accessToken.ExpiresAt)
 }
 
-func (s *InvitationService) ensureInvitationEventAvailable(invitation *models.Invitation) error {
+// checkInvitationEventAccess applies the public event gates to a token holder
+// and returns the event config (nil when no config repository is wired).
+func (s *InvitationService) checkInvitationEventAccess(invitation *models.Invitation, access PublicAccess) (*models.EventConfig, error) {
 	if invitation == nil || invitation.EventID == uuid.Nil {
-		return nil
+		return nil, nil
 	}
 	if s.eventsRepo != nil {
 		event, err := s.eventsRepo.GetEventByIDRaw(invitation.EventID)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrInvitationEventGone
+		}
 		if err != nil {
-			return fmt.Errorf("%w: %v", ErrInvitationEventAccessFailed, err)
+			return nil, fmt.Errorf("%w: %v", ErrInvitationEventAccessFailed, err)
 		}
 		if event == nil || !event.IsActive {
-			return ErrInvitationEventUnavailable
+			return nil, ErrInvitationEventUnavailable
 		}
 	}
-	if s.configRepo != nil {
-		cfg, err := s.configRepo.GetEventConfigByID(invitation.EventID)
-		if err != nil {
-			return fmt.Errorf("%w: %v", ErrInvitationEventAccessFailed, err)
-		}
-		if !invitationEventAccessWindowOpen(cfg, s.invitationEventNow()) {
-			return ErrInvitationEventUnavailable
-		}
+	if s.configRepo == nil {
+		return nil, nil
 	}
-	return nil
+	cfg, err := s.configRepo.GetEventConfigByID(invitation.EventID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvitationEventAccessFailed, err)
+	}
+	if !invitationEventAccessWindowOpen(cfg, s.invitationEventNow()) {
+		return nil, ErrInvitationEventUnavailable
+	}
+	if cfg != nil && cfg.HasAuthPasswordPreview() &&
+		!previewtoken.Validate(access.PreviewToken, invitation.EventID) &&
+		!publicaccessproof.Validate(access.PasswordProof, invitation.EventID, eventsService.EventConfigAccessVersion(cfg)) {
+		return nil, ErrInvitationPasswordRequired
+	}
+	return cfg, nil
 }
 
 func (s *InvitationService) invitationEventNow() time.Time {
@@ -378,20 +493,7 @@ func (s *InvitationService) invitationEventNow() time.Time {
 }
 
 func invitationEventAccessWindowOpen(cfg *models.EventConfig, now time.Time) bool {
-	if cfg == nil {
-		return true
-	}
-	if invitationEventAccessTimeSet(cfg.ActiveFrom) && now.Before(cfg.ActiveFrom) {
-		return false
-	}
-	if cfg.ActiveUntil != nil && invitationEventAccessTimeSet(*cfg.ActiveUntil) && now.After(*cfg.ActiveUntil) {
-		return false
-	}
-	return true
-}
-
-func invitationEventAccessTimeSet(value time.Time) bool {
-	return !value.IsZero() && value.Year() > 1970
+	return eventsService.EventAccessWindowOpen(cfg, now)
 }
 
 // normalizeRSVPMethod keeps the rsvp_method an invitation token holder sends

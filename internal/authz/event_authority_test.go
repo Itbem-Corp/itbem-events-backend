@@ -291,17 +291,17 @@ func TestMoveRequiresOrganizationManageOnBothSides(t *testing.T) {
 	assert.NoError(t, RequireClientMoveAccess(&models.User{RootLevel: models.RootLevelPrimary}, &source, &destination))
 }
 
-func TestDetachIsPrimaryRootOnly(t *testing.T) {
+func TestDetachIsRejectedForAllRoles(t *testing.T) {
 	source := uuid.Must(uuid.NewV4())
 	for _, user := range []*models.User{
 		{ID: uuid.Must(uuid.NewV4())},
 		{RootLevel: models.RootLevelOperational},
 	} {
 		err := RequireClientMoveAccess(user, &source, nil)
-		requireStatus(t, err, http.StatusForbidden)
-		assert.Contains(t, err.Error(), "primary platform administrator")
+		requireStatus(t, err, http.StatusBadRequest)
+		assert.Contains(t, err.Error(), "cannot be detached")
 	}
-	assert.NoError(t, RequireClientMoveAccess(&models.User{RootLevel: models.RootLevelPrimary}, &source, nil))
+	requireStatus(t, RequireClientMoveAccess(&models.User{RootLevel: models.RootLevelPrimary}, &source, nil), http.StatusBadRequest)
 	assert.NoError(t, RequireClientMoveAccess(&models.User{}, nil, nil))
 }
 

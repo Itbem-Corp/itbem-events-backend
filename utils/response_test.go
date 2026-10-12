@@ -2,6 +2,7 @@ package utils
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -87,4 +88,21 @@ func TestErrorWithDataWritesAPIResponseEnvelope(t *testing.T) {
 	assert.Equal(t, "Upload limit reached", body["message"])
 	assert.Equal(t, map[string]any{"uploads_remaining": float64(0)}, body["data"])
 	assert.NotContains(t, body, "error")
+}
+
+func TestWriteFailedHidesTheDatabaseError(t *testing.T) {
+	e := echo.New()
+	rec := httptest.NewRecorder()
+	c := e.NewContext(httptest.NewRequest(http.MethodPut, "/api/sections/1", nil), rec)
+
+	dbErr := errors.New(`ERROR: duplicate key value violates unique constraint "idx_secret" (SQLSTATE 23505)`)
+	require.NoError(t, WriteFailed(c, "Error updating section", dbErr))
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.NotContains(t, rec.Body.String(), "idx_secret")
+	assert.NotContains(t, rec.Body.String(), "SQLSTATE")
+
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, WriteFailedCode, body["error"])
+	assert.Equal(t, WriteFailedMessage, body["message"])
 }

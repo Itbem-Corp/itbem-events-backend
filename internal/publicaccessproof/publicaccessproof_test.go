@@ -51,3 +51,19 @@ func TestValidateRejectsExpiredToken(t *testing.T) {
 
 	assert.False(t, Validate(token, eventID, "v1"))
 }
+
+func TestPasswordVersionIsKeyedAndStable(t *testing.T) {
+	eventID := uuid.Must(uuid.NewV4())
+	t.Setenv("EVENT_ACCESS_SECRET", "")
+	assert.Empty(t, PasswordVersion(eventID, "secreto"), "no secret, no version")
+
+	t.Setenv("EVENT_ACCESS_SECRET", "test-secret")
+	first := PasswordVersion(eventID, "secreto")
+	assert.NotEmpty(t, first)
+	assert.Equal(t, first, PasswordVersion(eventID, "  secreto  "))
+	assert.NotEqual(t, first, PasswordVersion(eventID, "secreto2"))
+	assert.Empty(t, PasswordVersion(eventID, ""))
+
+	t.Setenv("EVENT_ACCESS_SECRET", "other-secret")
+	assert.NotEqual(t, first, PasswordVersion(eventID, "secreto"), "version depends on the server key")
+}

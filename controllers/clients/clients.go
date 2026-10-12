@@ -178,6 +178,8 @@ func respondCreateClientError(c echo.Context, err error) error {
 		return utils.Error(c, http.StatusBadRequest, "El tipo de organización no es válido", ErrCodeClientTypeInvalid)
 	case errors.Is(err, clients.ErrClientCodeConflict):
 		return utils.Error(c, http.StatusConflict, "Ya existe una organización con un identificador igual; inténtalo de nuevo con otro nombre", ErrCodeClientCodeConflict)
+	case resourcesService.IsInvalidMediaFile(err):
+		return utils.Error(c, http.StatusBadRequest, resourcesService.InvalidMediaFileMessage, resourcesService.InvalidMediaFileCode)
 	case validations.IsValidationError(err):
 		status, detail := resourcesService.UploadErrorResponse(err)
 		return utils.Error(c, status, "Invalid logo", detail)
@@ -735,6 +737,8 @@ func UpdateClient(c echo.Context) error {
 			return utils.Error(c, http.StatusForbidden, "No tienes permiso para editar esta organización", ErrCodeClientPermissionDenied)
 		case errors.Is(err, clients.ErrClientNotFound):
 			return utils.Error(c, http.StatusNotFound, "La organización no existe", ErrCodeClientNotFound)
+		case resourcesService.IsInvalidMediaFile(err):
+			return utils.Error(c, http.StatusBadRequest, resourcesService.InvalidMediaFileMessage, resourcesService.InvalidMediaFileCode)
 		case validations.IsValidationError(err):
 			status, detail := resourcesService.UploadErrorResponse(err)
 			return utils.Error(c, status, "Invalid logo", detail)

@@ -3,6 +3,7 @@ package dtos
 import (
 	"encoding/json"
 	"events-stocks/models"
+	"strings"
 	"testing"
 	"time"
 
@@ -503,4 +504,78 @@ func TestEventConfigResponseRedactAccessSecretBlanksOnlyThePassword(t *testing.T
 func TestEventConfigResponseRedactAccessSecretIsNilSafe(t *testing.T) {
 	var response *EventConfigResponse
 	assert.NotPanics(t, func() { response.RedactAccessSecret() })
+}
+
+func applyPasswordPatch(t *testing.T, cfg *models.EventConfig, password string) error {
+	t.Helper()
+	raw, err := json.Marshal(password)
+	require.NoError(t, err)
+	return EventConfigPatch{"auth_password_preview": raw}.ApplyTo(cfg)
+}
+
+func TestEventConfigPatch_PasswordMinimumLength(t *testing.T) {
+	cfg := &models.EventConfig{}
+	err := applyPasswordPatch(t, cfg, "12345")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "auth_password_preview")
+	assert.Contains(t, err.Error(), "at least 6")
+	assert.Empty(t, cfg.AuthPasswordPreview)
+
+	require.NoError(t, applyPasswordPatch(t, cfg, " 123456 "))
+	assert.Equal(t, "123456", cfg.AuthPasswordPreview)
+}
+
+func TestEventConfigPatch_PasswordCountsRunesAndCapsLength(t *testing.T) {
+	cfg := &models.EventConfig{}
+	require.NoError(t, applyPasswordPatch(t, cfg, "ñandúé"))
+	require.Error(t, applyPasswordPatch(t, &models.EventConfig{}, strings.Repeat("a", 129)))
+}
+
+func TestEventConfigPatch_PasswordKeepsLegacyShortValueAndAllowsRemoval(t *testing.T) {
+	cfg := &models.EventConfig{AuthPasswordPreview: "1234"}
+	require.NoError(t, applyPasswordPatch(t, cfg, "1234"), "re-sending the unchanged legacy password is allowed")
+	require.NoError(t, applyPasswordPatch(t, cfg, ""), "clearing the password is allowed")
+	assert.Empty(t, cfg.AuthPasswordPreview)
+}
+
+func TestEventConfigPatch_RSVPDeadlineSetAndClear(t *testing.T) {
+	cfg := &models.EventConfig{}
+	require.NoError(t, EventConfigPatch{"rsvp_deadline": json.RawMessage(`"2026-11-20T23:59:00-06:00"`)}.ApplyTo(cfg))
+	require.NotNil(t, cfg.RSVPDeadline)
+	assert.True(t, cfg.RSVPDeadline.Equal(time.Date(2026, 11, 21, 5, 59, 0, 0, time.UTC)))
+
+	require.NoError(t, EventConfigPatch{"rsvp_deadline": json.RawMessage(`null`)}.ApplyTo(cfg))
+	assert.Nil(t, cfg.RSVPDeadline)
+}
+
+func TestEventConfigPatch_RSVPDeadlineAcceptsAliasesAndRejectsGarbage(t *testing.T) {
+	for _, key := range []string{"rsvpDeadline", "RSVPDeadline", "RsvpDeadline"} {
+		cfg := &models.EventConfig{}
+		require.NoError(t, EventConfigPatch{key: json.RawMessage(`"2026-11-20T23:59:00Z"`)}.ApplyTo(cfg), key)
+		require.NotNil(t, cfg.RSVPDeadline, key)
+	}
+	err := EventConfigPatch{"rsvp_deadline": json.RawMessage(`"mañana"`)}.ApplyTo(&models.EventConfig{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rsvp_deadline")
+}
+
+func TestEventConfigResponse_RSVPDeadlineIsNullOrRFC3339(t *testing.T) {
+	eventID := uuid.Must(uuid.NewV4())
+	raw, err := json.Marshal(NewEventConfigResponse(&models.EventConfig{ID: eventID}, eventID))
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"rsvp_deadline":null`)
+
+	deadline := time.Date(2026, 11, 21, 5, 59, 0, 0, time.UTC)
+	raw, err = json.Marshal(NewEventConfigResponse(&models.EventConfig{ID: eventID, RSVPDeadline: &deadline}, eventID))
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"rsvp_deadline":"2026-11-21T05:59:00Z"`)
+}
+
+func TestEventConfig_RSVPDeadlinePassed(t *testing.T) {
+	deadline := time.Date(2026, 11, 21, 5, 59, 0, 0, time.UTC)
+	cfg := &models.EventConfig{RSVPDeadline: &deadline}
+	assert.False(t, cfg.RSVPDeadlinePassed(deadline.Add(-time.Second)))
+	assert.False(t, cfg.RSVPDeadlinePassed(deadline), "the deadline instant itself is still open")
+	assert.True(t, cfg.RSVPDeadlinePassed(deadline.Add(time.Second)))
+	assert.False(t, (&models.EventConfig{}).RSVPDeadlinePassed(deadline))
 }

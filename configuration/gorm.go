@@ -354,6 +354,12 @@ func migrateModels(db *gorm.DB) error {
 		if err := migrateDeliveryEpicMembershipIntegrity(tx); err != nil {
 			return fmt.Errorf("migrate delivery epic membership integrity: %w", err)
 		}
+		if err := migrateEventIdentityIntegrity(tx); err != nil {
+			return fmt.Errorf("migrate event identity integrity: %w", err)
+		}
+		if err := repairInvalidEventTimezones(tx); err != nil {
+			return err
+		}
 		// Early worker prototypes created this table and let Postgres choose the
 		// foreign-key name. The backend now owns the shared schema and GORM creates
 		// fk_event_analytics_rollups_event with the intended update/delete policy.
@@ -365,6 +371,10 @@ func migrateModels(db *gorm.DB) error {
 		// Allow invitation_id to be NULL (needed for shared QR uploads without a personal token).
 		if err := tx.Exec("ALTER TABLE IF EXISTS moments ALTER COLUMN invitation_id DROP NOT NULL").Error; err != nil {
 			return fmt.Errorf("relax moments invitation constraint: %w", err)
+		}
+		// One live moment per stored upload object (EventiApp MOM-6).
+		if err := migrateMomentContentURLUniqueness(tx); err != nil {
+			return fmt.Errorf("migrate moment content uniqueness: %w", err)
 		}
 		// The original ledger deduplicated by an optional provider response ID.
 		// Some providers legitimately omit that value, and a task can make more

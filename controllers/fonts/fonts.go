@@ -34,7 +34,7 @@ func UploadFonts(c echo.Context) error {
 	fonts, err := fontSvc.UploadAndCreateFonts(files)
 	if err != nil {
 		status, detail := resourcesSvc.UploadErrorResponse(err)
-		return utils.Error(c, status, "Upload failed", detail)
+		return utils.Error(c, status, resourcesSvc.UploadErrorMessage(err, "Upload failed"), detail)
 	}
 
 	return utils.Success(c, http.StatusCreated, "Fonts uploaded", dtos.NewFontResponses(fonts))

@@ -3,6 +3,7 @@ package dtos
 import (
 	"encoding/json"
 	"events-stocks/models"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,7 +36,7 @@ func TestNewEventResponseUsesExplicitDashboardContract(t *testing.T) {
 		EventDateTime:      eventDate,
 		Timezone:           "America/Mexico_City",
 		Language:           "es",
-		EventTypeID:        eventTypeID,
+		EventTypeID:        &eventTypeID,
 		EventType:          models.EventType{ID: eventTypeID, Name: "wedding"},
 		EventConfig:        models.EventConfig{ID: eventID, IsPublic: true, ShowHeader: true},
 		OrganizerName:      "Ana y Luis",
@@ -91,7 +92,7 @@ func TestEventPayloadApplyToNormalizesOptionalDashboardFields(t *testing.T) {
 	maxGuests := 100
 	event := models.Event{
 		ClientID:      &clientID,
-		EventTypeID:   eventTypeID,
+		EventTypeID:   &eventTypeID,
 		MaxGuests:     &maxGuests,
 		EventDateTime: time.Date(2026, time.August, 15, 20, 30, 0, 0, time.UTC),
 	}
@@ -100,7 +101,7 @@ func TestEventPayloadApplyToNormalizesOptionalDashboardFields(t *testing.T) {
 
 	assert.Equal(t, "Demo", event.Name)
 	assert.Nil(t, event.ClientID)
-	assert.Equal(t, uuid.Nil, event.EventTypeID)
+	assert.Nil(t, event.EventTypeID, "a null event type is stored as NULL, never the zero UUID")
 	assert.Nil(t, event.MaxGuests)
 	assert.True(t, event.EventDateTime.IsZero())
 	assert.Equal(t, "https://cdn.example.com/song.mp3", event.MusicUrl)
@@ -150,7 +151,8 @@ func TestEventPayloadApplyToAcceptsFrontendCasingAliases(t *testing.T) {
 	assert.True(t, event.EventDateTime.Equal(time.Date(2026, time.August, 16, 2, 30, 0, 0, time.UTC)))
 	assert.Equal(t, "America/Mexico_City", event.Timezone)
 	assert.Equal(t, "es", event.Language)
-	assert.Equal(t, eventTypeID, event.EventTypeID)
+	require.NotNil(t, event.EventTypeID)
+	assert.Equal(t, eventTypeID, *event.EventTypeID)
 	assert.Equal(t, "Ana y Luis", event.OrganizerName)
 	assert.Equal(t, "hola@example.com", event.OrganizerEmail)
 	assert.Equal(t, "+5215555555555", event.OrganizerPhone)
@@ -180,7 +182,8 @@ func TestEventPayloadCanonicalFieldsWinOverAliases(t *testing.T) {
 
 	assert.Equal(t, "canonical", event.Identifier)
 	assert.Equal(t, time.Date(2026, time.August, 15, 20, 30, 0, 0, time.UTC), event.EventDateTime)
-	assert.Equal(t, canonicalTypeID, event.EventTypeID)
+	require.NotNil(t, event.EventTypeID)
+	assert.Equal(t, canonicalTypeID, *event.EventTypeID)
 }
 
 func TestEventPayloadApplyToKeepsAbsentFields(t *testing.T) {
@@ -193,7 +196,7 @@ func TestEventPayloadApplyToKeepsAbsentFields(t *testing.T) {
 	maxGuests := 100
 	event := models.Event{
 		ClientID:    &clientID,
-		EventTypeID: eventTypeID,
+		EventTypeID: &eventTypeID,
 		MaxGuests:   &maxGuests,
 	}
 
@@ -202,7 +205,8 @@ func TestEventPayloadApplyToKeepsAbsentFields(t *testing.T) {
 	assert.Equal(t, "Actualizado", event.Name)
 	require.NotNil(t, event.ClientID)
 	assert.Equal(t, clientID, *event.ClientID)
-	assert.Equal(t, eventTypeID, event.EventTypeID)
+	require.NotNil(t, event.EventTypeID)
+	assert.Equal(t, eventTypeID, *event.EventTypeID)
 	require.NotNil(t, event.MaxGuests)
 	assert.Equal(t, 100, *event.MaxGuests)
 }
@@ -241,4 +245,66 @@ func TestNewEventResponseOmitsUnloadedRelations(t *testing.T) {
 
 func TestNewEventResponsesReturnsEmptyArray(t *testing.T) {
 	assert.Empty(t, NewEventResponses(nil))
+}
+
+func TestValidateEventTimezone(t *testing.T) {
+	for _, valid := range []string{"", "  ", "UTC", "America/Mexico_City", "America/Tijuana", "Europe/Madrid"} {
+		assert.NoError(t, ValidateEventTimezone(valid), valid)
+	}
+	for _, invalid := range []string{"Foo/Bar", "Mars/Base", "Local", "local", "../etc/passwd", "America/Mexico City"} {
+		assert.ErrorIs(t, ValidateEventTimezone(invalid), ErrInvalidEventTimezone, invalid)
+	}
+}
+
+// EVT-3 / SET-16: an invalid timezone used to be stored and then broke every
+// list query of the organization.
+func TestEventPayloadApplyToRejectsInvalidTimezone(t *testing.T) {
+	var payload EventPayload
+	require.NoError(t, json.Unmarshal([]byte(`{"timezone":"Foo/Bar"}`), &payload))
+	event := models.Event{Timezone: "America/Mexico_City"}
+
+	err := payload.ApplyTo(&event)
+	assert.ErrorIs(t, err, ErrInvalidEventTimezone)
+	assert.Equal(t, "America/Mexico_City", event.Timezone, "the stored value must not change")
+}
+
+// Review M4: values PostgreSQL accepts but Go rejects survive the boot repair;
+// sending them back unchanged must keep saving, changing to one must not.
+func TestEventPayloadApplyToKeepsUnchangedLegacyTimezone(t *testing.T) {
+	for _, legacy := range []string{"america/mexico_city", "UTC+5"} {
+		require.Error(t, ValidateEventTimezone(legacy), legacy)
+		var payload EventPayload
+		require.NoError(t, json.Unmarshal([]byte(`{"timezone":"`+legacy+`","name":"Boda"}`), &payload))
+		event := models.Event{Timezone: legacy}
+		require.NoError(t, payload.ApplyTo(&event), legacy)
+		assert.Equal(t, legacy, event.Timezone)
+		assert.Equal(t, "Boda", event.Name)
+
+		changed := models.Event{Timezone: "America/Mexico_City"}
+		assert.ErrorIs(t, payload.ApplyTo(&changed), ErrInvalidEventTimezone, legacy)
+	}
+}
+
+func TestEventPayloadApplyToCapsNewEventName(t *testing.T) {
+	long := strings.Repeat("a", EventNameMaxChars+1)
+	var event models.Event
+	err := EventPayload{Name: &long}.ApplyTo(&event)
+	assert.ErrorIs(t, err, ErrEventNameTooLong)
+
+	exact := strings.Repeat("ñ", EventNameMaxChars)
+	assert.NoError(t, EventPayload{Name: &exact}.ApplyTo(&event))
+
+	// A legacy over-long name sent back unchanged keeps saving.
+	legacy := models.Event{Name: long}
+	assert.NoError(t, EventPayload{Name: &long}.ApplyTo(&legacy))
+}
+
+func TestEventPayloadReadsShiftDatesAliases(t *testing.T) {
+	for _, body := range []string{`{"shift_dates":false}`, `{"shiftDates":false}`, `{"ShiftDates":false}`} {
+		var payload EventPayload
+		assert.NoError(t, json.Unmarshal([]byte(body), &payload))
+		if assert.NotNil(t, payload.ShiftDates, body) {
+			assert.False(t, *payload.ShiftDates)
+		}
+	}
 }

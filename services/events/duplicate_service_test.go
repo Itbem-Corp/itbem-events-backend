@@ -35,7 +35,7 @@ func TestBuildDuplicateEventResetsOperationalFields(t *testing.T) {
 		EventDateTime:    time.Date(2026, time.March, 14, 20, 0, 0, 0, time.UTC),
 		Timezone:         "America/Mexico_City",
 		Language:         "es",
-		EventTypeID:      eventTypeID,
+		EventTypeID:      &eventTypeID,
 		OrganizerName:    "Eventi",
 		OrganizerEmail:   "hola@example.com",
 		OrganizerPhone:   "555-0101",
@@ -310,4 +310,53 @@ func (m *duplicateStorageMock) GetFileStream(filename, folder, bucket, provider 
 	m.readFilename = filename
 	m.readFolder = folder
 	return io.NopCloser(bytes.NewReader(m.content)), nil
+}
+
+// EVT-86: a copy moved to a later date keeps its window and RSVP deadline
+// relative to its own event date.
+func TestShiftDuplicateConfigDatesMovesWindowWithTheEvent(t *testing.T) {
+	now := time.Date(2026, time.October, 12, 12, 0, 0, 0, time.UTC)
+	from := time.Date(2026, time.October, 1, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2026, time.October, 16, 0, 0, 0, 0, time.UTC)
+	deadline := time.Date(2026, time.October, 15, 0, 0, 0, 0, time.UTC)
+	cfg := models.EventConfig{ActiveFrom: from, ActiveUntil: &until, RSVPDeadline: &deadline}
+
+	shiftDuplicateConfigDates(&cfg, 31*24*time.Hour, now)
+
+	assert.Equal(t, from.Add(31*24*time.Hour), cfg.ActiveFrom)
+	require.NotNil(t, cfg.ActiveUntil)
+	assert.Equal(t, until.Add(31*24*time.Hour), *cfg.ActiveUntil)
+	require.NotNil(t, cfg.RSVPDeadline)
+	assert.Equal(t, deadline.Add(31*24*time.Hour), *cfg.RSVPDeadline)
+}
+
+// EVT-86: a deadline or window end still in the past is cleared, so the copy
+// is never born closed.
+func TestShiftDuplicateConfigDatesClearsDatesStillInThePast(t *testing.T) {
+	now := time.Date(2026, time.October, 12, 12, 0, 0, 0, time.UTC)
+	until := time.Date(2026, time.September, 30, 0, 0, 0, 0, time.UTC)
+	deadline := time.Date(2026, time.September, 20, 0, 0, 0, 0, time.UTC)
+	cfg := models.EventConfig{ActiveUntil: &until, RSVPDeadline: &deadline}
+
+	shiftDuplicateConfigDates(&cfg, 0, now)
+
+	assert.Nil(t, cfg.ActiveUntil)
+	assert.Nil(t, cfg.RSVPDeadline)
+	assert.True(t, cfg.ActiveFrom.IsZero())
+}
+
+func TestDuplicateNameRequested(t *testing.T) {
+	blank := "   "
+	name := "Boda"
+	assert.False(t, duplicateNameRequested(dtos.EventPayload{}))
+	assert.False(t, duplicateNameRequested(dtos.EventPayload{Name: &blank}))
+	assert.True(t, duplicateNameRequested(dtos.EventPayload{Name: &name}))
+}
+
+func TestDuplicateShiftDatesDefaultsToTrue(t *testing.T) {
+	off := false
+	on := true
+	assert.True(t, duplicateShiftDates(dtos.EventPayload{}))
+	assert.True(t, duplicateShiftDates(dtos.EventPayload{ShiftDates: &on}))
+	assert.False(t, duplicateShiftDates(dtos.EventPayload{ShiftDates: &off}))
 }
