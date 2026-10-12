@@ -234,6 +234,7 @@ func (s *GuestService) UpdateGuest(obj *models.Guest) error {
 	if IsPublicHostRole(obj.Role) {
 		obj.IsHost = true
 	}
+	s.alignGuestStatusWithRSVP(obj, oldGuest)
 	s.syncRSVPMetadata(obj, oldGuest)
 	// A host edit of the RSVP replaces what a door check-in wrote; dropping
 	// the provenance keeps a later undo from restoring a superseded answer.
@@ -391,6 +392,59 @@ func (s *GuestService) syncRSVPMetadata(obj *models.Guest, oldGuest *models.Gues
 	if obj.RSVPMethod == "" {
 		obj.RSVPMethod = "host"
 	}
+}
+
+// guestStatusCatalog resolves the seeded guest status ids by code. The
+// production guest repository implements it; adapters without it leave the
+// status columns as the caller sent them.
+type guestStatusCatalog interface {
+	GuestStatusIDByCode(code string) (uuid.UUID, error)
+}
+
+var rsvpStatusCodes = []string{"pending", "confirmed", "declined"}
+
+// alignGuestStatusWithRSVP keeps guest_status_id and rsvp_status in step on a
+// PUT (GST-15/GST-62): when rsvp_status changes, the status follows it; when
+// only the status id changes to a catalog status, rsvp_status follows it.
+// When both change and disagree, rsvp_status wins (it is what the dashboard
+// shows and what analytics count).
+func (s *GuestService) alignGuestStatusWithRSVP(obj, oldGuest *models.Guest) {
+	catalog, ok := s.repo.(guestStatusCatalog)
+	if !ok || obj == nil {
+		return
+	}
+	nextRSVP := normalizeRSVPStatus(obj.RSVPStatus)
+	previousRSVP := ""
+	previousStatusID := uuid.Nil
+	if oldGuest != nil {
+		previousRSVP = normalizeRSVPStatus(oldGuest.RSVPStatus)
+		previousStatusID = oldGuest.GuestStatusID
+	}
+	nextStatusID := obj.GuestStatusID
+	if obj.StatusID != uuid.Nil {
+		nextStatusID = obj.StatusID
+	}
+
+	if nextRSVP != previousRSVP && isCatalogRSVPStatus(nextRSVP) {
+		if id, err := catalog.GuestStatusIDByCode(nextRSVP); err == nil && id != uuid.Nil {
+			obj.GuestStatusID = id
+			obj.StatusID = id
+		}
+		return
+	}
+	if nextStatusID == previousStatusID || nextStatusID == uuid.Nil {
+		return
+	}
+	for _, code := range rsvpStatusCodes {
+		if id, err := catalog.GuestStatusIDByCode(code); err == nil && id == nextStatusID {
+			obj.RSVPStatus = code
+			return
+		}
+	}
+}
+
+func isCatalogRSVPStatus(status string) bool {
+	return status == "pending" || status == "confirmed" || status == "declined"
 }
 
 func normalizeRSVPStatus(status string) string {

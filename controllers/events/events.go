@@ -21,6 +21,7 @@ import (
 	"events-stocks/utils"
 	"github.com/gofrs/uuid"
 	"github.com/labstack/echo/v4"
+	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 	"log/slog"
@@ -288,7 +289,7 @@ func ListEvents(c echo.Context) error {
 		}
 		events, err := eventSvc.ListEventsByClientID(clientID)
 		if err != nil {
-			return utils.Error(c, http.StatusInternalServerError, "Error fetching events", err.Error())
+			return respondEventListError(c, err)
 		}
 		return utils.Success(c, http.StatusOK, "Events loaded", eventResponsesWithCoverView(events))
 	}
@@ -297,7 +298,7 @@ func ListEvents(c echo.Context) error {
 	if user.IsPlatformAdmin() {
 		events, err := eventSvc.ListEventsForDashboard()
 		if err != nil {
-			return utils.Error(c, http.StatusInternalServerError, "Error fetching events", err.Error())
+			return respondEventListError(c, err)
 		}
 		return utils.Success(c, http.StatusOK, "Events loaded", eventResponsesWithCoverView(events))
 	}
@@ -309,7 +310,7 @@ func ListEvents(c echo.Context) error {
 	}
 	events, err := eventSvc.ListEventsForUser(*access)
 	if err != nil {
-		return utils.Error(c, http.StatusInternalServerError, "Error fetching events", err.Error())
+		return respondEventListError(c, err)
 	}
 	return utils.Success(c, http.StatusOK, "Events loaded", eventResponsesWithCoverView(events))
 }
@@ -362,7 +363,7 @@ func listEventPage(c echo.Context, user *models.User) error {
 	}
 	events, total, counts, listErr := eventSvc.ListEventPage(clientID, caller, query)
 	if listErr != nil {
-		return utils.Error(c, http.StatusInternalServerError, "Error fetching events", listErr.Error())
+		return respondEventListError(c, listErr)
 	}
 	totalPages := (total + pageSize - 1) / pageSize
 	return utils.Success(c, http.StatusOK, "Events loaded", dtos.EventListPage{
@@ -406,7 +407,7 @@ func GetDashboardOverview(c echo.Context) error {
 
 	overview, err := eventSvc.GetDashboardOverview(clientID, caller, time.Now())
 	if err != nil {
-		return utils.Error(c, http.StatusInternalServerError, "Error fetching dashboard events", err.Error())
+		return respondEventReadError(c, err, "dashboard events")
 	}
 
 	return utils.Success(c, http.StatusOK, "Dashboard loaded", overview)
@@ -437,7 +438,7 @@ func GetEventNotifications(c echo.Context) error {
 	}
 	notifications, listErr := eventSvc.ListEventNotifications(clientID, caller, time.Now())
 	if listErr != nil {
-		return utils.Error(c, http.StatusInternalServerError, "Error fetching event notifications", listErr.Error())
+		return respondEventReadError(c, listErr, "event notifications")
 	}
 	return utils.Success(c, http.StatusOK, "Event notifications loaded", notifications)
 }
@@ -626,7 +627,7 @@ func CreateEvent(c echo.Context) error {
 	}
 	var event models.Event
 	if err := payload.ApplyTo(&event); err != nil {
-		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
+		return respondEventPayloadError(c, err)
 	}
 	if err := c.Validate(&event); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Validation error", err.Error())
@@ -642,7 +643,7 @@ func CreateEvent(c echo.Context) error {
 	}
 
 	if err := eventSvc.CreateEvent(&event); err != nil {
-		return utils.Error(c, http.StatusInternalServerError, "Error creating event", err.Error())
+		return respondEventWriteError(c, err, "Error creating event")
 	}
 
 	return utils.Success(c, http.StatusCreated, "Event created", dtos.NewEventResponse(&event))
@@ -662,13 +663,15 @@ func UpdateEvent(c echo.Context) error {
 	}
 
 	originalClientID := existing.ClientID
+	originalName := existing.Name
 	var payload dtos.EventPayload
 	if err := c.Bind(&payload); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
 	}
 	if err := payload.ApplyTo(existing); err != nil {
-		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
+		return respondEventPayloadError(c, err)
 	}
+	keepClientWhenCleared(existing, originalClientID)
 	if err := c.Validate(existing); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Validation error", err.Error())
 	}
@@ -677,8 +680,16 @@ func UpdateEvent(c echo.Context) error {
 	}
 
 	existing.ID = id
+	// Only a rename or a move is checked against the case-insensitive rule,
+	// so events that already share a name in another letter case keep
+	// saving their other fields (EVT-22).
+	if existing.Name != originalName || !sameClientID(existing.ClientID, originalClientID) {
+		if err := eventSvc.EnsureEventNameAvailable(existing.ClientID, existing.Name, id); err != nil {
+			return respondEventWriteError(c, err, "Error updating event")
+		}
+	}
 	if err := eventSvc.UpdateEvent(existing); err != nil {
-		return utils.Error(c, http.StatusInternalServerError, "Error updating event", err.Error())
+		return respondEventWriteError(c, err, "Error updating event")
 	}
 
 	return utils.Success(c, http.StatusOK, "Event updated", eventResponseWithCoverView(existing))
@@ -713,13 +724,10 @@ func GetPageSpec(c echo.Context) error {
 
 	spec, err := eventsService.GetPageSpecByToken(token)
 	if err != nil {
-		if errors.Is(err, eventsService.ErrPageSpecTokenExpired) {
-			return utils.Error(c, http.StatusUnauthorized, "Invalid invitation token", err.Error())
+		if handled, respErr := respondPageSpecAccessError(c, err); handled {
+			return respErr
 		}
-		if errors.Is(err, eventsService.ErrPageSpecInactive) {
-			return utils.Error(c, http.StatusForbidden, "Event is not public", "")
-		}
-		return utils.Error(c, http.StatusNotFound, "Page spec not found", err.Error())
+		return utils.Error(c, http.StatusNotFound, "Page spec not found", "")
 	}
 
 	return utils.Success(c, http.StatusOK, "Page spec loaded", pageSpecPublicResponse(c, spec))
@@ -736,13 +744,43 @@ func GetPageSpecByIdentifier(c echo.Context) error {
 
 	spec, err := eventsService.GetPageSpecByIdentifier(identifier, utils.PublicPreviewToken(c), utils.PublicInvitationQueryToken(c))
 	if err != nil {
-		if errors.Is(err, eventsService.ErrPageSpecNotPublic) || errors.Is(err, eventsService.ErrPageSpecInactive) {
-			return utils.Error(c, http.StatusForbidden, "Event is not public", "")
+		if handled, respErr := respondPageSpecAccessError(c, err); handled {
+			return respErr
 		}
-		return utils.Error(c, http.StatusNotFound, "Page spec not found", err.Error())
+		return utils.Error(c, http.StatusNotFound, "Page spec not found", "")
 	}
 
 	return utils.Success(c, http.StatusOK, "Page spec loaded", pageSpecPublicResponse(c, spec))
+}
+
+// Public page-spec error codes (field "code", repeated in "error") the public
+// site branches on.
+const (
+	PageSpecTokenInvalidCode = "invitation_token_invalid"
+	PageSpecTokenExpiredCode = "invitation_token_expired"
+	PageSpecEventGoneCode    = "event_gone"
+	PageSpecNotPublicCode    = "event_not_public"
+)
+
+func pageSpecError(c echo.Context, status int, message, code string) error {
+	return c.JSON(status, dtos.NewPublicError(status, message, code))
+}
+
+// respondPageSpecAccessError maps the page-spec access errors shared by the
+// token and identifier routes: 401 invalid/expired link, 410 deleted event,
+// 403 not public (no token) or inactive event.
+func respondPageSpecAccessError(c echo.Context, err error) (bool, error) {
+	switch {
+	case errors.Is(err, eventsService.ErrPageSpecTokenExpired):
+		return true, pageSpecError(c, http.StatusUnauthorized, "Este enlace ya no es válido o expiró. Pide al organizador uno nuevo.", PageSpecTokenExpiredCode)
+	case errors.Is(err, eventsService.ErrPageSpecTokenNotFound):
+		return true, pageSpecError(c, http.StatusUnauthorized, "Este enlace ya no es válido o expiró. Pide al organizador uno nuevo.", PageSpecTokenInvalidCode)
+	case errors.Is(err, eventsService.ErrPageSpecEventGone):
+		return true, pageSpecError(c, http.StatusGone, "Este evento ya no está disponible", PageSpecEventGoneCode)
+	case errors.Is(err, eventsService.ErrPageSpecNotPublic), errors.Is(err, eventsService.ErrPageSpecInactive):
+		return true, pageSpecError(c, http.StatusForbidden, "Event is not public", PageSpecNotPublicCode)
+	}
+	return false, nil
 }
 
 // POST /api/events/:identifier/view
@@ -943,9 +981,20 @@ func VerifyEventAccess(c echo.Context) error {
 		})
 	}
 
-	if cfg.NormalizedAuthPasswordPreview() != password {
+	// Only failures count per IP: the slot is reserved before the compare (so
+	// parallel bursts cannot overshoot) and refunded on success. When the
+	// event-wide failure budget is spent the per-IP cap is tightened instead of
+	// blocking every guest of the event.
+	clientIP := c.RealIP()
+	underAttack, _ := eventPasswordLimiter.EventFailuresExceeded(event.ID)
+	if ok, retry := eventPasswordLimiter.ReserveIPFailure(event.ID, clientIP, underAttack); !ok {
+		return tooManyPasswordAttempts(c, retry)
+	}
+	if !publicaccessproof.PasswordMatches(cfg.NormalizedAuthPasswordPreview(), password) {
+		eventPasswordLimiter.RecordFailure(event.ID)
 		return utils.Error(c, http.StatusUnauthorized, "Contraseña incorrecta", "")
 	}
+	eventPasswordLimiter.RefundIPFailure(event.ID, clientIP)
 
 	accessVersion := eventsService.EventConfigAccessVersion(cfg)
 	accessToken, expiresAt, err := publicaccessproof.Generate(event.ID, accessVersion, eventPasswordAccessTTL)
@@ -962,6 +1011,26 @@ func VerifyEventAccess(c echo.Context) error {
 	})
 }
 
+// eventPasswordLimiter caps failed verify-access guesses per event+IP, with a
+// tighter per-IP cap while the event-wide failure budget is spent.
+var eventPasswordLimiter = publicaccessproof.NewAttemptLimiter(func() *redis.Client {
+	return configuration.RedisClient
+}, nil)
+
+const (
+	eventPasswordTooManyAttemptsCode    = "too_many_attempts"
+	eventPasswordTooManyAttemptsMessage = "Demasiados intentos. Espera unos minutos e inténtalo de nuevo."
+)
+
+func tooManyPasswordAttempts(c echo.Context, retry time.Duration) error {
+	seconds := int(math.Ceil(retry.Seconds()))
+	if seconds < 1 {
+		seconds = 1
+	}
+	c.Response().Header().Set("Retry-After", strconv.Itoa(seconds))
+	return c.JSON(http.StatusTooManyRequests, dtos.NewPublicError(http.StatusTooManyRequests, eventPasswordTooManyAttemptsMessage, eventPasswordTooManyAttemptsCode))
+}
+
 func GetEventMeta(c echo.Context) error {
 	identifier := c.Param("identifier")
 	if identifier == "" {
@@ -971,11 +1040,11 @@ func GetEventMeta(c echo.Context) error {
 	if err != nil || event == nil {
 		return utils.Error(c, http.StatusNotFound, "Event not found", "")
 	}
-	allowed, err := allowPublicEventReadWithProof(c, event)
+	access, err := allowPublicEventReadWithProofAndConfig(c, event)
 	if err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Error loading event config", err.Error())
 	}
-	if !allowed {
+	if !access.Allowed {
 		return utils.Error(c, http.StatusForbidden, "Event is not public", "")
 	}
 	eventType := ""
@@ -1004,6 +1073,7 @@ func GetEventMeta(c echo.Context) error {
 		CoverViewURLExpiresAt: coverURLExpiresAt,
 		ViewURL:               coverURL,
 		ViewURLExpiresAt:      coverURLExpiresAt,
+		OGImageURL:            ogImageURL(event.Identifier, event.CoverImageURL),
 		EventDateTime:         eventDateTime,
 		Address:               event.Address,
 		SecondAddress:         event.SecondAddress,
@@ -1012,6 +1082,8 @@ func GetEventMeta(c echo.Context) error {
 		OrganizerName:         event.OrganizerName,
 		EventType:             eventType,
 		ContentVersion:        contentVersion,
+		RSVPDeadline:          eventsService.RSVPDeadline(access.Config),
+		RSVPOpen:              eventsService.RSVPOpen(access.Config, time.Now()),
 	})
 }
 
@@ -1028,14 +1100,19 @@ func allowPublicEventRead(event *models.Event, previewToken, invitationToken str
 // (/meta and the bare /events/:key): it also requires the verify-access proof
 // (X-Event-Access-Token or event_access_token) for password-protected events.
 func allowPublicEventReadWithProof(c echo.Context, event *models.Event) (bool, error) {
+	result, err := allowPublicEventReadWithProofAndConfig(c, event)
+	return result.Allowed, err
+}
+
+func allowPublicEventReadWithProofAndConfig(c echo.Context, event *models.Event) (publicaccess.EventReadResult, error) {
 	if event == nil {
-		return false, nil
+		return publicaccess.EventReadResult{}, nil
 	}
 	deps := eventPublicReadDeps(func(uuid.UUID) (bool, error) {
 		return event.IsActive, nil
 	})
 	deps.RequirePasswordProof = true
-	return publicaccess.AllowEventReadFromRequest(c, event.ID, deps)
+	return publicaccess.AllowEventReadFromRequestWithConfig(c, event.ID, deps)
 }
 
 func allowPublicViewTracking(event *models.Event, invitationToken, accessToken string) (bool, error) {

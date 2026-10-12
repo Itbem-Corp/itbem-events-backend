@@ -38,6 +38,9 @@ type EventSectionPayload struct {
 	IsVisible           *bool           `json:"is_visible"`
 	IsVisibleAlt        *bool           `json:"isVisible"`
 	IsVisiblePascal     *bool           `json:"IsVisible"`
+	// ExpectedUpdatedAt (RFC3339Nano, the updated_at the client loaded) makes
+	// PUT /sections/:id conditional: a mismatch answers 409 section_conflict.
+	ExpectedUpdatedAt string `json:"expected_updated_at"`
 }
 
 type EventSectionResponse struct {
@@ -78,6 +81,9 @@ func ApplyEventSectionPayload(section *models.EventSection, payload EventSection
 	if payload.Config != nil || payload.ConfigPascal != nil || payload.ContentJSON != nil || payload.ContentJSONAlt != nil || payload.ContentJSONPascal != nil {
 		config, err := NormalizeEventSectionConfig(payload.Config, payload.ConfigPascal, payload.ContentJSON, payload.ContentJSONAlt, payload.ContentJSONPascal)
 		if err != nil {
+			return err
+		}
+		if err := ValidateEventSectionConfigURLs(config); err != nil {
 			return err
 		}
 		section.Config = config

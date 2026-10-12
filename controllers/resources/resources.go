@@ -1,6 +1,7 @@
 package resources
 
 import (
+	"errors"
 	"events-stocks/controllers/publicaccess"
 	"events-stocks/dtos"
 	"events-stocks/internal/authz"
@@ -12,6 +13,7 @@ import (
 	"events-stocks/utils"
 	"github.com/gofrs/uuid"
 	"github.com/labstack/echo/v4"
+	"gorm.io/gorm"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -179,6 +181,11 @@ func resourceEventActive(eventID uuid.UUID) (bool, error) {
 		return true, nil
 	}
 	event, err := resourceEventRepo.GetEventByIDRaw(eventID)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		// A deleted event is simply not readable: the gate answers 403 like
+		// an inactive event instead of a 500 (EVT-9).
+		return false, nil
+	}
 	if err != nil || event == nil {
 		return false, err
 	}
@@ -357,7 +364,7 @@ func CreateResource(c echo.Context) error {
 	)
 	if err != nil {
 		status, detail := Resources.UploadErrorResponse(err)
-		return utils.Error(c, status, "Failed to create resource", detail)
+		return utils.Error(c, status, Resources.UploadErrorMessage(err, "Failed to create resource"), detail)
 	}
 
 	// 🔐 Generar URL firmada
@@ -429,7 +436,7 @@ func UploadMultipleResources(c echo.Context) error {
 	resources, err := scopedResourceSvc.UploadMultipleResources(files, sectionID, resourceTypeID)
 	if err != nil {
 		status, detail := Resources.UploadErrorResponse(err)
-		return utils.Error(c, status, "Failed to upload resources", detail)
+		return utils.Error(c, status, Resources.UploadErrorMessage(err, "Failed to upload resources"), detail)
 	}
 
 	result := make([]dtos.AdminResourceResponse, 0, len(resources))
@@ -479,15 +486,15 @@ func UpdateFileContent(c echo.Context) error {
 	path, err := scopedResourceSvc.UpdateFileContent(file, resource.Path, fileHeader)
 	if err != nil {
 		status, detail := Resources.UploadErrorResponse(err)
-		return utils.Error(c, status, "Failed to update file content", detail)
+		return utils.Error(c, status, Resources.UploadErrorMessage(err, "Failed to update file content"), detail)
 	}
 	if path != resource.Path {
 		resource.Path = path
 		if err := scopedResourceSvc.UpdateResource(resource); err != nil {
-			return utils.Error(c, http.StatusInternalServerError, "Failed to update resource path", err.Error())
+			return utils.WriteFailed(c, "Failed to update resource path", err)
 		}
 	} else if err := scopedResourceSvc.TouchResourceUpdatedAt(resource, time.Now().UTC()); err != nil {
-		return utils.Error(c, http.StatusInternalServerError, "Failed to update resource timestamp", err.Error())
+		return utils.WriteFailed(c, "Failed to update resource timestamp", err)
 	}
 
 	viewURL, _ := scopedResourceSvc.GetPresignedURLWithTTL(path, Resources.ResourceMutationURLTTLMinutes)
@@ -531,7 +538,7 @@ func ReplaceFile(c echo.Context) error {
 	path, err := scopedResourceSvc.ReplaceFile(oldPath, file, fileHeader)
 	if err != nil {
 		status, detail := Resources.UploadErrorResponse(err)
-		return utils.Error(c, status, "Failed to replace file", detail)
+		return utils.Error(c, status, Resources.UploadErrorMessage(err, "Failed to replace file"), detail)
 	}
 	if path != oldPath {
 		resource.Path = path
@@ -539,13 +546,13 @@ func ReplaceFile(c echo.Context) error {
 			if cleanupErr := scopedResourceSvc.DeleteObjectByPath(path); cleanupErr != nil {
 				slog.Error("replacement resource rollback failed", "resource_id", resource.ID, "path", path, "error", cleanupErr)
 			}
-			return utils.Error(c, http.StatusInternalServerError, "Failed to update resource path", err.Error())
+			return utils.WriteFailed(c, "Failed to update resource path", err)
 		}
 		if cleanupErr := scopedResourceSvc.DeleteObjectByPath(oldPath); cleanupErr != nil {
 			slog.Warn("old replacement resource cleanup failed", "resource_id", resource.ID, "path", oldPath, "error", cleanupErr)
 		}
 	} else if err := scopedResourceSvc.TouchResourceUpdatedAt(resource, time.Now().UTC()); err != nil {
-		return utils.Error(c, http.StatusInternalServerError, "Failed to update resource timestamp", err.Error())
+		return utils.WriteFailed(c, "Failed to update resource timestamp", err)
 	}
 
 	viewURL, _ := scopedResourceSvc.GetPresignedURLWithTTL(path, Resources.ResourceMutationURLTTLMinutes)

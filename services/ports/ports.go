@@ -18,6 +18,11 @@ var (
 
 var ErrMultipartUploadNotFound = errors.New("multipart upload not found")
 
+// ErrObjectNotFound is returned by object metadata reads when the object does
+// not exist (S3 HeadObject 404). It is a client-side condition, never a
+// storage outage: callers map it to a 4xx instead of a retryable 5xx.
+var ErrObjectNotFound = errors.New("storage object not found")
+
 // CacheRepository is the minimal Redis interface used by all services.
 type CacheRepository interface {
 	Invalidate(resource string, key string) error
@@ -152,6 +157,18 @@ type EventMemberRepository interface {
 	List(eventID uuid.UUID) ([]models.EventMember, error)
 	Upsert(eventID, userID uuid.UUID, role string) (*models.EventMember, error)
 	Remove(eventID, userID uuid.UUID) error
+}
+
+// ErrEventSectionConflict: a conditional section update found the row
+// changed since the caller's expected updated_at (STU-N3).
+var ErrEventSectionConflict = errors.New("event section was modified since it was loaded")
+
+// ConditionalEventSectionUpdater is implemented by repositories that can
+// update a section only when its stored updated_at still equals expected
+// (compared at Postgres microsecond precision) in one statement. It returns
+// ErrEventSectionConflict when the row changed.
+type ConditionalEventSectionUpdater interface {
+	UpdateEventSectionIfUnmodified(m *models.EventSection, expected time.Time) error
 }
 
 // ApplicationClientReach is implemented by client repositories that can tell

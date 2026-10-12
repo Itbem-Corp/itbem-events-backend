@@ -6,6 +6,7 @@ import (
 	"events-stocks/dtos"
 	"events-stocks/internal/accesstoken"
 	"events-stocks/internal/previewtoken"
+	"events-stocks/internal/publicaccessproof"
 	"events-stocks/models"
 	"events-stocks/services/ports"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gofrs/uuid"
+	"gorm.io/gorm"
 )
 
 var _pageSpecSvc *PageSpecService
@@ -24,7 +26,17 @@ var (
 	ErrPageSpecInactive      = errors.New("event page is inactive")
 	ErrPageSpecTokenExpired  = errors.New("token expired")
 	ErrPageSpecTokenNotFound = errors.New("token not found")
+	// ErrPageSpecEventGone: the event behind the identifier or the invitation
+	// was deleted (410 event_gone, like the invitation ByToken route).
+	ErrPageSpecEventGone = errors.New("event deleted")
 )
+
+// PageSpecDeletedIdentifierRepository is implemented by the production events
+// repository: it lists the soft-deleted events that used an identifier, so a
+// caller holding a token for one of them gets 410 instead of 404.
+type PageSpecDeletedIdentifierRepository interface {
+	DeletedEventIDsByIdentifier(identifier string) ([]uuid.UUID, error)
+}
 
 const defaultPageSpecMaxUploadsPerGuest = 30
 
@@ -100,6 +112,7 @@ func NewPageSpecService(
 type pageSpecDeps struct {
 	getToken                       func(token string) (*models.InvitationAccessToken, error)
 	getInvitation                  func(id uuid.UUID) (*models.Invitation, error)
+	invitationHasLiveGuest         func(id uuid.UUID) (bool, error)
 	getEvent                       func(id uuid.UUID) (*models.Event, error)
 	getSections                    func(eventID uuid.UUID) ([]models.EventSection, error)
 	getConfig                      func(id uuid.UUID) (*models.EventConfig, error)
@@ -114,6 +127,7 @@ type identifierPageSpecDeps struct {
 	getEventByIdentifier           func(identifier string) (*models.Event, error)
 	getToken                       func(token string) (*models.InvitationAccessToken, error)
 	getInvitation                  func(id uuid.UUID) (*models.Invitation, error)
+	invitationHasLiveGuest         func(id uuid.UUID) (bool, error)
 	getSections                    func(eventID uuid.UUID) ([]models.EventSection, error)
 	getConfig                      func(id uuid.UUID) (*models.EventConfig, error)
 	getResourceVersion             func(eventID uuid.UUID) (*time.Time, error)
@@ -121,6 +135,7 @@ type identifierPageSpecDeps struct {
 	getGuestVersion                func(eventID uuid.UUID) (*time.Time, error)
 	getMomentVersion               func(eventID uuid.UUID) (*time.Time, error)
 	validatePreviewToken           func(token string, eventID uuid.UUID) bool
+	deletedEventIDs                func(identifier string) ([]uuid.UUID, error)
 	now                            func() time.Time
 }
 
@@ -133,6 +148,7 @@ type buildSpecDeps struct {
 	getGuestVersion                func(eventID uuid.UUID) (*time.Time, error)
 	getMomentVersion               func(eventID uuid.UUID) (*time.Time, error)
 	previewAuthorized              bool
+	now                            time.Time
 }
 
 // buildPageSpecFromEvent builds a PageSpec from an already-resolved event.
@@ -185,23 +201,9 @@ func buildPageSpecFromEventWithConfig(event *models.Event, deps buildSpecDeps, c
 		}
 	}
 
-	// 3. Build access control from EventConfig (best-effort — never blocks the page)
-	var access *dtos.PageSpecAccess
-	if cfg != nil {
-		isZero := cfg.ActiveFrom.IsZero() || cfg.ActiveFrom.Year() <= 1970
-		access = &dtos.PageSpecAccess{
-			PasswordProtected: cfg.HasAuthPasswordPreview(),
-			AccessVersion:     pageSpecAccessVersion(cfg),
-			PreviewAuthorized: deps.previewAuthorized,
-		}
-		if !isZero {
-			t := cfg.ActiveFrom
-			access.ActiveFrom = &t
-		}
-		if cfg.ActiveUntil != nil && !cfg.ActiveUntil.IsZero() {
-			access.ActiveUntil = cfg.ActiveUntil
-		}
-	}
+	// 3. Build access control from EventConfig. The window itself is enforced
+	// before this builder runs; these fields drive the public site's gates.
+	access := buildPageSpecAccess(cfg, deps.previewAuthorized, pageSpecBuildNow(deps.now))
 
 	// 4. Build meta
 	var eventDateTime *time.Time
@@ -224,6 +226,8 @@ func buildPageSpecFromEventWithConfig(event *models.Event, deps buildSpecDeps, c
 		EventType:      event.EventType.Name,
 		ContentVersion: pageSpecContentVersion(event, cfg, sections, resourceUpdatedAt, guestUpdatedAt, momentUpdatedAt),
 		Access:         access,
+		RSVPDeadline:   RSVPDeadline(cfg),
+		RSVPOpen:       RSVPOpen(cfg, pageSpecBuildNow(deps.now)),
 		FooterVisible:  cfg == nil || cfg.ShowFooter,
 		Theme:          buildPageSpecTheme(cfg),
 	}
@@ -250,6 +254,9 @@ func buildPageSpecFromEventWithConfig(event *models.Event, deps buildSpecDeps, c
 		config := dtos.EventSectionConfigRaw(s.Config)
 
 		config = injectRuntimeSectionConfig(s.ComponentType, config, event, cfg)
+		if pageSpecSectionKind(s.ComponentType) == "RSVPConfirmation" {
+			config = injectRSVPAvailability(config, cfg, pageSpecBuildNow(deps.now))
+		}
 
 		specSections = append(specSections, dtos.PageSpecSection{
 			Type:      s.ComponentType,
@@ -266,6 +273,33 @@ func buildPageSpecFromEventWithConfig(event *models.Event, deps buildSpecDeps, c
 		Sections:    specSections,
 		MediaBucket: event.MediaBucket,
 	}, nil
+}
+
+func buildPageSpecAccess(cfg *models.EventConfig, previewAuthorized bool, now time.Time) *dtos.PageSpecAccess {
+	if cfg == nil {
+		return nil
+	}
+	access := &dtos.PageSpecAccess{
+		PasswordProtected: cfg.HasAuthPasswordPreview(),
+		AccessVersion:     pageSpecAccessVersion(cfg),
+		PreviewAuthorized: previewAuthorized,
+		WindowStatus:      EventAccessWindowStatus(cfg, now),
+	}
+	if EventAccessTimeSet(cfg.ActiveFrom) {
+		t := cfg.ActiveFrom
+		access.ActiveFrom = &t
+	}
+	if cfg.ActiveUntil != nil && !cfg.ActiveUntil.IsZero() {
+		access.ActiveUntil = cfg.ActiveUntil
+	}
+	return access
+}
+
+func pageSpecBuildNow(now time.Time) time.Time {
+	if now.IsZero() {
+		return time.Now()
+	}
+	return now
 }
 
 // loadPageSpecContentVersions overlaps the independent aggregate reads used by
@@ -357,17 +391,13 @@ func pageSpecContactVisible(cfg *models.EventConfig) bool {
 	return cfg == nil || cfg.ShowContactSection
 }
 
+// pageSpecAccessVersion is the version bound into password proofs. It is
+// derived from the password, so only a password change logs guests out.
 func pageSpecAccessVersion(cfg *models.EventConfig) string {
-	if cfg == nil {
+	if cfg == nil || !cfg.HasAuthPasswordPreview() {
 		return ""
 	}
-	if !cfg.UpdatedAt.IsZero() {
-		return cfg.UpdatedAt.UTC().Format(time.RFC3339Nano)
-	}
-	if !cfg.CreatedAt.IsZero() {
-		return cfg.CreatedAt.UTC().Format(time.RFC3339Nano)
-	}
-	return ""
+	return publicaccessproof.PasswordVersion(cfg.ID, cfg.NormalizedAuthPasswordPreview())
 }
 
 func latestPageSpecTime(current time.Time, candidates ...time.Time) time.Time {
@@ -513,7 +543,11 @@ func injectRuntimeSectionConfig(componentType string, config json.RawMessage, ev
 
 	switch sectionKind {
 	case "CountdownHeader":
-		if !event.EventDateTime.IsZero() {
+		// The section's own "fecha objetivo" wins when it is a valid date;
+		// the event date is only the default (STU-3).
+		if target, ok := countdownSectionTargetDate(configMap["targetDate"], event); ok {
+			configMap["targetDate"] = target
+		} else if !event.EventDateTime.IsZero() {
 			configMap["targetDate"] = event.EventDateTime.Format(time.RFC3339)
 		}
 	case "MomentWall":
@@ -527,9 +561,18 @@ func injectRuntimeSectionConfig(componentType string, config json.RawMessage, ev
 		configMap["show_moment_wall"] = momentsWallPublished
 		configMap["share_uploads_enabled"] = cfg != nil && cfg.AllowUploads && cfg.ShareUploadsEnabled && !momentsWallPublished
 		configMap["max_uploads_per_guest"] = pageSpecMaxUploadsPerGuest(cfg)
+		// Copy keys are the section's when set; the event's default moment
+		// request message only fills them in (STU-4). The identifier and
+		// the upload/visibility flags above stay backend-authoritative: they
+		// mirror gates the API enforces, so a section cannot claim them.
+		// The public MomentWall prefers moment_request_message, so a section
+		// that only set its subtitle shows that subtitle there too.
+		if subtitle, ok := configMap["subtitle"].(string); ok {
+			setConfigStringDefault(configMap, "moment_request_message", subtitle)
+		}
 		if cfg != nil {
-			setConfigString(configMap, "moment_request_message", cfg.DefaultMomentRequestMessage)
-			setConfigString(configMap, "subtitle", cfg.DefaultMomentRequestMessage)
+			setConfigStringDefault(configMap, "moment_request_message", cfg.DefaultMomentRequestMessage)
+			setConfigStringDefault(configMap, "subtitle", cfg.DefaultMomentRequestMessage)
 		}
 	case "RSVPConfirmation":
 		if cfg != nil {
@@ -539,6 +582,25 @@ func injectRuntimeSectionConfig(componentType string, config json.RawMessage, ev
 		}
 	}
 
+	if updated, err := json.Marshal(configMap); err == nil {
+		return json.RawMessage(updated)
+	}
+	return config
+}
+
+// injectRSVPAvailability adds rsvp_open and rsvp_deadline (RFC3339 or null) to
+// the RSVP section config so the card can render "confirmaciones cerradas".
+func injectRSVPAvailability(config json.RawMessage, cfg *models.EventConfig, now time.Time) json.RawMessage {
+	var configMap map[string]interface{}
+	if err := json.Unmarshal(config, &configMap); err != nil || configMap == nil {
+		configMap = map[string]interface{}{}
+	}
+	configMap["rsvp_open"] = RSVPOpen(cfg, now)
+	if deadline := RSVPDeadline(cfg); deadline != nil {
+		configMap["rsvp_deadline"] = deadline.Format(time.RFC3339)
+	} else {
+		configMap["rsvp_deadline"] = nil
+	}
 	if updated, err := json.Marshal(configMap); err == nil {
 		return json.RawMessage(updated)
 	}
@@ -559,6 +621,50 @@ func pageSpecMaxUploadsPerGuest(cfg *models.EventConfig) int {
 		return cfg.MaxUploadsPerGuest
 	}
 	return defaultPageSpecMaxUploadsPerGuest
+}
+
+// setConfigStringDefault sets key only when the section has no non-blank
+// string of its own there.
+func setConfigStringDefault(config map[string]interface{}, key, value string) {
+	if current, ok := config[key].(string); ok && strings.TrimSpace(current) != "" {
+		return
+	}
+	setConfigString(config, key, value)
+}
+
+// countdownSectionLocalLayouts are the zone-less forms the Studio editors save
+// (an <input type="datetime-local"> value) plus a bare date.
+var countdownSectionLocalLayouts = []string{"2006-01-02T15:04", "2006-01-02T15:04:05", "2006-01-02"}
+
+// countdownSectionTargetDate normalizes a section's own targetDate to RFC3339.
+// A value with an offset is kept as that instant; a zone-less value is read in
+// the event's timezone (UTC when unknown), so every visitor counts down to the
+// same moment instead of their own local clock. Blank or unparseable values
+// return false and the event date applies.
+func countdownSectionTargetDate(raw interface{}, event *models.Event) (string, bool) {
+	value, ok := raw.(string)
+	if !ok {
+		return "", false
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", false
+	}
+	if parsed, err := time.Parse(time.RFC3339, value); err == nil {
+		return parsed.Format(time.RFC3339), true
+	}
+	location := time.UTC
+	if event != nil {
+		if loaded, err := time.LoadLocation(strings.TrimSpace(event.Timezone)); err == nil && strings.TrimSpace(event.Timezone) != "" {
+			location = loaded
+		}
+	}
+	for _, layout := range countdownSectionLocalLayouts {
+		if parsed, err := time.ParseInLocation(layout, value, location); err == nil {
+			return parsed.Format(time.RFC3339), true
+		}
+	}
+	return "", false
 }
 
 func setConfigString(config map[string]interface{}, key, value string) {
@@ -784,11 +890,19 @@ func getPageSpec(deps pageSpecDeps, token string) (*dtos.PageSpec, error) {
 	// 2. Access token → invitation → event ID
 	invitation, err := deps.getInvitation(accessToken.InvitationID)
 	if err != nil || invitation == nil {
-		return nil, fmt.Errorf("invitation not found")
+		// A revoked link (guest deleted) soft-deletes its invitation: the
+		// token is no longer valid, not "page not found".
+		return nil, ErrPageSpecTokenNotFound
+	}
+	if !InvitationHeldByLiveGuest(deps.invitationHasLiveGuest, invitation.ID) {
+		return nil, ErrPageSpecTokenNotFound
 	}
 
 	// 3. Fetch event
 	event, err := deps.getEvent(invitation.EventID)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrPageSpecEventGone
+	}
 	if err != nil || event == nil {
 		return nil, fmt.Errorf("event not found")
 	}
@@ -796,33 +910,101 @@ func getPageSpec(deps pageSpecDeps, token string) (*dtos.PageSpec, error) {
 		return nil, ErrPageSpecInactive
 	}
 
-	return buildPageSpecFromEvent(event, buildSpecDeps{
+	cfg := loadEffectivePageSpecConfig(event.ID, deps.getConfig)
+	if !EventAccessWindowOpen(cfg, now) {
+		return windowLockedPageSpec(event, cfg, now), nil
+	}
+
+	return buildPageSpecFromEventWithConfig(event, buildSpecDeps{
 		getSections:                    deps.getSections,
 		getConfig:                      deps.getConfig,
 		getResourceVersion:             deps.getResourceVersion,
 		getResourceVersionBySectionIDs: deps.getResourceVersionBySectionIDs,
 		getGuestVersion:                deps.getGuestVersion,
 		getMomentVersion:               deps.getMomentVersion,
-	})
+		now:                            now,
+	}, cfg)
+}
+
+// windowLockedPageSpec is served when the caller may read the event but the
+// access window ("Disponible desde/hasta") is closed. It keeps meta.access so the
+// public site can render its "coming soon" / "ended" gate, and carries no
+// sections, address, contact, cover or theme.
+func windowLockedPageSpec(event *models.Event, cfg *models.EventConfig, now time.Time) *dtos.PageSpec {
+	return &dtos.PageSpec{
+		Meta: dtos.PageSpecMeta{
+			PageTitle:     event.Name,
+			EventID:       event.ID.String(),
+			Identifier:    event.Identifier,
+			Timezone:      event.Timezone,
+			Language:      event.Language,
+			EventType:     event.EventType.Name,
+			Access:        buildPageSpecAccess(cfg, false, now),
+			FooterVisible: false,
+		},
+		Sections: []dtos.PageSpecSection{},
+	}
 }
 
 func validPageSpecInvitationToken(deps identifierPageSpecDeps, eventID uuid.UUID, token string) bool {
-	if token == "" || deps.getToken == nil || deps.getInvitation == nil {
-		return false
+	return pageSpecInvitationTokenError(deps, eventID, token) == nil
+}
+
+// pageSpecInvitationTokenError checks an invitation token against the event:
+// nil when it opens the event, ErrPageSpecTokenExpired when it expired, and
+// ErrPageSpecTokenNotFound for a missing, unknown, revoked (guest deleted) or
+// other-event token.
+func pageSpecInvitationTokenError(deps identifierPageSpecDeps, eventID uuid.UUID, token string) error {
+	if strings.TrimSpace(token) == "" || deps.getToken == nil || deps.getInvitation == nil {
+		return ErrPageSpecTokenNotFound
 	}
 	now := pageSpecNow(deps.now)
 	accessToken, err := deps.getToken(token)
 	if err != nil || accessToken == nil {
+		return ErrPageSpecTokenNotFound
+	}
+	invitation, err := deps.getInvitation(accessToken.InvitationID)
+	if err != nil || invitation == nil || invitation.EventID != eventID {
+		return ErrPageSpecTokenNotFound
+	}
+	if !InvitationHeldByLiveGuest(deps.invitationHasLiveGuest, invitation.ID) {
+		return ErrPageSpecTokenNotFound
+	}
+	// Expiry is reported only for a token of this event, so another event's
+	// expired link never reveals anything beyond "invalid".
+	if isExpiredPageSpecAccessToken(accessToken, now) {
+		return ErrPageSpecTokenExpired
+	}
+	return nil
+}
+
+// deletedEventTokenProof reports whether the caller holds a valid preview
+// token or an invitation token for one of the deleted events.
+func deletedEventTokenProof(deps identifierPageSpecDeps, eventIDs []uuid.UUID, previewToken, invitationToken string) bool {
+	if strings.TrimSpace(previewToken) != "" {
+		for _, id := range eventIDs {
+			if validPageSpecPreviewToken(deps, id, previewToken) {
+				return true
+			}
+		}
+	}
+	if strings.TrimSpace(invitationToken) == "" || deps.getToken == nil || deps.getInvitation == nil {
 		return false
 	}
-	if isExpiredPageSpecAccessToken(accessToken, now) {
+	accessToken, err := deps.getToken(invitationToken)
+	if err != nil || accessToken == nil {
 		return false
 	}
 	invitation, err := deps.getInvitation(accessToken.InvitationID)
 	if err != nil || invitation == nil {
 		return false
 	}
-	return invitation.EventID == eventID
+	for _, id := range eventIDs {
+		if invitation.EventID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func validPageSpecPreviewToken(deps identifierPageSpecDeps, eventID uuid.UUID, token string) bool {
@@ -856,6 +1038,15 @@ func isExpiredPageSpecAccessToken(accessToken *models.InvitationAccessToken, now
 func getPageSpecByIdentifier(deps identifierPageSpecDeps, identifier, previewToken, invitationToken string) (*dtos.PageSpec, error) {
 	event, err := deps.getEventByIdentifier(identifier)
 	if err != nil || event == nil {
+		// 410 only for a caller who proves a link to the deleted event (its
+		// preview or invitation token). Anonymous callers get the same answer
+		// as for a slug that never existed, so deleted slugs cannot be listed.
+		if deps.deletedEventIDs != nil {
+			if ids, deletedErr := deps.deletedEventIDs(identifier); deletedErr == nil && len(ids) > 0 &&
+				deletedEventTokenProof(deps, ids, previewToken, invitationToken) {
+				return nil, ErrPageSpecEventGone
+			}
+		}
 		return nil, fmt.Errorf("event not found")
 	}
 
@@ -867,10 +1058,20 @@ func getPageSpecByIdentifier(deps identifierPageSpecDeps, identifier, previewTok
 	if !event.IsActive && !validPreview {
 		return nil, ErrPageSpecInactive
 	}
-	if !cfg.IsPublic {
-		if !validPreview && !validPageSpecInvitationToken(deps, event.ID, invitationToken) {
+	if !cfg.IsPublic && !validPreview {
+		// No token: the event is simply not public (403). A token that does
+		// not open it is the guest's link failing (401 invalid/expired), so
+		// the public site can say the link expired instead of "not published".
+		if strings.TrimSpace(invitationToken) == "" {
 			return nil, ErrPageSpecNotPublic
 		}
+		if tokenErr := pageSpecInvitationTokenError(deps, event.ID, invitationToken); tokenErr != nil {
+			return nil, tokenErr
+		}
+	}
+	now := pageSpecNow(deps.now)
+	if !validPreview && !EventAccessWindowOpen(cfg, now) {
+		return windowLockedPageSpec(event, cfg, now), nil
 	}
 
 	return buildPageSpecFromEventWithConfig(event, buildSpecDeps{
@@ -881,6 +1082,7 @@ func getPageSpecByIdentifier(deps identifierPageSpecDeps, identifier, previewTok
 		getGuestVersion:                deps.getGuestVersion,
 		getMomentVersion:               deps.getMomentVersion,
 		previewAuthorized:              validPreview,
+		now:                            now,
 	}, cfg)
 }
 
@@ -904,6 +1106,7 @@ func (s *PageSpecService) GetPageSpecByToken(token string) (*dtos.PageSpec, erro
 	return getPageSpec(pageSpecDeps{
 		getToken:                       accessTokenLookup(s.accessTokens),
 		getInvitation:                  s.invitations.GetInvitationByIDLite,
+		invitationHasLiveGuest:         InvitationLiveGuestLookup(s.invitations),
 		getEvent:                       s.events.GetEventByIDForSpec,
 		getSections:                    s.sections.ListByEventIDForSpec,
 		getConfig:                      s.configs.GetEventConfigByID,
@@ -935,10 +1138,15 @@ func (s *PageSpecService) GetPageSpecByIdentifier(identifier, previewToken, invi
 	if s.moments != nil {
 		getMomentVersion = s.moments.LatestPublicMomentUpdatedAtByEventID
 	}
+	var deletedEventIDs func(string) ([]uuid.UUID, error)
+	if deletedRepo, ok := s.events.(PageSpecDeletedIdentifierRepository); ok {
+		deletedEventIDs = deletedRepo.DeletedEventIDsByIdentifier
+	}
 	return getPageSpecByIdentifier(identifierPageSpecDeps{
 		getEventByIdentifier:           s.events.GetEventByIdentifier,
 		getToken:                       accessTokenLookup(s.accessTokens),
 		getInvitation:                  getInvitation,
+		invitationHasLiveGuest:         InvitationLiveGuestLookup(s.invitations),
 		getSections:                    s.sections.ListByEventIDForSpec,
 		getConfig:                      s.configs.GetEventConfigByID,
 		getResourceVersion:             getResourceVersion,
@@ -946,6 +1154,7 @@ func (s *PageSpecService) GetPageSpecByIdentifier(identifier, previewToken, invi
 		getGuestVersion:                getGuestVersion,
 		getMomentVersion:               getMomentVersion,
 		validatePreviewToken:           previewtoken.Validate,
+		deletedEventIDs:                deletedEventIDs,
 	}, identifier, previewToken, invitationToken)
 }
 

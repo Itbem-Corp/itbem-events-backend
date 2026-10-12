@@ -6,6 +6,7 @@ import (
 	"errors"
 	"events-stocks/dtos"
 	"events-stocks/models"
+	"events-stocks/repositories/eventsrepository"
 	"events-stocks/services/ports"
 	"events-stocks/utils"
 	"fmt"
@@ -726,7 +727,7 @@ func TestNewDefaultEventConfig_MatchesDashboardDefaults(t *testing.T) {
 	assert.True(t, cfg.ShowSecondLocation)
 	assert.True(t, cfg.ShowHostsSection)
 	assert.True(t, cfg.ShowPhotoGallery)
-	assert.True(t, cfg.ShowMomentWall)
+	assert.False(t, cfg.ShowMomentWall, "EVT-68: a new event's moment wall starts unpublished")
 	assert.True(t, cfg.VisibilityConfigured)
 	assert.True(t, cfg.ShowContactSection)
 	assert.True(t, cfg.ShowEventSchedule)
@@ -896,7 +897,7 @@ func TestEventConfigService_GetEventConfigByID_AutoCreatesDefaultOnRecordNotFoun
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.Equal(t, id, result.ID)
-	assert.True(t, result.ShowMomentWall)
+	assert.False(t, result.ShowMomentWall)
 	assert.True(t, result.ShowRSVPSection)
 	assert.False(t, result.IsPublic)
 	assert.Equal(t, 2, callCount)
@@ -948,8 +949,10 @@ func TestBuildPageSpecInjectsMomentWallRuntimeConfig(t *testing.T) {
 	assert.Equal(t, true, openConfig["share_uploads_enabled"])
 	assert.Equal(t, false, openConfig["published"])
 	assert.Equal(t, float64(12), openConfig["max_uploads_per_guest"])
-	assert.Equal(t, "Sube tus mejores fotos", openConfig["moment_request_message"])
-	assert.Equal(t, "Sube tus mejores fotos", openConfig["subtitle"])
+	// STU-4: the section's own subtitle wins over the event default and
+	// feeds moment_request_message, which the public component prefers.
+	assert.Equal(t, "Comparte algo", openConfig["moment_request_message"])
+	assert.Equal(t, "Comparte algo", openConfig["subtitle"])
 
 	publishedSpec, err := buildPageSpecFromEventWithConfig(event, deps, &models.EventConfig{
 		ID:                  eventID,
@@ -1235,4 +1238,45 @@ func TestEventSectionService_ListByEventID_RepoError(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Nil(t, result)
+}
+
+type nameCheckingEventsRepo struct {
+	*mockEventsRepo
+	taken     bool
+	seenName  string
+	seenSkip  uuid.UUID
+	seenOwner *uuid.UUID
+}
+
+func (r *nameCheckingEventsRepo) EventNameTaken(clientID *uuid.UUID, name string, excludeID uuid.UUID) (bool, error) {
+	r.seenOwner, r.seenName, r.seenSkip = clientID, name, excludeID
+	return r.taken, nil
+}
+
+// EVT-22: a name that differs only in letter case from another live event of
+// the organization is rejected before the insert (409 event_name_taken).
+func TestEventService_CreateEvent_RejectsCaseOnlyDuplicateName(t *testing.T) {
+	created := false
+	clientID := uuid.Must(uuid.NewV4())
+	repo := &nameCheckingEventsRepo{
+		mockEventsRepo: &mockEventsRepo{CreateEventFunc: func(*models.Event) error { created = true; return nil }},
+		taken:          true,
+	}
+
+	err := NewEventService(repo, &mockCacheRepo{}).CreateEvent(&models.Event{ClientID: &clientID, Name: "qa-autotest events 1"})
+
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, eventsrepository.ErrEventNameAlreadyExists))
+	assert.False(t, created)
+	assert.Equal(t, "qa-autotest events 1", repo.seenName)
+	assert.Equal(t, &clientID, repo.seenOwner)
+	assert.Equal(t, uuid.Nil, repo.seenSkip)
+}
+
+func TestEventService_EnsureEventNameAvailable_FreeNamePasses(t *testing.T) {
+	eventID := uuid.Must(uuid.NewV4())
+	repo := &nameCheckingEventsRepo{mockEventsRepo: &mockEventsRepo{}}
+
+	require.NoError(t, NewEventService(repo, &mockCacheRepo{}).EnsureEventNameAvailable(nil, "Boda", eventID))
+	assert.Equal(t, eventID, repo.seenSkip)
 }
