@@ -8,6 +8,11 @@ type Config struct {
 	// development control plane has no AWS administrative credentials to call
 	// Cognito AdminGetUser after a restart.
 	AllowLocalUserSyncFallback string `required:"false"`
+	// EventClientAccess is the EVENT_CLIENT_ACCESS kill switch for EventiApp
+	// event clients (event_client_grants): "on" or "off". Empty or any other
+	// value means off. Deployed through the GitHub Actions repository
+	// variable of the same name; toggling requires a backend deploy.
+	EventClientAccess string `required:"false"`
 	// LocalBootstrapRootEmails is an explicit, comma-separated allow-list used
 	// only with ENV=local. It can provision the first authenticated local
 	// platform administrator without putting an identity, password or privilege

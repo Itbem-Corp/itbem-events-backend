@@ -35,6 +35,7 @@ go run ./cmd/api
 | `AWS_ACCESS_KEY_ID` | no | Standard AWS SDK access key for local development only. Production deploys use GitHub OIDC and must not store this value. |
 | `AWS_SECRET_ACCESS_KEY` | no | Standard AWS SDK secret key for local development only. Production deploys use GitHub OIDC and must not store this value. |
 | `AWS_SESSION_TOKEN` | no | Standard temporary-session token when the selected credentials require one. Read directly by the SDK. |
+| `EVENT_CLIENT_ACCESS` | no | EventiApp event clients kill switch: `on` or `off`. Empty is off; any other value is logged and treated as off. Off: no grant authority path, no grant-only sessions, no grant rows in lists, the event-client routes answer 404 and `event:clients:manage` is reported `false`. Rows are kept. Production reads the GitHub Actions repository variable `EVENT_CLIENT_ACCESS` (see below). |
 | `COGNITO_AWS_REGION` | **yes** | AWS region for Cognito (often same as `AWS_REGION`) |
 | `COGNITO_USER_POOL_ID` | **yes** | Cognito User Pool ID (`us-east-1_XXXXXXXXX`) |
 | `OIDC_ISSUER_URL` | local qualification only | Optional disposable JWT issuer override. It is accepted only when paired with `OIDC_JWKS_URL`, `ENV=local`, and the URL is absolute HTTP(S) loopback with no credentials, query, or fragment. Deployed environments fail closed when it is present. |
@@ -224,6 +225,7 @@ variables passed to the container:
 | `EC2_INSTANCE_ID` | environment variable | yes | Exact EC2 target authorized in the OIDC role stack. |
 | `EC2_USER` | environment variable | yes | Exact OS user authorized by the OIDC role stack. |
 | `EC2_HOST` | environment variable | yes | SSH target whose pinned key is stored in `EC2_HOST_KEY`. |
+| `EVENT_CLIENT_ACCESS` | repository variable | no | Rendered into the container env as `--optional EVENT_CLIENT_ACCESS`. Unset = off. Toggling means changing the variable and re-running `deploy-backend` (workflow_dispatch, `confirm_production`); it takes one full deploy. |
 
 Pushes to `main` run validation but never deploy production. Production requires
 a manual workflow dispatch with `confirm_production=true` and should use a

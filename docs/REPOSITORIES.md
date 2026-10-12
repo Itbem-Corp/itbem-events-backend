@@ -35,6 +35,9 @@
 | `repositories/eventsectionrepository/EventSectionRepository.go` | EventSection CRUD |
 | `repositories/eventtyperepository/EventTypeRepository.go` | EventType catalog queries |
 | `repositories/eventanalyticsrepository/EventAnalyticsRepository.go` | Analytics upsert/aggregate |
+| `repositories/eventsrepository/event_client_scope.go` | `ConfigureEventClientScope` and `withEventClientGrants`: ORs active event-client grants into user-scoped event lists while `EVENT_CLIENT_ACCESS` is on (same predicates as authorization) |
+| `repositories/eventclientrepository/EventClientRepository.go` | Event-client grants: `HasActiveGrant`, counts, `ActiveGrantedEventIDs`, per-event and per-organization lists, candidates, assignments page, `FindLiveUsersByEmail`, `HasMembershipInOrganizationTree`, `Grant` (revokes stale rows of a previous organization, then `ON CONFLICT DO NOTHING` on the active index), `Revoke`, `RevokeAllForEvent`, `RevokeAllForOrganizationUser`. Active = not revoked, event not deleted and still in the grant organization, organization active, holder without any `client_members` row there |
+| `repositories/eventmemberrepository/EventMemberRepository.go` | Event assignments; `RolesForUser` batches roles for many events |
 | `repositories/eventtablerepository/EventTableRepository.go` | Seating tables (physical table `tables`): CRUD, `AssignGuestsToTables`, `SaveSeatingPlan`. `CountEventTablesInEvent(eventID, ids)` counts the live (not soft-deleted) tables of the event among `ids` in one query; guest create/update compare it with the number of distinct ids. |
 
 ### Guests & Invitations
@@ -52,6 +55,7 @@
 | Path | Purpose |
 |------|---------|
 | `repositories/clientrepository/clientRepository.go` | Client CRUD + hierarchy |
+| `repositories/clientrepository/access_lookup.go` | `CheckAccessRecursiveE` (organization role lookup that returns its error; `CheckAccessRecursive` wraps it) and `ResolveClientProduct` (nearest branded ancestor's application code) |
 | `repositories/clienttyperepository/clientTypeRepository.go` | ClientType catalog |
 | `repositories/clientrolerepository/clientRoleRepository.go` | ClientRole catalog |
 | `repositories/userrepository/UserRepository.go` | User CRUD, Cognito sync |

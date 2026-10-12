@@ -414,6 +414,9 @@ jobs:
           AUTOMATION_BUDGET_PROVIDER: ${{ vars.AUTOMATION_BUDGET_PROVIDER }}
           AUTOMATION_BUDGET_MODEL: ${{ vars.AUTOMATION_BUDGET_MODEL }}
           AUTOMATION_WORKSPACE_CATALOG_POLICY_JSON: ${{ vars.AUTOMATION_WORKSPACE_CATALOG_POLICY_JSON }}
+          # EventiApp event clients kill switch (on|off; unset = off). Toggle by
+          # changing the repository variable and re-running this deploy.
+          EVENT_CLIENT_ACCESS: ${{ vars.EVENT_CLIENT_ACCESS }}
         run: |
           set -euo pipefail
           if [[ -n "$SQS_AUTOMATION_QUEUE_URL" && -z "$AI_PROVIDER_CREDENTIALS_SECRET_ID" ]]; then
@@ -481,6 +484,7 @@ jobs:
             --optional AUTOMATION_BUDGET_PROVIDER \
             --optional AUTOMATION_BUDGET_MODEL \
             --optional AUTOMATION_WORKSPACE_CATALOG_POLICY_JSON \
+            --optional EVENT_CLIENT_ACCESS \
             --required SNS_WORKER_TOPIC_ARN
 
       - name: Verify existing automated database recovery coverage

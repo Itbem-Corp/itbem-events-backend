@@ -147,7 +147,7 @@ const callerAccessEventPredicate = `EXISTS (
 )`
 
 func scopeEventsToCallerAccess(query *gorm.DB, access dtos.EventCallerAccess) *gorm.DB {
-	return query.Where(callerAccessEventPredicate, access.ApplicationID, access.UserID)
+	return withEventClientGrants(query, access.UserID, callerAccessEventPredicate, access.ApplicationID, access.UserID)
 }
 
 // dashboardEventsScope selects the events of one organization (clientID,

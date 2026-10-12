@@ -312,7 +312,11 @@ func ListEvents(c echo.Context) error {
 	if err != nil {
 		return respondEventListError(c, err)
 	}
-	return utils.Success(c, http.StatusOK, "Events loaded", eventResponsesWithCoverView(events))
+	responses := eventResponsesWithCoverView(events)
+	if err := markViewerAccess(user, responses); err != nil {
+		return utils.Error(c, http.StatusInternalServerError, "Error fetching events", err.Error())
+	}
+	return utils.Success(c, http.StatusOK, "Events loaded", responses)
 }
 
 func listEventPage(c echo.Context, user *models.User) error {
@@ -366,8 +370,14 @@ func listEventPage(c echo.Context, user *models.User) error {
 		return respondEventListError(c, listErr)
 	}
 	totalPages := (total + pageSize - 1) / pageSize
+	responses := eventResponsesWithCoverView(events)
+	if caller != nil {
+		if err := markViewerAccess(user, responses); err != nil {
+			return utils.Error(c, http.StatusInternalServerError, "Error fetching events", err.Error())
+		}
+	}
 	return utils.Success(c, http.StatusOK, "Events loaded", dtos.EventListPage{
-		Data:       eventResponsesWithCoverView(events),
+		Data:       responses,
 		Total:      total,
 		Page:       page,
 		PageSize:   pageSize,
@@ -691,6 +701,7 @@ func UpdateEvent(c echo.Context) error {
 	if err := eventSvc.UpdateEvent(existing); err != nil {
 		return respondEventWriteError(c, err, "Error updating event")
 	}
+	revokeEventClientsAfterMove(c, id, originalClientID, existing.ClientID, user.ID)
 
 	return utils.Success(c, http.StatusOK, "Event updated", eventResponseWithCoverView(existing))
 }

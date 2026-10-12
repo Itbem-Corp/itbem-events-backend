@@ -79,6 +79,7 @@ Types nest Platform › Agency › Customer; a Customer cannot have sub-organiza
 | Analytics view | Owner, Admin, Event manager, Editor, Analyst | Aggregate event and RSVP metrics. |
 | Metrics view (`metrics:view`) | EventiApp: Owner and Admin (direct or inherited) plus roots 1 and 2. Cafetton House and ITBEM: Owner, Admin, Event manager, Editor, Analyst | Product-metrics portfolio (`GET /api/metrics/portfolio`). Not an event capability: event analytics stay on Analytics view. |
 | Members manage | Owner and Admin (and both platform-root levels) | Organization and event-team assignment, limited to members ranked below the actor (see Delegation invariants). |
+| Event clients manage (`event:clients:manage`) | Owner, Admin (direct or inherited), Event manager (unless an event assignment narrows it), Root 1. Not Root 2 | Assign external event clients to an event (`/api/events/:id/clients*`). Reported as `false` while `EVENT_CLIENT_ACCESS` is off. |
 
 On EventiApp, `services/applications.applicationOrganizationCapabilities`
 removes `metrics:view` from every organization role except Owner/Admin, so the
@@ -100,3 +101,28 @@ View access never includes the event access password or a guest's invitation tok
 | `GET /events/:id/checkin-workspace`, `GET /guests/checkin:<event>` | Require Check-in and return the door projection (`dtos.CheckinGuest`): name, table, party size and RSVP status only, plus `checked_in_at` while a door check-in is in place (so the page knows which guests it may undo; who checked them in and the previous RSVP stay server-side). No email, phone, notes, dietary restrictions or invitation/RSVP token, for any caller. A QR scan is resolved on the server (`qr` query). The `search` query matches name and table by substring but email and phone only by their complete value, so which guests match never reveals part of a contact field. |
 
 The role lists in the capability table above describe intent. The enforced role-to-capability mapping is `roleHasCapability` and `eventRoleHasCapability` in `internal/authz/authz.go`, which `GET /events/:id/capabilities` and the dashboard follow.
+
+## Event authority precedence
+
+`internal/authz` resolves one authority per request and event
+(`resolveEventAuthority`, memoized in the Echo context by
+`RequireEventAccess`; `EnsureEventAccess` resolves fresh):
+
+1. Platform root (`platformHasCapability`).
+2. Organization access through `CheckAccessRecursiveE`
+   (`roleHasCapability`, then the `event_members` narrowing). A lookup error
+   is `500 Authorization error` and never reaches step 3.
+3. Event-client grant, only when `EVENT_CLIENT_ACCESS` is on (the
+   `HasEventClientGrant` hook is configured), the caller has no branded
+   `AuthTenantCode`, an active grant exists and the event's organization
+   resolves to EventiApp (`ResolveClientProduct`). Capability ceiling:
+   view, event:manage, guest:manage, checkin:run, analytics:view
+   (`EventClientCapabilityCeiling`). `event_members` is not consulted.
+4. `403 Access denied`.
+
+`RequireClientAccess` and `RequireClientCapability` never honour grants, and
+now surface organization lookup errors as 500 instead of a silent deny.
+`EventCapabilityForOrganizationEvents` evaluates one capability for many events
+of one organization with one organization lookup and one `event_members` batch
+(managers only, no grant path). `GET /api/events/:id/capabilities` answers 500
+when evaluation fails instead of reporting `false`.

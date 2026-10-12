@@ -47,6 +47,7 @@ var modelsWithoutSeed = []interface{}{
 	&models.PublicPerformanceWindowBucket{},
 	&models.User{},
 	&models.EventMember{},
+	&models.EventClientGrant{},
 	&models.ClientMember{},
 	&models.Application{},
 	&models.ClientApplication{},

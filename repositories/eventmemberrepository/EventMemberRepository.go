@@ -52,3 +52,20 @@ func (r *EventMemberRepo) Upsert(eventID, userID uuid.UUID, role string) (*model
 func (r *EventMemberRepo) Remove(eventID, userID uuid.UUID) error {
 	return r.db.Where("event_id = ? AND user_id = ?", eventID, userID).Delete(&models.EventMember{}).Error
 }
+
+// RolesForUser returns the active event-member role of userID on each of
+// eventIDs in one query. Events without an assignment are absent from the map.
+func (r *EventMemberRepo) RolesForUser(eventIDs []uuid.UUID, userID uuid.UUID) (map[uuid.UUID]string, error) {
+	result := make(map[uuid.UUID]string, len(eventIDs))
+	if len(eventIDs) == 0 {
+		return result, nil
+	}
+	var members []models.EventMember
+	if err := r.db.Where("event_id IN ? AND user_id = ? AND is_active = true", eventIDs, userID).Find(&members).Error; err != nil {
+		return nil, err
+	}
+	for _, member := range members {
+		result[member.EventID] = strings.ToUpper(strings.TrimSpace(member.Role))
+	}
+	return result, nil
+}

@@ -6,6 +6,8 @@ import (
 	"events-stocks/dtos"
 	"events-stocks/internal/products"
 	"fmt"
+	"strings"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider"
 	"github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider/types"
@@ -26,17 +28,23 @@ func GetCognitoUser(ctx context.Context, sub string) (*dtos.AuthUser, error) {
 	user := &dtos.AuthUser{
 		Sub:      *output.Username,
 		IsActive: output.Enabled,
+		Username: aws.ToString(output.Username),
+		Status:   string(output.UserStatus),
 	}
 
 	for _, attr := range output.UserAttributes {
-		val := *attr.Value
-		switch *attr.Name {
+		val := aws.ToString(attr.Value)
+		switch aws.ToString(attr.Name) {
 		case "email":
 			user.Email = val
 		case "given_name":
 			user.FirstName = val
 		case "family_name":
 			user.LastName = val
+		case "sub":
+			user.Subject = val
+		case "email_verified":
+			user.EmailVerified = strings.EqualFold(val, "true")
 		}
 	}
 
@@ -148,6 +156,21 @@ func EnableCognitoUser(ctx context.Context, sub string) error {
 		Username:   aws.String(sub),
 	})
 
+	return err
+}
+
+// ResendCognitoInvitation re-sends the pool's standard invitation message to
+// an account that has not completed its first sign-in
+// (AdminCreateUser MessageAction=RESEND). Cognito itself rejects the call for
+// accounts that already changed their temporary password.
+func ResendCognitoInvitation(ctx context.Context, username string) error {
+	cfg := configuration.LoadConfig()
+	client := configuration.GetCognitoClient()
+	_, err := client.AdminCreateUser(ctx, &cognitoidentityprovider.AdminCreateUserInput{
+		UserPoolId:    aws.String(cfg.CognitoUserPoolId),
+		Username:      aws.String(username),
+		MessageAction: types.MessageActionTypeResend,
+	})
 	return err
 }
 

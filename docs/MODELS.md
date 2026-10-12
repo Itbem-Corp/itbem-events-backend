@@ -60,6 +60,12 @@ Event     Event          `gorm:"foreignKey:EventID" json:"event,omitempty"`
 - **Purpose**: Staff/collaborators assigned to an event
 - **Relationships**: BelongsTo Event, BelongsTo User
 
+### EventClientGrant
+- **File**: `models/EventClientGrant.go` (table `event_client_grants`, EventiApp)
+- **Purpose**: Gives an external account (event client) event-level access to one event, behind `EVENT_CLIENT_ACCESS`. Not an organization role.
+- **Fields**: `event_id`, `user_id`, `organization_id` (the event's organization at grant time), `granted_by_user_id`, `revoked_at`, `revoked_by_user_id`, timestamps. No association fields.
+- **Constraints**: partial unique index `idx_event_client_grants_active (event_id, user_id) WHERE revoked_at IS NULL`. Revocation sets `revoked_at`; rows are kept.
+
 ---
 
 ### Guest

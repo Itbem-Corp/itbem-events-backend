@@ -4,6 +4,7 @@ import (
 	"errors"
 	"events-stocks/dtos"
 	"events-stocks/internal/authz"
+	"events-stocks/internal/products/eventiapp"
 	"events-stocks/models"
 	clientsService "events-stocks/services/clients"
 	eventmembersService "events-stocks/services/eventmembers"
@@ -37,9 +38,19 @@ func Capabilities(c echo.Context) error {
 		authz.CapabilityCheckin,
 		authz.CapabilityAnalyticsView,
 		authz.CapabilityMembersManage,
+		authz.CapabilityEventClientsManage,
 	} {
 		_, _, capabilityErr := authz.RequireEventCapability(c, eventID, capability)
-		capabilities[string(capability)] = capabilityErr == nil
+		// A failed dependency is an error, never a silent "false".
+		var failure *authz.Failure
+		if capabilityErr != nil && (!errors.As(capabilityErr, &failure) || failure.Status >= http.StatusInternalServerError) {
+			return authz.Respond(c, capabilityErr)
+		}
+		allowed := capabilityErr == nil
+		if capability == authz.CapabilityEventClientsManage && !eventiapp.EventClientAccessEnabled() {
+			allowed = false
+		}
+		capabilities[string(capability)] = allowed
 	}
 	return utils.Success(c, http.StatusOK, "Event capabilities", capabilities)
 }
