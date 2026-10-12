@@ -1,6 +1,7 @@
 package clients
 
 import (
+	"errors"
 	"events-stocks/dtos"
 	"events-stocks/internal/authz"
 	"events-stocks/internal/products"
@@ -342,6 +343,16 @@ func InviteUser(c echo.Context) error {
 	}
 	if operationalRootMayNotManageRootTarget(c, requester, targetUserID) {
 		return nil
+	}
+	// A direct membership takes precedence over access inherited from a parent
+	// organization, so adding an existing account can demote an inherited
+	// Owner or Admin here and in every organization below. Apply the same
+	// target ranking as every other member write.
+	if err := clientSvc.AuthorizeMemberTarget(requester, req.ClientID, targetUserID, users.GetUserByID); err != nil {
+		if errors.Is(err, clients.ErrMemberTargetDenied) {
+			return utils.Error(c, http.StatusForbidden, "Permission Denied", err.Error())
+		}
+		return utils.Error(c, http.StatusInternalServerError, "Authorization error", err.Error())
 	}
 
 	if err := clientSvc.AddUserToClient(req.ClientID, targetUserID, req.RoleID); err != nil {

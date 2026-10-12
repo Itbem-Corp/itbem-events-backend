@@ -609,8 +609,10 @@ var ErrMemberTargetDenied = errors.New("permission denied")
 type UserLookup func(userID uuid.UUID) (*models.User, error)
 
 // AuthorizeMemberTarget applies the delegation invariant to actions that
-// change another member's access inside clientID without changing their
-// organization role (application entitlements, event assignments). The
+// change another member's access inside clientID without going through the
+// direct-membership rank checks (application entitlements, event assignments,
+// and adding an existing account with InviteUser, whose new direct
+// membership would take precedence over an inherited Owner/Admin role). The
 // caller must already have checked members:manage on clientID.
 //
 //   - A primary root may act on any member.

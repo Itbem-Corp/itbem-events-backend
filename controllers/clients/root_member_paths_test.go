@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gofrs/uuid"
@@ -60,6 +61,16 @@ func (r *hierarchyRoleRepo) GetByID(id uuid.UUID) (*models.ClientRole, error) {
 	return role, nil
 }
 
+// GetByCode matches codes case-insensitively, like the real repository.
+func (r *hierarchyRoleRepo) GetByCode(code string) (*models.ClientRole, error) {
+	for _, role := range r.roles {
+		if strings.EqualFold(role.Code, code) {
+			return role, nil
+		}
+	}
+	return nil, errors.New("record not found")
+}
+
 // countingAuthRepo records identity-provider accounts created by a request.
 type countingAuthRepo struct {
 	mockControllerAuthRepo
@@ -84,6 +95,15 @@ func (r *directoryUserRepo) GetUserByID(id uuid.UUID) (*models.User, error) {
 	return user, nil
 }
 
+func (r *directoryUserRepo) GetUserByEmail(email string) (*models.User, error) {
+	for _, user := range r.users {
+		if strings.EqualFold(user.Email, email) {
+			return user, nil
+		}
+	}
+	return nil, errors.New("record not found")
+}
+
 type memberPathFixture struct {
 	clientID   uuid.UUID
 	targetID   uuid.UUID
@@ -104,6 +124,8 @@ type memberPathFixture struct {
 	primaryRootID     uuid.UUID
 	operationalRootID uuid.UUID
 	repo              *outsiderClientRepo
+	roles             *hierarchyRoleRepo
+	directory         *directoryUserRepo
 	auth              *countingAuthRepo
 }
 
@@ -134,24 +156,26 @@ func newMemberPathFixture(t *testing.T, requester models.User) memberPathFixture
 		fixture.operationalRootID: member,
 	}}
 
-	previousClientSvc := clientSvc
-	clientSvc = clientService.NewClientService(fixture.repo, &hierarchyRoleRepo{roles: map[uuid.UUID]*models.ClientRole{
+	fixture.roles = &hierarchyRoleRepo{roles: map[uuid.UUID]*models.ClientRole{
 		fixture.memberRole:       member,
 		fixture.ownerRole:        owner,
 		fixture.adminRole:        {ID: fixture.adminRole, Code: "Admin", Hierarchy: 2},
 		fixture.eventManagerRole: {ID: fixture.eventManagerRole, Code: "EVENT_MANAGER", Hierarchy: 3},
 		fixture.editorRole:       {ID: fixture.editorRole, Code: "EDITOR", Hierarchy: 4},
 		fixture.checkinRole:      {ID: fixture.checkinRole, Code: "CHECKIN", Hierarchy: 5},
-	}}, &mockClientTypeRepo{}, nil, nil, nil)
+	}}
+	previousClientSvc := clientSvc
+	clientSvc = clientService.NewClientService(fixture.repo, fixture.roles, &mockClientTypeRepo{}, nil, nil, nil)
 	t.Cleanup(func() { clientSvc = previousClientSvc })
 
 	fixture.auth = &countingAuthRepo{}
-	usersService.SetDefaultUserService(usersService.NewUserService(&directoryUserRepo{users: map[uuid.UUID]*models.User{
+	fixture.directory = &directoryUserRepo{users: map[uuid.UUID]*models.User{
 		fixture.targetID:          {ID: fixture.targetID, Email: "member@example.com"},
 		fixture.ownerID:           {ID: fixture.ownerID, Email: "owner@example.com"},
 		fixture.primaryRootID:     {ID: fixture.primaryRootID, Email: "root1@example.com", RootLevel: models.RootLevelPrimary},
 		fixture.operationalRootID: {ID: fixture.operationalRootID, Email: "root2@example.com", RootLevel: models.RootLevelOperational},
-	}}, fixture.auth, nil))
+	}}
+	usersService.SetDefaultUserService(usersService.NewUserService(fixture.directory, fixture.auth, nil))
 	t.Cleanup(func() { usersService.SetDefaultUserService(nil) })
 
 	restore := authz.ReplaceHooksForTest(authz.Hooks{
