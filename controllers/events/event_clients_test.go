@@ -108,15 +108,21 @@ func TestEventClientCannotMoveEventToAnotherOrganization(t *testing.T) {
 	assert.Zero(t, *updates, "nothing is written")
 }
 
-func TestEventClientCannotDetachEvent(t *testing.T) {
+// client_id: null on an update keeps the current organization (#291), so an
+// event client sending it can never detach or move the event: the update is a
+// plain edit inside the organization and no grant is revoked.
+func TestEventClientNullClientIDKeepsOrganization(t *testing.T) {
 	eventID, _, _, updates := moveFixture(t)
+	revoked := 0
+	withEventClientDeps(t, EventClientDeps{RevokeAllForEvent: func(uuid.UUID, uuid.UUID) error { revoked++; return nil }})
 	c, rec := newEchoCtx(http.MethodPut, "/api/events/x", `{"client_id":null}`)
 	c.SetParamNames("id")
 	c.SetParamValues(eventID.String())
 	c.Set("cognito_sub", "sub")
 	require.NoError(t, UpdateEvent(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
-	assert.Zero(t, *updates)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, 1, *updates)
+	assert.Zero(t, revoked, "no move, no revoke")
 }
 
 func TestEventClientCanEditEventWithinItsOrganization(t *testing.T) {
