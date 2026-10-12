@@ -45,8 +45,10 @@ func ListClientRoles(c echo.Context) error {
 		return utils.Error(c, http.StatusInternalServerError, "Service unavailable", "")
 	}
 
+	// Both platform-root levels manage teams in any organization and assign
+	// from just below Owner, matching CanAssignClientRoleAsRoot.
 	myRoleCode := "OWNER"
-	if !user.IsPrimaryRoot() {
+	if !user.IsPlatformAdmin() {
 		myRoleCode, err = clientSvc.GetEffectiveMemberRole(user.ID, clientID)
 		if err != nil {
 			return utils.Error(c, http.StatusForbidden, "Access Denied", "You are not a member of this organization")

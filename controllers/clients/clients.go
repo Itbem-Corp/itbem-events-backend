@@ -37,8 +37,17 @@ func operationalRootMayNotManageOrganization(c echo.Context, user *models.User) 
 	if user.EffectiveRootLevel() != models.RootLevelOperational {
 		return false
 	}
-	_ = utils.Error(c, http.StatusForbidden, "Permission Denied", "Operational roots cannot change organization structure or teams")
+	_ = utils.Error(c, http.StatusForbidden, "Permission Denied", "Operational roots cannot change organization structure")
 	return true
+}
+
+// platformTeamManager decides whether a member write takes the platform path:
+// any organization, no membership required, and the *AsRoot service rules
+// that never assign, change or remove an Owner. Both root levels manage
+// teams (members:manage); a Root 2 is additionally kept away from
+// platform-root accounts by operationalRootMayNotManageRootTarget.
+func platformTeamManager(user *models.User) bool {
+	return user.IsPlatformAdmin()
 }
 
 func operationalRootMayNotManageRootTarget(c echo.Context, requester *models.User, targetUserID uuid.UUID) bool {
@@ -302,13 +311,13 @@ func InviteUser(c echo.Context) error {
 		return utils.Error(c, http.StatusBadRequest, "Invalid data", "role_id is required")
 	}
 
-	if !requester.IsPrimaryRoot() {
+	if !platformTeamManager(requester) {
 		if err := clientSvc.CanManageClientMembers(req.ClientID, requester.ID); err != nil {
 			return utils.Error(c, http.StatusForbidden, "Permission Denied", "You cannot add members to this client")
 		}
 	}
 	var rolePermissionErr error
-	if requester.IsPrimaryRoot() {
+	if platformTeamManager(requester) {
 		rolePermissionErr = clientSvc.CanAssignClientRoleAsRoot(req.RoleID)
 	} else {
 		rolePermissionErr = clientSvc.CanAssignClientRole(req.ClientID, requester.ID, req.RoleID)
@@ -403,13 +412,13 @@ func CreateClientMember(c echo.Context) error {
 		return utils.Error(c, http.StatusBadRequest, "Invalid data", err.Error())
 	}
 
-	if !requester.IsPrimaryRoot() {
+	if !platformTeamManager(requester) {
 		if err := clientSvc.CanManageClientMembers(req.ClientID, requester.ID); err != nil {
 			return utils.Error(c, http.StatusForbidden, "Permission Denied", "You cannot add members to this client")
 		}
 	}
 	var rolePermissionErr error
-	if requester.IsPrimaryRoot() {
+	if platformTeamManager(requester) {
 		rolePermissionErr = clientSvc.CanAssignClientRoleAsRoot(req.RoleID)
 	} else {
 		rolePermissionErr = clientSvc.CanAssignClientRole(req.ClientID, requester.ID, req.RoleID)
@@ -521,7 +530,7 @@ func RemoveMember(c echo.Context) error {
 	}
 
 	var removeErr error
-	if requester.IsPrimaryRoot() {
+	if platformTeamManager(requester) {
 		removeErr = clientSvc.RemoveClientMemberAsRoot(clientID, targetUserID)
 	} else {
 		removeErr = clientSvc.RemoveClientMember(clientID, requester.ID, targetUserID)
@@ -570,7 +579,7 @@ func UpdateMemberRole(c echo.Context) error {
 	}
 
 	var updateErr error
-	if requester.IsPrimaryRoot() {
+	if platformTeamManager(requester) {
 		updateErr = clientSvc.UpdateClientMemberRoleAsRoot(clientID, targetUserID, req.NewRoleID)
 	} else {
 		updateErr = clientSvc.UpdateClientMemberRole(clientID, requester.ID, targetUserID, req.NewRoleID)
