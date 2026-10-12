@@ -258,6 +258,53 @@ func TestUpdateGuest_SnakeGuestStatusIDUpdatesBothStatusFields(t *testing.T) {
 	assert.Equal(t, "declined", f.repo.updated.RSVPStatus)
 }
 
+// Every spelling of the status id treats an empty string and the nil UUID as
+// "not sent": the stored status stays, it is never zeroed.
+func TestUpdateGuest_EmptyOrNilStatusIDKeepsStoredStatusUnderEveryKey(t *testing.T) {
+	keys := []string{
+		"status_id", "guest_status_id",
+		"statusId", "statusID", "StatusID", "StatusId",
+		"guestStatusId", "guestStatusID", "GuestStatusID", "GuestStatusId",
+	}
+	values := []string{`""`, `"   "`, `"` + uuid.Nil.String() + `"`}
+	for _, key := range keys {
+		for _, value := range values {
+			t.Run(key+"="+value, func(t *testing.T) {
+				f := newUpdateGuestFixture(t)
+
+				code, body := f.put(t, `{"`+key+`":`+value+`}`)
+
+				require.Equal(t, http.StatusOK, code, body)
+				require.NotNil(t, f.repo.updated)
+				assert.Equal(t, f.stored.GuestStatusID, f.repo.updated.GuestStatusID)
+				assert.Equal(t, f.stored.GuestStatusID, f.repo.updated.StatusID)
+			})
+		}
+	}
+}
+
+func TestUpdateGuest_MalformedSnakeStatusIDReturns400(t *testing.T) {
+	for _, value := range []string{`"vip"`, `123`} {
+		t.Run(value, func(t *testing.T) {
+			f := newUpdateGuestFixture(t)
+
+			code, body := f.put(t, `{"status_id":`+value+`}`)
+
+			assert.Equal(t, http.StatusBadRequest, code, body)
+			assert.Nil(t, f.repo.updated)
+		})
+	}
+}
+
+func TestCreateGuest_EmptySnakeStatusIDIsNotSent(t *testing.T) {
+	eventID := uuid.Must(uuid.NewV4())
+
+	code, guest, raw := createGuestForTest(t, `{"first_name":"Ana","status_id":"","guest_status_id":"","event_id":"`+eventID.String()+`"}`, eventID)
+
+	require.Equal(t, http.StatusCreated, code, raw)
+	assert.Equal(t, eventID, guest.EventID)
+}
+
 func TestUpdateGuest_WrongSnakeTypeReturns400(t *testing.T) {
 	f := newUpdateGuestFixture(t)
 

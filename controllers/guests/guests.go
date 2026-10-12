@@ -642,33 +642,49 @@ func UpdateGuest(c echo.Context) error {
 // parsed in decodeGuestWrite because "" must clear it; camel and Pascal
 // aliases come from applyGuestJSONAliases.
 type guestWritePayload struct {
-	FirstName           *string    `json:"first_name"`
-	LastName            *string    `json:"last_name"`
-	Nickname            *string    `json:"nickname"`
-	Email               *string    `json:"email"`
-	Phone               *string    `json:"phone"`
-	ShowContactInfo     *bool      `json:"show_contact_info"`
-	Role                *string    `json:"role"`
-	Bio                 *string    `json:"bio"`
-	Headline            *string    `json:"headline"`
-	Signature           *string    `json:"signature"`
-	Order               *int       `json:"order"`
-	ImageURL            *string    `json:"image_url"`
-	Image1URL           *string    `json:"image1_url"`
-	Image2URL           *string    `json:"image2_url"`
-	Image3URL           *string    `json:"image3_url"`
-	TableNumber         *string    `json:"table_number"`
-	IsHost              *bool      `json:"is_host"`
-	Notes               *string    `json:"notes"`
-	RSVPNotes           *string    `json:"rsvp_notes"`
-	DietaryRestrictions *string    `json:"dietary_restrictions"`
-	GuestsCount         *int       `json:"guests_count"`
-	RSVPGuestCount      *int       `json:"rsvp_guest_count"`
-	MaxGuests           *int       `json:"max_guests"`
-	GuestStatusID       *uuid.UUID `json:"guest_status_id"`
-	StatusID            *uuid.UUID `json:"status_id"`
-	RSVPStatus          *string    `json:"rsvp_status"`
-	RSVPMethod          *string    `json:"rsvp_method"`
+	FirstName           *string             `json:"first_name"`
+	LastName            *string             `json:"last_name"`
+	Nickname            *string             `json:"nickname"`
+	Email               *string             `json:"email"`
+	Phone               *string             `json:"phone"`
+	ShowContactInfo     *bool               `json:"show_contact_info"`
+	Role                *string             `json:"role"`
+	Bio                 *string             `json:"bio"`
+	Headline            *string             `json:"headline"`
+	Signature           *string             `json:"signature"`
+	Order               *int                `json:"order"`
+	ImageURL            *string             `json:"image_url"`
+	Image1URL           *string             `json:"image1_url"`
+	Image2URL           *string             `json:"image2_url"`
+	Image3URL           *string             `json:"image3_url"`
+	TableNumber         *string             `json:"table_number"`
+	IsHost              *bool               `json:"is_host"`
+	Notes               *string             `json:"notes"`
+	RSVPNotes           *string             `json:"rsvp_notes"`
+	DietaryRestrictions *string             `json:"dietary_restrictions"`
+	GuestsCount         *int                `json:"guests_count"`
+	RSVPGuestCount      *int                `json:"rsvp_guest_count"`
+	MaxGuests           *int                `json:"max_guests"`
+	GuestStatusID       *guestStatusIDValue `json:"guest_status_id"`
+	StatusID            *guestStatusIDValue `json:"status_id"`
+	RSVPStatus          *string             `json:"rsvp_status"`
+	RSVPMethod          *string             `json:"rsvp_method"`
+}
+
+var errInvalidGuestStatusID = errors.New("status_id must be a UUID, an empty string or null")
+
+// guestStatusIDValue is a snake_case status id in a guest write. It reads ""
+// as the nil UUID, which applyGuestWrite ignores exactly like the camel and
+// Pascal aliases; a value that is not a UUID string still fails the request.
+type guestStatusIDValue uuid.UUID
+
+func (v *guestStatusIDValue) UnmarshalJSON(raw []byte) error {
+	id, ok := parseJSONUUID(raw)
+	if !ok {
+		return errInvalidGuestStatusID
+	}
+	*v = guestStatusIDValue(id)
+	return nil
 }
 
 // guestWrite is one decoded guest request object: the allowlisted snake_case
@@ -740,11 +756,11 @@ func applyGuestWrite(guest *models.Guest, write guestWrite) {
 	setIfPresent(&guest.RSVPStatus, p.RSVPStatus)
 	setIfPresent(&guest.RSVPMethod, p.RSVPMethod)
 	// Both status columns move together and status_id wins, as it does in
-	// models.Guest.BeforeSave. A nil UUID leaves the stored status in place.
-	for _, statusID := range []*uuid.UUID{p.GuestStatusID, p.StatusID} {
-		if statusID != nil && *statusID != uuid.Nil {
-			guest.StatusID = *statusID
-			guest.GuestStatusID = *statusID
+	// models.Guest.BeforeSave. "" or the nil UUID leaves the stored status in
+	// place under every spelling of the key (see setGuestStatusID).
+	for _, statusID := range []*guestStatusIDValue{p.GuestStatusID, p.StatusID} {
+		if statusID != nil {
+			setGuestStatusID(guest, uuid.UUID(*statusID))
 		}
 	}
 	applyGuestJSONAliases(guest, write.fields)
@@ -854,15 +870,24 @@ func applyGuestJSONAliases(guest *models.Guest, fields jsonRequestFields) {
 	setInt(fields, []string{"public_order", "publicOrder", "PublicOrder", "display_order", "displayOrder", "DisplayOrder", "sort_order", "sortOrder", "SortOrder", "Order"}, func(value int) { guest.Order = value })
 
 	setUUID(fields, []string{"statusId", "statusID", "StatusID", "StatusId"}, func(value uuid.UUID) {
-		guest.StatusID = value
-		guest.GuestStatusID = value
+		setGuestStatusID(guest, value)
 	})
 	setUUID(fields, []string{"guestStatusId", "guestStatusID", "GuestStatusID", "GuestStatusId"}, func(value uuid.UUID) {
-		guest.StatusID = value
-		guest.GuestStatusID = value
+		setGuestStatusID(guest, value)
 	})
 	// event_id, table_id and the server-owned invitation_id, rsvp_token_id and
 	// rsvp_at have no alias here: see guestWriteEventID and decodeGuestWrite.
+}
+
+// setGuestStatusID moves both status columns to statusID. The nil UUID (which
+// is also what "" parses to) means "not sent" and keeps the stored status, so
+// no spelling of the key can zero a guest's status.
+func setGuestStatusID(guest *models.Guest, statusID uuid.UUID) {
+	if statusID == uuid.Nil {
+		return
+	}
+	guest.StatusID = statusID
+	guest.GuestStatusID = statusID
 }
 
 // isJSONNull reports a JSON null, which the scalar setters treat as an absent
