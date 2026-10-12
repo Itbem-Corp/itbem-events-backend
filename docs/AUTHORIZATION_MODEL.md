@@ -49,6 +49,10 @@ Only Owner and Administrator memberships propagate down an organization hierarch
 - Without an application session the handlers answer 503
   `Application session unavailable` and run no query.
 
+### Organization hierarchy
+
+Types nest Platform › Agency › Customer; a Customer cannot have sub-organizations (400 `CLIENT_HIERARCHY_LIMIT`). Only a Primary root creates top-level (Platform) organizations. An Owner of an organization (direct or inherited) may create, rename and delete organizations below it; this applies in every product whose contract enables the `organizations` module (ITBEM, Cafetton House). EventiApp's contract does not enable that module, so no EventiApp session carries `organizations:manage` and organization management is not available there. An organization's `code` is assigned once at creation and never changes on rename: it is matched against application codes and used by integrations.
+
 ## Delegation invariants
 
 - A role can grant, change, or remove only roles below its hierarchy.

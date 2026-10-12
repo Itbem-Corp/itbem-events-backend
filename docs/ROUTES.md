@@ -204,12 +204,12 @@ Legacy v1/v2 events remain auditable but cannot authorize a v3 action.
 - `DELETE /api/moments/:id` → `moments.DeleteMoment` — Invalidates Redis wall cache for the event.
 
 ### Clients / Organizations
-- `POST /api/clients` → `clients.CreateNewClient`
+- `POST /api/clients` → `clients.CreateNewClient` — Owner of the parent (direct or inherited) or Root 1; only Root 1 creates top-level organizations. Hierarchy is Platform › Agency › Customer (Customers have no children). Errors (code in `error`, Spanish `message`): 400 `CLIENT_HIERARCHY_LIMIT`, 400 `CLIENT_TYPE_NOT_ALLOWED`, 400 `CLIENT_TYPE_INVALID`, 400 `CLIENT_NAME_REQUIRED`, 403 `CLIENT_PERMISSION_DENIED`, 404 `CLIENT_PARENT_NOT_FOUND`, 409 `CLIENT_CODE_CONFLICT`, 500 `CLIENT_CREATE_FAILED`; logo problems keep the upload statuses. `code` is generated once from the name (accent-free slug, `-2`, `-3`… if already used by an organization or an application)
 - `GET /api/clients` → `clients.ListMyClients`
 - `GET /api/clients/children` → `clients.GetMySubClients` (?parent_id=...)
 - `GET /api/clients/:id` → `clients.GetClient` (recursive)
-- `PUT /api/clients/:id` → `clients.UpdateClient`
-- `DELETE /api/clients/:id` → `clients.DeleteClient` (recursive)
+- `PUT /api/clients/:id` → `clients.UpdateClient` — Owner (or Root 1); renaming changes `name` only, `code` is stable; authorization runs before the logo upload, and a failed update removes the new object. Errors: 403 `CLIENT_PERMISSION_DENIED`, 404 `CLIENT_NOT_FOUND` (code in `error`)
+- `DELETE /api/clients/:id` → `clients.DeleteClient` (recursive) — 409 `CLIENT_HAS_CHILDREN` when it has sub-organizations, 403 `CLIENT_PERMISSION_DENIED`, 404 `CLIENT_NOT_FOUND`; logo deleted after commit
 - `POST /api/clients/invite` → `clients.InviteUser` — body `{"client_id", "user_id" or "email", "role_id"}`; adds an existing account. Besides the member-write rules below, the account is ranked with `clients.AuthorizeMemberTarget` on its effective (direct or inherited) role in `client_id`, because the new direct membership takes precedence over an Owner/Admin role inherited from a parent organization: an Owner/Admin may only add accounts ranked strictly below its own effective role (never itself), Root 2 anyone except an Owner, only a primary root an Owner; nobody but a primary root a platform-root account. Denied → `403 Permission Denied` with nothing written.
 - `POST /api/clients/members` → `clients.CreateClientMember`
 - `GET /api/clients/members` → `clients.ListClientMembers`
@@ -241,7 +241,7 @@ Legacy v1/v2 events remain auditable but cannot authorize a v3 action.
 - **Deprecated:** `GET /api/cache/flush/:key` and `GET /api/cache/flush-all` run the same handlers with the same guard, but `middleware/audit` records only `POST`/`PUT`/`PATCH`/`DELETE`, so a successful `GET` flush leaves no audit row. Use `DELETE`; the `GET` aliases stay only for compatibility until ops confirms no script depends on them.
 
 ### Catalogs
-- `GET /api/catalogs/client-types` → `clienttypes.ListClientTypes`
+- `GET /api/catalogs/client-types` → `clienttypes.ListClientTypes` — without parameters: the types the caller can create (Root 1: all; others: child types of the organizations they own, e.g. Customer for an Agency owner). `?parent_id=` → types allowed under that parent (Owner required; 403/404 otherwise). `?parent_type_code=` → static rule (PLATFORM→AGENCY, AGENCY→CUSTOMER, CUSTOMER→none)
 - `GET /api/catalogs/roles` → `clientroles.ListClientRoles` (?client_id=...) — roles the caller may assign there: in any organization, a primary root gets every role below Owner and Root 2 only the roles within its own capabilities (Check-in, Analyst, Member, Viewer; never Admin, Event manager or Editor); everyone else needs a membership and gets the roles below its own (Owner/Admin only).
 - `GET /api/catalogs/design-templates` → `designtemplates.ListDesignTemplates` — list active design templates with color palettes and font sets
 - `GET /api/catalogs/design-templates/:id` → `designtemplates.GetDesignTemplate` — get single design template with full relations
