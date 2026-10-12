@@ -18,6 +18,11 @@ var (
 
 var ErrMultipartUploadNotFound = errors.New("multipart upload not found")
 
+// ErrObjectNotFound is returned by object metadata reads when the object does
+// not exist (S3 HeadObject 404). It is a client-side condition, never a
+// storage outage: callers map it to a 4xx instead of a retryable 5xx.
+var ErrObjectNotFound = errors.New("storage object not found")
+
 // CacheRepository is the minimal Redis interface used by all services.
 type CacheRepository interface {
 	Invalidate(resource string, key string) error
