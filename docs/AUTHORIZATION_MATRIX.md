@@ -23,8 +23,8 @@ decides where that identity may enter and what it may do.
 
 | Product | Root level 1 | Root level 2 |
 | --- | --- | --- |
-| EventiApp | Full event definition and operation across the platform | Event visibility, guest operation, check-in and analytics; cannot change event structure |
-| ITBEM | Organizations, members, application access, users and root assignment | Read/support view of users and organizations; cannot change governance or root levels |
+| EventiApp | Full event definition and operation across the platform | Event visibility, guest operation, check-in, analytics and event-team assignments; cannot change event structure |
+| ITBEM | Organizations, members, application access, users and root assignment | Support view of users and organizations plus team management (members below Owner and their application access); cannot touch Owners or root accounts, change governance or root levels |
 | Cafetton House | No implicit access; requires an explicit organization membership and application entitlement | No implicit access; requires an explicit organization membership and application entitlement |
 
 ## Organization roles
@@ -38,6 +38,13 @@ decides where that identity may enter and what it may do.
 | Guest | View | View | No | No | No |
 
 An optional event assignment can narrow this further for one event.
+
+Team management (member roles, member application access, event
+assignments) only reaches members ranked strictly below the actor's own
+organization role; Root 2 reaches every member except an Owner and never a
+platform-root account. Only Root 1 may change an Owner's or a root account's
+application access or event assignments, and nobody assigns, re-roles or
+removes an Owner through member management.
 
 ## Product surfaces
 

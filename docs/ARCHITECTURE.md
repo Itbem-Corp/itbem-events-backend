@@ -413,12 +413,14 @@ See `go.mod` for full list. Key dependencies:
 - Client-scoped data access
 - Parameterized queries (GORM prevents SQL injection)
 - CORS configuration in Echo
-- Cache flush endpoints (`/cache/flush/*`) require a primary root (level 1) via `authz.RequirePrimaryRoot`
+- Cache flush endpoints (`DELETE /cache/flush/:key`, `DELETE /cache/flush-all`; the `GET` aliases are deprecated because `GET` is never audited) require a primary root (level 1) via `authz.RequirePrimaryRoot`
 - `middleware.Secure()` — X-Frame-Options, X-XSS-Protection, X-Content-Type-Options headers
 - Rate limiting por IP: público 20 req/s (burst 40), protegido 60 req/s (burst 100)
 - Input validation via `go-playground/validator/v10` — `required`, `email`, `oneof` en campos clave
 - Platform-admin endpoints never read the raw `user.IsRoot` flag: `authz.RequireRoot` admits any platform admin (`IsPlatformAdmin()`, level 1 or 2) and `authz.RequirePrimaryRoot` admits only level 1 (`IsPrimaryRoot()`, including legacy `is_root` accounts without a level). Governance and global cross-tenant operations (root levels, access policies, audit logs, cache flush, font upload, media backfills, automation provider/policy administration) are gated on the primary root (see Auth Guard Pattern below and `docs/AUTHORIZATION_MODEL.md`)
-- `InviteUser` (clients) validates OWNER/ADMIN role on target client via `CheckAccessRecursive` before adding members
+- Member writes (clients) validate an OWNER/ADMIN role on the target client via `CheckAccessRecursive`, except for platform roots (level 1 or 2), which manage teams in any organization but never assign, change or remove an Owner; Root 2 never targets a platform-root account
+- Member application toggles and event assignments rank the target against the requester through `clients.AuthorizeMemberTarget` (only members ranked strictly below the requester; Root 2 not an Owner; only Root 1 a platform-root account)
+- Primary-root accounts cannot be deleted, deactivated or close themselves through the API (`409 Protected account`)
 
 ### Auth Guard Pattern (boolean helper)
 

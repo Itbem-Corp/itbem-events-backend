@@ -267,8 +267,12 @@ func requireTenantClientBoundary(user *models.User, clientID uuid.UUID) error {
 }
 
 // platformHasCapability makes Root 2 useful for cross-account operational
-// support without treating it as a second superuser. Root 1 remains the only
-// level allowed to change event structure, teams, or organization governance.
+// support without treating it as a second superuser. Root 2 may operate
+// guests, check-in and analytics and manage teams (members:manage: event
+// assignments, member application access, member roles below Owner), but
+// never an Owner or a platform-root account (clients.AuthorizeMemberTarget,
+// the *AsRoot member rules). Root 1 remains the only level allowed to change
+// event structure or organization governance.
 func platformHasCapability(user *models.User, capability Capability) bool {
 	if user.IsPrimaryRoot() {
 		return true
