@@ -78,3 +78,13 @@ type EventRepairResponse struct {
 	Fixes    []string `json:"fixes"`
 	Warnings []string `json:"warnings"`
 }
+
+// PublicErrorResponse is the error envelope for public EventiApp endpoints that
+// need a machine-readable reason the public site can branch on. It keeps the
+// standard {status, message, error} keys and adds code.
+type PublicErrorResponse struct {
+	Status  int    `json:"status"`
+	Message string `json:"message"`
+	Code    string `json:"code"`
+	Error   string `json:"error,omitempty"`
+}

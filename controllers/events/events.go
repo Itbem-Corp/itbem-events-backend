@@ -21,6 +21,7 @@ import (
 	"events-stocks/utils"
 	"github.com/gofrs/uuid"
 	"github.com/labstack/echo/v4"
+	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 	"log/slog"
@@ -953,7 +954,15 @@ func VerifyEventAccess(c echo.Context) error {
 		})
 	}
 
-	if cfg.NormalizedAuthPasswordPreview() != password {
+	clientIP := c.RealIP()
+	if ok, retry := eventPasswordLimiter.ReserveIPAttempt(event.ID, clientIP); !ok {
+		return tooManyPasswordAttempts(c, retry)
+	}
+	if exceeded, retry := eventPasswordLimiter.EventFailuresExceeded(event.ID); exceeded {
+		return tooManyPasswordAttempts(c, retry)
+	}
+	if !publicaccessproof.PasswordMatches(cfg.NormalizedAuthPasswordPreview(), password) {
+		eventPasswordLimiter.RecordFailure(event.ID)
 		return utils.Error(c, http.StatusUnauthorized, "Contraseña incorrecta", "")
 	}
 
@@ -969,6 +978,29 @@ func VerifyEventAccess(c echo.Context) error {
 		AccessTokenType:   "event_password",
 		AccessVersion:     accessVersion,
 		ExpiresAt:         &expiresAt,
+	})
+}
+
+// eventPasswordLimiter caps verify-access guesses per event+IP and per event.
+var eventPasswordLimiter = publicaccessproof.NewAttemptLimiter(func() *redis.Client {
+	return configuration.RedisClient
+}, nil)
+
+const (
+	eventPasswordTooManyAttemptsCode    = "too_many_attempts"
+	eventPasswordTooManyAttemptsMessage = "Demasiados intentos. Espera unos minutos e inténtalo de nuevo."
+)
+
+func tooManyPasswordAttempts(c echo.Context, retry time.Duration) error {
+	seconds := int(math.Ceil(retry.Seconds()))
+	if seconds < 1 {
+		seconds = 1
+	}
+	c.Response().Header().Set("Retry-After", strconv.Itoa(seconds))
+	return c.JSON(http.StatusTooManyRequests, dtos.PublicErrorResponse{
+		Status:  http.StatusTooManyRequests,
+		Message: eventPasswordTooManyAttemptsMessage,
+		Code:    eventPasswordTooManyAttemptsCode,
 	})
 }
 
