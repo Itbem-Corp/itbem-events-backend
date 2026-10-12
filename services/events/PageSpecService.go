@@ -101,6 +101,7 @@ func NewPageSpecService(
 type pageSpecDeps struct {
 	getToken                       func(token string) (*models.InvitationAccessToken, error)
 	getInvitation                  func(id uuid.UUID) (*models.Invitation, error)
+	invitationHasLiveGuest         func(id uuid.UUID) (bool, error)
 	getEvent                       func(id uuid.UUID) (*models.Event, error)
 	getSections                    func(eventID uuid.UUID) ([]models.EventSection, error)
 	getConfig                      func(id uuid.UUID) (*models.EventConfig, error)
@@ -115,6 +116,7 @@ type identifierPageSpecDeps struct {
 	getEventByIdentifier           func(identifier string) (*models.Event, error)
 	getToken                       func(token string) (*models.InvitationAccessToken, error)
 	getInvitation                  func(id uuid.UUID) (*models.Invitation, error)
+	invitationHasLiveGuest         func(id uuid.UUID) (bool, error)
 	getSections                    func(eventID uuid.UUID) ([]models.EventSection, error)
 	getConfig                      func(id uuid.UUID) (*models.EventConfig, error)
 	getResourceVersion             func(eventID uuid.UUID) (*time.Time, error)
@@ -821,6 +823,9 @@ func getPageSpec(deps pageSpecDeps, token string) (*dtos.PageSpec, error) {
 	if err != nil || invitation == nil {
 		return nil, fmt.Errorf("invitation not found")
 	}
+	if !InvitationHeldByLiveGuest(deps.invitationHasLiveGuest, invitation.ID) {
+		return nil, ErrPageSpecTokenNotFound
+	}
 
 	// 3. Fetch event
 	event, err := deps.getEvent(invitation.EventID)
@@ -880,10 +885,10 @@ func validPageSpecInvitationToken(deps identifierPageSpecDeps, eventID uuid.UUID
 		return false
 	}
 	invitation, err := deps.getInvitation(accessToken.InvitationID)
-	if err != nil || invitation == nil {
+	if err != nil || invitation == nil || invitation.EventID != eventID {
 		return false
 	}
-	return invitation.EventID == eventID
+	return InvitationHeldByLiveGuest(deps.invitationHasLiveGuest, invitation.ID)
 }
 
 func validPageSpecPreviewToken(deps identifierPageSpecDeps, eventID uuid.UUID, token string) bool {
@@ -970,6 +975,7 @@ func (s *PageSpecService) GetPageSpecByToken(token string) (*dtos.PageSpec, erro
 	return getPageSpec(pageSpecDeps{
 		getToken:                       accessTokenLookup(s.accessTokens),
 		getInvitation:                  s.invitations.GetInvitationByIDLite,
+		invitationHasLiveGuest:         InvitationLiveGuestLookup(s.invitations),
 		getEvent:                       s.events.GetEventByIDForSpec,
 		getSections:                    s.sections.ListByEventIDForSpec,
 		getConfig:                      s.configs.GetEventConfigByID,
@@ -1005,6 +1011,7 @@ func (s *PageSpecService) GetPageSpecByIdentifier(identifier, previewToken, invi
 		getEventByIdentifier:           s.events.GetEventByIdentifier,
 		getToken:                       accessTokenLookup(s.accessTokens),
 		getInvitation:                  getInvitation,
+		invitationHasLiveGuest:         InvitationLiveGuestLookup(s.invitations),
 		getSections:                    s.sections.ListByEventIDForSpec,
 		getConfig:                      s.configs.GetEventConfigByID,
 		getResourceVersion:             getResourceVersion,

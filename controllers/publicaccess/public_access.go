@@ -134,10 +134,10 @@ func allowInvitationToken(eventID uuid.UUID, token string, deps EventReadDeps, n
 		return false
 	}
 	invitation, err := deps.InvitationRepo.GetInvitationByIDLite(accessToken.InvitationID)
-	if err != nil || invitation == nil {
+	if err != nil || invitation == nil || invitation.EventID != eventID {
 		return false
 	}
-	return invitation.EventID == eventID
+	return eventsService.InvitationHeldByLiveGuest(eventsService.InvitationLiveGuestLookup(deps.InvitationRepo), invitation.ID)
 }
 
 func isExpiredAccessToken(accessToken *models.InvitationAccessToken, now time.Time) bool {
