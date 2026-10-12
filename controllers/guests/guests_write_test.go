@@ -353,13 +353,51 @@ func TestCreateGuest_IgnoresServerOwnedFieldsAndNestedObjects(t *testing.T) {
 	assert.Nil(t, guest.GuestStatus)
 }
 
-func TestCreateGuest_EmptyTableIDMeansNoTable(t *testing.T) {
+// The dashboard guest form sends the guest's table_id or an empty string on
+// create and update; "" and null both mean "no table", under any spelling.
+func TestCreateGuest_EmptyOrNullTableIDMeansNoTable(t *testing.T) {
+	for _, field := range []string{`"table_id":""`, `"table_id":null`, `"tableId":""`, `"TableID":null`} {
+		t.Run(field, func(t *testing.T) {
+			eventID := uuid.Must(uuid.NewV4())
+			useGuestTables(t)
+
+			code, guest, raw := createGuestForTest(t, `{"first_name":"Ana",`+field+`,"event_id":"`+eventID.String()+`"}`, eventID)
+
+			require.Equal(t, http.StatusCreated, code, raw)
+			assert.Nil(t, guest.TableID)
+		})
+	}
+}
+
+func TestCreateGuests_EmptyOrNullTableIDMeansNoTable(t *testing.T) {
+	svc := guestsService.NewGuestService(&mockGuestRepo{}, &uniqueTokenRepo{}, &mockCacheRepo{}, &mockTransactor{})
+	orig := guestSvc
+	guestSvc = svc
+	t.Cleanup(func() { guestSvc = orig })
 	eventID := uuid.Must(uuid.NewV4())
+	table := models.EventTable{ID: uuid.Must(uuid.NewV4()), EventID: eventID}
+	useGuestTables(t, table)
+	event := eventID.String()
 
-	code, guest, raw := createGuestForTest(t, `{"first_name":"Ana","table_id":"","event_id":"`+eventID.String()+`"}`, eventID)
+	body := `[{"first_name":"Ana","event_id":"` + event + `","table_id":""},
+		{"first_name":"Bob","event_id":"` + event + `","table_id":null},
+		{"first_name":"Cy","event_id":"` + event + `","tableId":""},
+		{"first_name":"Di","event_id":"` + event + `","table_id":"` + table.ID.String() + `"}]`
+	c, rec := newEchoCtx(http.MethodPost, "/guests/batch", body)
+	setAuthzContext(t, c, eventID, nil)
 
-	require.Equal(t, http.StatusCreated, code, raw)
-	assert.Nil(t, guest.TableID)
+	require.NoError(t, CreateGuests(c))
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var envelope struct {
+		Data []dtos.GuestResponse `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &envelope))
+	require.Len(t, envelope.Data, 4)
+	for _, guest := range envelope.Data[:3] {
+		assert.Nil(t, guest.TableID, guest.FirstName)
+	}
+	require.NotNil(t, envelope.Data[3].TableID)
+	assert.Equal(t, table.ID, *envelope.Data[3].TableID)
 }
 
 func TestCreateGuest_RejectsTableFromAnotherEvent(t *testing.T) {
