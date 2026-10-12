@@ -40,7 +40,7 @@ func DuplicateEvent(c echo.Context) error {
 
 	accessCandidate := *existing
 	if err := payload.ApplyTo(&accessCandidate); err != nil {
-		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
+		return respondEventPayloadError(c, err)
 	}
 	if err := authz.RequireEventClientForCreate(user, accessCandidate.ClientID); err != nil {
 		return authz.Respond(c, err)

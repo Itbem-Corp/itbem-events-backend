@@ -106,3 +106,27 @@ func TestUpdateEvent_OtherDatabaseErrorsStay500(t *testing.T) {
 	require.NoError(t, UpdateEvent(c))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
+
+func TestCreateAndUpdateEvent_InvalidTimezoneReturns400(t *testing.T) {
+	useEventService(t, &mockEventsRepo{
+		CreateEventFunc: func(event *models.Event) error { t.Fatal("must not store"); return nil },
+		UpdateEventFunc: func(event *models.Event) error { t.Fatal("must not store"); return nil },
+	})
+	clientID := uuid.Must(uuid.NewV4())
+	c, rec := newEchoCtx(http.MethodPost, "/events", `{"name":"X","client_id":"`+clientID.String()+`","timezone":"Foo/Bar"}`)
+	setRootAuth(t, c)
+	require.NoError(t, CreateEvent(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	body := decodeAPIError(t, rec.Body.Bytes())
+	assert.Equal(t, "Zona horaria inválida", body.Message)
+	assert.Equal(t, eventErrorInvalidTimezone, body.Error)
+
+	eventID := uuid.Must(uuid.NewV4())
+	c, rec = newEchoCtx(http.MethodPut, "/events/"+eventID.String(), `{"timezone":"Mars/Base"}`)
+	c.SetParamNames("id")
+	c.SetParamValues(eventID.String())
+	setRootAuthWithEvent(t, c, nil)
+	require.NoError(t, UpdateEvent(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, eventErrorInvalidTimezone, decodeAPIError(t, rec.Body.Bytes()).Error)
+}

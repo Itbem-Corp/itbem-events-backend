@@ -167,7 +167,11 @@ func (p EventPayload) ApplyTo(event *models.Event) error {
 		}
 	}
 	if p.Timezone != nil {
-		event.Timezone = strings.TrimSpace(*p.Timezone)
+		timezone := strings.TrimSpace(*p.Timezone)
+		if err := ValidateEventTimezone(timezone); err != nil {
+			return fieldError("timezone", err)
+		}
+		event.Timezone = timezone
 	}
 	if p.Language != nil {
 		event.Language = strings.TrimSpace(*p.Language)

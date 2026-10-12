@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 
+	"events-stocks/dtos"
 	"events-stocks/repositories/eventsrepository"
 	"events-stocks/utils"
 
@@ -15,7 +16,17 @@ import (
 const (
 	eventErrorNameTaken       = "event_name_taken"
 	eventErrorIdentifierTaken = "event_identifier_taken"
+	eventErrorInvalidTimezone = "invalid_timezone"
 )
+
+// respondEventPayloadError answers a payload that could not be applied to an
+// event: 400 always, with a Spanish message for the cases the form can fix.
+func respondEventPayloadError(c echo.Context, err error) error {
+	if errors.Is(err, dtos.ErrInvalidEventTimezone) {
+		return utils.Error(c, http.StatusBadRequest, "Zona horaria inválida", eventErrorInvalidTimezone)
+	}
+	return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
+}
 
 // respondEventWriteError maps a failed create, update or duplicate of an event
 // to its HTTP answer: a unique violation is the caller's conflict (409, with a

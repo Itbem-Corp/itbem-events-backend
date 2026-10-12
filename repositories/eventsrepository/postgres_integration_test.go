@@ -29,6 +29,7 @@ import (
 	gormlogger "gorm.io/gorm/logger"
 
 	"events-stocks/configuration"
+	"events-stocks/dtos"
 	"events-stocks/models"
 	"events-stocks/repositories/eventconfigrepository"
 )
@@ -243,4 +244,30 @@ func TestEventIdentityMigrationReplacesGlobalIndexesAndIsIdempotent(t *testing.T
 	assert.Empty(t, eventIndexDefinition(t, "idx_events_name"))
 	assert.Empty(t, eventIndexDefinition(t, "idx_events_identifier"))
 	assert.NotEmpty(t, eventIndexDefinition(t, configuration.EventClientNameLiveIndex))
+}
+
+// EVT-3 / SET-16: a stored invalid timezone made every list/count query of the
+// organization fail. The startup repair blanks only values PostgreSQL rejects.
+func TestStartupRepairsInvalidEventTimezonesSoListsLoad(t *testing.T) {
+	suffix := lifecycleSuffix()
+	org := createLifecycleClient(t, suffix, "TZ")
+	bad := createLifecycleEvent(t, &org, "Zona mala "+suffix, "zona-mala-"+suffix)
+	good := createLifecycleEvent(t, &org, "Zona buena "+suffix, "zona-buena-"+suffix)
+	require.NoError(t, configuration.DB.Exec(`UPDATE events SET timezone = 'Foo/Bar' WHERE id = ?`, bad.ID).Error)
+
+	query := dtos.EventListQuery{Page: 1, PageSize: 12, Filter: "all", Now: time.Now()}
+	_, _, _, err := ListEventPage(&org, nil, query)
+	require.Error(t, err, "precondition: the bad value breaks the list")
+
+	require.NoError(t, configuration.MigrateModelsForTest(configuration.DB))
+
+	events, total, _, err := ListEventPage(&org, nil, query)
+	require.NoError(t, err)
+	assert.Equal(t, 2, total)
+	assert.Len(t, events, 2)
+	var badZone, goodZone string
+	require.NoError(t, configuration.DB.Raw(`SELECT timezone FROM events WHERE id = ?`, bad.ID).Row().Scan(&badZone))
+	require.NoError(t, configuration.DB.Raw(`SELECT timezone FROM events WHERE id = ?`, good.ID).Row().Scan(&goodZone))
+	assert.Equal(t, "", badZone)
+	assert.Equal(t, "America/Mexico_City", goodZone)
 }

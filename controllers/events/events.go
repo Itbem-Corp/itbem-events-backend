@@ -626,7 +626,7 @@ func CreateEvent(c echo.Context) error {
 	}
 	var event models.Event
 	if err := payload.ApplyTo(&event); err != nil {
-		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
+		return respondEventPayloadError(c, err)
 	}
 	if err := c.Validate(&event); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Validation error", err.Error())
@@ -667,7 +667,7 @@ func UpdateEvent(c echo.Context) error {
 		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
 	}
 	if err := payload.ApplyTo(existing); err != nil {
-		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
+		return respondEventPayloadError(c, err)
 	}
 	if err := c.Validate(existing); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Validation error", err.Error())
