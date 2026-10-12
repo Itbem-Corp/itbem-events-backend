@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
 	"events-stocks/models"
 
@@ -107,6 +108,131 @@ func TestBulkUpdateGuestStatus_CheckinOnlyCallerCannotUndoAGuestsOwnRSVP(t *test
 	}
 }
 
+// The guests panel's bulk Confirmar (a guest:manage caller, plain confirmed
+// body) is the organizer's answer, exactly like confirming one guest with PUT
+// /guests/:id: it records no door check-in, so check-in staff cannot undo it
+// back to the guest's earlier pending or declined RSVP (409, nothing written).
+// An organizer confirmation of a guest already checked in at the door replaces
+// that check-in the same way.
+func TestBulkUpdateGuestStatus_OrganizerBulkConfirmCannotBeUndoneAtTheDoor(t *testing.T) {
+	clientID := uuid.Must(uuid.NewV4())
+	for managerName, manager := range guestManagerCallers(clientID) {
+		for doorName, door := range doorOnlyCallers(clientID) {
+			t.Run(managerName+"/"+doorName, func(t *testing.T) {
+				eventID := uuid.Must(uuid.NewV4())
+				catalog := newBulkStatusCatalog()
+				stubGuestStatusLookup(t, catalog)
+				store := useBulkStatusStore(t)
+				pending := seedPendingGuests(store, eventID, catalog, 1)[0]
+				declinedAt := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+				declined := models.Guest{ID: uuid.Must(uuid.NewV4()), EventID: eventID, RSVPStatus: "declined", RSVPMethod: "web", RSVPAt: &declinedAt, GuestStatusID: catalog.declined.ID, StatusID: catalog.declined.ID}
+				store.put(declined)
+				checkedInFirst := seedPendingGuests(store, eventID, catalog, 1)[0]
+				all := []uuid.UUID{pending, declined.ID, checkedInFirst}
+
+				setBulkStatusCaller(t, eventID, clientID, door)
+				code, body := patchBulkStatus(t, checkinActionBody(eventID, []uuid.UUID{checkedInFirst}, catalog.confirmed.ID))
+				require.Equal(t, http.StatusOK, code, body)
+				firstCheckin := store.get(checkedInFirst)
+				require.True(t, firstCheckin.DoorCheckedIn())
+
+				setBulkStatusCaller(t, eventID, clientID, manager)
+				code, body = patchBulkStatus(t, bulkStatusBody(eventID, all, catalog.confirmed.ID, "confirmed"))
+				require.Equal(t, http.StatusOK, code, body)
+				confirmed := map[uuid.UUID]models.Guest{}
+				for _, id := range all {
+					got := store.get(id)
+					assertGuestRSVP(t, got, catalog.confirmed, "confirmed", "host")
+					assertNoDoorCheckin(t, got)
+					confirmed[id] = got
+				}
+				writes := store.writes()
+
+				setBulkStatusCaller(t, eventID, clientID, door)
+				for _, id := range all {
+					code, body = patchBulkStatus(t, undoCheckinBody(eventID, []uuid.UUID{id}))
+					assert.Equal(t, http.StatusConflict, code, body)
+					assert.Contains(t, body, "Check-in cannot be undone")
+					assert.Equal(t, confirmed[id], store.get(id), "the organizer's confirmation is unchanged")
+				}
+				assert.Equal(t, writes, store.writes(), "nothing is written")
+			})
+		}
+	}
+}
+
+// An organizer who checks a guest in at the door says so with action checkin:
+// that is a door check-in like any other, and check-in staff may undo it.
+func TestBulkUpdateGuestStatus_OrganizerExplicitCheckinCanBeUndoneAtTheDoor(t *testing.T) {
+	clientID := uuid.Must(uuid.NewV4())
+	for managerName, manager := range guestManagerCallers(clientID) {
+		for doorName, door := range doorOnlyCallers(clientID) {
+			t.Run(managerName+"/"+doorName, func(t *testing.T) {
+				eventID := uuid.Must(uuid.NewV4())
+				catalog := newBulkStatusCatalog()
+				stubGuestStatusLookup(t, catalog)
+				store := useBulkStatusStore(t)
+				ids := seedPendingGuests(store, eventID, catalog, 2)
+
+				setBulkStatusCaller(t, eventID, clientID, manager)
+				code, body := patchBulkStatus(t, checkinActionBody(eventID, ids, catalog.confirmed.ID))
+				require.Equal(t, http.StatusOK, code, body)
+				for _, id := range ids {
+					got := store.get(id)
+					assertGuestRSVP(t, got, catalog.confirmed, "confirmed", "host")
+					require.True(t, got.DoorCheckedIn())
+				}
+
+				setBulkStatusCaller(t, eventID, clientID, door)
+				code, body = patchBulkStatus(t, undoCheckinBody(eventID, ids))
+				require.Equal(t, http.StatusOK, code, body)
+				for _, id := range ids {
+					got := store.get(id)
+					assertGuestRSVP(t, got, catalog.pending, "pending", "")
+					assertNoDoorCheckin(t, got)
+				}
+			})
+		}
+	}
+}
+
+// action checkin only ever confirms: any other status, or a status_id that is
+// not the confirmed one, answers 400 for every caller and writes nothing.
+func TestBulkUpdateGuestStatus_CheckinActionNeedsTheConfirmedStatus(t *testing.T) {
+	clientID := uuid.Must(uuid.NewV4())
+	catalog := newBulkStatusCatalog()
+	callers := doorOnlyCallers(clientID)
+	callers["organization EVENT_MANAGER"] = bulkStatusCaller{clientRole: "EVENT_MANAGER", memberOf: clientID}
+	cases := map[string]struct {
+		statusID   uuid.UUID
+		rsvpStatus string
+		message    string
+	}{
+		"pending":                         {catalog.pending.ID, "pending", "Invalid rsvp_status"},
+		"declined":                        {catalog.declined.ID, "declined", "Invalid rsvp_status"},
+		"no rsvp_status":                  {catalog.confirmed.ID, "", "Invalid rsvp_status"},
+		"confirmed with declined status":  {catalog.declined.ID, "confirmed", "status_id does not match rsvp_status"},
+		"confirmed with an unknown state": {uuid.Must(uuid.NewV4()), "confirmed", "Invalid status_id"},
+	}
+	for callerName, caller := range callers {
+		for name, tc := range cases {
+			t.Run(callerName+"/"+name, func(t *testing.T) {
+				eventID := uuid.Must(uuid.NewV4())
+				stubGuestStatusLookup(t, catalog)
+				store := useBulkStatusStore(t)
+				setBulkStatusCaller(t, eventID, clientID, caller)
+
+				code, body := patchBulkStatus(t, `{"event_id":"`+eventID.String()+`","ids":`+guestIDsJSON(newGuestIDs(1)...)+
+					`,"action":"checkin","status_id":"`+tc.statusID.String()+`","rsvp_status":"`+tc.rsvpStatus+`","rsvp_method":"host"}`)
+
+				assert.Equal(t, http.StatusBadRequest, code, body)
+				assert.Contains(t, body, tc.message)
+				assert.Zero(t, store.writes())
+			})
+		}
+	}
+}
+
 // A guest:manage caller undoes a door check-in the same way, and keeps full
 // control through an explicit status change.
 func TestBulkUpdateGuestStatus_GuestManagerCanUndoAndStillOverride(t *testing.T) {
@@ -120,7 +246,7 @@ func TestBulkUpdateGuestStatus_GuestManagerCanUndoAndStillOverride(t *testing.T)
 	selfConfirmed := models.Guest{ID: uuid.Must(uuid.NewV4()), EventID: eventID, RSVPStatus: "confirmed", RSVPMethod: "web", GuestStatusID: catalog.pending.ID}
 	store.put(selfConfirmed)
 
-	code, body := patchBulkStatus(t, bulkStatusBody(eventID, door, catalog.confirmed.ID, "confirmed"))
+	code, body := patchBulkStatus(t, checkinActionBody(eventID, door, catalog.confirmed.ID))
 	require.Equal(t, http.StatusOK, code, body)
 	code, body = patchBulkStatus(t, undoCheckinBody(eventID, door))
 	require.Equal(t, http.StatusOK, code, body)
@@ -217,7 +343,7 @@ func TestBulkUpdateGuestStatus_UnknownActionIs400(t *testing.T) {
 	store := useBulkStatusStore(t)
 	setBulkStatusCaller(t, eventID, clientID, bulkStatusCaller{clientRole: "OWNER", memberOf: clientID})
 
-	for _, action := range []string{"checkin", "undo", "delete"} {
+	for _, action := range []string{"check_in", "undo", "delete", "checkin_undo"} {
 		code, body := patchBulkStatus(t, `{"event_id":"`+eventID.String()+`","ids":`+guestIDsJSON(newGuestIDs(1)...)+
 			`,"action":"`+action+`","status_id":"`+catalog.confirmed.ID.String()+`","rsvp_status":"confirmed"}`)
 		assert.Equal(t, http.StatusBadRequest, code, body)

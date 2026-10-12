@@ -1026,16 +1026,25 @@ func BulkDeleteGuests(c echo.Context) error {
 
 const bulkCheckinOnlyDetail = "Without guest:manage only check-in is allowed: rsvp_status confirmed with the confirmed guest status, or action undo_checkin"
 
-// bulkActionUndoCheckin is the only action PATCH /guests/bulk/status takes; no
-// action means "set the status in the body".
-const bulkActionUndoCheckin = "undo_checkin"
+// The actions PATCH /guests/bulk/status takes; no action means "set the status
+// in the body".
+const (
+	bulkActionCheckin     = "checkin"
+	bulkActionUndoCheckin = "undo_checkin"
+)
 
 // PATCH /guests/bulk/status — checkin:run on event_id.
-//   - rsvp_status confirmed with the confirmed status is the door check-in, open
-//     to every checkin:run caller; it records what the guest had before.
+//   - action checkin (confirmed status only) is the door check-in, open to every
+//     checkin:run caller; it records what the guest had before so it can be
+//     undone. A plain confirmed body from a caller without guest:manage, who
+//     can do nothing but check guests in, is the door check-in too.
+//   - a plain body from a guest:manage caller is the organizer's own answer,
+//     confirmed included (the guests panel's bulk Confirmar): it is written like
+//     PUT /guests/:id and clears any door check-in, so check-in staff cannot
+//     undo it.
 //   - action undo_checkin reverses door check-ins (status fields are ignored),
 //     also with checkin:run alone; a guest confirmed any other way answers 409.
-//   - any other status needs guest:manage.
+//   - pending and declined need guest:manage.
 func BulkUpdateGuestStatus(c echo.Context) error {
 	var body struct {
 		EventID       string   `json:"event_id"`
@@ -1061,8 +1070,8 @@ func BulkUpdateGuestStatus(c echo.Context) error {
 		return utils.Error(c, http.StatusBadRequest, "Invalid IDs", "ids must contain between 1 and 100 guests")
 	}
 	action := strings.ToLower(strings.TrimSpace(body.Action))
-	if action != "" && action != bulkActionUndoCheckin {
-		return utils.Error(c, http.StatusBadRequest, "Invalid action", "expected "+bulkActionUndoCheckin+" or no action")
+	if action != "" && action != bulkActionCheckin && action != bulkActionUndoCheckin {
+		return utils.Error(c, http.StatusBadRequest, "Invalid action", "expected "+bulkActionCheckin+", "+bulkActionUndoCheckin+" or no action")
 	}
 	rsvpMethod := strings.ToLower(strings.TrimSpace(body.RSVPMethod))
 	if rsvpMethod == "" {
@@ -1106,6 +1115,9 @@ func BulkUpdateGuestStatus(c echo.Context) error {
 	if rsvpStatus != "pending" && rsvpStatus != "confirmed" && rsvpStatus != "declined" {
 		return utils.Error(c, http.StatusBadRequest, "Invalid rsvp_status", "expected pending, confirmed, or declined")
 	}
+	if action == bulkActionCheckin && rsvpStatus != "confirmed" {
+		return utils.Error(c, http.StatusBadRequest, "Invalid rsvp_status", "action "+bulkActionCheckin+" expects rsvp_status confirmed with the confirmed guest status")
+	}
 	status, err := guestStatusByID(statusID)
 	if errors.Is(err, gorm.ErrRecordNotFound) || (err == nil && status == nil) {
 		return utils.Error(c, http.StatusBadRequest, "Invalid status_id", "guest status does not exist")
@@ -1119,26 +1131,52 @@ func BulkUpdateGuestStatus(c echo.Context) error {
 	if strings.ToLower(strings.TrimSpace(status.Code)) != rsvpStatus {
 		return utils.Error(c, http.StatusBadRequest, "status_id does not match rsvp_status", "the guest status code must equal rsvp_status")
 	}
-	// The door check-in (confirmed) needs only checkin:run. Any other status
-	// could rewrite the guest's own RSVP and needs guest:manage; check-in
-	// staff take a check-in back with action undo_checkin instead.
-	if rsvpStatus == "confirmed" {
+	// Only a door check-in records provenance, because only a door check-in
+	// may be undone by check-in staff. Without guest:manage a confirmed body
+	// can only be a check-in; with it, only action checkin says so, and the
+	// plain body is the organizer's answer. Pending and declined could rewrite
+	// the guest's own RSVP and need guest:manage; check-in staff take a
+	// check-in back with action undo_checkin instead.
+	doorCheckin := action == bulkActionCheckin
+	if !doorCheckin {
+		managesGuests, authErr := callerManagesGuests(c, eventID)
+		if authErr != nil {
+			return authz.Respond(c, authErr)
+		}
+		switch {
+		case managesGuests:
+			// The organizer's answer: BulkUpdateGuestStatus below.
+		case rsvpStatus == "confirmed":
+			doorCheckin = true
+		default:
+			return utils.Error(c, http.StatusForbidden, "Access denied", bulkCheckinOnlyDetail)
+		}
+	}
+	if doorCheckin {
 		if err := guestSvc.CheckInGuests(eventID, ids, statusID, user.ID); err != nil {
 			return utils.Error(c, http.StatusBadRequest, "Error updating guest statuses", err.Error())
 		}
 		return utils.Success(c, http.StatusOK, "Guest statuses updated", nil)
 	}
-	if _, _, authErr := authz.RequireEventCapability(c, eventID, authz.CapabilityGuestManage); authErr != nil {
-		var failure *authz.Failure
-		if errors.As(authErr, &failure) && failure.Status == http.StatusForbidden {
-			return utils.Error(c, http.StatusForbidden, "Access denied", bulkCheckinOnlyDetail)
-		}
-		return authz.Respond(c, authErr)
-	}
 	if err := guestSvc.BulkUpdateGuestStatus(eventID, ids, statusID, rsvpStatus, rsvpMethod); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Error updating guest statuses", err.Error())
 	}
 	return utils.Success(c, http.StatusOK, "Guest statuses updated", nil)
+}
+
+// callerManagesGuests reports whether the caller, already allowed checkin:run
+// on eventID, also has guest:manage there. Only a 403 means "no"; any other
+// failure (a lookup error) is returned so the request writes nothing.
+func callerManagesGuests(c echo.Context, eventID uuid.UUID) (bool, error) {
+	_, _, err := authz.RequireEventCapability(c, eventID, authz.CapabilityGuestManage)
+	if err == nil {
+		return true, nil
+	}
+	var failure *authz.Failure
+	if errors.As(err, &failure) && failure.Status == http.StatusForbidden {
+		return false, nil
+	}
+	return false, err
 }
 
 // DELETE /guests/:id

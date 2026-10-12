@@ -3,6 +3,7 @@ package guests
 import (
 	"errors"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -170,6 +171,12 @@ func bulkStatusBody(eventID uuid.UUID, ids []uuid.UUID, statusID uuid.UUID, rsvp
 		`","rsvp_status":"` + rsvpStatus + `","rsvp_method":"host"}`
 }
 
+// checkinActionBody is the explicit door check-in: the confirmed status body
+// with action checkin (what the dashboard check-in page sends for Llegó and QR).
+func checkinActionBody(eventID uuid.UUID, ids []uuid.UUID, confirmedID uuid.UUID) string {
+	return strings.TrimSuffix(bulkStatusBody(eventID, ids, confirmedID, "confirmed"), "}") + `,"action":"checkin"}`
+}
+
 // The two ways a caller ends up with checkin:run but not guest:manage: the
 // organization role is CHECKIN, or an event assignment narrows a broader
 // organization role to CHECKIN.
@@ -180,27 +187,67 @@ func doorOnlyCallers(clientID uuid.UUID) map[string]bulkStatusCaller {
 	}
 }
 
+// Callers with both checkin:run and guest:manage on the event: the organizers
+// whose bulk Confirmar in the guests panel is their own answer, not a door
+// check-in.
+func guestManagerCallers(clientID uuid.UUID) map[string]bulkStatusCaller {
+	return map[string]bulkStatusCaller{
+		"organization EVENT_MANAGER":            {clientRole: "EVENT_MANAGER", memberOf: clientID},
+		"organization OWNER":                    {clientRole: "OWNER", memberOf: clientID},
+		"organization ADMIN":                    {clientRole: "ADMIN", memberOf: clientID},
+		"inherited ADMIN":                       {clientRole: "INHERITED_ADMIN", memberOf: clientID},
+		"event EDITOR under EVENT_MANAGER":      {clientRole: "EVENT_MANAGER", eventRole: "EDITOR", memberOf: clientID},
+		"event EVENT_OWNER under EVENT_MANAGER": {clientRole: "EVENT_MANAGER", eventRole: "EVENT_OWNER", memberOf: clientID},
+	}
+}
+
+// assertNoDoorCheckin checks that none of the door check-in provenance is set.
+func assertNoDoorCheckin(t *testing.T, guest models.Guest) {
+	t.Helper()
+	assert.False(t, guest.DoorCheckedIn(), "door checked in")
+	assert.Nil(t, guest.CheckedInAt, "checked_in_at")
+	assert.Nil(t, guest.CheckedInByUserID, "checked_in_by_user_id")
+	assert.Nil(t, guest.CheckinPreviousRSVPStatus, "checkin_previous_rsvp_status")
+	assert.Nil(t, guest.CheckinPreviousGuestStatusID, "checkin_previous_guest_status_id")
+	assert.Nil(t, guest.CheckinPreviousRSVPMethod, "checkin_previous_rsvp_method")
+	assert.Nil(t, guest.CheckinPreviousRSVPAt, "checkin_previous_rsvp_at")
+}
+
+// A caller without guest:manage can only check guests in, so their plain
+// confirmed body is a door check-in, as is action checkin: both record the
+// provenance.
 func TestBulkUpdateGuestStatus_CheckinOnlyCallerCanCheckGuestsIn(t *testing.T) {
 	clientID := uuid.Must(uuid.NewV4())
+	bodies := map[string]func(eventID uuid.UUID, ids []uuid.UUID, confirmedID uuid.UUID) string{
+		"plain confirmed body": func(eventID uuid.UUID, ids []uuid.UUID, confirmedID uuid.UUID) string {
+			return bulkStatusBody(eventID, ids, confirmedID, "confirmed")
+		},
+		"action checkin": checkinActionBody,
+	}
 	for name, caller := range doorOnlyCallers(clientID) {
-		t.Run(name, func(t *testing.T) {
-			eventID := uuid.Must(uuid.NewV4())
-			catalog := newBulkStatusCatalog()
-			stubGuestStatusLookup(t, catalog)
-			store := useBulkStatusStore(t)
-			setBulkStatusCaller(t, eventID, clientID, caller)
-			ids := newGuestIDs(3)
+		for bodyName, body := range bodies {
+			t.Run(name+"/"+bodyName, func(t *testing.T) {
+				eventID := uuid.Must(uuid.NewV4())
+				catalog := newBulkStatusCatalog()
+				stubGuestStatusLookup(t, catalog)
+				store := useBulkStatusStore(t)
+				setBulkStatusCaller(t, eventID, clientID, caller)
+				ids := newGuestIDs(3)
 
-			c, rec := newEchoCtx(http.MethodPatch, "/guests/bulk/status", bulkStatusBody(eventID, ids, catalog.confirmed.ID, "confirmed"))
-			c.Set("cognito_sub", "door-sub")
+				c, rec := newEchoCtx(http.MethodPatch, "/guests/bulk/status", body(eventID, ids, catalog.confirmed.ID))
+				c.Set("cognito_sub", "door-sub")
 
-			require.NoError(t, BulkUpdateGuestStatus(c))
-			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-			require.Equal(t, 1, store.writes())
-			for _, id := range ids {
-				assertGuestRSVP(t, store.get(id), catalog.confirmed, "confirmed", "host")
-			}
-		})
+				require.NoError(t, BulkUpdateGuestStatus(c))
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				require.Equal(t, 1, store.writes())
+				for _, id := range ids {
+					got := store.get(id)
+					assertGuestRSVP(t, got, catalog.confirmed, "confirmed", "host")
+					assert.True(t, got.DoorCheckedIn(), "the check-in records door provenance")
+					assert.NotNil(t, got.CheckedInByUserID, "the check-in records who did it")
+				}
+			})
+		}
 	}
 }
 
@@ -298,16 +345,13 @@ func TestBulkUpdateGuestStatus_UnknownStatusIs400(t *testing.T) {
 	}
 }
 
+// A guest:manage caller's plain body is the organizer's own answer for every
+// status, confirmed included (the guests panel's bulk Confirmar): it is
+// written like PUT /guests/:id and records no door check-in.
 func TestBulkUpdateGuestStatus_GuestManagerKeepsFullBehaviour(t *testing.T) {
 	clientID := uuid.Must(uuid.NewV4())
 	catalog := newBulkStatusCatalog()
-	callers := map[string]bulkStatusCaller{
-		"organization EVENT_MANAGER":            {clientRole: "EVENT_MANAGER", memberOf: clientID},
-		"organization OWNER":                    {clientRole: "OWNER", memberOf: clientID},
-		"inherited ADMIN":                       {clientRole: "INHERITED_ADMIN", memberOf: clientID},
-		"event EDITOR under EVENT_MANAGER":      {clientRole: "EVENT_MANAGER", eventRole: "EDITOR", memberOf: clientID},
-		"event EVENT_OWNER under EVENT_MANAGER": {clientRole: "EVENT_MANAGER", eventRole: "EVENT_OWNER", memberOf: clientID},
-	}
+	callers := guestManagerCallers(clientID)
 	transitions := map[string]models.GuestStatus{
 		"confirmed": catalog.confirmed,
 		"pending":   catalog.pending,
@@ -329,7 +373,9 @@ func TestBulkUpdateGuestStatus_GuestManagerKeepsFullBehaviour(t *testing.T) {
 				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 				require.Equal(t, 1, store.writes())
 				for _, id := range ids {
-					assertGuestRSVP(t, store.get(id), status, rsvpStatus, "host")
+					got := store.get(id)
+					assertGuestRSVP(t, got, status, rsvpStatus, "host")
+					assertNoDoorCheckin(t, got)
 				}
 			})
 		}
@@ -399,9 +445,10 @@ func TestBulkUpdateGuestStatus_CallerFromAnotherOrganizationIsDenied(t *testing.
 	}
 }
 
-// The check-in path costs one status lookup and no second capability check;
-// only a non-check-in transition pays for the guest:manage check.
-func TestBulkUpdateGuestStatus_CheckinTransitionSkipsGuestManageCheck(t *testing.T) {
+// action checkin costs one capability check (checkin:run). A plain body also
+// checks guest:manage, because whether the caller manages guests decides
+// whether a confirmed body is a door check-in or the organizer's answer.
+func TestBulkUpdateGuestStatus_CheckinActionSkipsGuestManageCheck(t *testing.T) {
 	clientID := uuid.Must(uuid.NewV4())
 	eventID := uuid.Must(uuid.NewV4())
 	catalog := newBulkStatusCatalog()
@@ -409,17 +456,60 @@ func TestBulkUpdateGuestStatus_CheckinTransitionSkipsGuestManageCheck(t *testing
 	useBulkStatusStore(t)
 	checks := setBulkStatusCaller(t, eventID, clientID, bulkStatusCaller{clientRole: "EVENT_MANAGER", memberOf: clientID})
 
-	c, rec := newEchoCtx(http.MethodPatch, "/guests/bulk/status", bulkStatusBody(eventID, newGuestIDs(1), catalog.confirmed.ID, "confirmed"))
-	c.Set("cognito_sub", "manager-sub")
-	require.NoError(t, BulkUpdateGuestStatus(c))
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.Equal(t, int64(1), checks.Load())
+	steps := []struct {
+		name  string
+		body  string
+		total int64
+	}{
+		{"action checkin", checkinActionBody(eventID, newGuestIDs(1), catalog.confirmed.ID), 1},
+		{"plain confirmed", bulkStatusBody(eventID, newGuestIDs(1), catalog.confirmed.ID, "confirmed"), 3},
+		{"plain pending", bulkStatusBody(eventID, newGuestIDs(1), catalog.pending.ID, "pending"), 5},
+	}
+	for _, step := range steps {
+		c, rec := newEchoCtx(http.MethodPatch, "/guests/bulk/status", step.body)
+		c.Set("cognito_sub", "manager-sub")
+		require.NoError(t, BulkUpdateGuestStatus(c))
+		require.Equal(t, http.StatusOK, rec.Code, "%s: %s", step.name, rec.Body.String())
+		assert.Equal(t, step.total, checks.Load(), step.name)
+	}
+}
 
-	c, rec = newEchoCtx(http.MethodPatch, "/guests/bulk/status", bulkStatusBody(eventID, newGuestIDs(1), catalog.pending.ID, "pending"))
+// When the guest:manage check itself fails (not a 403), a plain confirmed body
+// is neither a door check-in nor an organizer answer: the error is returned
+// and nothing is written.
+func TestBulkUpdateGuestStatus_GuestManageLookupFailureWritesNothing(t *testing.T) {
+	clientID := uuid.Must(uuid.NewV4())
+	eventID := uuid.Must(uuid.NewV4())
+	userID := uuid.Must(uuid.NewV4())
+	catalog := newBulkStatusCatalog()
+	stubGuestStatusLookup(t, catalog)
+	store := useBulkStatusStore(t)
+	var memberLookups atomic.Int64
+	restore := authz.ReplaceHooksForTest(authz.Hooks{
+		SyncUser: func(string) (*models.User, error) { return &models.User{ID: userID}, nil },
+		GetEventByIDRaw: func(id uuid.UUID) (*models.Event, error) {
+			owner := clientID
+			return &models.Event{ID: id, ClientID: &owner}, nil
+		},
+		CheckAccessRecursive: func(uuid.UUID, uuid.UUID) (bool, string) { return true, "EVENT_MANAGER" },
+		GetEventMemberRole: func(uuid.UUID, uuid.UUID) (string, bool, error) {
+			if memberLookups.Add(1) > 1 {
+				return "", false, errors.New("event member lookup failed")
+			}
+			return "", false, nil
+		},
+	})
+	t.Cleanup(restore)
+	ids := seedPendingGuests(store, eventID, catalog, 1)
+
+	c, rec := newEchoCtx(http.MethodPatch, "/guests/bulk/status", bulkStatusBody(eventID, ids, catalog.confirmed.ID, "confirmed"))
 	c.Set("cognito_sub", "manager-sub")
 	require.NoError(t, BulkUpdateGuestStatus(c))
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.Equal(t, int64(3), checks.Load())
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	assert.Equal(t, int64(2), memberLookups.Load())
+	assert.Zero(t, store.writes())
+	assertGuestRSVP(t, store.get(ids[0]), catalog.pending, "pending", "")
 }
 
 // A guest of another event in ids fails the whole request: the event the

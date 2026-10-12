@@ -42,8 +42,9 @@ func setPlatformAdminCaller(t *testing.T, user models.User) {
 }
 
 // bulkStatusRoleCase runs the whole bulk status surface for one caller:
-// check-in, undo of that check-in, undo refused for a guest's own RSVP, and
-// pending/declined, which need guest:manage.
+// check-in, undo of that check-in, a plain confirmed body (a door check-in
+// without guest:manage, the organizer's answer with it), undo refused for a
+// guest's own RSVP, and pending/declined, which need guest:manage.
 type bulkStatusRoleCase struct {
 	install           func(t *testing.T, eventID uuid.UUID)
 	canSetOtherStatus bool
@@ -57,10 +58,11 @@ func runBulkStatusRoleCase(t *testing.T, tc bulkStatusRoleCase) {
 	store := useBulkStatusStore(t)
 	tc.install(t, eventID)
 	door := seedPendingGuests(store, eventID, catalog, 2)
+	plain := seedPendingGuests(store, eventID, catalog, 1)
 	selfConfirmed := models.Guest{ID: uuid.Must(uuid.NewV4()), EventID: eventID, RSVPStatus: "confirmed", RSVPMethod: "web", GuestStatusID: catalog.pending.ID}
 	store.put(selfConfirmed)
 
-	code, body := patchBulkStatus(t, bulkStatusBody(eventID, door, catalog.confirmed.ID, "confirmed"))
+	code, body := patchBulkStatus(t, checkinActionBody(eventID, door, catalog.confirmed.ID))
 	require.Equal(t, http.StatusOK, code, "check-in: %s", body)
 	for _, id := range door {
 		got := store.get(id)
@@ -70,6 +72,19 @@ func runBulkStatusRoleCase(t *testing.T, tc bulkStatusRoleCase) {
 	code, body = patchBulkStatus(t, undoCheckinBody(eventID, door[:1]))
 	require.Equal(t, http.StatusOK, code, "undo: %s", body)
 	assertGuestRSVP(t, store.get(door[0]), catalog.pending, "pending", "")
+
+	code, body = patchBulkStatus(t, bulkStatusBody(eventID, plain, catalog.confirmed.ID, "confirmed"))
+	require.Equal(t, http.StatusOK, code, "plain confirm: %s", body)
+	plainGuest := store.get(plain[0])
+	assert.Equal(t, !tc.canSetOtherStatus, plainGuest.DoorCheckedIn(), "a plain confirm is a door check-in only without guest:manage")
+	code, body = patchBulkStatus(t, undoCheckinBody(eventID, plain))
+	if tc.canSetOtherStatus {
+		assert.Equal(t, http.StatusConflict, code, "undo of the organizer's confirmation: %s", body)
+		assertGuestRSVP(t, store.get(plain[0]), catalog.confirmed, "confirmed", "host")
+	} else {
+		assert.Equal(t, http.StatusOK, code, "undo of a plain door check-in: %s", body)
+		assertGuestRSVP(t, store.get(plain[0]), catalog.pending, "pending", "")
+	}
 
 	code, body = patchBulkStatus(t, undoCheckinBody(eventID, []uuid.UUID{selfConfirmed.ID}))
 	assert.Equal(t, http.StatusConflict, code, "undo of an own RSVP: %s", body)
