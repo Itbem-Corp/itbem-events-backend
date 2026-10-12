@@ -919,7 +919,7 @@ func BulkApproveRejectMoments(c echo.Context) error {
 		isApproved = *value
 	}
 	if err := momentSvc.BulkUpdateApproval(uuids, isApproved); err != nil {
-		return utils.Error(c, http.StatusInternalServerError, "Error updating moments", err.Error())
+		return utils.WriteFailed(c, "Error updating moments", err)
 	}
 	return utils.Success(c, http.StatusOK, "Moments updated", nil)
 }
