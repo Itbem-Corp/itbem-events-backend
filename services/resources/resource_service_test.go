@@ -502,9 +502,12 @@ func TestUploadClientLogoRejectsNonImageMedia(t *testing.T) {
 	storage := &mockObjectStorage{}
 	svc := newTestResourceService(nil, nil, storage)
 
+	// Real MP4 signature: the content matches the declared type, so the
+	// image-only rule is what rejects it.
+	mp4 := append([]byte{0, 0, 0, 0x18}, []byte("ftypmp42mp42isom")...)
 	_, _, err := svc.UploadClientLogo(
-		&memoryMultipartFile{Reader: bytes.NewReader([]byte("video-bytes"))},
-		newTestFileHeader("logo.mp4", "video/mp4", int64(len("video-bytes"))),
+		&memoryMultipartFile{Reader: bytes.NewReader(mp4)},
+		newTestFileHeader("logo.mp4", "video/mp4", int64(len(mp4))),
 		clientID,
 	)
 

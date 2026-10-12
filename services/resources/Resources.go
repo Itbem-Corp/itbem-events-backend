@@ -1262,7 +1262,10 @@ func (rs *ResourceService) sanitizeAndOptimizeUpload(
 
 	optimized, newContentType, err := rs.Optimizer.OptimizeIfImage(file, header, contentType)
 	if err != nil {
-		return nil, "", "", fmt.Errorf("failed to optimize image: %w", err)
+		// The allowlisted type passed but libvips could not decode the bytes
+		// (corrupt or mislabeled file): the file is the problem, not the
+		// service (STU-43).
+		return nil, "", "", InvalidMediaFileError{Reason: fmt.Sprintf("decode %s: %v", contentType, err)}
 	}
 
 	// Usa filename forzado o genera UUID
@@ -1274,6 +1277,17 @@ func (rs *ResourceService) sanitizeAndOptimizeUpload(
 
 	finalName = updateFilenameExtension(baseName, newContentType)
 	return optimized, finalName, newContentType, nil
+}
+
+// mediaKindMismatch reports a declared raster image or video whose sniffed
+// content has another top-level type. SVG is text by nature and is skipped.
+func mediaKindMismatch(declared, detected string) bool {
+	declaredKind, _, _ := strings.Cut(declared, "/")
+	if (declaredKind != "image" && declaredKind != "video") || declared == "image/svg+xml" {
+		return false
+	}
+	detectedKind, _, _ := strings.Cut(detected, "/")
+	return detectedKind != declaredKind
 }
 
 func detectUploadContentType(file multipart.File, header *multipart.FileHeader) (string, error) {
@@ -1308,6 +1322,12 @@ func detectUploadContentType(file multipart.File, header *multipart.FileHeader) 
 		}
 		if AllowedMimeTypes[detected] || detected == "text/html; charset=utf-8" || detected == "text/html" {
 			return detected, nil
+		}
+		// The bytes are recognizably something else (text, PDF, an audio
+		// file...) than the photo or video the name and header claim, e.g. a
+		// text file renamed .png (STU-43).
+		if mediaKindMismatch(declared, detected) {
+			return "", InvalidMediaFileError{Reason: fmt.Sprintf("declared %s, content is %s", declared, detected)}
 		}
 	}
 	return declared, nil

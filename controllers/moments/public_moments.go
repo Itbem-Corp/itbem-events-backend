@@ -42,7 +42,7 @@ type uploadCounterRepository interface {
 
 func respondMomentUploadError(c echo.Context, message string, err error) error {
 	status, detail := resourcesService.UploadErrorResponse(err)
-	return utils.Error(c, status, message, detail)
+	return utils.Error(c, status, resourcesService.UploadErrorMessage(err, message), detail)
 }
 
 var (

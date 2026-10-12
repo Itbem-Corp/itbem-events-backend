@@ -22,6 +22,10 @@ func UploadErrorResponse(err error) (status int, detail string) {
 	if err == nil {
 		return http.StatusInternalServerError, "The upload could not be completed."
 	}
+	if IsInvalidMediaFile(err) {
+		slog.Info("rejected invalid media upload", "error", err)
+		return http.StatusBadRequest, InvalidMediaFileCode
+	}
 	if validations.IsValidationError(err) {
 		message := err.Error()
 		switch {
@@ -43,4 +47,35 @@ func UploadErrorResponse(err error) (status int, detail string) {
 		return http.StatusInternalServerError, storageErr.ClientMessage()
 	}
 	return http.StatusInternalServerError, "The upload could not be completed. Please retry."
+}
+
+// InvalidMediaFileCode is the "error" code of an upload whose bytes are not
+// the image or video it claims to be (400).
+const InvalidMediaFileCode = "invalid_media_file"
+
+// InvalidMediaFileMessage is the Spanish message shown for InvalidMediaFileCode.
+const InvalidMediaFileMessage = "El archivo no es una imagen o video válido. Elige otro archivo."
+
+// InvalidMediaFileError: the uploaded file's content does not match an
+// allowed image/video type or cannot be decoded. Reason stays in server logs.
+type InvalidMediaFileError struct {
+	Reason string
+}
+
+func (e InvalidMediaFileError) Error() string {
+	return InvalidMediaFileCode + ": " + e.Reason
+}
+
+func IsInvalidMediaFile(err error) bool {
+	var target InvalidMediaFileError
+	return errors.As(err, &target)
+}
+
+// UploadErrorMessage is the message for a failed upload: the Spanish
+// invalid-file text when that is the cause, fallback otherwise.
+func UploadErrorMessage(err error, fallback string) string {
+	if IsInvalidMediaFile(err) {
+		return InvalidMediaFileMessage
+	}
+	return fallback
 }
