@@ -3,16 +3,25 @@
 package eventsrepository
 
 // Real-PostgreSQL tests for the organization product boundary (backend
-// review M6, security review #2). They share the disposable container of
-// postgres_integration_test.go; nothing touches the local stack database.
+// review M6, security review #2). They use the disposable container of
+// postgres_integration_test.go when that suite runs (its TestMain sets
+// configuration.DB), else start their own (boundaryDB). Nothing touches the
+// local stack database; without Docker the test is skipped.
 
 import (
+	"context"
+	"os/exec"
 	"testing"
+	"time"
 
 	"github.com/gofrs/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
+	gormpostgres "gorm.io/driver/postgres"
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	gormlogger "gorm.io/gorm/logger"
 
 	"events-stocks/configuration"
 	"events-stocks/models"
@@ -22,6 +31,39 @@ import (
 
 func boundarySuffix() string {
 	return uuid.Must(uuid.NewV4()).String()[:8]
+}
+
+// boundaryDB keeps the shared suite database when another integration suite
+// of this package already set configuration.DB, and otherwise starts a
+// disposable PostgreSQL 16 container for this test and migrates it.
+func boundaryDB(t *testing.T) {
+	t.Helper()
+	if configuration.DB != nil {
+		return
+	}
+	if exec.Command("docker", "info").Run() != nil {
+		t.Skip("Docker not available; organization boundary PostgreSQL test not run")
+	}
+	ctx := context.Background()
+	container, err := tcpostgres.Run(ctx, "postgres:16-alpine",
+		tcpostgres.WithDatabase("testdb"),
+		tcpostgres.WithUsername("test"),
+		tcpostgres.WithPassword("test"),
+		tcpostgres.BasicWaitStrategies(),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = container.Terminate(cleanupCtx)
+	})
+	dsn, err := container.ConnectionString(ctx, "sslmode=disable")
+	require.NoError(t, err)
+	db, err := gorm.Open(gormpostgres.Open(dsn), &gorm.Config{Logger: gormlogger.Default.LogMode(gormlogger.Silent)})
+	require.NoError(t, err)
+	require.NoError(t, configuration.MigrateModelsForTest(db))
+	configuration.DB = db
+	t.Cleanup(func() { configuration.DB = nil })
 }
 
 // The migration does not run the seeds, so the product catalog rows the
@@ -123,6 +165,7 @@ func sessionOrganizationIDs(t *testing.T, user *models.User, product string) map
 // another product's portal or its subtree, and inheritance stops at inactive
 // or deleted organizations.
 func TestSessionInheritanceStaysInsideTheApplicationOnPostgres(t *testing.T) {
+	boundaryDB(t)
 	suffix := boundarySuffix()
 	root := clientIDByCode(t, "eventiapp")
 	itbemPortal := ensureClientWithCode(t, "itbem", &root)
