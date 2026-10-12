@@ -49,7 +49,7 @@ func TestUpdateEventSectionIfUnmodified(t *testing.T) {
 			WillReturnResult(sqlmock.NewResult(0, tc.rows))
 		mock.ExpectCommit()
 		err := UpdateEventSectionIfUnmodified(section, expected)
-		if !errors.Is(err, tc.wantErr) && !(err == nil && tc.wantErr == nil) {
+		if !errors.Is(err, tc.wantErr) {
 			t.Fatalf("rows=%d: got %v, want %v", tc.rows, err, tc.wantErr)
 		}
 	}
