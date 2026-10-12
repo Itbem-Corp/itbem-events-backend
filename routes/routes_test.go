@@ -68,7 +68,11 @@ func TestConfigurarRutasRegistersFrontendContractRoutes(t *testing.T) {
 
 		// Dashboard protected contracts.
 		"GET /api/session",
+		// audit.Mutations skips successful same-organization renewals only on
+		// this exact route template (middleware/audit skipOnSuccessRoute).
+		"POST /api/session/organization-context",
 		"GET /api/audit-logs",
+		"GET /api/metrics/portfolio",
 		"GET /api/events",
 		"GET /api/events/dashboard",
 		"GET /api/events/all",

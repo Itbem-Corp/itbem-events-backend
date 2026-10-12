@@ -14,6 +14,29 @@ import (
 
 const maxUserAgentLength = 512
 
+// contextSkipOnSuccess marks a request whose successful outcome changes no
+// state. It is honoured only on skipOnSuccessRoute.
+const contextSkipOnSuccess = "audit_skip_on_success"
+
+// skipOnSuccessRoute is the only route whose successful outcome may skip the
+// audit row: renewing the organization credential already in use.
+const skipOnSuccessRoute = "/api/session/organization-context"
+
+// SkipOnSuccess tells Mutations that this request's successful outcome changes
+// no state, so it needs no audit row. Denials and errors are still recorded.
+// The mark is honoured only on POST /api/session/organization-context, so no
+// other handler can use it to hide a state change.
+func SkipOnSuccess(c echo.Context) {
+	c.Set(contextSkipOnSuccess, true)
+}
+
+// SkipOnSuccessRequested reports whether the handler marked the request with
+// SkipOnSuccess. Whether the mark is honoured is decided by Mutations.
+func SkipOnSuccessRequested(c echo.Context) bool {
+	marked, _ := c.Get(contextSkipOnSuccess).(bool)
+	return marked
+}
+
 // Mutations persists a body-free, append-only audit record for every
 // authenticated state-changing request and every denied authenticated read.
 // The historical name is retained because routes already register it.
@@ -21,7 +44,7 @@ func Mutations(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		err := next(c)
 		status := responseStatus(c, err)
-		if !shouldAudit(c.Request().Method, status) {
+		if !shouldPersist(c, c.Request().Method, status) {
 			return err
 		}
 		entry := newEntry(c, status)
@@ -41,6 +64,19 @@ func Mutations(next echo.HandlerFunc) echo.HandlerFunc {
 		}
 		return err
 	}
+}
+
+// shouldPersist applies the audit policy plus the single no-op exception: a
+// successful POST /api/session/organization-context that its handler marked
+// with SkipOnSuccess. The route check keeps the mark from hiding any other
+// state change.
+func shouldPersist(c echo.Context, method string, status int) bool {
+	if !shouldAudit(method, status) {
+		return false
+	}
+	succeeded := status >= 200 && status < 400
+	renewal := strings.EqualFold(strings.TrimSpace(method), http.MethodPost) && c.Path() == skipOnSuccessRoute
+	return !(succeeded && renewal && SkipOnSuccessRequested(c))
 }
 
 func shouldAudit(method string, status int) bool {

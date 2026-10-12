@@ -5,6 +5,7 @@ import (
 	"events-stocks/internal/authz"
 	"events-stocks/internal/organizationcontext"
 	"events-stocks/middleware/applicationaccess"
+	"events-stocks/middleware/audit"
 	"events-stocks/models"
 	"events-stocks/services/applications"
 	"events-stocks/services/users"
@@ -51,6 +52,13 @@ func IssueOrganizationContext(c echo.Context) error {
 	token, expiresAt, err := organizationcontext.Generate(sub, session.Application.Code, organizationID, organizationcontext.DefaultTTL)
 	if err != nil {
 		return utils.Error(c, http.StatusServiceUnavailable, "Organization context unavailable", "credential could not be issued")
+	}
+	// Re-issuing the credential of the organization the request already
+	// selected (header org validated by applicationaccess, body org validated
+	// above) changes no state, so the success is not audited. Switches,
+	// denials and errors still are.
+	if current, ok := c.Get(applicationaccess.ContextOrganizationID).(uuid.UUID); ok && current == organizationID {
+		audit.SkipOnSuccess(c)
 	}
 	return utils.Success(c, http.StatusOK, "Organization context created", map[string]any{
 		"token":           token,
