@@ -36,6 +36,9 @@ var (
 	// 500 "access check failed" (EVT-9).
 	ErrInvitationEventGone = errors.New("invitation event no longer exists")
 	ErrInvalidRSVPRequest          = errors.New("invalid RSVP request")
+	// ErrInvalidRSVPToken covers an unknown or expired token and a token whose
+	// invitation or guest is gone: the caller answers 401.
+	ErrInvalidRSVPToken = errors.New("invalid or expired token")
 )
 
 // _invitationSvc is the package-level singleton set by internal/app.
@@ -256,16 +259,21 @@ func (s *InvitationService) ConfirmRSVPWithResult(prettyToken string, status str
 	if !isValidRSVPStatus(status) {
 		return nil, fmt.Errorf("%w: invalid RSVP status", ErrInvalidRSVPRequest)
 	}
+	// Bound the free text before any lookup: dietary_restrictions is
+	// varchar(255), and an over-long value must be a 400, never a failed write.
+	if err := checkRSVPTextLengths(dietaryRestrictions, rsvpNotes...); err != nil {
+		return nil, err
+	}
 	accessToken, err := accesstoken.Lookup(s.tokenRepo, prettyToken)
 	if err != nil || accessToken == nil {
-		return nil, fmt.Errorf("invalid or expired token")
+		return nil, ErrInvalidRSVPToken
 	}
 	if isExpiredAccessToken(accessToken, now) {
-		return nil, fmt.Errorf("invalid or expired token")
+		return nil, ErrInvalidRSVPToken
 	}
 	invitation, err := s.repo.GetInvitationByIDLite(accessToken.InvitationID)
 	if err != nil || invitation == nil {
-		return nil, fmt.Errorf("invitation not found for token")
+		return nil, fmt.Errorf("%w: invitation not found for token", ErrInvalidRSVPToken)
 	}
 	if err := s.ensureInvitationEventAvailable(invitation); err != nil {
 		return nil, err
@@ -282,7 +290,7 @@ func (s *InvitationService) ConfirmRSVPWithResult(prettyToken string, status str
 	}
 	guest, err := s.guestRepo.GetGuestByInvitationID(accessToken.InvitationID)
 	if err != nil || guest == nil {
-		return nil, fmt.Errorf("guest not found for token")
+		return nil, fmt.Errorf("%w: guest not found for token", ErrInvalidRSVPToken)
 	}
 	if guest.EventID == uuid.Nil && invitation.EventID != uuid.Nil {
 		guest.EventID = invitation.EventID
@@ -324,6 +332,36 @@ func (s *InvitationService) ConfirmRSVPWithResult(prettyToken string, status str
 		Guest:       guest,
 		PrettyToken: canonicalRSVPPrettyToken(accessToken, prettyToken),
 	}, nil
+}
+
+// RSVPTextTooLongError is an RSVP whose free text is over its column limit.
+// It wraps ErrInvalidRSVPRequest; Message is the Spanish text for the guest.
+type RSVPTextTooLongError struct {
+	Field *models.GuestFieldTooLongError
+}
+
+func (e *RSVPTextTooLongError) Error() string {
+	return ErrInvalidRSVPRequest.Error() + ": " + e.Field.Error()
+}
+
+func (e *RSVPTextTooLongError) Unwrap() error { return ErrInvalidRSVPRequest }
+
+func (e *RSVPTextTooLongError) Message() string { return e.Field.Message() }
+
+func checkRSVPTextLengths(dietaryRestrictions string, rsvpNotes ...string) error {
+	checks := []error{
+		models.CheckTextLength("dietary_restrictions", "Restricciones alimentarias", dietaryRestrictions, models.GuestDietaryRestrictionsMaxChars),
+	}
+	if len(rsvpNotes) > 0 {
+		checks = append(checks, models.CheckTextLength("rsvp_notes", "Notas", rsvpNotes[0], models.GuestRSVPNotesMaxChars))
+	}
+	for _, err := range checks {
+		var tooLong *models.GuestFieldTooLongError
+		if errors.As(err, &tooLong) {
+			return &RSVPTextTooLongError{Field: tooLong}
+		}
+	}
+	return nil
 }
 
 func effectiveInvitationMaxGuests(maxGuests int) int {

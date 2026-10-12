@@ -7,6 +7,7 @@ import (
 	invitationsService "events-stocks/services/invitations"
 	"events-stocks/utils"
 	"github.com/labstack/echo/v4"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -231,10 +232,19 @@ func ConfirmRSVP(c echo.Context) error {
 		if errors.Is(err, invitationsService.ErrInvitationEventAccessFailed) {
 			return utils.Error(c, http.StatusInternalServerError, "Error loading event access", err.Error())
 		}
+		var tooLong *invitationsService.RSVPTextTooLongError
+		if errors.As(err, &tooLong) {
+			return utils.Error(c, http.StatusBadRequest, tooLong.Message(), "rsvp_text_too_long")
+		}
 		if errors.Is(err, invitationsService.ErrInvalidRSVPRequest) {
 			return utils.Error(c, http.StatusBadRequest, "Invalid RSVP request", err.Error())
 		}
-		return utils.Error(c, http.StatusUnauthorized, "RSVP confirmation failed", err.Error())
+		if errors.Is(err, invitationsService.ErrInvalidRSVPToken) {
+			return utils.Error(c, http.StatusUnauthorized, "RSVP confirmation failed", invitationsService.ErrInvalidRSVPToken.Error())
+		}
+		// Anything else is a persistence failure: log it, never echo it.
+		slog.Error("rsvp confirmation failed", "error", err)
+		return utils.Error(c, http.StatusInternalServerError, "No pudimos guardar tu respuesta. Intenta de nuevo en unos minutos.", "rsvp_save_failed")
 	}
 
 	return utils.Success(c, http.StatusOK, "RSVP confirmed", dtos.NewRSVPConfirmationResponse(confirmation.Guest, confirmation.PrettyToken))
