@@ -1,12 +1,15 @@
 package eventsectionrepository
 
 import (
+	"events-stocks/configuration"
 	"events-stocks/models"
 	"events-stocks/repositories/gormrepository"
+	"events-stocks/services/ports"
 	"fmt"
 	"github.com/gofrs/uuid"
 	"gorm.io/gorm"
 	"sort"
+	"time"
 )
 
 func CreateEventSection(m *models.EventSection) error {
@@ -15,6 +18,23 @@ func CreateEventSection(m *models.EventSection) error {
 
 func UpdateEventSection(m *models.EventSection) error {
 	return gormrepository.Update(m, m.ID)
+}
+
+// UpdateEventSectionIfUnmodified writes the section only while its stored
+// updated_at equals expected. Postgres keeps microseconds, so expected is
+// truncated to that precision; the check and the write are one UPDATE, so
+// two concurrent saves with the same expected value cannot both win.
+func UpdateEventSectionIfUnmodified(m *models.EventSection, expected time.Time) error {
+	result := configuration.DB.Model(m).
+		Where("id = ? AND updated_at = ?", m.ID, expected.UTC().Truncate(time.Microsecond)).
+		Select("*").Updates(m)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ports.ErrEventSectionConflict
+	}
+	return nil
 }
 
 func DeleteEventSection(id uuid.UUID) error {
@@ -82,6 +102,9 @@ func (r *EventSectionRepo) CreateEventSection(m *models.EventSection) error {
 }
 func (r *EventSectionRepo) UpdateEventSection(m *models.EventSection) error {
 	return UpdateEventSection(m)
+}
+func (r *EventSectionRepo) UpdateEventSectionIfUnmodified(m *models.EventSection, expected time.Time) error {
+	return UpdateEventSectionIfUnmodified(m, expected)
 }
 func (r *EventSectionRepo) DeleteEventSection(id uuid.UUID) error { return DeleteEventSection(id) }
 func (r *EventSectionRepo) BulkUpdateSectionOrder(eventID uuid.UUID, updates map[uuid.UUID]int) error {

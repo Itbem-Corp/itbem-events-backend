@@ -38,6 +38,9 @@ type EventSectionPayload struct {
 	IsVisible           *bool           `json:"is_visible"`
 	IsVisibleAlt        *bool           `json:"isVisible"`
 	IsVisiblePascal     *bool           `json:"IsVisible"`
+	// ExpectedUpdatedAt (RFC3339Nano, the updated_at the client loaded) makes
+	// PUT /sections/:id conditional: a mismatch answers 409 section_conflict.
+	ExpectedUpdatedAt string `json:"expected_updated_at"`
 }
 
 type EventSectionResponse struct {

@@ -6,10 +6,13 @@ import (
 	"events-stocks/internal/authz"
 	"events-stocks/models"
 	eventsService "events-stocks/services/events"
+	"events-stocks/services/ports"
 	"events-stocks/utils"
 	"github.com/gofrs/uuid"
 	"github.com/labstack/echo/v4"
 	"net/http"
+	"strings"
+	"time"
 )
 
 var eventSectionSvc *eventsService.EventSectionService
@@ -27,6 +30,23 @@ func respondInvalidSectionConfig(c echo.Context, err error) error {
 		return utils.Error(c, http.StatusBadRequest, urlErr.Error(), dtos.InvalidSectionURLCode)
 	}
 	return utils.Error(c, http.StatusBadRequest, "Invalid section config", err.Error())
+}
+
+// SectionConflictCode is the code of a PUT /sections/:id rejected because the
+// section changed after the client loaded it (STU-N3).
+const SectionConflictCode = "section_conflict"
+
+// respondSectionConflict answers 409 with the current section in data so the
+// editor can reload it. The code is sent both as "error" (the envelope's
+// usual code field) and "code".
+func respondSectionConflict(c echo.Context, current *models.EventSection) error {
+	return c.JSON(http.StatusConflict, map[string]interface{}{
+		"status":  http.StatusConflict,
+		"message": "Esta sección cambió en otra pestaña o por otra persona.",
+		"error":   SectionConflictCode,
+		"code":    SectionConflictCode,
+		"data":    dtos.NewEventSectionResponse(*current),
+	})
 }
 
 // GET /events/:id/sections
@@ -98,12 +118,35 @@ func UpdateSection(c echo.Context) error {
 		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
 	}
 
+	var expectedUpdatedAt *time.Time
+	if raw := strings.TrimSpace(payload.ExpectedUpdatedAt); raw != "" {
+		parsed, parseErr := time.Parse(time.RFC3339Nano, raw)
+		if parseErr != nil {
+			return utils.Error(c, http.StatusBadRequest, "expected_updated_at debe ser una fecha RFC 3339 válida", "invalid_expected_updated_at")
+		}
+		expectedUpdatedAt = &parsed
+		if !eventsService.SectionUpdatedAtMatches(section.UpdatedAt, parsed) {
+			return respondSectionConflict(c, section)
+		}
+	}
+
 	section.ID = id
 	section.EventID = originalEventID
 	if err := dtos.ApplyEventSectionPayload(section, payload, false); err != nil {
 		return respondInvalidSectionConfig(c, err)
 	}
-	if err := eventSectionSvc.UpdateEventSection(section); err != nil {
+	if expectedUpdatedAt != nil {
+		if err := eventSectionSvc.UpdateEventSectionIfUnmodified(section, *expectedUpdatedAt); err != nil {
+			if errors.Is(err, ports.ErrEventSectionConflict) {
+				current, loadErr := eventSectionSvc.GetEventSectionByID(id)
+				if loadErr != nil {
+					return utils.Error(c, http.StatusInternalServerError, "Error loading section", loadErr.Error())
+				}
+				return respondSectionConflict(c, current)
+			}
+			return utils.WriteFailed(c, "Error updating section", err)
+		}
+	} else if err := eventSectionSvc.UpdateEventSection(section); err != nil {
 		return utils.WriteFailed(c, "Error updating section", err)
 	}
 
