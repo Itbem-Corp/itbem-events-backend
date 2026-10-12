@@ -14,6 +14,7 @@ import (
 
 	"github.com/gofrs/uuid"
 	"github.com/labstack/echo/v4"
+	"gorm.io/gorm"
 )
 
 type metricSummary struct {
@@ -45,12 +46,38 @@ type inventorySummary struct {
 	Events        int64 `json:"events"`
 }
 
+// productTotal is the exact number of distinct active users per product in
+// the window. Summing summaries[].active_users double-counts a user who is
+// active in several organizations of the same product (ADM-3).
+type productTotal struct {
+	TenantCode  string `json:"tenant_code"`
+	ActiveUsers int64  `json:"active_users"`
+}
+
 type portfolioResponse struct {
-	From      time.Time        `json:"from"`
-	To        time.Time        `json:"to"`
-	Summaries []metricSummary  `json:"summaries"`
-	Timeline  []dailyPoint     `json:"timeline"`
-	Inventory inventorySummary `json:"inventory"`
+	From          time.Time        `json:"from"`
+	To            time.Time        `json:"to"`
+	Summaries     []metricSummary  `json:"summaries"`
+	Timeline      []dailyPoint     `json:"timeline"`
+	ProductTotals []productTotal   `json:"product_totals"`
+	Inventory     inventorySummary `json:"inventory"`
+}
+
+// productTotalsQuery counts DISTINCT users per product over the window with
+// the same scope as the rest of the portfolio (one org, one product, or all
+// products for a primary root).
+func productTotalsQuery(db *gorm.DB, from, to time.Time, tenant string, clientID uuid.UUID, hasClient, crossProduct bool) *gorm.DB {
+	query := db.Table("product_active_user_daily active").
+		Select("active.tenant_code, COUNT(DISTINCT active.user_id) AS active_users").
+		Where("active.day BETWEEN ? AND ?", from, to).
+		Group("active.tenant_code").
+		Order("active.tenant_code ASC")
+	if hasClient {
+		query = query.Where("active.client_id = ?", clientID)
+	} else if !crossProduct {
+		query = query.Where("active.tenant_code = ?", tenant)
+	}
+	return query
 }
 
 func Portfolio(c echo.Context) error {
@@ -106,6 +133,15 @@ func Portfolio(c echo.Context) error {
 		return utils.Error(c, http.StatusServiceUnavailable, "Metrics unavailable", err.Error())
 	}
 
+	// For an organization-scoped view the daily active users must be limited
+	// to that organization too; otherwise the product-wide count leaked into
+	// an org admin's chart.
+	activeScope := ""
+	activeArgs := []interface{}{}
+	if hasClient {
+		activeScope = " AND active.client_id = ?"
+		activeArgs = append(activeArgs, clientID)
+	}
 	timelineQuery := configuration.DB.Table("product_metric_daily metrics").
 		Select(`
 			metrics.day,
@@ -118,8 +154,8 @@ func Portfolio(c echo.Context) error {
 			(SELECT COUNT(DISTINCT active.user_id)
 			 FROM product_active_user_daily active
 			 WHERE active.day = metrics.day
-			   AND active.tenant_code = metrics.tenant_code) AS active_users
-		`).
+			   AND active.tenant_code = metrics.tenant_code`+activeScope+`) AS active_users
+		`, activeArgs...).
 		Where("metrics.day BETWEEN ? AND ?", from, to).
 		Group("metrics.day, metrics.tenant_code").
 		Order("metrics.day ASC, metrics.tenant_code ASC")
@@ -133,9 +169,14 @@ func Portfolio(c echo.Context) error {
 		return utils.Error(c, http.StatusServiceUnavailable, "Metrics unavailable", err.Error())
 	}
 
+	productTotals := make([]productTotal, 0)
+	if err := productTotalsQuery(configuration.DB, from, to, tenant, clientID, hasClient, user.IsPrimaryRoot()).Scan(&productTotals).Error; err != nil {
+		return utils.Error(c, http.StatusServiceUnavailable, "Metrics unavailable", err.Error())
+	}
+
 	inventory := loadInventory(tenant, clientID, hasClient, user.IsPrimaryRoot())
 	return utils.Success(c, http.StatusOK, "Product metrics", portfolioResponse{
-		From: from, To: to, Summaries: summaries, Timeline: timeline, Inventory: inventory,
+		From: from, To: to, Summaries: summaries, Timeline: timeline, ProductTotals: productTotals, Inventory: inventory,
 	})
 }
 
