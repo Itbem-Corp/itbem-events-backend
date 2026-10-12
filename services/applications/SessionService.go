@@ -334,7 +334,9 @@ func (service *SessionService) invalidateCognitoSub(cognitoSub string) {
 // organization (access_role INHERITED_*), the same inheritance
 // CheckAccessRecursive applies to direct API calls. Descent stops at an
 // organization whose code is another application's portal, so a platform
-// Owner never receives another product's subtree as a workspace.
+// Owner never receives another product's subtree as a workspace, and at an
+// inactive or deleted organization: neither it nor its subtree is inherited
+// (a deactivated membership seed hands nothing down either).
 func (service *SessionService) organizationAccess(userID, applicationID uuid.UUID) ([]OrganizationAccess, error) {
 	organizations := make([]OrganizationAccess, 0)
 	err := service.db.Raw(`
@@ -345,6 +347,10 @@ func (service *SessionService) organizationAccess(userID, applicationID uuid.UUI
 				ON client_members.id = access.client_member_id
 				AND client_members.is_active = true
 			JOIN client_roles ON client_roles.id = client_members.client_role_id
+			JOIN clients seed
+				ON seed.id = client_members.client_id
+				AND seed.deleted_at IS NULL
+				AND seed.is_active = true
 			WHERE access.application_id = ?
 				AND access.is_active = true
 				AND client_members.user_id = ?
@@ -356,6 +362,7 @@ func (service *SessionService) organizationAccess(userID, applicationID uuid.UUI
 			FROM clients child
 			JOIN reachable ON child.parent_id = reachable.client_id
 			WHERE child.deleted_at IS NULL
+				AND child.is_active = true
 				AND UPPER(reachable.role_code) IN ('OWNER', 'ADMIN')
 				AND reachable.depth < 31
 				AND NOT EXISTS (
