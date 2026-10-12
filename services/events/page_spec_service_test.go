@@ -1166,7 +1166,7 @@ func TestBuildPageSpec_InjectsRSVPMessagesFromEventConfig(t *testing.T) {
 	assert.NotContains(t, cfg, "moment_request_message")
 }
 
-func TestGetPageSpec_MomentWallUsesDefaultConfigAsPublished(t *testing.T) {
+func TestGetPageSpec_DefaultConfigHidesUnpublishedMomentWall(t *testing.T) {
 	sections := []models.EventSection{
 		{
 			ID:            testSectionID1,
@@ -1190,15 +1190,10 @@ func TestGetPageSpec_MomentWallUsesDefaultConfigAsPublished(t *testing.T) {
 
 	spec, err := getPageSpec(deps, "ABC123")
 	require.NoError(t, err)
-	require.Len(t, spec.Sections, 1)
-
-	var cfg map[string]interface{}
-	require.NoError(t, json.Unmarshal(spec.Sections[0].Config, &cfg))
-	assert.Equal(t, true, cfg["published"])
-	assert.Equal(t, true, cfg["moments_wall_published"])
-	assert.Equal(t, false, cfg["allow_uploads"])
-	assert.Equal(t, false, cfg["allow_messages"])
-	assert.Equal(t, false, cfg["share_uploads_enabled"])
+	// EVT-68: a new event's wall starts unpublished and uploads closed, so
+	// the MomentWall section stays out of the PageSpec until the organizer
+	// opens uploads or publishes the wall.
+	require.Len(t, spec.Sections, 0)
 }
 
 func TestBuildPageSpec_UsesDefaultConfigWhenConfigLoadFails(t *testing.T) {
@@ -1223,16 +1218,9 @@ func TestBuildPageSpec_UsesDefaultConfigWhenConfigLoadFails(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, spec)
 	assert.True(t, spec.Meta.FooterVisible)
-	require.Len(t, spec.Sections, 1)
-
-	var cfg map[string]interface{}
-	require.NoError(t, json.Unmarshal(spec.Sections[0].Config, &cfg))
-	assert.Equal(t, "grad-izapa-2025", cfg["identifier"])
-	assert.Equal(t, true, cfg["published"])
-	assert.Equal(t, true, cfg["moments_wall_published"])
-	assert.Equal(t, false, cfg["allow_uploads"])
-	assert.Equal(t, false, cfg["allow_messages"])
-	assert.Equal(t, false, cfg["share_uploads_enabled"])
+	// The default config keeps the wall unpublished and uploads closed
+	// (EVT-68), so the MomentWall section is filtered out.
+	require.Len(t, spec.Sections, 0)
 }
 
 func TestBuildPageSpec_FiltersSectionsByEventConfig(t *testing.T) {

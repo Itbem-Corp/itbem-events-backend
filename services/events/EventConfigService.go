@@ -44,7 +44,11 @@ func NewDefaultEventConfig(id uuid.UUID) *models.EventConfig {
 		ShowSecondLocation:   true,
 		ShowHostsSection:     true,
 		ShowPhotoGallery:     true,
-		ShowMomentWall:       true,
+		// A new event starts with the moment wall unpublished: while the wall
+		// is published uploads stay closed (PageSpec forces allow_uploads off),
+		// so a published default made "Permitir subir fotos" look broken
+		// (EVT-68 / STU-55). The organizer publishes the wall after the event.
+		ShowMomentWall:       false,
 		VisibilityConfigured: true,
 		ShowContactSection:   true,
 		ShowHeader:           true,
