@@ -371,6 +371,10 @@ func migrateModels(db *gorm.DB) error {
 		if err := tx.Exec("ALTER TABLE IF EXISTS moments ALTER COLUMN invitation_id DROP NOT NULL").Error; err != nil {
 			return fmt.Errorf("relax moments invitation constraint: %w", err)
 		}
+		// One live moment per stored upload object (EventiApp MOM-6).
+		if err := migrateMomentContentURLUniqueness(tx); err != nil {
+			return fmt.Errorf("migrate moment content uniqueness: %w", err)
+		}
 		// The original ledger deduplicated by an optional provider response ID.
 		// Some providers legitimately omit that value, and a task can make more
 		// than one billable call. AutoMigrate creates automation_execution_run;
