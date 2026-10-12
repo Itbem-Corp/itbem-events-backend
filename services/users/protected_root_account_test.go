@@ -77,7 +77,7 @@ func TestAdminDeleteUserRefusesPrimaryRootAccounts(t *testing.T) {
 			calls := &accountCalls{}
 			users, auth := accountRepos(test.account, calls)
 
-			err := NewAdminUserService(users, nil, auth).DeleteUser(test.account.ID)
+			err := NewAdminUserService(users, &membershipClientRepo{}, auth).DeleteUser(uuid.Must(uuid.NewV4()), test.account.ID)
 
 			require.Error(t, err)
 			assert.True(t, errors.Is(err, ErrProtectedRootAccount), "got %v", err)
@@ -92,7 +92,7 @@ func TestAdminDeleteUserStillDeletesOtherAccounts(t *testing.T) {
 			calls := &accountCalls{}
 			users, auth := accountRepos(test.account, calls)
 
-			require.NoError(t, NewAdminUserService(users, nil, auth).DeleteUser(test.account.ID))
+			require.NoError(t, NewAdminUserService(users, &membershipClientRepo{}, auth).DeleteUser(uuid.Must(uuid.NewV4()), test.account.ID))
 
 			assert.Equal(t, 1, calls.providerDelete)
 			assert.Equal(t, 1, calls.localDeletes)

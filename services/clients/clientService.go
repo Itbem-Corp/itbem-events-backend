@@ -12,12 +12,34 @@ import (
 	"events-stocks/services/cacheutil"
 	"events-stocks/services/ports"
 	ResourceService "events-stocks/services/resources"
+	"events-stocks/utils"
 	"fmt"
 	"github.com/gofrs/uuid"
 	"gorm.io/gorm"
 	"log/slog"
 	"mime/multipart"
 	"strings"
+)
+
+// Sentinel errors let controllers map organization failures to stable HTTP
+// statuses and error codes instead of string-matching or returning 500.
+// The texts are kept identical to the historical messages.
+var (
+	ErrClientAccessDenied     = errors.New("access denied")
+	ErrClientPermissionDenied = errors.New("permission denied")
+	ErrClientNotFound         = errors.New("client not found")
+	ErrClientHasChildren      = errors.New("cannot delete organization while it has sub-organizations")
+
+	// Creation rule errors. Each one wraps the historical English detail so
+	// existing logs and tests keep matching, while the controller maps the
+	// sentinel to a 4xx with a Spanish message instead of a generic 500.
+	ErrClientTypeInvalid         = errors.New("invalid client type")
+	ErrClientRootTypeRequired    = errors.New("root organization type required")
+	ErrClientParentNotFound      = errors.New("parent organization not found")
+	ErrClientChildTypeNotAllowed = errors.New("organization type not allowed under parent")
+	ErrClientHierarchyLimit      = errors.New("organization hierarchy limit reached")
+	ErrClientCodeConflict        = errors.New("organization code already exists")
+	ErrClientLogoUpload          = errors.New("organization logo upload failed")
 )
 
 // _clientSvc is the package-level singleton set by internal/app.
@@ -103,6 +125,10 @@ type ClientService struct {
 	cache          ports.CacheRepository
 	tx             ports.Transactor
 	tenantCode     string
+	// applicationCode is the session product of a request-scoped service
+	// (WithApplicationScope). When set, every organization check by id also
+	// requires the application-scoped reach (portal stop, ROLES-N2).
+	applicationCode string
 }
 
 func NewClientService(
@@ -147,6 +173,39 @@ func (s *ClientService) WithTenantScope(tenantCode, bucket string) *ClientServic
 	return &clone
 }
 
+// WithApplicationScope returns a request-scoped copy whose organization
+// checks by id stay inside applicationCode: Owner/Admin inheritance does not
+// reach another application's portal tree, the same boundary as the
+// organization lists and the session. An empty code keeps the unscoped
+// behaviour (internal callers that check a third user's membership).
+func (s *ClientService) WithApplicationScope(applicationCode string) *ClientService {
+	if s == nil {
+		return nil
+	}
+	clone := *s
+	clone.applicationCode = strings.ToLower(strings.TrimSpace(applicationCode))
+	return &clone
+}
+
+// checkAccess is CheckAccessRecursive plus, for an application-scoped
+// service, the application reach. It fails closed when the repository cannot
+// answer the reach question.
+func (s *ClientService) checkAccess(userID, clientID uuid.UUID) (bool, string) {
+	allowed, role := s.clientRepo.CheckAccessRecursive(userID, clientID)
+	if !allowed || s.applicationCode == "" {
+		return allowed, role
+	}
+	reach, ok := s.clientRepo.(ports.ApplicationClientReach)
+	if !ok {
+		return false, ""
+	}
+	reachable, err := reach.ReachableClientIDsInApplication(userID, s.applicationCode, []uuid.UUID{clientID})
+	if err != nil || !reachable[clientID] {
+		return false, ""
+	}
+	return allowed, role
+}
+
 func normalizeTenantCode(value string) string {
 	return products.NormalizeOrDefault(value).String()
 }
@@ -165,46 +224,46 @@ func (s *ClientService) CreateClientAsPrimaryRoot(name string, clientTypeID uuid
 func (s *ClientService) createClient(name string, clientTypeID uuid.UUID, ownerUserID uuid.UUID, parentID *uuid.UUID, primaryRoot bool) (*models.Client, error) {
 	requestedType, err := s.clientTypeRepo.GetByID(clientTypeID)
 	if err != nil {
-		return nil, fmt.Errorf("invalid client type id: %w", err)
+		return nil, fmt.Errorf("%w: invalid client type id: %v", ErrClientTypeInvalid, err)
 	}
 	if parentID == nil {
 		if requestedType.Code != "PLATFORM" {
-			return nil, fmt.Errorf("root clients must be of type PLATFORM")
+			return nil, fmt.Errorf("%w: root clients must be of type PLATFORM", ErrClientRootTypeRequired)
 		}
 	} else {
 		if !primaryRoot {
-			allowed, role := s.clientRepo.CheckAccessRecursive(ownerUserID, *parentID)
+			allowed, role := s.checkAccess(ownerUserID, *parentID)
 			roleUpper := strings.ToUpper(role)
 			if !allowed || (roleUpper != "OWNER" && roleUpper != "INHERITED_OWNER") {
-				return nil, fmt.Errorf("permission denied: owner access required on parent organization")
+				return nil, fmt.Errorf("%w: owner access required on parent organization", ErrClientPermissionDenied)
 			}
 		}
 		parent, err := s.clientRepo.GetClientByID(*parentID)
 		if err != nil {
-			return nil, fmt.Errorf("parent client not found")
+			return nil, fmt.Errorf("%w: parent client not found", ErrClientParentNotFound)
 		}
-		switch strings.ToUpper(parent.ClientType.Code) {
-		case "PLATFORM":
-			if strings.ToUpper(requestedType.Code) != "AGENCY" {
-				return nil, fmt.Errorf("platforms can only create agencies")
+		allowedChildren := models.AllowedChildClientTypeCodes(parent.ClientType.Code)
+		if len(allowedChildren) == 0 {
+			return nil, fmt.Errorf("%w: customers cannot have sub-clients", ErrClientHierarchyLimit)
+		}
+		if !containsFold(allowedChildren, requestedType.Code) {
+			if strings.EqualFold(parent.ClientType.Code, models.ClientTypeCodePlatform) {
+				return nil, fmt.Errorf("%w: platforms can only create agencies", ErrClientChildTypeNotAllowed)
 			}
-		case "AGENCY":
-			if strings.ToUpper(requestedType.Code) != "CUSTOMER" {
-				return nil, fmt.Errorf("agencies can only create customers")
-			}
-		default:
-			return nil, fmt.Errorf("customers cannot have sub-clients")
+			return nil, fmt.Errorf("%w: agencies can only create customers", ErrClientChildTypeNotAllowed)
 		}
 	}
 	ownerRole, err := s.clientRoleRepo.GetByCode("Owner")
 	if err != nil {
 		return nil, fmt.Errorf("system configuration error: 'Owner' role not found in database")
 	}
-	slug := strings.ToLower(strings.TrimSpace(name))
-	slug = strings.ReplaceAll(slug, " ", "-")
 	clientID, err := uuid.NewV4()
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate client id: %w", err)
+	}
+	slug, err := s.uniqueClientCode(name)
+	if err != nil {
+		return nil, err
 	}
 	mediaBucket := ""
 	if s.rs != nil {
@@ -231,10 +290,16 @@ func (s *ClientService) createClient(name string, clientTypeID uuid.UUID, ownerU
 			}
 			return tx.Create(member).Error
 		}); err != nil {
+			if isUniqueViolation(err) {
+				return nil, fmt.Errorf("%w: %v", ErrClientCodeConflict, err)
+			}
 			return nil, fmt.Errorf("failed to create client and assign owner: %w", err)
 		}
 	} else {
 		if err := s.clientRepo.CreateClient(client); err != nil {
+			if isUniqueViolation(err) {
+				return nil, fmt.Errorf("%w: %v", ErrClientCodeConflict, err)
+			}
 			return nil, err
 		}
 		if err := s.clientRepo.AddMember(member); err != nil {
@@ -245,10 +310,103 @@ func (s *ClientService) createClient(name string, clientTypeID uuid.UUID, ownerU
 	return client, nil
 }
 
+// CreatableClientTypeCodes returns the organization type codes the requester
+// may create. With a parent it is exactly the types allowed under that parent
+// (after the same Owner check as creation). Without a parent, a primary root
+// gets every type, and anybody else gets the union of the types they
+// may create under every organization they own (directly or inherited), so an
+// Agency owner is offered "Customer", never "Platform".
+func (s *ClientService) CreatableClientTypeCodes(requesterID uuid.UUID, parentID *uuid.UUID, primaryRoot bool) ([]string, error) {
+	if parentID != nil {
+		if !primaryRoot {
+			allowed, role := s.checkAccess(requesterID, *parentID)
+			roleUpper := strings.ToUpper(role)
+			if !allowed || (roleUpper != "OWNER" && roleUpper != "INHERITED_OWNER") {
+				return nil, fmt.Errorf("%w: owner access required on parent organization", ErrClientPermissionDenied)
+			}
+		}
+		parent, err := s.clientRepo.GetClientByID(*parentID)
+		if err != nil {
+			return nil, fmt.Errorf("%w: parent client not found", ErrClientParentNotFound)
+		}
+		return models.AllowedChildClientTypeCodes(parent.ClientType.Code), nil
+	}
+	if primaryRoot {
+		// Root 1 provisions every level; the parent is validated on create.
+		return []string{models.ClientTypeCodePlatform, models.ClientTypeCodeAgency, models.ClientTypeCodeCustomer}, nil
+	}
+	owned, _, err := s.clientRepo.ListClientsPaginated(&requesterID, dtos.ClientsListQuery{Page: 1, PageSize: 1000})
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]struct{}{}
+	codes := make([]string, 0, 2)
+	for _, client := range owned {
+		role := strings.ToUpper(client.AccessRole)
+		if role != "OWNER" && role != "INHERITED_OWNER" {
+			continue
+		}
+		for _, code := range models.AllowedChildClientTypeCodes(client.ClientType.Code) {
+			if _, ok := seen[code]; !ok {
+				seen[code] = struct{}{}
+				codes = append(codes, code)
+			}
+		}
+	}
+	return codes, nil
+}
+
+// maxClientCodeAttempts bounds the numbered-suffix search for a free code.
+const maxClientCodeAttempts = 50
+
+// uniqueClientCode derives the organization's stable code from its name and,
+// when the repository can check it, appends "-2", "-3"... until the code is
+// free (also avoiding application codes, which carry product meaning). The
+// unique index stays the final guard; a lost race is ErrClientCodeConflict.
+func (s *ClientService) uniqueClientCode(name string) (string, error) {
+	base := utils.Slugify(name)
+	if base == "" {
+		base = "organizacion"
+	}
+	checker, ok := s.clientRepo.(ports.ClientCodeRepository)
+	if !ok {
+		return base, nil
+	}
+	candidate := base
+	for attempt := 2; attempt <= maxClientCodeAttempts+1; attempt++ {
+		taken, err := checker.ClientCodeTaken(candidate)
+		if err != nil {
+			return "", fmt.Errorf("check organization code: %w", err)
+		}
+		if !taken {
+			return candidate, nil
+		}
+		candidate = fmt.Sprintf("%s-%d", base, attempt)
+	}
+	return "", fmt.Errorf("%w: no free code for %q", ErrClientCodeConflict, base)
+}
+
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "duplicate key value") || strings.Contains(message, "SQLSTATE 23505")
+}
+
+func containsFold(values []string, expected string) bool {
+	for _, value := range values {
+		if strings.EqualFold(value, expected) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *ClientService) GetClientDetails(clientID, userID uuid.UUID) (*models.Client, error) {
-	allowed, _ := s.clientRepo.CheckAccessRecursive(userID, clientID)
+	allowed, _ := s.checkAccess(userID, clientID)
 	if !allowed {
-		return nil, fmt.Errorf("access denied: user is not a member of this client hierarchy")
+		return nil, fmt.Errorf("%w: user is not a member of this client hierarchy", ErrClientAccessDenied)
 	}
 	return s.clientRepo.GetClientByID(clientID)
 }
@@ -287,22 +445,20 @@ func (s *ClientService) updateClientDetails(
 	shouldDeleteOld bool,
 	primaryRoot bool,
 ) (*models.Client, error) {
-	if !primaryRoot {
-		allowed, role := s.clientRepo.CheckAccessRecursive(requesterID, clientID)
-		if !allowed || (strings.ToUpper(role) != "OWNER" && strings.ToUpper(role) != "INHERITED_OWNER") {
-			return nil, fmt.Errorf("permission denied")
-		}
+	if err := s.authorizeClientUpdate(clientID, requesterID, primaryRoot); err != nil {
+		return nil, err
 	}
 	client, err := s.clientRepo.GetClientByID(clientID)
 	if err != nil {
-		return nil, fmt.Errorf("client not found")
+		return nil, ErrClientNotFound
 	}
 	oldLogo := client.Logo
 	oldMediaBucket := client.MediaBucket
+	// The code is a stable identifier: it is matched against application
+	// codes (membership application resolution) and used by integrations, so
+	// renaming an organization changes only its display name.
 	if trimmedName := strings.TrimSpace(name); trimmedName != "" {
 		client.Name = trimmedName
-		slug := strings.ToLower(trimmedName)
-		client.Code = strings.ReplaceAll(slug, " ", "-")
 	}
 	if shouldDeleteOld || logoName != "" {
 		client.Logo = logoName
@@ -322,6 +478,64 @@ func (s *ClientService) updateClientDetails(
 		}
 	}
 	s.invalidateAllMyClients()
+	return client, nil
+}
+
+// authorizeClientUpdate is the single OWNER check for organization edits.
+// It must run before any side effect (logo upload) happens.
+func (s *ClientService) authorizeClientUpdate(clientID, requesterID uuid.UUID, primaryRoot bool) error {
+	if primaryRoot {
+		return nil
+	}
+	allowed, role := s.checkAccess(requesterID, clientID)
+	roleUpper := strings.ToUpper(role)
+	if !allowed || (roleUpper != "OWNER" && roleUpper != "INHERITED_OWNER") {
+		return ErrClientPermissionDenied
+	}
+	return nil
+}
+
+// UpdateClientWithLogo authorizes the requester and confirms the organization
+// exists BEFORE uploading a new logo, so an unauthorized caller can never
+// write objects under the organization's branding prefix. Any failure after
+// the upload removes the freshly uploaded object. primaryRoot must only be
+// true for a Root 1 caller (the controller decides that).
+func (s *ClientService) UpdateClientWithLogo(
+	clientID, requesterID uuid.UUID,
+	primaryRoot bool,
+	name string,
+	logoFile multipart.File,
+	logoHeader *multipart.FileHeader,
+	removeLogo bool,
+) (*models.Client, error) {
+	if err := s.authorizeClientUpdate(clientID, requesterID, primaryRoot); err != nil {
+		return nil, err
+	}
+	if _, err := s.clientRepo.GetClientByID(clientID); err != nil {
+		return nil, ErrClientNotFound
+	}
+	logoName := ""
+	shouldDeleteOld := false
+	if logoFile != nil {
+		filename, err := s.UploadClientLogo(logoFile, logoHeader, clientID)
+		if err != nil {
+			return nil, err
+		}
+		logoName = filename
+		shouldDeleteOld = true
+	} else if removeLogo {
+		shouldDeleteOld = true
+	}
+	client, err := s.updateClientDetails(clientID, requesterID, name, logoName, shouldDeleteOld, primaryRoot)
+	if err != nil {
+		// updateClientDetails already removes the new object when the row
+		// update fails; cover the re-check failures (access revoked or the
+		// organization deleted between the check and the update) here.
+		if logoName != "" && (errors.Is(err, ErrClientPermissionDenied) || errors.Is(err, ErrClientNotFound)) {
+			s.cleanupClientLogo(clientID, logoName)
+		}
+		return nil, err
+	}
 	return client, nil
 }
 
@@ -406,12 +620,46 @@ func (s *ClientService) invalidateAllMyClients() {
 }
 
 func (s *ClientService) GetClientChildren(parentID, userID uuid.UUID) ([]models.Client, error) {
-	allowed, role := s.clientRepo.CheckAccessRecursive(userID, parentID)
+	allowed, role := s.checkAccess(userID, parentID)
 	role = strings.TrimPrefix(strings.ToUpper(role), "INHERITED_")
 	if !allowed || (role != "OWNER" && role != "ADMIN") {
-		return nil, fmt.Errorf("access denied")
+		return nil, ErrClientAccessDenied
 	}
 	return s.clientRepo.GetChildrenClients(parentID)
+}
+
+// GetClientChildrenInApplication is GetClientChildren for a member of one
+// application session: the parent must be inside the application's reach
+// and children that are another application's portal (with their trees) are
+// left out, the same boundary as GET /api/clients (ROLES-N2).
+func (s *ClientService) GetClientChildrenInApplication(parentID, userID uuid.UUID, applicationCode string) ([]models.Client, error) {
+	children, err := s.GetClientChildren(parentID, userID)
+	if err != nil {
+		return nil, err
+	}
+	reach, ok := s.clientRepo.(ports.ApplicationClientReach)
+	if !ok || strings.TrimSpace(applicationCode) == "" {
+		return children, nil
+	}
+	ids := make([]uuid.UUID, 0, len(children)+1)
+	ids = append(ids, parentID)
+	for _, child := range children {
+		ids = append(ids, child.ID)
+	}
+	reachable, err := reach.ReachableClientIDsInApplication(userID, applicationCode, ids)
+	if err != nil {
+		return nil, err
+	}
+	if !reachable[parentID] {
+		return nil, ErrClientAccessDenied
+	}
+	scoped := make([]models.Client, 0, len(children))
+	for _, child := range children {
+		if reachable[child.ID] {
+			scoped = append(scoped, child)
+		}
+	}
+	return scoped, nil
 }
 
 func (s *ClientService) GetClientChildrenAsPrimaryRoot(parentID uuid.UUID) ([]models.Client, error) {
@@ -428,13 +676,13 @@ func (s *ClientService) DeleteClientAsPrimaryRoot(clientID uuid.UUID) error {
 
 func (s *ClientService) deleteClient(clientID, requesterID uuid.UUID, primaryRoot bool) error {
 	if !primaryRoot {
-		allowed, role := s.clientRepo.CheckAccessRecursive(requesterID, clientID)
+		allowed, role := s.checkAccess(requesterID, clientID)
 		if !allowed {
-			return fmt.Errorf("access denied")
+			return ErrClientAccessDenied
 		}
 		roleUpper := strings.ToUpper(role)
 		if roleUpper != "OWNER" && roleUpper != "INHERITED_OWNER" {
-			return fmt.Errorf("permission denied: only the owner can delete the organization")
+			return fmt.Errorf("%w: only the owner can delete the organization", ErrClientPermissionDenied)
 		}
 	}
 	children, err := s.clientRepo.GetChildrenClients(clientID)
@@ -442,12 +690,11 @@ func (s *ClientService) deleteClient(clientID, requesterID uuid.UUID, primaryRoo
 		return fmt.Errorf("failed to verify organization hierarchy: %w", err)
 	}
 	if len(children) > 0 {
-		return fmt.Errorf("cannot delete organization while it has sub-organizations")
+		return ErrClientHasChildren
 	}
 	client, err := s.clientRepo.GetClientByID(clientID)
-	if err == nil && client.Logo != "" && s.rs != nil {
-		fullPath := clientLogoObjectPath(client.ID, client.Logo)
-		_ = s.rs.WithBucket(client.MediaBucket).DeleteObjectByPath(fullPath)
+	if err != nil {
+		return ErrClientNotFound
 	}
 	if s.tx != nil {
 		if err := s.tx.Transaction(func(tx *gorm.DB) error {
@@ -467,6 +714,13 @@ func (s *ClientService) deleteClient(clientID, requesterID uuid.UUID, primaryRoo
 		}
 		if err := s.clientRepo.DeleteClient(clientID); err != nil {
 			return fmt.Errorf("failed to delete client: %w", err)
+		}
+	}
+	// The logo is removed only after the rows are gone: a failed or rolled
+	// back delete must never leave a live organization without its logo.
+	if client.Logo != "" && s.rs != nil {
+		if err := s.rs.WithBucket(client.MediaBucket).DeleteObjectByPath(clientLogoObjectPath(client.ID, client.Logo)); err != nil {
+			slog.Warn("failed to delete logo of deleted client", "client_id", client.ID, "error", err)
 		}
 	}
 	s.invalidateAllMyClients()
@@ -500,7 +754,7 @@ func (s *ClientService) AddUserToClient(clientID, userID, roleID uuid.UUID) erro
 }
 
 func (s *ClientService) CanManageClientMembers(clientID, requesterID uuid.UUID) error {
-	allowed, role := s.clientRepo.CheckAccessRecursive(requesterID, clientID)
+	allowed, role := s.checkAccess(requesterID, clientID)
 	roleUpper := strings.ToUpper(role)
 	if !allowed || (roleUpper != "OWNER" && roleUpper != "ADMIN" && roleUpper != "INHERITED_OWNER" && roleUpper != "INHERITED_ADMIN") {
 		return fmt.Errorf("permission denied: cannot manage members for this client")
@@ -509,7 +763,7 @@ func (s *ClientService) CanManageClientMembers(clientID, requesterID uuid.UUID) 
 }
 
 func (s *ClientService) CanAssignClientRole(clientID, requesterID, roleID uuid.UUID) error {
-	allowed, roleCode := s.clientRepo.CheckAccessRecursive(requesterID, clientID)
+	allowed, roleCode := s.checkAccess(requesterID, clientID)
 	if !allowed {
 		return fmt.Errorf("permission denied: cannot manage members for this client")
 	}
@@ -565,7 +819,7 @@ func (s *ClientService) GetDirectMemberRole(userID, clientID uuid.UUID) (string,
 // for presentation of assignable roles; mutation paths still validate the
 // hierarchy again server-side.
 func (s *ClientService) GetEffectiveMemberRole(userID, clientID uuid.UUID) (string, error) {
-	allowed, roleCode := s.clientRepo.CheckAccessRecursive(userID, clientID)
+	allowed, roleCode := s.checkAccess(userID, clientID)
 	if !allowed || roleCode == "" {
 		return "", fmt.Errorf("user is not a member of this organization")
 	}
@@ -577,7 +831,7 @@ func (s *ClientService) GetEffectiveMemberRole(userID, clientID uuid.UUID) (stri
 // check. This keeps propagation consistent: an inherited administrator can
 // manage a child organization, but never a peer or superior role.
 func (s *ClientService) getEffectiveManagerRole(clientID, requesterID uuid.UUID) (*models.ClientRole, error) {
-	allowed, roleCode := s.clientRepo.CheckAccessRecursive(requesterID, clientID)
+	allowed, roleCode := s.checkAccess(requesterID, clientID)
 	if allowed && roleCode != "" {
 		switch strings.TrimPrefix(strings.ToUpper(roleCode), "INHERITED_") {
 		case "OWNER":
@@ -816,7 +1070,7 @@ func (s *ClientService) CreateClientWithLogo(
 		path, presignedURL, err := s.rs.UploadClientLogo(logoFile, logoHeader, client.ID)
 		if err != nil {
 			s.rollbackCreatedClient(client, ownerUserID, "")
-			return nil, fmt.Errorf("failed to create client logo: %w", err)
+			return nil, fmt.Errorf("%w: failed to create client logo: %w", ErrClientLogoUpload, err)
 		}
 		client.Logo = path
 		if err := s.clientRepo.UpdateClient(client); err != nil {
@@ -850,7 +1104,7 @@ func (s *ClientService) CreateClientWithLogoAsPrimaryRoot(
 	path, presignedURL, err := s.rs.UploadClientLogo(logoFile, logoHeader, client.ID)
 	if err != nil {
 		s.rollbackCreatedClient(client, ownerUserID, "")
-		return nil, fmt.Errorf("failed to create client logo: %w", err)
+		return nil, fmt.Errorf("%w: failed to create client logo: %w", ErrClientLogoUpload, err)
 	}
 	client.Logo = path
 	if err := s.clientRepo.UpdateClient(client); err != nil {
@@ -859,4 +1113,12 @@ func (s *ClientService) CreateClientWithLogoAsPrimaryRoot(
 	}
 	client.Logo = presignedURL
 	return client, nil
+}
+
+// CreatableClientTypeCodes is the package-level wrapper over the DI instance.
+func CreatableClientTypeCodes(requesterID uuid.UUID, parentID *uuid.UUID, primaryRoot bool) ([]string, error) {
+	if _clientSvc == nil {
+		return nil, fmt.Errorf("client service not initialized")
+	}
+	return _clientSvc.CreatableClientTypeCodes(requesterID, parentID, primaryRoot)
 }

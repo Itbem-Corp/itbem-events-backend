@@ -135,7 +135,7 @@ func DeleteUser(c echo.Context) error {
 
 	if err := userSvc.DeleteFullAccount(cognitoSub); err != nil {
 		if errors.Is(err, users.ErrProtectedRootAccount) {
-			return utils.Error(c, http.StatusConflict, "Protected account", err.Error())
+			return respondProtectedAccount(c)
 		}
 		return utils.Error(c, http.StatusInternalServerError, "Error deleting account", err.Error())
 	}
@@ -282,7 +282,7 @@ func UpdateUserRootLevel(c echo.Context) error {
 	if err := userSvc.SetUserRootLevel(userID, req.RootLevel); err != nil {
 		switch {
 		case errors.Is(err, users.ErrProtectedRootAccount):
-			return utils.Error(c, http.StatusConflict, "Protected account", err.Error())
+			return respondProtectedAccount(c)
 		case errors.Is(err, gorm.ErrRecordNotFound):
 			return utils.Error(c, http.StatusNotFound, "User not found", "")
 		}
@@ -303,18 +303,21 @@ func ListAllUsers(c echo.Context) error {
 	}
 	page, _ := strconv.Atoi(c.QueryParam("page"))
 	pageSize, _ := strconv.Atoi(c.QueryParam("page_size"))
-	status := c.QueryParam("status")
+	status := strings.ToLower(strings.TrimSpace(c.QueryParam("status")))
 	// A Root 2 account uses this directory to support ordinary users. It must
 	// never enumerate platform administrators, including by requesting the
-	// root-only filter explicitly.
-	if !requester.IsPrimaryRoot() {
+	// root-only filter explicitly, but its active/inactive filter must still
+	// apply (it used to be overwritten, so "Inactivos" listed active users).
+	excludeRoots := !requester.IsPrimaryRoot()
+	if excludeRoots && status == "root" {
 		status = "non_root"
 	}
 	list, err := adminSvc.ListAllUsers(dtos.AdminUsersListQuery{
-		Page:     page,
-		PageSize: pageSize,
-		Search:   c.QueryParam("search"),
-		Status:   status,
+		Page:         page,
+		PageSize:     pageSize,
+		Search:       c.QueryParam("search"),
+		Status:       status,
+		ExcludeRoots: excludeRoots,
 	})
 	if err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Error listing users", err.Error())
@@ -425,28 +428,65 @@ func UpdateUserDetail(c echo.Context) error {
 	return utils.Success(c, http.StatusOK, "User updated", dtos.NewAdminUserResponse(user))
 }
 
+// Stable error codes (in the `error` field) for guarded user actions.
+const (
+	ErrCodeUserNotFound             = "USER_NOT_FOUND"
+	ErrCodeUserSelfAction           = "USER_SELF_ACTION"
+	ErrCodeUserPrimaryRootProtected = "USER_PRIMARY_ROOT_PROTECTED"
+	ErrCodeUserHasActiveMemberships = "USER_HAS_ACTIVE_MEMBERSHIPS"
+)
+
+// respondAdminUserGuard maps the ADM-9 guard errors; it returns false when
+// err is not one of them.
+// respondProtectedAccount is the one answer for an action refused because the
+// target is a primary root (users.ErrProtectedRootAccount): 409 "Protected
+// account", the contract of #285, with the stable code
+// USER_PRIMARY_ROOT_PROTECTED in error instead of the Go error text.
+func respondProtectedAccount(c echo.Context) error {
+	return utils.Error(c, http.StatusConflict, "Protected account", ErrCodeUserPrimaryRootProtected)
+}
+
+func respondAdminUserGuard(c echo.Context, err error) bool {
+	switch {
+	case errors.Is(err, users.ErrAdminUserNotFound):
+		_ = utils.Error(c, http.StatusNotFound, "Usuario no encontrado", ErrCodeUserNotFound)
+	case errors.Is(err, users.ErrAdminCannotTargetSelf):
+		_ = utils.Error(c, http.StatusConflict, "No puedes realizar esta acción sobre tu propia cuenta", ErrCodeUserSelfAction)
+	case errors.Is(err, users.ErrProtectedRootAccount):
+		_ = respondProtectedAccount(c)
+	case errors.Is(err, users.ErrAdminUserHasActiveMembership):
+		_ = utils.Error(c, http.StatusConflict, "El usuario todavía pertenece a una o más organizaciones. Quítalo de ellas antes de eliminarlo.", ErrCodeUserHasActiveMemberships)
+	default:
+		return false
+	}
+	return true
+}
+
 func DeleteUserDetail(c echo.Context) error {
-	if !requirePrimaryRoot(c) {
-		return nil
+	requester, err := authz.RequirePrimaryRoot(c)
+	if err != nil {
+		return authz.Respond(c, err)
 	}
 	userID, err := uuid.FromString(c.Param("id"))
 	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid ID", "")
 	}
 
-	if err := adminSvc.DeleteUser(userID); err != nil {
-		if errors.Is(err, users.ErrProtectedRootAccount) {
-			return utils.Error(c, http.StatusConflict, "Protected account", err.Error())
+	if err := adminSvc.DeleteUser(requester.ID, userID); err != nil {
+		if respondAdminUserGuard(c, err) {
+			return nil
 		}
-		return utils.Error(c, http.StatusInternalServerError, "Error deleting user", err.Error())
+		slog.Error("admin user delete failed", "user_id", userID, "error", err)
+		return utils.Error(c, http.StatusInternalServerError, "Error deleting user", "No se pudo eliminar el usuario")
 	}
 
 	return utils.Success(c, http.StatusOK, "User deleted", nil)
 }
 
 func DeactivateUser(c echo.Context) error {
-	if !requireRoot(c) {
-		return nil
+	requester, err := authz.RequireRoot(c)
+	if err != nil {
+		return authz.Respond(c, err)
 	}
 	userID, err := uuid.FromString(c.Param("id"))
 	if err != nil {
@@ -456,10 +496,10 @@ func DeactivateUser(c echo.Context) error {
 		return nil
 	}
 
-	user, err := adminSvc.SetUserActive(userID, false)
+	user, err := adminSvc.DeactivateUser(requester.ID, userID)
 	if err != nil {
-		if errors.Is(err, users.ErrProtectedRootAccount) {
-			return utils.Error(c, http.StatusConflict, "Protected account", err.Error())
+		if respondAdminUserGuard(c, err) {
+			return nil
 		}
 		return utils.Error(c, http.StatusInternalServerError, "Failed to deactivate user", err.Error())
 	}

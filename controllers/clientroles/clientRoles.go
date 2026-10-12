@@ -51,7 +51,7 @@ func ListClientRoles(c echo.Context) error {
 	// Root 2 never sees Admin, Event manager or Editor.
 	myRoleCode := "OWNER"
 	if !user.IsPlatformAdmin() {
-		myRoleCode, err = clientSvc.GetEffectiveMemberRole(user.ID, clientID)
+		myRoleCode, err = clientSvc.WithApplicationScope(user.SessionApplicationCode).GetEffectiveMemberRole(user.ID, clientID)
 		if err != nil {
 			return utils.Error(c, http.StatusForbidden, "Access Denied", "You are not a member of this organization")
 		}

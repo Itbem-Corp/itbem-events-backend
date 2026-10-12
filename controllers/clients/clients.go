@@ -6,7 +6,9 @@ import (
 	"events-stocks/internal/authz"
 	"events-stocks/internal/products"
 	"events-stocks/internal/tenantresources"
+	"events-stocks/middleware/applicationaccess"
 	"events-stocks/models"
+	"events-stocks/services/applications"
 	"events-stocks/services/clients"
 	resourcesService "events-stocks/services/resources"
 	"events-stocks/services/users"
@@ -14,12 +16,27 @@ import (
 	"events-stocks/utils"
 	"github.com/gofrs/uuid"
 	"github.com/labstack/echo/v4"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 )
 
 var clientSvc *clients.ClientService
+
+// Stable error codes returned in the `error` field so the dashboard can map
+// them without parsing English or Go error text.
+const (
+	ErrCodeClientHasChildren      = "CLIENT_HAS_CHILDREN"
+	ErrCodeClientPermissionDenied = "CLIENT_PERMISSION_DENIED"
+	ErrCodeClientNotFound         = "CLIENT_NOT_FOUND"
+	ErrCodeClientTypeInvalid      = "CLIENT_TYPE_INVALID"
+	ErrCodeClientTypeNotAllowed   = "CLIENT_TYPE_NOT_ALLOWED"
+	ErrCodeClientHierarchyLimit   = "CLIENT_HIERARCHY_LIMIT"
+	ErrCodeClientParentNotFound   = "CLIENT_PARENT_NOT_FOUND"
+	ErrCodeClientCodeConflict     = "CLIENT_CODE_CONFLICT"
+	ErrCodeClientNameRequired     = "CLIENT_NAME_REQUIRED"
+)
 
 func InitClientsController(svc *clients.ClientService) {
 	clientSvc = svc
@@ -32,6 +49,21 @@ func clientServiceForContext(c echo.Context) *clients.ClientService {
 	}
 	tenantCode, _ := c.Get("tenant_code").(string)
 	return clientSvc.WithTenantScope(tenantCode, bucket)
+}
+
+// clientAuthzService is the client service for an organization check by id
+// on behalf of user: members stay inside their session application (no other
+// product's portal tree, ROLES-N2), platform admins keep their behaviour.
+func clientAuthzService(c echo.Context, user *models.User) *clients.ClientService {
+	return withApplicationScope(c, user, clientSvc)
+}
+
+func withApplicationScope(c echo.Context, user *models.User, svc *clients.ClientService) *clients.ClientService {
+	if svc == nil || user == nil || user.IsPlatformAdmin() {
+		return svc
+	}
+	tenantCode, _ := c.Get("tenant_code").(string)
+	return svc.WithApplicationScope(sessionApplicationCode(c, strings.ToLower(strings.TrimSpace(tenantCode))))
 }
 
 func operationalRootMayNotManageOrganization(c echo.Context, user *models.User) bool {
@@ -82,12 +114,12 @@ func CreateNewClient(c echo.Context) error {
 		return nil
 	}
 
-	name := c.FormValue("name")
+	name := strings.TrimSpace(c.FormValue("name"))
 	clientTypeIDStr := c.FormValue("client_type_id")
 	parentIDStr := c.FormValue("parent_id")
 
 	if name == "" {
-		return utils.Error(c, http.StatusBadRequest, "Name required", "Client name cannot be empty")
+		return utils.Error(c, http.StatusBadRequest, "El nombre de la organización es obligatorio", ErrCodeClientNameRequired)
 	}
 
 	clientTypeID, err := uuid.FromString(clientTypeIDStr)
@@ -113,24 +145,51 @@ func CreateNewClient(c echo.Context) error {
 	}
 
 	var newClient *models.Client
-	scopedClientSvc := clientServiceForContext(c)
+	scopedClientSvc := withApplicationScope(c, user, clientServiceForContext(c))
 	if user.IsPrimaryRoot() {
 		newClient, err = scopedClientSvc.CreateClientWithLogoAsPrimaryRoot(name, clientTypeID, user.ID, parentID, file, header)
 	} else {
 		newClient, err = scopedClientSvc.CreateClientWithLogo(name, clientTypeID, user.ID, parentID, file, header)
 	}
 	if err != nil {
-		if resourcesService.IsInvalidMediaFile(err) {
-			return utils.Error(c, http.StatusBadRequest, resourcesService.InvalidMediaFileMessage, resourcesService.InvalidMediaFileCode)
-		}
-		status, detail := resourcesService.UploadErrorResponse(err)
-		if validations.IsValidationError(err) {
-			return utils.Error(c, status, "Invalid logo", detail)
-		}
-		return utils.Error(c, status, "Failed to create client", detail)
+		return respondCreateClientError(c, err)
 	}
 
 	return utils.Success(c, http.StatusCreated, "Client created", dtos.NewClientResponse(newClient))
+}
+
+// respondCreateClientError maps organization-creation failures to the right
+// status. Only logo failures use the upload messages; rule violations are 4xx
+// with a Spanish message and a stable code, and anything else is a plain 500
+// that does not pretend to be an upload problem.
+func respondCreateClientError(c echo.Context, err error) error {
+	switch {
+	case errors.Is(err, clients.ErrClientPermissionDenied):
+		return utils.Error(c, http.StatusForbidden, "No tienes permiso para crear organizaciones dentro de la organización seleccionada", ErrCodeClientPermissionDenied)
+	case errors.Is(err, clients.ErrClientParentNotFound):
+		return utils.Error(c, http.StatusNotFound, "La organización superior no existe", ErrCodeClientParentNotFound)
+	case errors.Is(err, clients.ErrClientHierarchyLimit):
+		return utils.Error(c, http.StatusBadRequest, "Las organizaciones de tipo Cliente no pueden tener sub-organizaciones. La jerarquía permitida es Plataforma › Agencia › Cliente.", ErrCodeClientHierarchyLimit)
+	case errors.Is(err, clients.ErrClientChildTypeNotAllowed):
+		return utils.Error(c, http.StatusBadRequest, "Ese tipo de organización no se puede crear dentro de la organización seleccionada", ErrCodeClientTypeNotAllowed)
+	case errors.Is(err, clients.ErrClientRootTypeRequired):
+		return utils.Error(c, http.StatusBadRequest, "Una organización sin organización superior debe ser de tipo Plataforma", ErrCodeClientTypeNotAllowed)
+	case errors.Is(err, clients.ErrClientTypeInvalid):
+		return utils.Error(c, http.StatusBadRequest, "El tipo de organización no es válido", ErrCodeClientTypeInvalid)
+	case errors.Is(err, clients.ErrClientCodeConflict):
+		return utils.Error(c, http.StatusConflict, "Ya existe una organización con un identificador igual; inténtalo de nuevo con otro nombre", ErrCodeClientCodeConflict)
+	case resourcesService.IsInvalidMediaFile(err):
+		return utils.Error(c, http.StatusBadRequest, resourcesService.InvalidMediaFileMessage, resourcesService.InvalidMediaFileCode)
+	case validations.IsValidationError(err):
+		status, detail := resourcesService.UploadErrorResponse(err)
+		return utils.Error(c, status, "Invalid logo", detail)
+	case errors.Is(err, clients.ErrClientLogoUpload):
+		status, detail := resourcesService.UploadErrorResponse(err)
+		return utils.Error(c, status, "Failed to create client", detail)
+	default:
+		slog.Error("organization creation failed", "error", err)
+		return utils.Error(c, http.StatusInternalServerError, "No se pudo crear la organización", "CLIENT_CREATE_FAILED")
+	}
 }
 
 func GetClient(c echo.Context) error {
@@ -154,10 +213,10 @@ func GetClient(c echo.Context) error {
 	if user.IsPrimaryRoot() {
 		client, err = clientSvc.GetClientDetailsAsPrimaryRoot(clientID)
 	} else {
-		client, err = clientSvc.GetClientDetails(clientID, user.ID)
+		client, err = clientAuthzService(c, user).GetClientDetails(clientID, user.ID)
 	}
 	if err != nil {
-		if err.Error() == "access denied: user is not a member of this client hierarchy" {
+		if errors.Is(err, clients.ErrClientAccessDenied) {
 			return utils.Error(c, http.StatusForbidden, "Access Denied", "You do not have permission to view this organization")
 		}
 		return utils.Error(c, http.StatusInternalServerError, "Error fetching client", err.Error())
@@ -181,6 +240,14 @@ func ListMyClients(c echo.Context) error {
 	}
 	tenantCode, _ := c.Get("tenant_code").(string)
 	tenantCode = strings.ToLower(strings.TrimSpace(tenantCode))
+	// A member (not a platform admin) only lists the organizations their
+	// application session can enter: Owner/Admin inheritance stops at another
+	// product's portal organization (ROLES-N2). Platform admins keep the
+	// platform-wide list.
+	applicationCode := ""
+	if !user.IsPlatformAdmin() {
+		applicationCode = sessionApplicationCode(c, tenantCode)
+	}
 	if products.AllowsPlatformAuthority(tenantCode) {
 		tenantCode = ""
 	}
@@ -199,8 +266,9 @@ func ListMyClients(c echo.Context) error {
 		}
 		query := dtos.ClientsListQuery{
 			Page: page, PageSize: pageSize,
-			Search:     strings.TrimSpace(c.QueryParam("search")),
-			TenantCode: tenantCode,
+			Search:          strings.TrimSpace(c.QueryParam("search")),
+			TenantCode:      tenantCode,
+			ApplicationCode: applicationCode,
 		}
 		myClients, total, err := clientSvc.ListClientsPaginated(userID, query)
 		if err != nil {
@@ -217,10 +285,10 @@ func ListMyClients(c echo.Context) error {
 		})
 	}
 
-	if tenantCode != "" {
+	if tenantCode != "" || applicationCode != "" {
 		myClients, _, err := clientSvc.ListClientsPaginated(
 			&user.ID,
-			dtos.ClientsListQuery{Page: 1, PageSize: 1000, TenantCode: tenantCode},
+			dtos.ClientsListQuery{Page: 1, PageSize: 1000, TenantCode: tenantCode, ApplicationCode: applicationCode},
 		)
 		if err != nil {
 			return utils.Error(c, http.StatusInternalServerError, "Error fetching clients", err.Error())
@@ -252,6 +320,21 @@ func ListMyClients(c echo.Context) error {
 	return utils.Success(c, http.StatusOK, "User clients", dtos.NewClientResponses(myClients))
 }
 
+// sessionApplicationCode is the product of the authenticated application
+// session (set by applicationaccess.Require), falling back to the resolved
+// tenant. Empty when neither names a known product.
+func sessionApplicationCode(c echo.Context, tenantCode string) string {
+	if session, ok := c.Get(applicationaccess.ContextKey).(*applications.Session); ok && session != nil {
+		if code := strings.ToLower(strings.TrimSpace(session.Application.Code)); code != "" {
+			return code
+		}
+	}
+	if definition, ok := products.Resolve(tenantCode); ok {
+		return definition.Code.String()
+	}
+	return ""
+}
+
 func GetMySubClients(c echo.Context) error {
 	_, ok := c.Get("cognito_sub").(string)
 	if !ok {
@@ -274,10 +357,16 @@ func GetMySubClients(c echo.Context) error {
 	}
 
 	var children []models.Client
-	if user.IsPrimaryRoot() {
+	switch {
+	case user.IsPrimaryRoot():
 		children, err = clientSvc.GetClientChildrenAsPrimaryRoot(parentID)
-	} else {
+	case user.IsPlatformAdmin():
 		children, err = clientSvc.GetClientChildren(parentID, user.ID)
+	default:
+		// Members stay inside their application session: no other product's
+		// portal organizations (ROLES-N2 follow-up).
+		tenantCode, _ := c.Get("tenant_code").(string)
+		children, err = clientSvc.GetClientChildrenInApplication(parentID, user.ID, sessionApplicationCode(c, strings.ToLower(strings.TrimSpace(tenantCode))))
 	}
 	if err != nil {
 		return utils.Error(c, http.StatusForbidden, "Access Denied", "You do not have permission to view children of this organization")
@@ -318,7 +407,7 @@ func InviteUser(c echo.Context) error {
 	}
 
 	if !platformTeamManager(requester) {
-		if err := clientSvc.CanManageClientMembers(req.ClientID, requester.ID); err != nil {
+		if err := clientAuthzService(c, requester).CanManageClientMembers(req.ClientID, requester.ID); err != nil {
 			return utils.Error(c, http.StatusForbidden, "Permission Denied", "You cannot add members to this client")
 		}
 	}
@@ -326,7 +415,7 @@ func InviteUser(c echo.Context) error {
 	if platformTeamManager(requester) {
 		rolePermissionErr = clientSvc.CanAssignClientRoleAsRoot(requester, req.RoleID)
 	} else {
-		rolePermissionErr = clientSvc.CanAssignClientRole(req.ClientID, requester.ID, req.RoleID)
+		rolePermissionErr = clientAuthzService(c, requester).CanAssignClientRole(req.ClientID, requester.ID, req.RoleID)
 	}
 	if rolePermissionErr != nil {
 		return utils.Error(c, http.StatusForbidden, "Permission Denied", rolePermissionErr.Error())
@@ -392,13 +481,18 @@ func DeleteClient(c echo.Context) error {
 	if user.IsPrimaryRoot() {
 		err = clientSvc.DeleteClientAsPrimaryRoot(clientID)
 	} else {
-		err = clientSvc.DeleteClient(clientID, user.ID)
+		err = clientAuthzService(c, user).DeleteClient(clientID, user.ID)
 	}
 	if err != nil {
-		if err.Error() == "permission denied: only the owner can delete the organization" {
-			return utils.Error(c, http.StatusForbidden, "Permission Denied", err.Error())
+		switch {
+		case errors.Is(err, clients.ErrClientHasChildren):
+			return utils.Error(c, http.StatusConflict, "No se puede eliminar una organización que tiene sub-organizaciones. Elimina o mueve primero sus sub-organizaciones.", ErrCodeClientHasChildren)
+		case errors.Is(err, clients.ErrClientPermissionDenied), errors.Is(err, clients.ErrClientAccessDenied):
+			return utils.Error(c, http.StatusForbidden, "Solo el propietario puede eliminar la organización", ErrCodeClientPermissionDenied)
+		case errors.Is(err, clients.ErrClientNotFound):
+			return utils.Error(c, http.StatusNotFound, "La organización no existe", ErrCodeClientNotFound)
 		}
-		return utils.Error(c, http.StatusInternalServerError, "Error deleting client", err.Error())
+		return utils.Error(c, http.StatusInternalServerError, "Error deleting client", "No se pudo eliminar la organización")
 	}
 
 	return utils.Success(c, http.StatusOK, "Client deleted successfully", nil)
@@ -429,7 +523,7 @@ func CreateClientMember(c echo.Context) error {
 	}
 
 	if !platformTeamManager(requester) {
-		if err := clientSvc.CanManageClientMembers(req.ClientID, requester.ID); err != nil {
+		if err := clientAuthzService(c, requester).CanManageClientMembers(req.ClientID, requester.ID); err != nil {
 			return utils.Error(c, http.StatusForbidden, "Permission Denied", "You cannot add members to this client")
 		}
 	}
@@ -437,7 +531,7 @@ func CreateClientMember(c echo.Context) error {
 	if platformTeamManager(requester) {
 		rolePermissionErr = clientSvc.CanAssignClientRoleAsRoot(requester, req.RoleID)
 	} else {
-		rolePermissionErr = clientSvc.CanAssignClientRole(req.ClientID, requester.ID, req.RoleID)
+		rolePermissionErr = clientAuthzService(c, requester).CanAssignClientRole(req.ClientID, requester.ID, req.RoleID)
 	}
 	if rolePermissionErr != nil {
 		return utils.Error(c, http.StatusForbidden, "Permission Denied", rolePermissionErr.Error())
@@ -501,7 +595,7 @@ func ListClientMembers(c echo.Context) error {
 		if user.IsPlatformAdmin() {
 			members, total, listErr = clientSvc.ListClientMembersPageAsRoot(targetClientID, page, pageSize, c.QueryParam("search"))
 		} else {
-			members, total, listErr = clientSvc.ListClientMembersPage(targetClientID, user.ID, page, pageSize, c.QueryParam("search"))
+			members, total, listErr = clientAuthzService(c, user).ListClientMembersPage(targetClientID, user.ID, page, pageSize, c.QueryParam("search"))
 		}
 		if listErr != nil {
 			return utils.Error(c, http.StatusForbidden, "Access Denied", listErr.Error())
@@ -514,7 +608,7 @@ func ListClientMembers(c echo.Context) error {
 	if user.IsPlatformAdmin() {
 		members, err = clientSvc.ListClientMembersAsRoot(targetClientID)
 	} else {
-		members, err = clientSvc.ListClientMembers(targetClientID, user.ID)
+		members, err = clientAuthzService(c, user).ListClientMembers(targetClientID, user.ID)
 	}
 	if err != nil {
 		return utils.Error(c, http.StatusForbidden, "Access Denied", err.Error())
@@ -549,7 +643,7 @@ func RemoveMember(c echo.Context) error {
 	if platformTeamManager(requester) {
 		removeErr = clientSvc.RemoveClientMemberAsRoot(clientID, targetUserID)
 	} else {
-		removeErr = clientSvc.RemoveClientMember(clientID, requester.ID, targetUserID)
+		removeErr = clientAuthzService(c, requester).RemoveClientMember(clientID, requester.ID, targetUserID)
 	}
 	if removeErr != nil {
 		return utils.Error(c, http.StatusForbidden, "Operation failed", removeErr.Error())
@@ -598,7 +692,7 @@ func UpdateMemberRole(c echo.Context) error {
 	if platformTeamManager(requester) {
 		updateErr = clientSvc.UpdateClientMemberRoleAsRoot(requester, clientID, targetUserID, req.NewRoleID)
 	} else {
-		updateErr = clientSvc.UpdateClientMemberRole(clientID, requester.ID, targetUserID, req.NewRoleID)
+		updateErr = clientAuthzService(c, requester).UpdateClientMemberRole(clientID, requester.ID, targetUserID, req.NewRoleID)
 	}
 	if updateErr != nil {
 		return utils.Error(c, http.StatusForbidden, "Operation failed", updateErr.Error())
@@ -627,39 +721,34 @@ func UpdateClient(c echo.Context) error {
 
 	name := c.FormValue("name")
 	file, header, errFile := c.Request().FormFile("logo")
-
-	var logoName string
-	var shouldDeleteOld = false
-
 	if errFile == nil {
 		defer file.Close()
-		filename, err := clientServiceForContext(c).UploadClientLogo(file, header, clientID)
-		if err != nil {
-			if resourcesService.IsInvalidMediaFile(err) {
-				return utils.Error(c, http.StatusBadRequest, resourcesService.InvalidMediaFileMessage, resourcesService.InvalidMediaFileCode)
-			}
+	} else {
+		file, header = nil, nil
+	}
+	removeLogo := c.FormValue("remove_logo") == "true"
+
+	// Authorization happens inside UpdateClientWithLogo BEFORE the logo is
+	// uploaded (ADM-8): a caller without OWNER access never writes to storage.
+	res, err := withApplicationScope(c, user, clientServiceForContext(c)).UpdateClientWithLogo(clientID, user.ID, user.IsPrimaryRoot(), name, file, header, removeLogo)
+	if err != nil {
+		switch {
+		case errors.Is(err, clients.ErrClientPermissionDenied):
+			return utils.Error(c, http.StatusForbidden, "No tienes permiso para editar esta organización", ErrCodeClientPermissionDenied)
+		case errors.Is(err, clients.ErrClientNotFound):
+			return utils.Error(c, http.StatusNotFound, "La organización no existe", ErrCodeClientNotFound)
+		case resourcesService.IsInvalidMediaFile(err):
+			return utils.Error(c, http.StatusBadRequest, resourcesService.InvalidMediaFileMessage, resourcesService.InvalidMediaFileCode)
+		case validations.IsValidationError(err):
 			status, detail := resourcesService.UploadErrorResponse(err)
-			if validations.IsValidationError(err) {
-				return utils.Error(c, status, "Invalid logo", detail)
+			return utils.Error(c, status, "Invalid logo", detail)
+		default:
+			status, detail := resourcesService.UploadErrorResponse(err)
+			if status == http.StatusInternalServerError {
+				return utils.Error(c, http.StatusInternalServerError, "Update error", "No se pudo actualizar la organización")
 			}
 			return utils.Error(c, status, "Error uploading logo", detail)
 		}
-		logoName = filename
-		shouldDeleteOld = true
-	} else if c.FormValue("remove_logo") == "true" {
-		logoName = ""
-		shouldDeleteOld = true
-	}
-
-	var res *models.Client
-	scopedClientSvc := clientServiceForContext(c)
-	if user.IsPrimaryRoot() {
-		res, err = scopedClientSvc.UpdateClientDetailsAsPrimaryRoot(clientID, name, logoName, shouldDeleteOld)
-	} else {
-		res, err = scopedClientSvc.UpdateClientDetails(clientID, user.ID, name, logoName, shouldDeleteOld)
-	}
-	if err != nil {
-		return utils.Error(c, http.StatusForbidden, "Update error", err.Error())
 	}
 
 	if res.Logo != "" {

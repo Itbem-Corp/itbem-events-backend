@@ -59,6 +59,10 @@ type AdminUsersListQuery struct {
 	PageSize int
 	Search   string
 	Status   string
+	// ExcludeRoots hides platform-root accounts regardless of Status. It is set
+	// for Root 2 so its directory never lists roots while the active/inactive
+	// filter still applies.
+	ExcludeRoots bool
 }
 
 type AdminUserDetailResponse struct {
