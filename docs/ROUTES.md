@@ -176,7 +176,8 @@ Legacy v1/v2 events remain auditable but cannot authorize a v3 action.
 - `GET /api/events/:id/sections` → `eventsection.ListSectionsByEvent`
 - `POST /api/events/:id/sections` → `eventsection.CreateSection`
 - `PATCH /api/events/:id/sections/reorder` → `eventsection.ReorderSections` — Bulk reorder event sections. Body: `{"sections": [{"id": "uuid", "order": 1}]}`.
-- `PUT /api/sections/:id` → `eventsection.UpdateSection`
+- `PUT /api/sections/:id` → `eventsection.UpdateSection` — Optional `expected_updated_at` (RFC 3339, the `updated_at` the editor loaded): the update is conditional and a section changed meanwhile answers `409` `section_conflict` ("Esta sección cambió en otra pestaña o por otra persona.", code in `error` and `code`) with the current section in `data`; a malformed value is `400` `invalid_expected_updated_at`.
+- Section `config` link validation (create/update): keys ending in `url`, `urls`, `href`, `hrefs`, `link`, `links`, `src`, `website`, `websites` (case-insensitive, any depth, array items included) accept only `http`, `https`, `mailto`, `tel`, `geo` or no scheme (relative path / storage key); strings nested in objects under such a key (e.g. `socialLinks.instagram`) reject `javascript:`, `vbscript:`, `data:` and `file:`. Rejection: `400` `invalid_section_url` with a Spanish message naming the field. Stored configs are never rejected on read.
 - Update/save failures of sections, event config, cover, tables, guests, moments (also the public save), resources and users answer `500` `write_failed` ("No se pudieron guardar los cambios. Inténtalo de nuevo."); database errors are logged, never echoed.
 - `DELETE /api/sections/:id` → `eventsection.DeleteSection`
 
