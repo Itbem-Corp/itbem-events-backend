@@ -71,3 +71,45 @@ func TestCacheFlushHandlersUseRequestContext(t *testing.T) {
 		t.Fatal("FlushAll did not propagate the request context to the cache store")
 	}
 }
+
+// The DELETE routes and the deprecated GET aliases share these handlers, so
+// both stay primary-root-only: Root 2 and standard users never reach Redis.
+func TestCacheFlushHandlersRequirePrimaryRoot(t *testing.T) {
+	previousStore := store
+	t.Cleanup(func() { store = previousStore })
+
+	for name, requester := range map[string]models.User{
+		"operational root":                {RootLevel: models.RootLevelOperational},
+		"legacy is_root operational root": {IsRoot: true, RootLevel: models.RootLevelOperational},
+		"standard user":                   {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cacheStore := &recordingCacheStore{}
+			InitCacheController(cacheStore)
+			restore := authz.ReplaceHooksForTest(authz.Hooks{
+				SyncUser: func(string) (*models.User, error) {
+					user := requester
+					return &user, nil
+				},
+			})
+			t.Cleanup(restore)
+
+			for _, handler := range []echo.HandlerFunc{FlushKey, FlushAll} {
+				recorder := httptest.NewRecorder()
+				c := echo.New().NewContext(httptest.NewRequest(http.MethodDelete, "/api/cache/flush-all", nil), recorder)
+				c.Set("cognito_sub", "cache-test-sub")
+				c.SetParamNames("key")
+				c.SetParamValues("events")
+				if err := handler(c); err != nil {
+					t.Fatalf("handler returned an error: %v", err)
+				}
+				if recorder.Code != http.StatusForbidden {
+					t.Fatalf("expected 403, got %d: %s", recorder.Code, recorder.Body.String())
+				}
+			}
+			if cacheStore.deleteContext != nil || cacheStore.flushContext != nil {
+				t.Fatal("a denied flush must not reach the cache store")
+			}
+		})
+	}
+}
