@@ -457,6 +457,8 @@ func wireDependencies(cfg *models.Config) {
 		GetInvitationByIDLite: invitationRepo.GetInvitationByIDLite,
 		GetResourceByID:       resourceRepo.GetResourceByID,
 		GetEventMemberRole:    eventMemberRepo.RoleForUser,
+
+		ReachableClientIDsInApplication: clientRepo.ReachableClientIDsInApplication,
 	})
 
 	resourcesController.InitResourceController(resourceSvc, resourcesController.PublicResourceAccessDeps{

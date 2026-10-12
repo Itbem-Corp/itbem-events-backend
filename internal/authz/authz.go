@@ -27,6 +27,9 @@ type Hooks struct {
 	GetInvitationByIDLite func(invitationID uuid.UUID) (*models.Invitation, error)
 	GetResourceByID       func(resourceID uuid.UUID) (*models.Resource, error)
 	GetEventMemberRole    func(eventID, userID uuid.UUID) (role string, found bool, err error)
+	// ReachableClientIDsInApplication is the application-scoped reach used by
+	// the organization lists and the session (portal stop, ROLES-N2).
+	ReachableClientIDsInApplication func(userID uuid.UUID, applicationCode string, ids []uuid.UUID) (map[uuid.UUID]bool, error)
 }
 
 var hooks Hooks
@@ -66,6 +69,9 @@ func ReplaceHooksForTest(replacement Hooks) func() {
 	}
 	if replacement.GetEventMemberRole != nil {
 		hooks.GetEventMemberRole = replacement.GetEventMemberRole
+	}
+	if replacement.ReachableClientIDsInApplication != nil {
+		hooks.ReachableClientIDsInApplication = replacement.ReachableClientIDsInApplication
 	}
 	return func() {
 		hooks = previous
@@ -158,12 +164,21 @@ func CurrentUser(c echo.Context) (*models.User, error) {
 // A tenant app client is an authenticated organizational entry point, not a
 // cosmetic hostname. Platform-root authority exists on EventiApp and the ITBEM
 // control plane; branded customer portals use explicit memberships and roles.
+//
+// Every scoped copy also carries the session application, so organization
+// checks by id apply the same product boundary as the lists and the session.
 func scopeUserToTenant(c echo.Context, user *models.User) *models.User {
 	tenantCode, _ := c.Get("tenant_code").(string)
-	if user == nil || tenantCode == "" || products.AllowsPlatformAuthority(tenantCode) {
+	if user == nil || tenantCode == "" {
 		return user
 	}
 	scoped := *user
+	if definition, ok := products.Resolve(tenantCode); ok {
+		scoped.SessionApplicationCode = definition.Code.String()
+	}
+	if products.AllowsPlatformAuthority(tenantCode) {
+		return &scoped
+	}
 	scoped.IsRoot = false
 	scoped.RootLevel = models.RootLevelNone
 	scoped.AuthTenantCode = strings.ToLower(strings.TrimSpace(tenantCode))
@@ -236,7 +251,7 @@ func RequireClientAccess(user *models.User, clientID uuid.UUID) error {
 			Detail:  "You do not have access to this client",
 		}
 	}
-	return nil
+	return requireSessionApplicationReach(user, clientID)
 }
 
 // RequireClientCapability evaluates the effective direct or inherited client
@@ -258,6 +273,30 @@ func RequireClientCapability(user *models.User, clientID uuid.UUID, capability C
 	allowed, role := hooks.CheckAccessRecursive(user.ID, clientID)
 	if !allowed || !roleHasCapability(role, capability) {
 		return &Failure{Status: http.StatusForbidden, Message: "Access denied", Detail: "Your organization role cannot perform this action"}
+	}
+	return requireSessionApplicationReach(user, clientID)
+}
+
+// requireSessionApplicationReach keeps organization checks by id inside the
+// session application: CheckAccessRecursive follows Owner/Admin inheritance
+// into every descendant, including another application's portal tree (an
+// EventiApp platform-org Owner would reach the ITBEM or Cafetton House portal
+// orgs). The target must also be in the application-scoped reach that the
+// organization lists and the session use. Platform admins never get here.
+func requireSessionApplicationReach(user *models.User, clientID uuid.UUID) error {
+	applicationCode := strings.TrimSpace(user.SessionApplicationCode)
+	if applicationCode == "" {
+		return nil
+	}
+	if hooks.ReachableClientIDsInApplication == nil {
+		return dependencyFailure("ReachableClientIDsInApplication")
+	}
+	reachable, err := hooks.ReachableClientIDsInApplication(user.ID, applicationCode, []uuid.UUID{clientID})
+	if err != nil {
+		return &Failure{Status: http.StatusInternalServerError, Message: "Authorization error", Detail: "application reach lookup failed"}
+	}
+	if !reachable[clientID] {
+		return &Failure{Status: http.StatusForbidden, Message: "Access denied", Detail: "Client is outside the current application"}
 	}
 	return nil
 }

@@ -43,8 +43,8 @@ func configureEventiAppSession(t *testing.T, role string) {
 			"id", "code", "name", "product_label", "modules",
 			"allows_platform_admin", "is_active", "created_at", "updated_at",
 		}).AddRow(applicationID, "eventiapp", "EventiApp", "Event operations", `["home","events","metrics"]`, true, true, now, now))
-	mock.ExpectQuery(`SELECT DISTINCT\s+clients.id`).
-		WithArgs(applicationID, userID).
+	mock.ExpectQuery(`WITH RECURSIVE direct_access`).
+		WithArgs(applicationID, userID, applicationID).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "code", "logo", "access_role"}).
 			AddRow(uuid.Must(uuid.NewV4()), "Organization", "organization", "", role))
 	mock.ExpectQuery(`SELECT \* FROM "user_application_policies"`).
