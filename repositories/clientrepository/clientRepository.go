@@ -105,6 +105,17 @@ func CountUserClientStatuses(userID uuid.UUID) (dtos.UserClientCounts, error) {
 
 // ... (CreateClient, GetClientByID, UpdateClient, AddMember se quedan igual) ...
 
+// ClientCodeTaken reports whether code is used by any organization, including
+// soft-deleted rows (the unique index still holds them), or by an application.
+func ClientCodeTaken(code string) (bool, error) {
+	var taken bool
+	err := gormrepository.DB().Raw(`
+		SELECT EXISTS (SELECT 1 FROM clients WHERE LOWER(code) = LOWER(?))
+			OR EXISTS (SELECT 1 FROM applications WHERE LOWER(code) = LOWER(?))
+	`, code, code).Scan(&taken).Error
+	return taken, err
+}
+
 func CreateClient(client *models.Client) error {
 	return gormrepository.Insert(client)
 }
@@ -368,6 +379,7 @@ func NewClientRepo() *ClientRepo { return &ClientRepo{} }
 func (r *ClientRepo) CreateClient(client *models.Client) error           { return CreateClient(client) }
 func (r *ClientRepo) GetClientByID(id uuid.UUID) (*models.Client, error) { return GetClientByID(id) }
 func (r *ClientRepo) UpdateClient(client *models.Client) error           { return UpdateClient(client) }
+func (r *ClientRepo) ClientCodeTaken(code string) (bool, error)          { return ClientCodeTaken(code) }
 func (r *ClientRepo) DeleteClient(id uuid.UUID) error                    { return DeleteClient(id) }
 func (r *ClientRepo) GetAllClients() ([]models.Client, error)            { return GetAllClients() }
 func (r *ClientRepo) GetClientsByUser(userID uuid.UUID) ([]models.Client, error) {

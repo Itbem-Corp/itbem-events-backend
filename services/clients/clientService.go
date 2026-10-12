@@ -12,6 +12,7 @@ import (
 	"events-stocks/services/cacheutil"
 	"events-stocks/services/ports"
 	ResourceService "events-stocks/services/resources"
+	"events-stocks/utils"
 	"fmt"
 	"github.com/gofrs/uuid"
 	"gorm.io/gorm"
@@ -28,7 +29,20 @@ var (
 	ErrClientPermissionDenied = errors.New("permission denied")
 	ErrClientNotFound         = errors.New("client not found")
 	ErrClientHasChildren      = errors.New("cannot delete organization while it has sub-organizations")
+
+	// Creation rule errors. Each one wraps the historical English detail so
+	// existing logs and tests keep matching, while the controller maps the
+	// sentinel to a 4xx with a Spanish message instead of a generic 500.
+	ErrClientTypeInvalid         = errors.New("invalid client type")
+	ErrClientRootTypeRequired    = errors.New("root organization type required")
+	ErrClientParentNotFound      = errors.New("parent organization not found")
+	ErrClientChildTypeNotAllowed = errors.New("organization type not allowed under parent")
+	ErrClientHierarchyLimit      = errors.New("organization hierarchy limit reached")
+	ErrClientCodeConflict        = errors.New("organization code already exists")
+	ErrClientLogoUpload          = errors.New("organization logo upload failed")
 )
+
+
 
 // _clientSvc is the package-level singleton set by internal/app.
 var _clientSvc *ClientService
@@ -175,46 +189,46 @@ func (s *ClientService) CreateClientAsPrimaryRoot(name string, clientTypeID uuid
 func (s *ClientService) createClient(name string, clientTypeID uuid.UUID, ownerUserID uuid.UUID, parentID *uuid.UUID, primaryRoot bool) (*models.Client, error) {
 	requestedType, err := s.clientTypeRepo.GetByID(clientTypeID)
 	if err != nil {
-		return nil, fmt.Errorf("invalid client type id: %w", err)
+		return nil, fmt.Errorf("%w: invalid client type id: %v", ErrClientTypeInvalid, err)
 	}
 	if parentID == nil {
 		if requestedType.Code != "PLATFORM" {
-			return nil, fmt.Errorf("root clients must be of type PLATFORM")
+			return nil, fmt.Errorf("%w: root clients must be of type PLATFORM", ErrClientRootTypeRequired)
 		}
 	} else {
 		if !primaryRoot {
 			allowed, role := s.clientRepo.CheckAccessRecursive(ownerUserID, *parentID)
 			roleUpper := strings.ToUpper(role)
 			if !allowed || (roleUpper != "OWNER" && roleUpper != "INHERITED_OWNER") {
-				return nil, fmt.Errorf("permission denied: owner access required on parent organization")
+				return nil, fmt.Errorf("%w: owner access required on parent organization", ErrClientPermissionDenied)
 			}
 		}
 		parent, err := s.clientRepo.GetClientByID(*parentID)
 		if err != nil {
-			return nil, fmt.Errorf("parent client not found")
+			return nil, fmt.Errorf("%w: parent client not found", ErrClientParentNotFound)
 		}
-		switch strings.ToUpper(parent.ClientType.Code) {
-		case "PLATFORM":
-			if strings.ToUpper(requestedType.Code) != "AGENCY" {
-				return nil, fmt.Errorf("platforms can only create agencies")
+		allowedChildren := models.AllowedChildClientTypeCodes(parent.ClientType.Code)
+		if len(allowedChildren) == 0 {
+			return nil, fmt.Errorf("%w: customers cannot have sub-clients", ErrClientHierarchyLimit)
+		}
+		if !containsFold(allowedChildren, requestedType.Code) {
+			if strings.EqualFold(parent.ClientType.Code, models.ClientTypeCodePlatform) {
+				return nil, fmt.Errorf("%w: platforms can only create agencies", ErrClientChildTypeNotAllowed)
 			}
-		case "AGENCY":
-			if strings.ToUpper(requestedType.Code) != "CUSTOMER" {
-				return nil, fmt.Errorf("agencies can only create customers")
-			}
-		default:
-			return nil, fmt.Errorf("customers cannot have sub-clients")
+			return nil, fmt.Errorf("%w: agencies can only create customers", ErrClientChildTypeNotAllowed)
 		}
 	}
 	ownerRole, err := s.clientRoleRepo.GetByCode("Owner")
 	if err != nil {
 		return nil, fmt.Errorf("system configuration error: 'Owner' role not found in database")
 	}
-	slug := strings.ToLower(strings.TrimSpace(name))
-	slug = strings.ReplaceAll(slug, " ", "-")
 	clientID, err := uuid.NewV4()
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate client id: %w", err)
+	}
+	slug, err := s.uniqueClientCode(name)
+	if err != nil {
+		return nil, err
 	}
 	mediaBucket := ""
 	if s.rs != nil {
@@ -241,10 +255,16 @@ func (s *ClientService) createClient(name string, clientTypeID uuid.UUID, ownerU
 			}
 			return tx.Create(member).Error
 		}); err != nil {
+			if isUniqueViolation(err) {
+				return nil, fmt.Errorf("%w: %v", ErrClientCodeConflict, err)
+			}
 			return nil, fmt.Errorf("failed to create client and assign owner: %w", err)
 		}
 	} else {
 		if err := s.clientRepo.CreateClient(client); err != nil {
+			if isUniqueViolation(err) {
+				return nil, fmt.Errorf("%w: %v", ErrClientCodeConflict, err)
+			}
 			return nil, err
 		}
 		if err := s.clientRepo.AddMember(member); err != nil {
@@ -253,6 +273,99 @@ func (s *ClientService) createClient(name string, clientTypeID uuid.UUID, ownerU
 	}
 	s.invalidateMyClients(ownerUserID)
 	return client, nil
+}
+
+// CreatableClientTypeCodes returns the organization type codes the requester
+// may create. With a parent it is exactly the types allowed under that parent
+// (after the same Owner check as creation). Without a parent, a primary root
+// gets every type, and anybody else gets the union of the types they
+// may create under every organization they own (directly or inherited), so an
+// Agency owner is offered "Customer", never "Platform".
+func (s *ClientService) CreatableClientTypeCodes(requesterID uuid.UUID, parentID *uuid.UUID, primaryRoot bool) ([]string, error) {
+	if parentID != nil {
+		if !primaryRoot {
+			allowed, role := s.clientRepo.CheckAccessRecursive(requesterID, *parentID)
+			roleUpper := strings.ToUpper(role)
+			if !allowed || (roleUpper != "OWNER" && roleUpper != "INHERITED_OWNER") {
+				return nil, fmt.Errorf("%w: owner access required on parent organization", ErrClientPermissionDenied)
+			}
+		}
+		parent, err := s.clientRepo.GetClientByID(*parentID)
+		if err != nil {
+			return nil, fmt.Errorf("%w: parent client not found", ErrClientParentNotFound)
+		}
+		return models.AllowedChildClientTypeCodes(parent.ClientType.Code), nil
+	}
+	if primaryRoot {
+		// Root 1 provisions every level; the parent is validated on create.
+		return []string{models.ClientTypeCodePlatform, models.ClientTypeCodeAgency, models.ClientTypeCodeCustomer}, nil
+	}
+	owned, _, err := s.clientRepo.ListClientsPaginated(&requesterID, dtos.ClientsListQuery{Page: 1, PageSize: 1000})
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]struct{}{}
+	codes := make([]string, 0, 2)
+	for _, client := range owned {
+		role := strings.ToUpper(client.AccessRole)
+		if role != "OWNER" && role != "INHERITED_OWNER" {
+			continue
+		}
+		for _, code := range models.AllowedChildClientTypeCodes(client.ClientType.Code) {
+			if _, ok := seen[code]; !ok {
+				seen[code] = struct{}{}
+				codes = append(codes, code)
+			}
+		}
+	}
+	return codes, nil
+}
+
+// maxClientCodeAttempts bounds the numbered-suffix search for a free code.
+const maxClientCodeAttempts = 50
+
+// uniqueClientCode derives the organization's stable code from its name and,
+// when the repository can check it, appends "-2", "-3"... until the code is
+// free (also avoiding application codes, which carry product meaning). The
+// unique index stays the final guard; a lost race is ErrClientCodeConflict.
+func (s *ClientService) uniqueClientCode(name string) (string, error) {
+	base := utils.Slugify(name)
+	if base == "" {
+		base = "organizacion"
+	}
+	checker, ok := s.clientRepo.(ports.ClientCodeRepository)
+	if !ok {
+		return base, nil
+	}
+	candidate := base
+	for attempt := 2; attempt <= maxClientCodeAttempts+1; attempt++ {
+		taken, err := checker.ClientCodeTaken(candidate)
+		if err != nil {
+			return "", fmt.Errorf("check organization code: %w", err)
+		}
+		if !taken {
+			return candidate, nil
+		}
+		candidate = fmt.Sprintf("%s-%d", base, attempt)
+	}
+	return "", fmt.Errorf("%w: no free code for %q", ErrClientCodeConflict, base)
+}
+
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "duplicate key value") || strings.Contains(message, "SQLSTATE 23505")
+}
+
+func containsFold(values []string, expected string) bool {
+	for _, value := range values {
+		if strings.EqualFold(value, expected) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *ClientService) GetClientDetails(clientID, userID uuid.UUID) (*models.Client, error) {
@@ -306,10 +419,11 @@ func (s *ClientService) updateClientDetails(
 	}
 	oldLogo := client.Logo
 	oldMediaBucket := client.MediaBucket
+	// The code is a stable identifier: it is matched against application
+	// codes (membership application resolution) and used by integrations, so
+	// renaming an organization changes only its display name.
 	if trimmedName := strings.TrimSpace(name); trimmedName != "" {
 		client.Name = trimmedName
-		slug := strings.ToLower(trimmedName)
-		client.Code = strings.ReplaceAll(slug, " ", "-")
 	}
 	if shouldDeleteOld || logoName != "" {
 		client.Logo = logoName
@@ -887,7 +1001,7 @@ func (s *ClientService) CreateClientWithLogo(
 		path, presignedURL, err := s.rs.UploadClientLogo(logoFile, logoHeader, client.ID)
 		if err != nil {
 			s.rollbackCreatedClient(client, ownerUserID, "")
-			return nil, fmt.Errorf("failed to create client logo: %w", err)
+			return nil, fmt.Errorf("%w: failed to create client logo: %w", ErrClientLogoUpload, err)
 		}
 		client.Logo = path
 		if err := s.clientRepo.UpdateClient(client); err != nil {
@@ -921,7 +1035,7 @@ func (s *ClientService) CreateClientWithLogoAsPrimaryRoot(
 	path, presignedURL, err := s.rs.UploadClientLogo(logoFile, logoHeader, client.ID)
 	if err != nil {
 		s.rollbackCreatedClient(client, ownerUserID, "")
-		return nil, fmt.Errorf("failed to create client logo: %w", err)
+		return nil, fmt.Errorf("%w: failed to create client logo: %w", ErrClientLogoUpload, err)
 	}
 	client.Logo = path
 	if err := s.clientRepo.UpdateClient(client); err != nil {
@@ -930,4 +1044,12 @@ func (s *ClientService) CreateClientWithLogoAsPrimaryRoot(
 	}
 	client.Logo = presignedURL
 	return client, nil
+}
+
+// CreatableClientTypeCodes is the package-level wrapper over the DI instance.
+func CreatableClientTypeCodes(requesterID uuid.UUID, parentID *uuid.UUID, primaryRoot bool) ([]string, error) {
+	if _clientSvc == nil {
+		return nil, fmt.Errorf("client service not initialized")
+	}
+	return _clientSvc.CreatableClientTypeCodes(requesterID, parentID, primaryRoot)
 }

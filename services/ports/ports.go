@@ -375,6 +375,14 @@ type ClientRepository interface {
 	CountClientsByUsers(userIDs []uuid.UUID) (map[uuid.UUID]int64, error)
 }
 
+// ClientCodeRepository is optionally implemented by a ClientRepository to
+// report whether an organization code is already used by an organization
+// (including soft-deleted ones, which keep their unique index entry) or by an
+// application.
+type ClientCodeRepository interface {
+	ClientCodeTaken(code string) (bool, error)
+}
+
 type ClientMembersPageRepository interface {
 	ListMembersPage(clientID uuid.UUID, page, pageSize int, search string) ([]models.ClientMember, int64, error)
 }

@@ -14,6 +14,7 @@ import (
 	"events-stocks/utils"
 	"github.com/gofrs/uuid"
 	"github.com/labstack/echo/v4"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -27,6 +28,12 @@ const (
 	ErrCodeClientHasChildren      = "CLIENT_HAS_CHILDREN"
 	ErrCodeClientPermissionDenied = "CLIENT_PERMISSION_DENIED"
 	ErrCodeClientNotFound         = "CLIENT_NOT_FOUND"
+	ErrCodeClientTypeInvalid      = "CLIENT_TYPE_INVALID"
+	ErrCodeClientTypeNotAllowed   = "CLIENT_TYPE_NOT_ALLOWED"
+	ErrCodeClientHierarchyLimit   = "CLIENT_HIERARCHY_LIMIT"
+	ErrCodeClientParentNotFound   = "CLIENT_PARENT_NOT_FOUND"
+	ErrCodeClientCodeConflict     = "CLIENT_CODE_CONFLICT"
+	ErrCodeClientNameRequired     = "CLIENT_NAME_REQUIRED"
 )
 
 func InitClientsController(svc *clients.ClientService) {
@@ -90,12 +97,12 @@ func CreateNewClient(c echo.Context) error {
 		return nil
 	}
 
-	name := c.FormValue("name")
+	name := strings.TrimSpace(c.FormValue("name"))
 	clientTypeIDStr := c.FormValue("client_type_id")
 	parentIDStr := c.FormValue("parent_id")
 
 	if name == "" {
-		return utils.Error(c, http.StatusBadRequest, "Name required", "Client name cannot be empty")
+		return utils.Error(c, http.StatusBadRequest, "El nombre de la organización es obligatorio", ErrCodeClientNameRequired)
 	}
 
 	clientTypeID, err := uuid.FromString(clientTypeIDStr)
@@ -128,14 +135,42 @@ func CreateNewClient(c echo.Context) error {
 		newClient, err = scopedClientSvc.CreateClientWithLogo(name, clientTypeID, user.ID, parentID, file, header)
 	}
 	if err != nil {
-		status, detail := resourcesService.UploadErrorResponse(err)
-		if validations.IsValidationError(err) {
-			return utils.Error(c, status, "Invalid logo", detail)
-		}
-		return utils.Error(c, status, "Failed to create client", detail)
+		return respondCreateClientError(c, err)
 	}
 
 	return utils.Success(c, http.StatusCreated, "Client created", dtos.NewClientResponse(newClient))
+}
+
+// respondCreateClientError maps organization-creation failures to the right
+// status. Only logo failures use the upload messages; rule violations are 4xx
+// with a Spanish message and a stable code, and anything else is a plain 500
+// that does not pretend to be an upload problem.
+func respondCreateClientError(c echo.Context, err error) error {
+	switch {
+	case errors.Is(err, clients.ErrClientPermissionDenied):
+		return utils.Error(c, http.StatusForbidden, "No tienes permiso para crear organizaciones dentro de la organización seleccionada", ErrCodeClientPermissionDenied)
+	case errors.Is(err, clients.ErrClientParentNotFound):
+		return utils.Error(c, http.StatusNotFound, "La organización superior no existe", ErrCodeClientParentNotFound)
+	case errors.Is(err, clients.ErrClientHierarchyLimit):
+		return utils.Error(c, http.StatusBadRequest, "Las organizaciones de tipo Cliente no pueden tener sub-organizaciones. La jerarquía permitida es Plataforma › Agencia › Cliente.", ErrCodeClientHierarchyLimit)
+	case errors.Is(err, clients.ErrClientChildTypeNotAllowed):
+		return utils.Error(c, http.StatusBadRequest, "Ese tipo de organización no se puede crear dentro de la organización seleccionada", ErrCodeClientTypeNotAllowed)
+	case errors.Is(err, clients.ErrClientRootTypeRequired):
+		return utils.Error(c, http.StatusBadRequest, "Una organización sin organización superior debe ser de tipo Plataforma", ErrCodeClientTypeNotAllowed)
+	case errors.Is(err, clients.ErrClientTypeInvalid):
+		return utils.Error(c, http.StatusBadRequest, "El tipo de organización no es válido", ErrCodeClientTypeInvalid)
+	case errors.Is(err, clients.ErrClientCodeConflict):
+		return utils.Error(c, http.StatusConflict, "Ya existe una organización con un identificador igual; inténtalo de nuevo con otro nombre", ErrCodeClientCodeConflict)
+	case validations.IsValidationError(err):
+		status, detail := resourcesService.UploadErrorResponse(err)
+		return utils.Error(c, status, "Invalid logo", detail)
+	case errors.Is(err, clients.ErrClientLogoUpload):
+		status, detail := resourcesService.UploadErrorResponse(err)
+		return utils.Error(c, status, "Failed to create client", detail)
+	default:
+		slog.Error("organization creation failed", "error", err)
+		return utils.Error(c, http.StatusInternalServerError, "No se pudo crear la organización", "CLIENT_CREATE_FAILED")
+	}
 }
 
 func GetClient(c echo.Context) error {
