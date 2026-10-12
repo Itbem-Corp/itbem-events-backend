@@ -185,8 +185,14 @@ func (p EventPayload) ApplyTo(event *models.Event) error {
 	}
 	if p.Timezone != nil {
 		timezone := strings.TrimSpace(*p.Timezone)
-		if err := ValidateEventTimezone(timezone); err != nil {
-			return fieldError("timezone", err)
+		// Only a new or changed zone is validated: a stored legacy value that
+		// PostgreSQL accepts but Go does not (lower-case IANA name, POSIX
+		// "UTC+5") is sent back unchanged by every dashboard save and must
+		// keep saving.
+		if timezone != strings.TrimSpace(event.Timezone) {
+			if err := ValidateEventTimezone(timezone); err != nil {
+				return fieldError("timezone", err)
+			}
 		}
 		event.Timezone = timezone
 	}

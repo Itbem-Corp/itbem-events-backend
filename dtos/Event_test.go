@@ -268,6 +268,23 @@ func TestEventPayloadApplyToRejectsInvalidTimezone(t *testing.T) {
 	assert.Equal(t, "America/Mexico_City", event.Timezone, "the stored value must not change")
 }
 
+// Review M4: values PostgreSQL accepts but Go rejects survive the boot repair;
+// sending them back unchanged must keep saving, changing to one must not.
+func TestEventPayloadApplyToKeepsUnchangedLegacyTimezone(t *testing.T) {
+	for _, legacy := range []string{"america/mexico_city", "UTC+5"} {
+		require.Error(t, ValidateEventTimezone(legacy), legacy)
+		var payload EventPayload
+		require.NoError(t, json.Unmarshal([]byte(`{"timezone":"`+legacy+`","name":"Boda"}`), &payload))
+		event := models.Event{Timezone: legacy}
+		require.NoError(t, payload.ApplyTo(&event), legacy)
+		assert.Equal(t, legacy, event.Timezone)
+		assert.Equal(t, "Boda", event.Name)
+
+		changed := models.Event{Timezone: "America/Mexico_City"}
+		assert.ErrorIs(t, payload.ApplyTo(&changed), ErrInvalidEventTimezone, legacy)
+	}
+}
+
 func TestEventPayloadApplyToCapsNewEventName(t *testing.T) {
 	long := strings.Repeat("a", EventNameMaxChars+1)
 	var event models.Event
