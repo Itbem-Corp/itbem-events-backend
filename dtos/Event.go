@@ -307,6 +307,9 @@ type EventResponse struct {
 	EventSections                []EventSectionResponse `json:"event_sections"`
 	CreatedAt                    time.Time              `json:"created_at"`
 	UpdatedAt                    time.Time              `json:"updated_at"`
+	// ViewerAccess tells a non-root caller of a user-scoped list how it sees
+	// the row: "organization" or "event_client". Omitted otherwise.
+	ViewerAccess string `json:"viewer_access,omitempty"`
 }
 
 type StudioWorkspaceResponse struct {

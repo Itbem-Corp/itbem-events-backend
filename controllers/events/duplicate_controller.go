@@ -33,6 +33,15 @@ func DuplicateEvent(c echo.Context) error {
 		return authz.Respond(c, authErr)
 	}
 
+	// Duplicating copies design and media out of the source event, so it needs
+	// organization-level event:manage on the source organization: an
+	// event-client grant can never export an event into another organization.
+	if existing.ClientID != nil {
+		if err := authz.RequireClientCapability(user, *existing.ClientID, authz.CapabilityEventManage); err != nil {
+			return authz.Respond(c, err)
+		}
+	}
+
 	var payload dtos.EventPayload
 	if err := c.Bind(&payload); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
