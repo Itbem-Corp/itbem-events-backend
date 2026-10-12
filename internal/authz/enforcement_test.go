@@ -154,13 +154,6 @@ func newEnforcementRequest(session PolicyCeilingSource) echo.Context {
 	return c
 }
 
-func failureStatus(t *testing.T, err error) int {
-	t.Helper()
-	var failure *Failure
-	require.True(t, errors.As(err, &failure), "expected *Failure, got %v", err)
-	return failure.Status
-}
-
 func captureLogs(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	buffer := &bytes.Buffer{}
