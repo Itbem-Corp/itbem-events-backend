@@ -110,7 +110,9 @@ func updateResultError(result *gorm.DB) error {
 		return result.Error
 	}
 	if result.RowsAffected == 0 {
-		return errors.New("record not found")
+		// gorm.ErrRecordNotFound ("record not found", same text as before) so
+		// callers can use errors.Is instead of matching the message.
+		return gorm.ErrRecordNotFound
 	}
 	return nil
 }

@@ -68,6 +68,9 @@ func TestUpdateStillReportsRecordNotFoundWhenNoRowMatches(t *testing.T) {
 	if err == nil || err.Error() != "record not found" {
 		t.Fatalf("expected record not found, got %v", err)
 	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("expected the gorm.ErrRecordNotFound sentinel, got %v", err)
+	}
 }
 
 func TestUpdateFieldsByIDReturnsDatabaseErrorFirst(t *testing.T) {
