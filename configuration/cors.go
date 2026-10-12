@@ -49,7 +49,9 @@ func GetCORSConfig(cfg *models.Config) echo.MiddlewareFunc {
 			requestcontract.HeaderOrganizationID,
 			requestcontract.HeaderOrganizationContext,
 		},
-		ExposeHeaders: []string{"Idempotency-Replayed", "Idempotency-Status"},
+		// Retry-After lets the public site and dashboard show when a 429/503 can
+		// be retried (rate limits, password attempts, upload quota).
+		ExposeHeaders: []string{"Idempotency-Replayed", "Idempotency-Status", echo.HeaderRetryAfter},
 		AllowMethods: []string{
 			http.MethodGet,
 			http.MethodPost,

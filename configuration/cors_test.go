@@ -166,3 +166,13 @@ func TestGetCORSConfigAllowsUploadDeviceIDHeader(t *testing.T) {
 		}
 	}
 }
+
+func TestGetCORSConfigExposesRetryAfter(t *testing.T) {
+	e := newCORSTestServer(&models.Config{})
+
+	rec := performCORSRequest(e, "https://eventiapp.com.mx")
+
+	if got := rec.Header().Get(echo.HeaderAccessControlExposeHeaders); !strings.Contains(got, echo.HeaderRetryAfter) {
+		t.Fatalf("expected Retry-After in exposed headers, got %q", got)
+	}
+}
