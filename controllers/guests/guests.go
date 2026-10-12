@@ -143,7 +143,7 @@ func GetCheckinWorkspace(c echo.Context) error {
 		return authz.Respond(c, authErr)
 	}
 
-	query := dtos.CheckinGuestsListQuery{Page: 1, PageSize: 60, Filter: "ALL", SkipTotal: true}
+	query := dtos.CheckinGuestsListQuery{Page: 1, PageSize: 60, Filter: "ALL", SkipTotal: true, DoorSearch: true}
 	var pageGuests []models.Guest
 	var total int64
 	var summary dtos.GuestSummary
@@ -283,6 +283,8 @@ func GetGuests(c echo.Context) error {
 		query := dtos.CheckinGuestsListQuery{
 			Page: page, PageSize: pageSize, Search: c.QueryParam("search"), Filter: c.QueryParam("filter"), QR: c.QueryParam("qr"),
 			Sort: c.QueryParam("sort"), Direction: c.QueryParam("direction"),
+			// checkin:run never sees contact data, so it cannot search it by substring either.
+			DoorSearch: checkinView,
 		}
 		var guests []models.Guest
 		var total int64

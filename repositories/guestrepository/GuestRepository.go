@@ -86,32 +86,80 @@ func ListGuestsByEventID(eventID uuid.UUID) ([]models.Guest, error) {
 	return list, err
 }
 
-func ListCheckinGuests(eventID uuid.UUID, query dtos.CheckinGuestsListQuery) ([]models.Guest, int64, error) {
-	statusExpr := "LOWER(BTRIM(COALESCE(NULLIF(BTRIM(guests.rsvp_status), ''), \"GuestStatus\".code, 'pending')))"
-	baseQuery := func() *gorm.DB {
-		base := configuration.DB.Model(&models.Guest{}).
-			Joins("LEFT JOIN invitation_access_tokens ON invitation_access_tokens.invitation_id = guests.invitation_id").
-			Joins("LEFT JOIN invitations ON invitations.id = guests.invitation_id AND invitations.deleted_at IS NULL").
-			Joins("GuestStatus").
-			Joins("Table").
-			Where("guests.event_id = ?", eventID)
+const checkinStatusExpr = "LOWER(BTRIM(COALESCE(NULLIF(BTRIM(guests.rsvp_status), ''), \"GuestStatus\".code, 'pending')))"
 
-		if qr := strings.TrimSpace(query.QR); qr != "" {
-			base = base.Where("CAST(guests.id AS TEXT) = ? OR invitation_access_tokens.pretty_token = ?", qr, qr)
-		} else if search := strings.TrimSpace(query.Search); search != "" {
+// checkinGuestsBaseQuery is the filter shared by the check-in list, the
+// guest-manager pages (page:, invitations:) and the CSV export.
+func checkinGuestsBaseQuery(db *gorm.DB, eventID uuid.UUID, query dtos.CheckinGuestsListQuery) *gorm.DB {
+	base := db.Model(&models.Guest{}).
+		Joins("LEFT JOIN invitation_access_tokens ON invitation_access_tokens.invitation_id = guests.invitation_id").
+		Joins("LEFT JOIN invitations ON invitations.id = guests.invitation_id AND invitations.deleted_at IS NULL").
+		Joins("GuestStatus").
+		Joins("Table").
+		Where("guests.event_id = ?", eventID)
+
+	if qr := strings.TrimSpace(query.QR); qr != "" {
+		base = base.Where("CAST(guests.id AS TEXT) = ? OR invitation_access_tokens.pretty_token = ?", qr, qr)
+	} else if search := strings.TrimSpace(query.Search); search != "" {
+		if query.DoorSearch {
+			base = whereDoorGuestSearch(base, search)
+		} else {
 			pattern := "%" + strings.ToLower(search) + "%"
 			base = base.Where(`LOWER(CONCAT_WS(' ', guests.first_name, guests.last_name, guests.email, guests.phone, guests.table_number, "Table".name)) LIKE ?`, pattern)
 		}
+	}
 
-		switch strings.ToUpper(strings.TrimSpace(query.Filter)) {
-		case "CONFIRMED":
-			base = base.Where(statusExpr + " = 'confirmed'")
-		case "PENDING":
-			base = base.Where(statusExpr + " = 'pending'")
-		case "DECLINED":
-			base = base.Where(statusExpr + " = 'declined'")
+	switch strings.ToUpper(strings.TrimSpace(query.Filter)) {
+	case "CONFIRMED":
+		base = base.Where(checkinStatusExpr + " = 'confirmed'")
+	case "PENDING":
+		base = base.Where(checkinStatusExpr + " = 'pending'")
+	case "DECLINED":
+		base = base.Where(checkinStatusExpr + " = 'declined'")
+	}
+	return base
+}
+
+// likeEscaper makes \ % and _ match themselves in a LIKE ... ESCAPE '\' pattern.
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
+// whereDoorGuestSearch is the search of the check-in surfaces. Their callers
+// (checkin:run, door-only roles included) never see email or phone, so only
+// the name and the table match by substring; email and phone match only their
+// complete value, and the search cannot read them back one character at a time.
+func whereDoorGuestSearch(base *gorm.DB, search string) *gorm.DB {
+	conditions := []string{
+		`LOWER(CONCAT_WS(' ', guests.first_name, guests.last_name, guests.table_number, "Table".name)) LIKE ? ESCAPE '\'`,
+		"LOWER(BTRIM(guests.email)) = LOWER(?)",
+	}
+	args := []interface{}{"%" + likeEscaper.Replace(strings.ToLower(search)) + "%", search}
+	if digits := phoneSearchDigits(search); digits != "" {
+		conditions = append(conditions, "regexp_replace(guests.phone, '[^0-9]', '', 'g') = ?")
+		args = append(args, digits)
+	}
+	return base.Where("("+strings.Join(conditions, " OR ")+")", args...)
+}
+
+// phoneSearchDigits returns the digits of a search written as a phone number
+// (digits, spaces and + - . ( ) only), or "" for any other search.
+func phoneSearchDigits(search string) string {
+	var digits strings.Builder
+	for _, r := range search {
+		switch {
+		case r >= '0' && r <= '9':
+			digits.WriteRune(r)
+		case r == ' ' || r == '+' || r == '-' || r == '.' || r == '(' || r == ')':
+		default:
+			return ""
 		}
-		return base
+	}
+	return digits.String()
+}
+
+func ListCheckinGuests(eventID uuid.UUID, query dtos.CheckinGuestsListQuery) ([]models.Guest, int64, error) {
+	statusExpr := checkinStatusExpr
+	baseQuery := func() *gorm.DB {
+		return checkinGuestsBaseQuery(configuration.DB, eventID, query)
 	}
 
 	var total int64

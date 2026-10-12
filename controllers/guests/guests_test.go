@@ -1677,14 +1677,17 @@ func (m *checkinStatusRepo) ListGuestStatuss() ([]models.GuestStatus, error) {
 var _ ports.GuestStatusRepository = (*checkinStatusRepo)(nil)
 
 // doorCheckinGuestRepo returns one fully populated guest and records whether
-// the list was loaded, so denied callers can be shown to load nothing.
+// the list was loaded, so denied callers can be shown to load nothing, and the
+// query it was loaded with.
 type doorCheckinGuestRepo struct {
 	checkinSummaryGuestRepo
 	listed bool
+	query  dtos.CheckinGuestsListQuery
 }
 
 func (m *doorCheckinGuestRepo) ListCheckinGuests(eventID uuid.UUID, query dtos.CheckinGuestsListQuery) ([]models.Guest, int64, error) {
 	m.listed = true
+	m.query = query
 	return m.checkinSummaryGuestRepo.ListCheckinGuests(eventID, query)
 }
 
@@ -1883,4 +1886,55 @@ func TestGetGuests_GuestManagerListsKeepFullRecord(t *testing.T) {
 			assert.Contains(t, rec.Body.String(), `"pretty_token":"PRETTY42"`)
 		})
 	}
+}
+
+// The check-in surfaces search with the door search (email and phone only by
+// their complete value); the guest-manager lists and the CSV export keep the
+// substring search over contact data, which their callers already see.
+func TestGuestLists_OnlyCheckinSurfacesUseDoorSearch(t *testing.T) {
+	for _, tc := range []struct {
+		prefix string
+		door   bool
+	}{{"checkin:", true}, {"page:", false}, {"invitations:", false}} {
+		t.Run(tc.prefix, func(t *testing.T) {
+			eventID := uuid.Must(uuid.NewV4())
+			repo := newDoorCheckinGuestRepo(eventID)
+			withDoorCheckinServices(t, repo)
+
+			c, rec := newEchoCtx(http.MethodGet, "/guests/"+tc.prefix+eventID.String()+"?page=1&page_size=50&search=ana%40gmail.com", "")
+			c.SetParamNames("key")
+			c.SetParamValues(tc.prefix + eventID.String())
+			setCheckinAuth(t, c, checkinAuth{orgRole: "EVENT_MANAGER"})
+
+			require.NoError(t, GetGuests(c))
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			require.True(t, repo.listed)
+			assert.Equal(t, "ana@gmail.com", repo.query.Search)
+			assert.Equal(t, tc.door, repo.query.DoorSearch)
+		})
+	}
+
+	t.Run("check-in workspace", func(t *testing.T) {
+		rec, repo := runCheckinWorkspace(t, checkinAuth{orgRole: "CHECKIN"})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		require.True(t, repo.listed)
+		assert.True(t, repo.query.DoorSearch)
+	})
+
+	t.Run("csv export", func(t *testing.T) {
+		eventID := uuid.Must(uuid.NewV4())
+		repo := newDoorCheckinGuestRepo(eventID)
+		withDoorCheckinServices(t, repo)
+
+		c, rec := newEchoCtx(http.MethodGet, "/events/"+eventID.String()+"/guests/export?search=ana%40gmail.com", "")
+		c.SetParamNames("id")
+		c.SetParamValues(eventID.String())
+		setCheckinAuth(t, c, checkinAuth{orgRole: "EVENT_MANAGER"})
+
+		require.NoError(t, ExportGuestsCSV(c))
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		require.True(t, repo.listed)
+		assert.Equal(t, "ana@gmail.com", repo.query.Search)
+		assert.False(t, repo.query.DoorSearch)
+	})
 }

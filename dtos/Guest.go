@@ -63,6 +63,10 @@ type CheckinGuestsListQuery struct {
 	// SkipTotal is reserved for composed workspace loads that obtain the
 	// authoritative total from the event summary in the same response.
 	SkipTotal bool
+	// DoorSearch is set only by the check-in surfaces (checkin:run), whose
+	// callers never see contact data: Search then matches name and table by
+	// substring, and email and phone only by their complete value.
+	DoorSearch bool
 }
 
 type CheckinGuestsPageResponse struct {
