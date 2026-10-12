@@ -283,7 +283,7 @@ func ListEvents(c echo.Context) error {
 		if err != nil {
 			return utils.Error(c, http.StatusBadRequest, "Invalid client_id", err.Error())
 		}
-		if err := authz.RequireClientAccess(user, clientID); err != nil {
+		if err := authz.RequireEventListAccess(user, clientID); err != nil {
 			return authz.Respond(c, err)
 		}
 		events, err := eventSvc.ListEventsByClientID(clientID)
@@ -345,7 +345,7 @@ func listEventPage(c echo.Context, user *models.User) error {
 		if parseErr != nil {
 			return utils.Error(c, http.StatusBadRequest, "Invalid client_id", parseErr.Error())
 		}
-		if accessErr := authz.RequireClientAccess(user, parsedClientID); accessErr != nil {
+		if accessErr := authz.RequireEventListAccess(user, parsedClientID); accessErr != nil {
 			return authz.Respond(c, accessErr)
 		}
 		clientID = &parsedClientID
@@ -402,7 +402,7 @@ func GetDashboardOverview(c echo.Context) error {
 		if parseErr != nil {
 			return utils.Error(c, http.StatusBadRequest, "Invalid client_id", parseErr.Error())
 		}
-		if accessErr := authz.RequireClientAccess(user, parsedClientID); accessErr != nil {
+		if accessErr := authz.RequireEventListAccess(user, parsedClientID); accessErr != nil {
 			return authz.Respond(c, accessErr)
 		}
 		clientID = &parsedClientID
@@ -434,7 +434,7 @@ func GetEventNotifications(c echo.Context) error {
 		if parseErr != nil {
 			return utils.Error(c, http.StatusBadRequest, "Invalid client_id", parseErr.Error())
 		}
-		if accessErr := authz.RequireClientAccess(user, parsed); accessErr != nil {
+		if accessErr := authz.RequireEventListAccess(user, parsed); accessErr != nil {
 			return authz.Respond(c, accessErr)
 		}
 		clientID = &parsed
