@@ -111,7 +111,8 @@ func uploadCoverSynchronously(c echo.Context, file multipart.File, header *multi
 }
 
 // BackfillEventCovers queues legacy covers without responsive variants. It is
-// root-only, bounded, and idempotent: terminal done rows are never selected.
+// primary-root-only (level 1), bounded, and idempotent: terminal done rows
+// are never selected.
 func BackfillEventCovers(c echo.Context) error {
 	// The candidate scan is global and requeues covers for every tenant, so
 	// it is platform governance (level 1), not operational support (level 2).
