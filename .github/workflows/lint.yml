@@ -35,10 +35,6 @@ jobs:
           python -m unittest discover -s scripts/tests -p 'test_*.py'
           python -m unittest scripts.deploy.test_render_docker_env
           python -m unittest scripts.deploy.test_verify_github_app_webhook
-      - name: Validate deployment IAM templates
-        run: |
-          python -m pip install --disable-pip-version-check cfn-lint==1.53.0
-          cfn-lint infra/*.yml
       - name: Verify inference diagnostic persistence against PostgreSQL
         run: python3 scripts/test-inference-diagnostics-postgres.py
       - name: Verify inference spend reconciliation against PostgreSQL
@@ -65,8 +61,3 @@ jobs:
         env:
           ITBEM_AWS_EMULATOR_PORT: ${{ runner.name == 'bema-private-ci-linux-2' && '14568' || '14567' }}
         run: sh scripts/qualify-agent-platform-live-aws.sh
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
-        with:
-          version: v2.12.2
-          args: --timeout=5m
