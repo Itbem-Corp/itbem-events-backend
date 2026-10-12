@@ -35,6 +35,8 @@ itbem-events-backend/
 | `internal/aicredentials/bundle.go` | Strict, cached, versioned provider credential-bundle schema; never serialize values from this package. |
 | `internal/aicredentials/environment.go` | Selects the local ignored test bundle or deployed Secrets Manager boundary; cross-environment stores are rejected before AWS initialization. |
 | `internal/authz/authz.go` | Shared user/event/client/resource authorization helpers |
+| `internal/authz/enforcement.go` | Product entitlement and policy ceiling (off/shadow/enforce), per-request lookup memo, shadow-denial logging |
+| `internal/capabilities/vocabulary.go` | Single capability vocabulary: authz names, session projection, role table, policy allow-list (leaf package) |
 | `controllers/automation/cost_filters.go` | Validates and applies authorization-preserving server-side cost filters and keyset cursors |
 | `routes/routes.go` | All API routes — `ConfigurarRutas` |
 | `configuration/gorm.go` | GORM setup, auto-migrate, model registration |

@@ -30,6 +30,7 @@
 | Path | Purpose |
 |------|---------|
 | `repositories/eventsrepository/EventsRepository.go` | Event CRUD and dashboard lists; `dashboardEventsScope` selects one organization, the caller-access portfolio (`callerAccessEventPredicate`, mirrors `SessionService.organizationAccess`) or all events for roots |
+| `repositories/eventsrepository/entitlement_scope.go` | Portfolio list scope (no `client_id`). `ConfigureEntitlementScope(mode)`: with `AUTHZ_PRODUCT_ENTITLEMENT=enforce` the membership condition also requires an active, non-deleted organization and an active `eventiapp` member entitlement. |
 | `repositories/eventsrepository/errorHandler.go` | Domain-specific error mapping |
 | `repositories/eventconfigrepository/EventConfigRepository.go` | EventConfig CRUD |
 | `repositories/eventsectionrepository/EventSectionRepository.go` | EventSection CRUD |
@@ -54,7 +55,8 @@
 | Path | Purpose |
 |------|---------|
 | `repositories/clientrepository/clientRepository.go` | Client CRUD + hierarchy |
-| `repositories/clientrepository/access_lookup.go` | `CheckAccessRecursiveE` (organization role lookup that returns its error; `CheckAccessRecursive` wraps it) and `ResolveClientProduct` (nearest branded ancestor's application code) |
+| `repositories/clientrepository/access_lookup.go` | `ResolveClientProduct` (nearest branded ancestor's application code) |
+| `repositories/clientrepository/access_checks.go` | Authorization lookups: `CheckAccessRecursiveE` (error-returning organization role lookup, 32-level bound; `CheckAccessRecursive` wraps it and swallows errors for legacy service callers) and `CheckApplicationAccessRecursive` (same lookup plus the product entitlement in one CTE, nearest-branded-ancestor rule, `Reason` for the first failed condition). Opt-in Postgres tests: `CLIENT_ACCESS_TEST_DSN`. |
 | `repositories/clienttyperepository/clientTypeRepository.go` | ClientType catalog |
 | `repositories/clientrolerepository/clientRoleRepository.go` | ClientRole catalog |
 | `repositories/userrepository/UserRepository.go` | User CRUD, Cognito sync |

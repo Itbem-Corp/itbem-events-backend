@@ -1,6 +1,10 @@
 package applications
 
-import "github.com/gofrs/uuid"
+import (
+	"strings"
+
+	"github.com/gofrs/uuid"
+)
 
 // AllowsOrganization is the shared authorization boundary for selecting an
 // organization from an authenticated application session.
@@ -30,4 +34,22 @@ func (session *Session) HasAnyCapability(expected ...string) bool {
 		}
 	}
 	return false
+}
+
+// ApplicationCode is the lower-case code of the authenticated application.
+func (session *Session) ApplicationCode() string {
+	if session == nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(session.Application.Code))
+}
+
+// PolicyCeiling returns the session names an active user_application_policy
+// allows, and whether such a policy exists. internal/authz uses it as the
+// server-side ceiling (AUTHZ_POLICY_CEILING). The map must not be modified.
+func (session *Session) PolicyCeiling() (map[string]struct{}, bool) {
+	if session == nil || !session.policyRestricted {
+		return nil, false
+	}
+	return session.policyCapabilities, true
 }

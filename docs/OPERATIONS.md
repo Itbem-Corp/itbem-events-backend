@@ -49,6 +49,41 @@ publish a clearly labelled test message, verify receipt in the monitored inbox,
 then record the time and recipient. Never use `set-alarm-state` on production
 automation without an approved drill window.
 
+## Authorization rollout flags
+
+`AUTHZ_PRODUCT_ENTITLEMENT` and `AUTHZ_POLICY_CEILING` (see
+`docs/ENVIRONMENT.md`) move through `off` -> `shadow` -> `enforce`.
+
+- **Toggle**: set the GitHub Actions repository variable, then run
+  `deploy-backend` (workflow_dispatch, `confirm_production=true`). The value is
+  read at startup only, so the change takes one full deploy.
+- **Rollback**: set the variable to `off` (or delete it) and run the deploy
+  again. No data changes; nothing to revert in the database.
+- **Shadow**: decisions do not change. Each would-deny is logged once per
+  (user, organization, capability) every 10 minutes as `authz shadow denial`
+  with `check` (`entitlement` or `policy`), `tenant`, `capability`, `reason`
+  (`member_not_entitled`, `product_mismatch`, `product_disabled`,
+  `organization_inactive`, `policy_excludes`) and `route`. The line carries no
+  user or organization identifier; counts come from the logs.
+- **Gates for enforce**: product entitlement only after the production impact
+  queries show no pair reachable today through the entitlement gap and 7 days
+  of shadow logs show no unexpected denial; the policy ceiling only after Root 1
+  reviews each existing policy with its owner.
+- **Scope**: entitlement covers event, guest, moment, section, invitation and
+  resource checks, event lists and event creation. It never covers member,
+  organization or application management.
+
+### Runbook: an Owner is locked out of events by entitlement
+
+The Owner can still manage members and applications (entitlement does not
+apply there). Root 1 (or the Owner) re-enables the membership with
+`PUT /api/clients/:id/member-applications/:user_id/eventiapp`
+(`controllers/sessions`, gated by `members:manage|applications:manage`, not by
+entitlement). The application session cache is invalidated by that call; the
+next request is authorized again. If the brand root itself was disabled, re-enable the
+`client_applications` row for the EventiApp root; the boot seed no longer does
+it automatically.
+
 ## Security audit trail
 
 `middleware/audit.Mutations` writes one append-only `audit_logs` row for every

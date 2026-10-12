@@ -23,7 +23,28 @@ const (
 // event: P1 platform root, P2 organization membership, P3 event-client grant.
 type eventAuthority struct {
 	kind authorityKind
-	role string
+	// access is the organization lookup (role plus product entitlement) for
+	// authorityOrganization; it is applied per capability through
+	// finalizeAuthorityDecision.
+	access ApplicationAccess
+}
+
+// eventClientGrantAccess is the ApplicationAccess a grant passes to
+// finalizeAuthorityDecision. eventClientGrantApplies already requires the
+// event organization to resolve to EventiApp (a hard gate, not flagged), so
+// the grant is entitled; the policy ceiling still applies.
+func eventClientGrantAccess() ApplicationAccess {
+	return ApplicationAccess{Allowed: true, Entitled: true}
+}
+
+// authorizeEventView applies AUTHZ_PRODUCT_ENTITLEMENT to a plain event read
+// (RequireEventAccess / EnsureEventAccess) by an organization member, the
+// same rule as RequireEventListAccess. Roots and grants are unaffected.
+func authorizeEventView(user *models.User, event *models.Event, authority eventAuthority) error {
+	if authority.kind != authorityOrganization || event == nil || event.ClientID == nil {
+		return nil
+	}
+	return enforceProductEntitlement(user, *event.ClientID, CapabilityView, authority.access)
 }
 
 const eventAuthorityContextPrefix = "authz.event_authority:"
@@ -99,12 +120,12 @@ func resolveEventAuthority(user *models.User, event *models.Event) (eventAuthori
 	if err := requireTenantClientBoundary(user, clientID); err != nil {
 		return eventAuthority{}, err
 	}
-	allowed, role, err := checkOrganizationAccess(user.ID, clientID)
+	access, err := lookupOrganizationAccess(user, clientID, scopeEventResource)
 	if err != nil {
 		return eventAuthority{}, err
 	}
-	if allowed {
-		return eventAuthority{kind: authorityOrganization, role: role}, nil
+	if access.Allowed {
+		return eventAuthority{kind: authorityOrganization, access: access}, nil
 	}
 	granted, err := eventClientGrantApplies(user, event.ID, clientID)
 	if err != nil {
@@ -155,16 +176,30 @@ func EventCapabilityForOrganizationEvents(user *models.User, orgID uuid.UUID, ev
 	}
 	if user.IsPlatformAdmin() {
 		allowed := platformHasCapability(user, capability)
+		if allowed {
+			ceilingAllowed, err := finalAuthorityAllows(enforcePolicyCeiling(user, capability))
+			if err != nil {
+				return nil, err
+			}
+			allowed = ceilingAllowed
+		}
 		for _, id := range eventIDs {
 			result[id] = allowed
 		}
 		return result, nil
 	}
-	allowed, role, err := checkOrganizationAccess(user.ID, orgID)
+	access, err := lookupOrganizationAccess(user, orgID, scopeEventResource)
 	if err != nil {
 		return nil, err
 	}
-	if !allowed || !roleHasCapability(role, capability) {
+	allowed := access.Allowed && roleHasCapability(access.Role, capability)
+	if allowed {
+		allowed, err = finalAuthorityAllows(finalizeAuthorityDecision(user, orgID, capability, access))
+		if err != nil {
+			return nil, err
+		}
+	}
+	if !allowed {
 		for _, id := range eventIDs {
 			result[id] = false
 		}
@@ -185,4 +220,18 @@ func EventCapabilityForOrganizationEvents(user *models.User, orgID uuid.UUID, ev
 		result[id] = !found || eventRoleHasCapability(role, capability)
 	}
 	return result, nil
+}
+
+// finalAuthorityAllows turns a finalizeAuthorityDecision result into an
+// allow flag for batch evaluation: a deny (4xx) is false, a dependency or
+// lookup failure (5xx or an untyped error) is returned so it is never read as
+// a silent deny.
+func finalAuthorityAllows(err error) (bool, error) {
+	if err == nil {
+		return true, nil
+	}
+	if failure, ok := err.(*Failure); ok && failure.Status < http.StatusInternalServerError {
+		return false, nil
+	}
+	return false, err
 }

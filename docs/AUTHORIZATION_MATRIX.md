@@ -104,6 +104,17 @@ To grant a member access:
 2. Enable the desired application for that organization.
 3. Create or activate the member/application entitlement.
 
+Product entitlement (step 3) is enforced server-side on EventiApp event
+resources and event lists once `AUTHZ_PRODUCT_ENTITLEMENT=enforce`: the
+membership needs an active `eventiapp` entitlement, the organization must be
+active and resolve (nearest branded ancestor) to EventiApp, and the product must
+be enabled on that branded root. Organization, member and application
+management are never gated by it. `user_application_policies` act as a
+server-side ceiling for the allow-listed capabilities once
+`AUTHZ_POLICY_CEILING=enforce`. Both default to `off` and are rolled out
+through `shadow` (`docs/OPERATIONS.md`). The vocabulary is in
+`docs/AUTHORIZATION_MODEL.md`.
+
 The boot seed (`seeds.SeedApplications`, run on every start) only inserts
 missing rows. It never re-enables a member/application entitlement or a
 brand-root product that an operator disabled; `models.Client` AfterCreate still

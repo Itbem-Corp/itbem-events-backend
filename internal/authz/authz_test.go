@@ -187,9 +187,12 @@ func TestOrganizationRoleCapabilitiesAreLeastPrivilege(t *testing.T) {
 }
 
 func TestEventAssignmentCanNarrowButNeverElevateOrganizationPermissions(t *testing.T) {
-	e := echo.New()
-	c := e.NewContext(httptest.NewRequest(http.MethodPut, "/api/events/event-id", nil), httptest.NewRecorder())
-	c.Set("cognito_sub", "event-member")
+	// Each call is a separate request: authz memoizes lookups per request.
+	newRequest := func() echo.Context {
+		c := echo.New().NewContext(httptest.NewRequest(http.MethodPut, "/api/events/event-id", nil), httptest.NewRecorder())
+		c.Set("cognito_sub", "event-member")
+		return c
+	}
 	userID := uuid.Must(uuid.NewV4())
 	eventID := uuid.Must(uuid.NewV4())
 	clientID := uuid.Must(uuid.NewV4())
@@ -202,12 +205,12 @@ func TestEventAssignmentCanNarrowButNeverElevateOrganizationPermissions(t *testi
 	})
 	t.Cleanup(restore)
 
-	_, _, err := RequireEventCapability(c, eventID, CapabilityEventManage)
+	_, _, err := RequireEventCapability(newRequest(), eventID, CapabilityEventManage)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "event assignment")
 
 	memberRole = "EDITOR"
-	_, _, err = RequireEventCapability(c, eventID, CapabilityEventManage)
+	_, _, err = RequireEventCapability(newRequest(), eventID, CapabilityEventManage)
 	require.NoError(t, err)
 
 	memberRole = "EVENT_MANAGER"
@@ -218,9 +221,7 @@ func TestEventAssignmentCanNarrowButNeverElevateOrganizationPermissions(t *testi
 	t.Cleanup(restoreGuestRole)
 	// The organization authority is memoized per request, so the changed
 	// organization role is observed by a new request context.
-	c = e.NewContext(httptest.NewRequest(http.MethodPut, "/api/events/event-id", nil), httptest.NewRecorder())
-	c.Set("cognito_sub", "event-member")
-	_, _, err = RequireEventCapability(c, eventID, CapabilityEventManage)
+	_, _, err = RequireEventCapability(newRequest(), eventID, CapabilityEventManage)
 	require.Error(t, err)
 }
 

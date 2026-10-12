@@ -25,6 +25,13 @@ class DeployWorkflowContractTests(unittest.TestCase):
         self.assertIn("EVENT_CLIENT_ACCESS: ${{ vars.EVENT_CLIENT_ACCESS }}", render_step)
         self.assertIn("--optional EVENT_CLIENT_ACCESS \\", render_step)
         self.assertNotIn("--required EVENT_CLIENT_ACCESS", workflow)
+    def test_authorization_rollout_flags_are_rendered_as_optional_variables(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        for name in ("AUTHZ_PRODUCT_ENTITLEMENT", "AUTHZ_POLICY_CEILING"):
+            self.assertIn(f"{name}: ${{{{ vars.{name} }}}}", workflow)
+            self.assertIn(f"--optional {name} \\", workflow)
+            self.assertNotIn(f"--required {name}", workflow)
+            self.assertNotIn(f"secrets.{name}", workflow)
 
     def test_aws_qualifier_allows_slow_emulator_startup(self):
         qualifier = AWS_QUALIFIER.read_text(encoding="utf-8")

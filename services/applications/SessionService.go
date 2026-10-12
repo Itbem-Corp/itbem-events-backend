@@ -3,6 +3,7 @@ package applications
 import (
 	"errors"
 	"events-stocks/dtos"
+	"events-stocks/internal/capabilities"
 	"events-stocks/internal/products"
 	"events-stocks/models"
 	"fmt"
@@ -47,6 +48,12 @@ type Session struct {
 	// EventAccess is present only when the caller holds active EventiApp
 	// event-client grants (EVENT_CLIENT_ACCESS on, events module, non-root).
 	EventAccess *EventAccess `json:"event_access,omitempty"`
+
+	// policyRestricted is true when an active user_application_policy exists;
+	// policyCapabilities holds the session names it allows. internal/authz
+	// reads them through PolicyCeiling (AUTHZ_POLICY_CEILING).
+	policyRestricted   bool
+	policyCapabilities map[string]struct{}
 }
 
 // EventAccess summarizes event-client grants: event-scoped powers on the
@@ -67,6 +74,12 @@ type SessionService struct {
 	eventAccess     EventClientAccessFunc
 	cacheMu         sync.RWMutex
 	cache           map[string]cachedSession
+	// policyCeiling mirrors AUTHZ_POLICY_CEILING. In enforce the per-org
+	// capability lists are capped by the policy too (the dashboard reads them).
+	policyCeiling capabilities.Mode
+	// eventClientCapability mirrors EVENT_CLIENT_ACCESS: only when it is on
+	// does the session project events:clients:manage.
+	eventClientCapability bool
 }
 
 type cachedSession struct {
@@ -82,6 +95,22 @@ func NewSessionService(db *gorm.DB, syncUser UserSyncFunc, profileImageURL ...Pr
 		service.profileImageURL = profileImageURL[0]
 	}
 	return service
+}
+
+// ConfigurePolicyCeiling sets the AUTHZ_POLICY_CEILING mode used to shape the
+// session. Call it at startup, before the service resolves sessions.
+func (service *SessionService) ConfigurePolicyCeiling(mode capabilities.Mode) {
+	if service != nil {
+		service.policyCeiling = mode
+	}
+}
+
+// ConfigureEventClientCapability projects events:clients:manage for roles
+// that hold it, only while EVENT_CLIENT_ACCESS is on. Call it at startup.
+func (service *SessionService) ConfigureEventClientCapability(enabled bool) {
+	if service != nil {
+		service.eventClientCapability = enabled
+	}
 }
 
 // ConfigureLocalBootstrap attaches the deliberately local-only first-user
@@ -171,34 +200,54 @@ func (service *SessionService) Resolve(cognitoSub, tenantCode string) (*Session,
 	if !platformAuthority && len(organizations) == 0 && eventAccess == nil {
 		return nil, fmt.Errorf("%w: no eligible organization", ErrApplicationAccessDenied)
 	}
+	var ceiling map[string]struct{}
+	if policyExists {
+		ceiling = make(map[string]struct{}, len(policy.Capabilities))
+		for _, name := range policy.Capabilities {
+			ceiling[name] = struct{}{}
+		}
+	}
 	for index := range organizations {
-		organizations[index].Capabilities = applicationOrganizationCapabilities(
+		organizationCapabilities := applicationOrganizationCapabilities(
 			application,
 			organizations[index].AccessRole,
 		)
+		if service.eventClientCapability {
+			organizationCapabilities = withEventClientCapability(application, organizations[index].AccessRole, organizationCapabilities)
+		}
+		if policyExists && service.policyCeiling == capabilities.ModeEnforce {
+			organizationCapabilities = capGovernedCapabilities(application.Code, organizationCapabilities, ceiling)
+		}
+		organizations[index].Capabilities = organizationCapabilities
 	}
 
 	profileImage := user.ProfileImage
 	if service.profileImageURL != nil {
 		profileImage = service.profileImageURL(user)
 	}
-	capabilities := effectiveApplicationCapabilities(application, user, organizations)
+	sessionCapabilities := effectiveApplicationCapabilities(application, user, organizations)
 	if eventAccess != nil {
+		if policyExists && service.policyCeiling == capabilities.ModeEnforce {
+			eventAccess.Capabilities = capGovernedCapabilities(application.Code, eventAccess.Capabilities, ceiling)
+		}
 		// eventAccess only exists with the events module, so the module
 		// removals in effectiveApplicationCapabilities cannot apply to it.
-		union := newCapabilitySet(capabilities...)
+		union := newCapabilitySet(sessionCapabilities...)
 		union.add(eventAccess.Capabilities...)
-		capabilities = union.values()
+		sessionCapabilities = union.values()
 	}
 	if policyExists {
-		capabilities = intersectCapabilities(capabilities, policy.Capabilities)
+		sessionCapabilities = intersectCapabilities(sessionCapabilities, policy.Capabilities)
 	}
 	session := &Session{
 		Application:   application,
 		User:          dtos.NewUserProfileResponse(user, profileImage),
 		Organizations: organizations,
-		Capabilities:  capabilities,
+		Capabilities:  sessionCapabilities,
 		EventAccess:   eventAccess,
+
+		policyRestricted:   policyExists,
+		policyCapabilities: ceiling,
 	}
 	service.cacheMu.Lock()
 	service.cache[cacheKey] = cachedSession{session: session, expiresAt: time.Now().Add(sessionCacheTTL)}
@@ -503,30 +552,59 @@ func eventClientCapabilities() []string {
 // EventClientCapabilities exposes the projection for parity tests.
 func EventClientCapabilities() []string { return eventClientCapabilities() }
 
+// organizationCapabilities projects the single role table in
+// internal/capabilities onto session names. organizations:view is always
+// present (any membership row may open the organization), Owner/Admin add
+// organization and member management, and roles holding analytics:view keep
+// the legacy metrics:view (removed below when the product reserves metrics).
+// Unknown role codes keep exactly their historical output: organizations:view
+// only. events:clients:manage is projected separately, behind
+// EVENT_CLIENT_ACCESS.
 func organizationCapabilities(role string) []string {
-	code := strings.TrimPrefix(strings.ToUpper(strings.TrimSpace(role)), "INHERITED_")
-	capabilities := newCapabilitySet("organizations:view")
-	switch code {
-	case "OWNER", "ADMIN":
-		capabilities.add(
-			"organizations:manage", "members:manage",
-			"events:view", "events:create", "events:manage", "events:delete",
-			"guests:manage", "checkin:run", "analytics:view", "metrics:view",
-		)
-	case "EVENT_MANAGER":
-		capabilities.add("events:view", "events:create", "events:manage", "guests:manage", "checkin:run", "analytics:view", "metrics:view")
-	case "EDITOR":
-		capabilities.add("events:view", "events:manage", "guests:manage", "analytics:view", "metrics:view")
-	case "MEMBER":
-		capabilities.add("events:view", "guests:manage")
-	case "CHECKIN":
-		capabilities.add("events:view", "checkin:run")
-	case "ANALYST":
-		capabilities.add("events:view", "analytics:view", "metrics:view")
-	case "GUEST", "VIEWER":
-		capabilities.add("events:view")
+	result := newCapabilitySet("organizations:view")
+	if !capabilities.IsKnownRole(role) {
+		return result.values()
 	}
-	return capabilities.values()
+	for _, capability := range capabilities.RoleCapabilities(role) {
+		if capability == capabilities.EventClientsManage {
+			continue
+		}
+		if name, ok := capabilities.SessionName(capability); ok {
+			result.add(name)
+		}
+	}
+	if capabilities.RoleHas(role, capabilities.AnalyticsView) {
+		result.add("metrics:view")
+	}
+	return result.values()
+}
+
+// withEventClientCapability adds events:clients:manage for roles that hold
+// it when the product has the events module.
+func withEventClientCapability(application models.Application, role string, current []string) []string {
+	if !moduleEnabled(application.Modules, "events") || !capabilities.IsKnownRole(role) ||
+		!capabilities.RoleHas(role, capabilities.EventClientsManage) {
+		return current
+	}
+	name, _ := capabilities.SessionName(capabilities.EventClientsManage)
+	result := newCapabilitySet(current...)
+	result.add(name)
+	return result.values()
+}
+
+// capGovernedCapabilities removes the policy-governed (allow-listed) names
+// the policy does not contain. Names outside the allow-list are untouched.
+func capGovernedCapabilities(application string, current []string, ceiling map[string]struct{}) []string {
+	result := make([]string, 0, len(current))
+	for _, name := range current {
+		if capabilities.PolicyAllows(application, name) {
+			if _, ok := ceiling[name]; !ok {
+				continue
+			}
+		}
+		result = append(result, name)
+	}
+	return result
 }
 
 func applicationOrganizationCapabilities(application models.Application, role string) []string {
@@ -554,8 +632,7 @@ func applicationOrganizationCapabilities(application models.Application, role st
 // isOrganizationAdminRole accepts direct and inherited Owner/Admin role codes,
 // which are stored in mixed case (seeds/ClientRoleSeed.go).
 func isOrganizationAdminRole(role string) bool {
-	code := strings.TrimPrefix(strings.ToUpper(strings.TrimSpace(role)), "INHERITED_")
-	return code == "OWNER" || code == "ADMIN"
+	return capabilities.IsOrganizationAdmin(role)
 }
 
 func moduleEnabled(modules models.StringList, expected string) bool {

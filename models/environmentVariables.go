@@ -186,4 +186,12 @@ type Config struct {
 	// as "itbem/backend,itbem/dashboard". A GitHub App installation alone never
 	// authorizes every repository to spend local review capacity.
 	GitHubReviewRepositories string `required:"false" env:"GITHUB_REVIEW_REPOSITORIES"`
+
+	// AuthzProductEntitlement rolls out product entitlement on event
+	// resources and event lists: off|shadow|enforce. Empty or invalid = off.
+	AuthzProductEntitlement string `required:"false" env:"AUTHZ_PRODUCT_ENTITLEMENT"`
+	// AuthzPolicyCeiling rolls out user_application_policies as a server-side
+	// ceiling for allow-listed capabilities: off|shadow|enforce. Empty or
+	// invalid = off.
+	AuthzPolicyCeiling string `required:"false" env:"AUTHZ_POLICY_CEILING"`
 }

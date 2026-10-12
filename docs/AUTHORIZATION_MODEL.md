@@ -57,6 +57,61 @@ Only Owner and Administrator memberships propagate down an organization hierarch
 - Only a Primary root can set `root_level`; it may set only `0` or `2`.
 - Event permissions are a ceiling from the organization role. An event assignment may reduce access, never elevate it.
 
+## One capability vocabulary
+
+`internal/capabilities` is the single table. It is a leaf package (standard
+library only), imported by `internal/authz` and `services/applications`, which
+cannot import each other (authz -> productmetricshttp -> services/applications).
+
+- The authz names are canonical (`event:manage`); `internal/authz` re-exports
+  them as type aliases, so callers did not change.
+- The session names are a projection (`capabilities.SessionName`):
+
+| authz | session |
+| --- | --- |
+| `view` | `events:view` |
+| `event:create` | `events:create` |
+| `event:manage` | `events:manage` |
+| `event:delete` | `events:delete` |
+| `guest:manage` | `guests:manage` |
+| `checkin:run` | `checkin:run` |
+| `analytics:view` | `analytics:view` |
+| `members:manage` | `members:manage` |
+| `organization:manage` | `organizations:manage` |
+| `metrics:view` | `metrics:view` |
+| `event:clients:manage` | `events:clients:manage` |
+
+- `RoleCapabilities(role)` drives both `authz.roleHasCapability` and the
+  session's `organizationCapabilities`. Any non-empty unknown role code keeps
+  its historical behaviour: `view` in authz, only `organizations:view` in the
+  session. Golden tests compare both sides with frozen copies of the previous
+  tables.
+- `events:clients:manage` reaches the session only while `EVENT_CLIENT_ACCESS`
+  is on (`SessionService.ConfigureEventClientCapability`).
+- `PolicyAllowList(application)` is the set of names a
+  `user_application_policy` may contain and the set the policy ceiling governs.
+  `events:delete` and `events:clients:manage` are deliberately outside it.
+
+## Server-side ceilings behind flags
+
+Both checks run after the platform, role (or grant) decision, through
+`authz.finalizeAuthorityDecision`:
+
+1. **Product entitlement** (`AUTHZ_PRODUCT_ENTITLEMENT`), event resources and
+   event lists only. `CheckApplicationAccessRecursive` answers the role lookup
+   and the entitlement in one query. `enforce` answers 403 `Your organization is
+   not enabled for this application`. Member, organization and application
+   management never apply it, so an Owner can always repair access.
+2. **Policy ceiling** (`AUTHZ_POLICY_CEILING`). The application session's
+   active policy is stamped on the per-request user; an allow-listed capability
+   the policy lacks is a 403 `Your application access policy does not allow this
+   action` in `enforce`. The primary root is exempt; Root 2 is capped.
+
+`shadow` never changes a decision: it logs `authz shadow denial` once per
+(user, organization, capability) every 10 minutes. Organization lookups are
+memoized per request (the event capabilities endpoint runs one access query)
+and a lookup error is a 500 that never falls through to another authority path.
+
 ## Event capabilities and privacy
 
 | Capability | Typical roles | What it covers |
