@@ -420,6 +420,22 @@ func (r *EventsRepo) IdentifierDeleted(identifier string) (bool, error) {
 	return IdentifierDeleted(identifier)
 }
 
+// DeletedEventIDsByIdentifier lists the soft-deleted events that used this
+// identifier (newest first, capped), so page-spec can answer 410 only to a
+// caller holding a token for one of them.
+func DeletedEventIDsByIdentifier(identifier string) ([]uuid.UUID, error) {
+	var ids []uuid.UUID
+	err := gormrepository.DB().Unscoped().Model(&models.Event{}).
+		Where("identifier = ? AND deleted_at IS NOT NULL", identifier).
+		Order("deleted_at DESC").Limit(20).
+		Pluck("id", &ids).Error
+	return ids, err
+}
+
+func (r *EventsRepo) DeletedEventIDsByIdentifier(identifier string) ([]uuid.UUID, error) {
+	return DeletedEventIDsByIdentifier(identifier)
+}
+
 // IdentifierExists returns true if an event with the given identifier already exists.
 func IdentifierExists(identifier string) bool {
 	var count int64

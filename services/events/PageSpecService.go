@@ -32,10 +32,10 @@ var (
 )
 
 // PageSpecDeletedIdentifierRepository is implemented by the production events
-// repository: it tells a deleted event's identifier apart from one that never
-// existed.
+// repository: it lists the soft-deleted events that used an identifier, so a
+// caller holding a token for one of them gets 410 instead of 404.
 type PageSpecDeletedIdentifierRepository interface {
-	IdentifierDeleted(identifier string) (bool, error)
+	DeletedEventIDsByIdentifier(identifier string) ([]uuid.UUID, error)
 }
 
 const defaultPageSpecMaxUploadsPerGuest = 30
@@ -135,7 +135,7 @@ type identifierPageSpecDeps struct {
 	getGuestVersion                func(eventID uuid.UUID) (*time.Time, error)
 	getMomentVersion               func(eventID uuid.UUID) (*time.Time, error)
 	validatePreviewToken           func(token string, eventID uuid.UUID) bool
-	identifierDeleted              func(identifier string) (bool, error)
+	deletedEventIDs                func(identifier string) ([]uuid.UUID, error)
 	now                            func() time.Time
 }
 
@@ -921,6 +921,35 @@ func pageSpecInvitationTokenError(deps identifierPageSpecDeps, eventID uuid.UUID
 	return nil
 }
 
+// deletedEventTokenProof reports whether the caller holds a valid preview
+// token or an invitation token for one of the deleted events.
+func deletedEventTokenProof(deps identifierPageSpecDeps, eventIDs []uuid.UUID, previewToken, invitationToken string) bool {
+	if strings.TrimSpace(previewToken) != "" {
+		for _, id := range eventIDs {
+			if validPageSpecPreviewToken(deps, id, previewToken) {
+				return true
+			}
+		}
+	}
+	if strings.TrimSpace(invitationToken) == "" || deps.getToken == nil || deps.getInvitation == nil {
+		return false
+	}
+	accessToken, err := deps.getToken(invitationToken)
+	if err != nil || accessToken == nil {
+		return false
+	}
+	invitation, err := deps.getInvitation(accessToken.InvitationID)
+	if err != nil || invitation == nil {
+		return false
+	}
+	for _, id := range eventIDs {
+		if invitation.EventID == id {
+			return true
+		}
+	}
+	return false
+}
+
 func validPageSpecPreviewToken(deps identifierPageSpecDeps, eventID uuid.UUID, token string) bool {
 	return deps.validatePreviewToken != nil && deps.validatePreviewToken(token, eventID)
 }
@@ -952,8 +981,12 @@ func isExpiredPageSpecAccessToken(accessToken *models.InvitationAccessToken, now
 func getPageSpecByIdentifier(deps identifierPageSpecDeps, identifier, previewToken, invitationToken string) (*dtos.PageSpec, error) {
 	event, err := deps.getEventByIdentifier(identifier)
 	if err != nil || event == nil {
-		if deps.identifierDeleted != nil {
-			if deleted, deletedErr := deps.identifierDeleted(identifier); deletedErr == nil && deleted {
+		// 410 only for a caller who proves a link to the deleted event (its
+		// preview or invitation token). Anonymous callers get the same answer
+		// as for a slug that never existed, so deleted slugs cannot be listed.
+		if deps.deletedEventIDs != nil {
+			if ids, deletedErr := deps.deletedEventIDs(identifier); deletedErr == nil && len(ids) > 0 &&
+				deletedEventTokenProof(deps, ids, previewToken, invitationToken) {
 				return nil, ErrPageSpecEventGone
 			}
 		}
@@ -1048,9 +1081,9 @@ func (s *PageSpecService) GetPageSpecByIdentifier(identifier, previewToken, invi
 	if s.moments != nil {
 		getMomentVersion = s.moments.LatestPublicMomentUpdatedAtByEventID
 	}
-	var identifierDeleted func(string) (bool, error)
+	var deletedEventIDs func(string) ([]uuid.UUID, error)
 	if deletedRepo, ok := s.events.(PageSpecDeletedIdentifierRepository); ok {
-		identifierDeleted = deletedRepo.IdentifierDeleted
+		deletedEventIDs = deletedRepo.DeletedEventIDsByIdentifier
 	}
 	return getPageSpecByIdentifier(identifierPageSpecDeps{
 		getEventByIdentifier:           s.events.GetEventByIdentifier,
@@ -1064,7 +1097,7 @@ func (s *PageSpecService) GetPageSpecByIdentifier(identifier, previewToken, invi
 		getGuestVersion:                getGuestVersion,
 		getMomentVersion:               getMomentVersion,
 		validatePreviewToken:           previewtoken.Validate,
-		identifierDeleted:              identifierDeleted,
+		deletedEventIDs:                deletedEventIDs,
 	}, identifier, previewToken, invitationToken)
 }
 

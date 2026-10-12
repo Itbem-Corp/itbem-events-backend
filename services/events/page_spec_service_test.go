@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/gofrs/uuid"
-	"gorm.io/gorm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -941,16 +941,47 @@ func TestGetPageSpecByIdentifier_PrivateEventTokenErrors(t *testing.T) {
 
 // EVT-93: a deleted event's identifier is 410 event_gone on both routes.
 func TestGetPageSpec_DeletedEventIsGone(t *testing.T) {
-	_, err := getPageSpecByIdentifier(identifierPageSpecDeps{
+	deletedID := uuid.Must(uuid.NewV4())
+	otherID := uuid.Must(uuid.NewV4())
+	invitationEvent := map[string]uuid.UUID{"invite-deleted": deletedID, "invite-other": otherID}
+	invitationByID := map[uuid.UUID]uuid.UUID{}
+	deps := identifierPageSpecDeps{
 		getEventByIdentifier: func(string) (*models.Event, error) { return nil, gorm.ErrRecordNotFound },
-		identifierDeleted:    func(string) (bool, error) { return true, nil },
-	}, "deleted-event", "", "")
+		deletedEventIDs:      func(string) ([]uuid.UUID, error) { return []uuid.UUID{deletedID}, nil },
+		validatePreviewToken: func(token string, eventID uuid.UUID) bool { return token == "preview-ok" && eventID == deletedID },
+		getToken: func(token string) (*models.InvitationAccessToken, error) {
+			eventID, ok := invitationEvent[token]
+			if !ok {
+				return nil, errors.New("not found")
+			}
+			invitationID := uuid.Must(uuid.NewV4())
+			invitationByID[invitationID] = eventID
+			return &models.InvitationAccessToken{InvitationID: invitationID}, nil
+		},
+		getInvitation: func(id uuid.UUID) (*models.Invitation, error) {
+			return &models.Invitation{ID: id, EventID: invitationByID[id]}, nil
+		},
+	}
+
+	// Anonymous: same answer as a slug that never existed.
+	_, err := getPageSpecByIdentifier(deps, "deleted-event", "", "")
+	assert.Error(t, err)
+	assert.NotErrorIs(t, err, ErrPageSpecEventGone)
+	_, err = getPageSpecByIdentifier(deps, "deleted-event", "forged", "unknown")
+	assert.NotErrorIs(t, err, ErrPageSpecEventGone)
+	_, err = getPageSpecByIdentifier(deps, "deleted-event", "", "invite-other")
+	assert.NotErrorIs(t, err, ErrPageSpecEventGone, "a token of another event proves nothing")
+
+	// A caller with a link to the deleted event learns it is gone.
+	_, err = getPageSpecByIdentifier(deps, "deleted-event", "preview-ok", "")
+	assert.ErrorIs(t, err, ErrPageSpecEventGone)
+	_, err = getPageSpecByIdentifier(deps, "deleted-event", "", "invite-deleted")
 	assert.ErrorIs(t, err, ErrPageSpecEventGone)
 
 	_, err = getPageSpecByIdentifier(identifierPageSpecDeps{
 		getEventByIdentifier: func(string) (*models.Event, error) { return nil, gorm.ErrRecordNotFound },
-		identifierDeleted:    func(string) (bool, error) { return false, nil },
-	}, "never-existed", "", "")
+		deletedEventIDs:      func(string) ([]uuid.UUID, error) { return nil, nil },
+	}, "never-existed", "preview-ok", "")
 	assert.Error(t, err)
 	assert.NotErrorIs(t, err, ErrPageSpecEventGone)
 
