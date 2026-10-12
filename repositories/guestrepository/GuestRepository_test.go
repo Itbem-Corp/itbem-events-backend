@@ -3,6 +3,7 @@ package guestrepository
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"events-stocks/dtos"
 	"events-stocks/models"
@@ -229,10 +230,58 @@ func TestGuestStatusTransitionValuesWritesOnlyRSVPColumnsWithSQLNulls(t *testing
 	assert.Equal(t, statusID, values["guest_status_id"])
 	assert.Equal(t, "pending", values["rsvp_status"])
 	assert.Equal(t, "host", values["rsvp_method"])
-	rsvpAt, present := values["rsvp_at"]
-	assert.True(t, present)
-	assert.Nil(t, rsvpAt, "a nil pointer must reach the driver as an untyped NULL")
+	for _, column := range []string{
+		"rsvp_at", "checked_in_at", "checked_in_by_user_id", "checkin_previous_rsvp_status",
+		"checkin_previous_guest_status_id", "checkin_previous_rsvp_method", "checkin_previous_rsvp_at",
+	} {
+		value, present := values[column]
+		assert.True(t, present, column)
+		assert.Nil(t, value, column+": a nil pointer must reach the driver as an untyped NULL")
+	}
+	assert.Len(t, values, 10)
 	for _, column := range []string{"first_name", "email", "event_id", "id", "table_id"} {
 		assert.NotContains(t, values, column)
+	}
+}
+
+func TestGuestStatusTransitionValuesCarriesDoorCheckinProvenance(t *testing.T) {
+	checkedInAt := time.Date(2026, time.May, 1, 20, 0, 0, 0, time.UTC)
+	answeredAt := checkedInAt.Add(-48 * time.Hour)
+	staff, previousStatusID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
+	previousStatus, previousMethod := "confirmed", "web"
+	guest := models.Guest{
+		RSVPStatus: "confirmed", RSVPMethod: "host", RSVPAt: &answeredAt,
+		CheckedInAt: &checkedInAt, CheckedInByUserID: &staff,
+		CheckinPreviousRSVPStatus: &previousStatus, CheckinPreviousGuestStatusID: &previousStatusID,
+		CheckinPreviousRSVPMethod: &previousMethod, CheckinPreviousRSVPAt: &answeredAt,
+	}
+
+	values := guestStatusTransitionValues(&guest)
+
+	assert.Equal(t, answeredAt, values["rsvp_at"])
+	assert.Equal(t, checkedInAt, values["checked_in_at"])
+	assert.Equal(t, staff, values["checked_in_by_user_id"])
+	assert.Equal(t, "confirmed", values["checkin_previous_rsvp_status"])
+	assert.Equal(t, previousStatusID, values["checkin_previous_guest_status_id"])
+	assert.Equal(t, "web", values["checkin_previous_rsvp_method"])
+	assert.Equal(t, answeredAt, values["checkin_previous_rsvp_at"])
+}
+
+// Every column the transition writes must exist on the model, or GORM would
+// silently drop it from the UPDATE.
+func TestGuestStatusTransitionValuesNamesRealGuestColumns(t *testing.T) {
+	db, err := gorm.Open(postgres.Open("host=localhost user=test dbname=test sslmode=disable"), &gorm.Config{
+		DryRun:               true,
+		DisableAutomaticPing: true,
+	})
+	require.NoError(t, err)
+	stmt := &gorm.Statement{DB: db}
+	require.NoError(t, stmt.Parse(&models.Guest{}))
+
+	for column := range guestStatusTransitionValues(&models.Guest{}) {
+		field := stmt.Schema.LookUpField(column)
+		if assert.NotNil(t, field, column) {
+			assert.Equal(t, column, field.DBName)
+		}
 	}
 }

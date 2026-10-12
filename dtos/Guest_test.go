@@ -192,8 +192,54 @@ func TestNewCheckinGuestResponsesCarryOnlyDoorFields(t *testing.T) {
 	}
 }
 
+// The check-in page offers undo only for guests checked in at the door, so the
+// door projection carries checked_in_at (and nothing else of the provenance).
+func TestNewCheckinGuestResponsesExposeOnlyCheckedInAt(t *testing.T) {
+	checkedInAt := time.Date(2026, 5, 1, 20, 0, 0, 0, time.UTC)
+	staff, previousStatusID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
+	previousStatus, previousMethod := "pending", "web"
+	encoded, err := json.Marshal(NewCheckinGuestResponses([]models.Guest{{
+		RSVPStatus: "confirmed", RSVPMethod: "host",
+		CheckedInAt: &checkedInAt, CheckedInByUserID: &staff, CheckinPreviousRSVPStatus: &previousStatus,
+		CheckinPreviousGuestStatusID: &previousStatusID, CheckinPreviousRSVPMethod: &previousMethod, CheckinPreviousRSVPAt: &checkedInAt,
+	}}))
+	require.NoError(t, err)
+
+	assert.Contains(t, string(encoded), `"checked_in_at":"2026-05-01T20:00:00Z"`)
+	assert.NotContains(t, string(encoded), "checked_in_by")
+	assert.NotContains(t, string(encoded), "checkin_previous")
+	assert.NotContains(t, string(encoded), staff.String())
+	assert.NotContains(t, string(encoded), previousStatusID.String())
+}
+
 func TestNewCheckinGuestResponsesReturnsEmptyArray(t *testing.T) {
 	encoded, err := json.Marshal(NewCheckinGuestResponses(nil))
 	require.NoError(t, err)
 	assert.JSONEq(t, `[]`, string(encoded))
+}
+
+// The dashboard learns that a guest was checked in at the door (and so can be
+// unmarked by check-in staff) from checked_in_at; who did it and the RSVP the
+// undo restores stay server-side.
+func TestNewGuestResponseExposesOnlyCheckedInAt(t *testing.T) {
+	checkedInAt := time.Date(2026, 5, 1, 20, 0, 0, 0, time.UTC)
+	staff, previousStatusID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
+	previousStatus, previousMethod := "pending", "web"
+	body := NewGuestResponse(&models.Guest{
+		RSVPStatus: "confirmed", RSVPMethod: "host",
+		CheckedInAt: &checkedInAt, CheckedInByUserID: &staff, CheckinPreviousRSVPStatus: &previousStatus,
+		CheckinPreviousGuestStatusID: &previousStatusID, CheckinPreviousRSVPMethod: &previousMethod, CheckinPreviousRSVPAt: &checkedInAt,
+	})
+
+	encoded, err := json.Marshal(body)
+	require.NoError(t, err)
+
+	assert.Contains(t, string(encoded), `"checked_in_at":"2026-05-01T20:00:00Z"`)
+	assert.NotContains(t, string(encoded), "checked_in_by")
+	assert.NotContains(t, string(encoded), "checkin_previous")
+	assert.NotContains(t, string(encoded), staff.String())
+
+	withoutCheckin, err := json.Marshal(NewGuestResponse(&models.Guest{RSVPStatus: "confirmed", RSVPMethod: "web"}))
+	require.NoError(t, err)
+	assert.NotContains(t, string(withoutCheckin), "checked_in_at")
 }

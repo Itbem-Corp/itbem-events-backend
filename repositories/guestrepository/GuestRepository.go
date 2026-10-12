@@ -539,6 +539,9 @@ func TransitionGuestStatuses(eventID uuid.UUID, ids []uuid.UUID, apply func(lock
 		if len(locked) != len(ids) {
 			return errGuestsOutsideEvent
 		}
+		if err := attachGuestStatuses(tx, locked); err != nil {
+			return err
+		}
 		changed, err := apply(locked)
 		if err != nil {
 			return err
@@ -565,14 +568,55 @@ func lockGuestsForStatusTransition(tx *gorm.DB, eventID uuid.UUID, ids []uuid.UU
 		Order("id")
 }
 
-// guestStatusTransitionValues is everything a status transition may write;
-// no other guest column is touched. Nil pointers become untyped NULLs.
+// attachGuestStatuses loads the catalog status of each locked guest (one
+// query, not locked) so a transition can fall back to its code when the
+// guest's rsvp_status is empty, as the check-in list does.
+func attachGuestStatuses(tx *gorm.DB, guests []models.Guest) error {
+	statusIDs := make([]uuid.UUID, 0, len(guests))
+	seen := make(map[uuid.UUID]struct{}, len(guests))
+	for i := range guests {
+		id := guests[i].GuestStatusID
+		if _, ok := seen[id]; ok || id == uuid.Nil {
+			continue
+		}
+		seen[id] = struct{}{}
+		statusIDs = append(statusIDs, id)
+	}
+	if len(statusIDs) == 0 {
+		return nil
+	}
+	var statuses []models.GuestStatus
+	if err := tx.Where("id IN ?", statusIDs).Find(&statuses).Error; err != nil {
+		return err
+	}
+	byID := make(map[uuid.UUID]models.GuestStatus, len(statuses))
+	for _, status := range statuses {
+		byID[status.ID] = status
+	}
+	for i := range guests {
+		if status, ok := byID[guests[i].GuestStatusID]; ok {
+			guests[i].GuestStatus = status
+			guests[i].Status = &guests[i].GuestStatus
+		}
+	}
+	return nil
+}
+
+// guestStatusTransitionValues is everything a status transition may write:
+// the RSVP columns and the door check-in provenance; no other guest column is
+// touched. Nil pointers become untyped NULLs.
 func guestStatusTransitionValues(guest *models.Guest) map[string]interface{} {
 	return map[string]interface{}{
-		"guest_status_id": guest.GuestStatusID,
-		"rsvp_status":     guest.RSVPStatus,
-		"rsvp_method":     guest.RSVPMethod,
-		"rsvp_at":         sqlNullable(guest.RSVPAt),
+		"guest_status_id":                  guest.GuestStatusID,
+		"rsvp_status":                      guest.RSVPStatus,
+		"rsvp_method":                      guest.RSVPMethod,
+		"rsvp_at":                          sqlNullable(guest.RSVPAt),
+		"checked_in_at":                    sqlNullable(guest.CheckedInAt),
+		"checked_in_by_user_id":            sqlNullable(guest.CheckedInByUserID),
+		"checkin_previous_rsvp_status":     sqlNullable(guest.CheckinPreviousRSVPStatus),
+		"checkin_previous_guest_status_id": sqlNullable(guest.CheckinPreviousGuestStatusID),
+		"checkin_previous_rsvp_method":     sqlNullable(guest.CheckinPreviousRSVPMethod),
+		"checkin_previous_rsvp_at":         sqlNullable(guest.CheckinPreviousRSVPAt),
 	}
 }
 

@@ -919,6 +919,62 @@ func TestConfirmRSVP_RestrictsMethodToPublicAllowlist(t *testing.T) {
 	}
 }
 
+// The guest's own answer replaces a door check-in: the provenance is cleared
+// so a later undo at the door cannot restore the pre-check-in RSVP over it.
+func TestConfirmRSVP_ClearsDoorCheckinProvenance(t *testing.T) {
+	for _, status := range []string{"confirmed", "declined", "pending"} {
+		t.Run(status, func(t *testing.T) {
+			invitationID := uuid.Must(uuid.NewV4())
+			checkedInAt := time.Date(2026, time.May, 1, 20, 0, 0, 0, time.UTC)
+			staff, previousStatusID := uuid.Must(uuid.NewV4()), uuid.Must(uuid.NewV4())
+			previousStatus, previousMethod := "pending", ""
+			var captured *models.Guest
+			tokenRepo := &mockAccessTokenRepo{
+				GetByPrettyTokenFunc: func(code string) (*models.InvitationAccessToken, error) {
+					return &models.InvitationAccessToken{ID: uuid.Must(uuid.NewV4()), InvitationID: invitationID, PrettyToken: code}, nil
+				},
+			}
+			invRepo := &mockInvitationRepo{
+				GetInvitationByIDLiteFunc: func(uuid.UUID) (*models.Invitation, error) {
+					return &models.Invitation{ID: invitationID, MaxGuests: 2}, nil
+				},
+			}
+			guestRepo := &mockGuestRepo{
+				GetGuestByInvitationIDFunc: func(uuid.UUID) (*models.Guest, error) {
+					return &models.Guest{
+						ID: uuid.Must(uuid.NewV4()), InvitationID: &invitationID, RSVPStatus: "confirmed", RSVPMethod: "host",
+						CheckedInAt: &checkedInAt, CheckedInByUserID: &staff, CheckinPreviousRSVPStatus: &previousStatus,
+						CheckinPreviousGuestStatusID: &previousStatusID, CheckinPreviousRSVPMethod: &previousMethod,
+					}, nil
+				},
+				UpdateGuestFunc: func(g *models.Guest) error {
+					copied := *g
+					captured = &copied
+					return nil
+				},
+			}
+			guestCount := 1
+			if status == "declined" {
+				guestCount = 0
+			}
+
+			svc := newService(invRepo, guestRepo, tokenRepo, nil, nil)
+			_, err := svc.ConfirmRSVP("VALID-TOKEN", status, "web", guestCount, "")
+
+			require.NoError(t, err)
+			require.NotNil(t, captured)
+			assert.Equal(t, status, captured.RSVPStatus)
+			assert.Equal(t, "web", captured.RSVPMethod)
+			assert.Nil(t, captured.CheckedInAt)
+			assert.Nil(t, captured.CheckedInByUserID)
+			assert.Nil(t, captured.CheckinPreviousRSVPStatus)
+			assert.Nil(t, captured.CheckinPreviousGuestStatusID)
+			assert.Nil(t, captured.CheckinPreviousRSVPMethod)
+			assert.Nil(t, captured.CheckinPreviousRSVPAt)
+		})
+	}
+}
+
 func TestConfirmRSVP_ExceedsMaxGuests_ExactBoundary(t *testing.T) {
 	// Exactly at the limit (guestCount == MaxGuests) should succeed, not fail
 	invitationID := uuid.Must(uuid.NewV4())

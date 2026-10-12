@@ -1024,10 +1024,18 @@ func BulkDeleteGuests(c echo.Context) error {
 	return utils.Success(c, http.StatusOK, "Guests deleted", nil)
 }
 
-const bulkCheckinOnlyDetail = "Without guest:manage only check-in is allowed: rsvp_status confirmed with the confirmed guest status"
+const bulkCheckinOnlyDetail = "Without guest:manage only check-in is allowed: rsvp_status confirmed with the confirmed guest status, or action undo_checkin"
 
-// PATCH /guests/bulk/status — checkin:run on event_id. Callers that also hold
-// guest:manage may set any status; checkin:run alone may only check guests in.
+// bulkActionUndoCheckin is the only action PATCH /guests/bulk/status takes; no
+// action means "set the status in the body".
+const bulkActionUndoCheckin = "undo_checkin"
+
+// PATCH /guests/bulk/status — checkin:run on event_id.
+//   - rsvp_status confirmed with the confirmed status is the door check-in, open
+//     to every checkin:run caller; it records what the guest had before.
+//   - action undo_checkin reverses door check-ins (status fields are ignored),
+//     also with checkin:run alone; a guest confirmed any other way answers 409.
+//   - any other status needs guest:manage.
 func BulkUpdateGuestStatus(c echo.Context) error {
 	var body struct {
 		EventID       string   `json:"event_id"`
@@ -1036,6 +1044,7 @@ func BulkUpdateGuestStatus(c echo.Context) error {
 		GuestStatusID string   `json:"guest_status_id"`
 		RSVPStatus    string   `json:"rsvp_status"`
 		RSVPMethod    string   `json:"rsvp_method"`
+		Action        string   `json:"action"`
 	}
 	if err := c.Bind(&body); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
@@ -1044,23 +1053,16 @@ func BulkUpdateGuestStatus(c echo.Context) error {
 	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid event_id", err.Error())
 	}
-	if _, _, authErr := authz.RequireEventCapability(c, eventID, authz.CapabilityCheckin); authErr != nil {
+	user, _, authErr := authz.RequireEventCapability(c, eventID, authz.CapabilityCheckin)
+	if authErr != nil {
 		return authz.Respond(c, authErr)
 	}
 	if len(body.IDs) == 0 || len(body.IDs) > 100 {
 		return utils.Error(c, http.StatusBadRequest, "Invalid IDs", "ids must contain between 1 and 100 guests")
 	}
-	statusIDRaw := strings.TrimSpace(body.StatusID)
-	if statusIDRaw == "" {
-		statusIDRaw = strings.TrimSpace(body.GuestStatusID)
-	}
-	statusID, err := uuid.FromString(statusIDRaw)
-	if err != nil {
-		return utils.Error(c, http.StatusBadRequest, "Invalid status_id", err.Error())
-	}
-	rsvpStatus := strings.ToLower(strings.TrimSpace(body.RSVPStatus))
-	if rsvpStatus != "pending" && rsvpStatus != "confirmed" && rsvpStatus != "declined" {
-		return utils.Error(c, http.StatusBadRequest, "Invalid rsvp_status", "expected pending, confirmed, or declined")
+	action := strings.ToLower(strings.TrimSpace(body.Action))
+	if action != "" && action != bulkActionUndoCheckin {
+		return utils.Error(c, http.StatusBadRequest, "Invalid action", "expected "+bulkActionUndoCheckin+" or no action")
 	}
 	rsvpMethod := strings.ToLower(strings.TrimSpace(body.RSVPMethod))
 	if rsvpMethod == "" {
@@ -1082,6 +1084,28 @@ func BulkUpdateGuestStatus(c echo.Context) error {
 		seen[id] = struct{}{}
 		ids = append(ids, id)
 	}
+	if action == bulkActionUndoCheckin {
+		if err := guestSvc.UndoGuestCheckins(eventID, ids); err != nil {
+			if errors.Is(err, guestService.ErrCheckinNotUndoable) {
+				return utils.Error(c, http.StatusConflict, "Check-in cannot be undone",
+					err.Error()+"; it is confirmed by an RSVP that is not a door check-in, which only guest:manage may change")
+			}
+			return utils.Error(c, http.StatusBadRequest, "Error undoing guest check-ins", err.Error())
+		}
+		return utils.Success(c, http.StatusOK, "Guest check-ins undone", nil)
+	}
+	statusIDRaw := strings.TrimSpace(body.StatusID)
+	if statusIDRaw == "" {
+		statusIDRaw = strings.TrimSpace(body.GuestStatusID)
+	}
+	statusID, err := uuid.FromString(statusIDRaw)
+	if err != nil {
+		return utils.Error(c, http.StatusBadRequest, "Invalid status_id", err.Error())
+	}
+	rsvpStatus := strings.ToLower(strings.TrimSpace(body.RSVPStatus))
+	if rsvpStatus != "pending" && rsvpStatus != "confirmed" && rsvpStatus != "declined" {
+		return utils.Error(c, http.StatusBadRequest, "Invalid rsvp_status", "expected pending, confirmed, or declined")
+	}
 	status, err := guestStatusByID(statusID)
 	if errors.Is(err, gorm.ErrRecordNotFound) || (err == nil && status == nil) {
 		return utils.Error(c, http.StatusBadRequest, "Invalid status_id", "guest status does not exist")
@@ -1095,17 +1119,21 @@ func BulkUpdateGuestStatus(c echo.Context) error {
 	if strings.ToLower(strings.TrimSpace(status.Code)) != rsvpStatus {
 		return utils.Error(c, http.StatusBadRequest, "status_id does not match rsvp_status", "the guest status code must equal rsvp_status")
 	}
-	// The door check-in (confirmed) needs only checkin:run. Check-in has no
-	// column of its own, so any other change could rewrite the guest's own
-	// RSVP and needs guest:manage.
-	if rsvpStatus != "confirmed" {
-		if _, _, authErr := authz.RequireEventCapability(c, eventID, authz.CapabilityGuestManage); authErr != nil {
-			var failure *authz.Failure
-			if errors.As(authErr, &failure) && failure.Status == http.StatusForbidden {
-				return utils.Error(c, http.StatusForbidden, "Access denied", bulkCheckinOnlyDetail)
-			}
-			return authz.Respond(c, authErr)
+	// The door check-in (confirmed) needs only checkin:run. Any other status
+	// could rewrite the guest's own RSVP and needs guest:manage; check-in
+	// staff take a check-in back with action undo_checkin instead.
+	if rsvpStatus == "confirmed" {
+		if err := guestSvc.CheckInGuests(eventID, ids, statusID, user.ID); err != nil {
+			return utils.Error(c, http.StatusBadRequest, "Error updating guest statuses", err.Error())
 		}
+		return utils.Success(c, http.StatusOK, "Guest statuses updated", nil)
+	}
+	if _, _, authErr := authz.RequireEventCapability(c, eventID, authz.CapabilityGuestManage); authErr != nil {
+		var failure *authz.Failure
+		if errors.As(authErr, &failure) && failure.Status == http.StatusForbidden {
+			return utils.Error(c, http.StatusForbidden, "Access denied", bulkCheckinOnlyDetail)
+		}
+		return authz.Respond(c, authErr)
 	}
 	if err := guestSvc.BulkUpdateGuestStatus(eventID, ids, statusID, rsvpStatus, rsvpMethod); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Error updating guest statuses", err.Error())

@@ -293,6 +293,9 @@ func (s *InvitationService) ConfirmRSVPWithResult(prettyToken string, status str
 	if len(rsvpNotes) > 0 {
 		guest.RSVPNotes = strings.TrimSpace(rsvpNotes[0])
 	}
+	// The guest's own answer replaces a door check-in, so an undo at the door
+	// can no longer restore the pre-check-in RSVP over it.
+	guest.ClearDoorCheckin()
 	if err := s.guestRepo.UpdateGuest(guest); err != nil {
 		return nil, err
 	}

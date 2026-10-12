@@ -50,6 +50,9 @@ type GuestResponse struct {
 	DietaryRestrictions string               `json:"dietary_restrictions"`
 	RSVPNotes           string               `json:"rsvp_notes"`
 	Notes               string               `json:"notes"`
+	// CheckedInAt is set while the guest is checked in at the door (PATCH
+	// /guests/bulk/status); check-in staff may undo only those check-ins.
+	CheckedInAt *time.Time `json:"checked_in_at,omitempty"`
 }
 
 type CheckinGuestsListQuery struct {
@@ -102,6 +105,10 @@ type CheckinGuest struct {
 	GuestsCount    int                  `json:"guests_count"`
 	RSVPStatus     string               `json:"rsvp_status"`
 	RSVPGuestCount int                  `json:"rsvp_guest_count"`
+	// CheckedInAt is set while the guest is checked in at the door; the
+	// check-in page offers undo only for those guests. Who checked the guest
+	// in and the previous RSVP stay server-side.
+	CheckedInAt *time.Time `json:"checked_in_at,omitempty"`
 }
 
 // CheckinGuestListResponse is the paged check-in list. CheckinGuestsPageResponse,
@@ -143,6 +150,7 @@ func NewCheckinGuestResponses(guests []models.Guest) []CheckinGuest {
 			GuestsCount:    guest.GuestsCount,
 			RSVPStatus:     guest.RSVPStatus,
 			RSVPGuestCount: guest.RSVPGuestCount,
+			CheckedInAt:    guest.CheckedInAt,
 		})
 	}
 	return response
@@ -224,6 +232,7 @@ func NewGuestResponse(guest *models.Guest) GuestResponse {
 		DietaryRestrictions: guest.DietaryRestrictions,
 		RSVPNotes:           guest.RSVPNotes,
 		Notes:               guest.Notes,
+		CheckedInAt:         guest.CheckedInAt,
 	}
 }
 

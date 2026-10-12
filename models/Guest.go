@@ -50,6 +50,39 @@ type Guest struct {
 	DietaryRestrictions string         `gorm:"type:varchar(255)" json:"dietary_restrictions"`
 	RSVPNotes           string         `gorm:"type:text" json:"rsvp_notes"`
 	Notes               string         `gorm:"type:text" json:"notes"`
+
+	// Door check-in provenance. Only the check-in transition of PATCH
+	// /guests/bulk/status sets these columns; its undo restores the
+	// checkin_previous_* values and clears them all, and any other write of the
+	// guest's RSVP clears them too. All nullable: AutoMigrate adds them without
+	// touching existing rows, and NULL means "not checked in at the door".
+	CheckedInAt                  *time.Time `gorm:"column:checked_in_at" json:"checked_in_at,omitempty"`
+	CheckedInByUserID            *uuid.UUID `gorm:"type:uuid;column:checked_in_by_user_id" json:"checked_in_by_user_id,omitempty"`
+	CheckinPreviousRSVPStatus    *string    `gorm:"type:text;column:checkin_previous_rsvp_status" json:"checkin_previous_rsvp_status,omitempty"`
+	CheckinPreviousGuestStatusID *uuid.UUID `gorm:"type:uuid;column:checkin_previous_guest_status_id" json:"checkin_previous_guest_status_id,omitempty"`
+	CheckinPreviousRSVPMethod    *string    `gorm:"type:text;column:checkin_previous_rsvp_method" json:"checkin_previous_rsvp_method,omitempty"`
+	CheckinPreviousRSVPAt        *time.Time `gorm:"column:checkin_previous_rsvp_at" json:"checkin_previous_rsvp_at,omitempty"`
+}
+
+// DoorCheckedIn reports whether the guest's RSVP is still the one a door
+// check-in wrote: provenance is recorded and the guest is confirmed by the
+// host. Only then may a check-in-only caller undo it.
+func (g *Guest) DoorCheckedIn() bool {
+	return g.CheckedInAt != nil &&
+		strings.EqualFold(strings.TrimSpace(g.RSVPStatus), "confirmed") &&
+		strings.EqualFold(strings.TrimSpace(g.RSVPMethod), "host")
+}
+
+// ClearDoorCheckin drops the door check-in provenance. Any RSVP write other
+// than the check-in transition calls it, so a later undo can never restore an
+// answer that has since been replaced (for example the guest's own RSVP).
+func (g *Guest) ClearDoorCheckin() {
+	g.CheckedInAt = nil
+	g.CheckedInByUserID = nil
+	g.CheckinPreviousRSVPStatus = nil
+	g.CheckinPreviousGuestStatusID = nil
+	g.CheckinPreviousRSVPMethod = nil
+	g.CheckinPreviousRSVPAt = nil
 }
 
 func (g *Guest) BeforeSave(tx *gorm.DB) error {
