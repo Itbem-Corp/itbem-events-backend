@@ -20,6 +20,16 @@ import (
 	"strings"
 )
 
+// Sentinel errors let controllers map organization failures to stable HTTP
+// statuses and error codes instead of string-matching or returning 500.
+// The texts are kept identical to the historical messages.
+var (
+	ErrClientAccessDenied     = errors.New("access denied")
+	ErrClientPermissionDenied = errors.New("permission denied")
+	ErrClientNotFound         = errors.New("client not found")
+	ErrClientHasChildren      = errors.New("cannot delete organization while it has sub-organizations")
+)
+
 // _clientSvc is the package-level singleton set by internal/app.
 var _clientSvc *ClientService
 
@@ -287,15 +297,12 @@ func (s *ClientService) updateClientDetails(
 	shouldDeleteOld bool,
 	primaryRoot bool,
 ) (*models.Client, error) {
-	if !primaryRoot {
-		allowed, role := s.clientRepo.CheckAccessRecursive(requesterID, clientID)
-		if !allowed || (strings.ToUpper(role) != "OWNER" && strings.ToUpper(role) != "INHERITED_OWNER") {
-			return nil, fmt.Errorf("permission denied")
-		}
+	if err := s.authorizeClientUpdate(clientID, requesterID, primaryRoot); err != nil {
+		return nil, err
 	}
 	client, err := s.clientRepo.GetClientByID(clientID)
 	if err != nil {
-		return nil, fmt.Errorf("client not found")
+		return nil, ErrClientNotFound
 	}
 	oldLogo := client.Logo
 	oldMediaBucket := client.MediaBucket
@@ -322,6 +329,64 @@ func (s *ClientService) updateClientDetails(
 		}
 	}
 	s.invalidateAllMyClients()
+	return client, nil
+}
+
+// authorizeClientUpdate is the single OWNER check for organization edits.
+// It must run before any side effect (logo upload) happens.
+func (s *ClientService) authorizeClientUpdate(clientID, requesterID uuid.UUID, primaryRoot bool) error {
+	if primaryRoot {
+		return nil
+	}
+	allowed, role := s.clientRepo.CheckAccessRecursive(requesterID, clientID)
+	roleUpper := strings.ToUpper(role)
+	if !allowed || (roleUpper != "OWNER" && roleUpper != "INHERITED_OWNER") {
+		return ErrClientPermissionDenied
+	}
+	return nil
+}
+
+// UpdateClientWithLogo authorizes the requester and confirms the organization
+// exists BEFORE uploading a new logo, so an unauthorized caller can never
+// write objects under the organization's branding prefix. Any failure after
+// the upload removes the freshly uploaded object. primaryRoot must only be
+// true for a Root 1 caller (the controller decides that).
+func (s *ClientService) UpdateClientWithLogo(
+	clientID, requesterID uuid.UUID,
+	primaryRoot bool,
+	name string,
+	logoFile multipart.File,
+	logoHeader *multipart.FileHeader,
+	removeLogo bool,
+) (*models.Client, error) {
+	if err := s.authorizeClientUpdate(clientID, requesterID, primaryRoot); err != nil {
+		return nil, err
+	}
+	if _, err := s.clientRepo.GetClientByID(clientID); err != nil {
+		return nil, ErrClientNotFound
+	}
+	logoName := ""
+	shouldDeleteOld := false
+	if logoFile != nil {
+		filename, err := s.UploadClientLogo(logoFile, logoHeader, clientID)
+		if err != nil {
+			return nil, err
+		}
+		logoName = filename
+		shouldDeleteOld = true
+	} else if removeLogo {
+		shouldDeleteOld = true
+	}
+	client, err := s.updateClientDetails(clientID, requesterID, name, logoName, shouldDeleteOld, primaryRoot)
+	if err != nil {
+		// updateClientDetails already removes the new object when the row
+		// update fails; cover the re-check failures (access revoked or the
+		// organization deleted between the check and the update) here.
+		if logoName != "" && (errors.Is(err, ErrClientPermissionDenied) || errors.Is(err, ErrClientNotFound)) {
+			s.cleanupClientLogo(clientID, logoName)
+		}
+		return nil, err
+	}
 	return client, nil
 }
 
@@ -430,11 +495,11 @@ func (s *ClientService) deleteClient(clientID, requesterID uuid.UUID, primaryRoo
 	if !primaryRoot {
 		allowed, role := s.clientRepo.CheckAccessRecursive(requesterID, clientID)
 		if !allowed {
-			return fmt.Errorf("access denied")
+			return ErrClientAccessDenied
 		}
 		roleUpper := strings.ToUpper(role)
 		if roleUpper != "OWNER" && roleUpper != "INHERITED_OWNER" {
-			return fmt.Errorf("permission denied: only the owner can delete the organization")
+			return fmt.Errorf("%w: only the owner can delete the organization", ErrClientPermissionDenied)
 		}
 	}
 	children, err := s.clientRepo.GetChildrenClients(clientID)
@@ -442,12 +507,11 @@ func (s *ClientService) deleteClient(clientID, requesterID uuid.UUID, primaryRoo
 		return fmt.Errorf("failed to verify organization hierarchy: %w", err)
 	}
 	if len(children) > 0 {
-		return fmt.Errorf("cannot delete organization while it has sub-organizations")
+		return ErrClientHasChildren
 	}
 	client, err := s.clientRepo.GetClientByID(clientID)
-	if err == nil && client.Logo != "" && s.rs != nil {
-		fullPath := clientLogoObjectPath(client.ID, client.Logo)
-		_ = s.rs.WithBucket(client.MediaBucket).DeleteObjectByPath(fullPath)
+	if err != nil {
+		return ErrClientNotFound
 	}
 	if s.tx != nil {
 		if err := s.tx.Transaction(func(tx *gorm.DB) error {
@@ -467,6 +531,13 @@ func (s *ClientService) deleteClient(clientID, requesterID uuid.UUID, primaryRoo
 		}
 		if err := s.clientRepo.DeleteClient(clientID); err != nil {
 			return fmt.Errorf("failed to delete client: %w", err)
+		}
+	}
+	// The logo is removed only after the rows are gone: a failed or rolled
+	// back delete must never leave a live organization without its logo.
+	if client.Logo != "" && s.rs != nil {
+		if err := s.rs.WithBucket(client.MediaBucket).DeleteObjectByPath(clientLogoObjectPath(client.ID, client.Logo)); err != nil {
+			slog.Warn("failed to delete logo of deleted client", "client_id", client.ID, "error", err)
 		}
 	}
 	s.invalidateAllMyClients()

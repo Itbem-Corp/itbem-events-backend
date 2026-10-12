@@ -21,6 +21,14 @@ import (
 
 var clientSvc *clients.ClientService
 
+// Stable error codes returned in the `error` field so the dashboard can map
+// them without parsing English or Go error text.
+const (
+	ErrCodeClientHasChildren      = "CLIENT_HAS_CHILDREN"
+	ErrCodeClientPermissionDenied = "CLIENT_PERMISSION_DENIED"
+	ErrCodeClientNotFound         = "CLIENT_NOT_FOUND"
+)
+
 func InitClientsController(svc *clients.ClientService) {
 	clientSvc = svc
 }
@@ -392,10 +400,15 @@ func DeleteClient(c echo.Context) error {
 		err = clientSvc.DeleteClient(clientID, user.ID)
 	}
 	if err != nil {
-		if err.Error() == "permission denied: only the owner can delete the organization" {
-			return utils.Error(c, http.StatusForbidden, "Permission Denied", err.Error())
+		switch {
+		case errors.Is(err, clients.ErrClientHasChildren):
+			return utils.Error(c, http.StatusConflict, "No se puede eliminar una organización que tiene sub-organizaciones. Elimina o mueve primero sus sub-organizaciones.", ErrCodeClientHasChildren)
+		case errors.Is(err, clients.ErrClientPermissionDenied), errors.Is(err, clients.ErrClientAccessDenied):
+			return utils.Error(c, http.StatusForbidden, "Solo el propietario puede eliminar la organización", ErrCodeClientPermissionDenied)
+		case errors.Is(err, clients.ErrClientNotFound):
+			return utils.Error(c, http.StatusNotFound, "La organización no existe", ErrCodeClientNotFound)
 		}
-		return utils.Error(c, http.StatusInternalServerError, "Error deleting client", err.Error())
+		return utils.Error(c, http.StatusInternalServerError, "Error deleting client", "No se pudo eliminar la organización")
 	}
 
 	return utils.Success(c, http.StatusOK, "Client deleted successfully", nil)
@@ -624,36 +637,32 @@ func UpdateClient(c echo.Context) error {
 
 	name := c.FormValue("name")
 	file, header, errFile := c.Request().FormFile("logo")
-
-	var logoName string
-	var shouldDeleteOld = false
-
 	if errFile == nil {
 		defer file.Close()
-		filename, err := clientServiceForContext(c).UploadClientLogo(file, header, clientID)
-		if err != nil {
+	} else {
+		file, header = nil, nil
+	}
+	removeLogo := c.FormValue("remove_logo") == "true"
+
+	// Authorization happens inside UpdateClientWithLogo BEFORE the logo is
+	// uploaded (ADM-8): a caller without OWNER access never writes to storage.
+	res, err := clientServiceForContext(c).UpdateClientWithLogo(clientID, user.ID, user.IsPrimaryRoot(), name, file, header, removeLogo)
+	if err != nil {
+		switch {
+		case errors.Is(err, clients.ErrClientPermissionDenied):
+			return utils.Error(c, http.StatusForbidden, "No tienes permiso para editar esta organización", ErrCodeClientPermissionDenied)
+		case errors.Is(err, clients.ErrClientNotFound):
+			return utils.Error(c, http.StatusNotFound, "La organización no existe", ErrCodeClientNotFound)
+		case validations.IsValidationError(err):
 			status, detail := resourcesService.UploadErrorResponse(err)
-			if validations.IsValidationError(err) {
-				return utils.Error(c, status, "Invalid logo", detail)
+			return utils.Error(c, status, "Invalid logo", detail)
+		default:
+			status, detail := resourcesService.UploadErrorResponse(err)
+			if status == http.StatusInternalServerError {
+				return utils.Error(c, http.StatusInternalServerError, "Update error", "No se pudo actualizar la organización")
 			}
 			return utils.Error(c, status, "Error uploading logo", detail)
 		}
-		logoName = filename
-		shouldDeleteOld = true
-	} else if c.FormValue("remove_logo") == "true" {
-		logoName = ""
-		shouldDeleteOld = true
-	}
-
-	var res *models.Client
-	scopedClientSvc := clientServiceForContext(c)
-	if user.IsPrimaryRoot() {
-		res, err = scopedClientSvc.UpdateClientDetailsAsPrimaryRoot(clientID, name, logoName, shouldDeleteOld)
-	} else {
-		res, err = scopedClientSvc.UpdateClientDetails(clientID, user.ID, name, logoName, shouldDeleteOld)
-	}
-	if err != nil {
-		return utils.Error(c, http.StatusForbidden, "Update error", err.Error())
 	}
 
 	if res.Logo != "" {
