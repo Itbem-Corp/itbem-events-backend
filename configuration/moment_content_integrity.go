@@ -19,7 +19,9 @@ WHERE deleted_at IS NULL AND content_url <> ''`
 
 // momentLiveContentURLDedupeSQL soft-deletes the extra live copies that the
 // confirm race may already have created, keeping per (event_id, content_url)
-// the most advanced row: approved first, then processed, then the oldest. It
+// the most advanced row: approved first (a legacy NULL is_approved counts as
+// not approved; plain DESC would sort NULL first), then processed, then the
+// oldest. It
 // only sets deleted_at, so a wrongly hidden row can be restored by clearing it;
 // the storage objects are shared by the copies and are not touched.
 const momentLiveContentURLDedupeSQL = `
@@ -27,7 +29,7 @@ WITH ranked AS (
     SELECT id,
            ROW_NUMBER() OVER (
                PARTITION BY event_id, content_url
-               ORDER BY is_approved DESC,
+               ORDER BY COALESCE(is_approved, false) DESC,
                         CASE WHEN processing_status IN ('', 'done') THEN 0 ELSE 1 END,
                         created_at ASC,
                         id ASC
@@ -42,9 +44,11 @@ WHERE moments.id = ranked.id AND ranked.copy_rank > 1`
 
 // migrateMomentContentURLUniqueness installs the live content_url unique
 // index once. It runs inside the startup migration transaction (after
-// AutoMigrate created moments): when the index already exists it returns
-// without locking; otherwise it locks moments against writes for the dedupe
-// and the index build, so no new duplicate can slip in between.
+// AutoMigrate created moments): the cheap pg_indexes pre-check returns
+// without locking, deduplicating or building when the index already exists
+// (every boot after the first); otherwise it locks moments against writes for
+// the dedupe and the index build, so no new duplicate can slip in between.
+// The soft-deleted count is always logged.
 func migrateMomentContentURLUniqueness(tx *gorm.DB) error {
 	var exists bool
 	if err := tx.Raw(`SELECT EXISTS (
@@ -65,6 +69,9 @@ func migrateMomentContentURLUniqueness(tx *gorm.DB) error {
 	if result.RowsAffected > 0 {
 		slog.Warn("soft-deleted duplicate live moments before adding the content_url unique index",
 			"rows", result.RowsAffected, "index", models.MomentLiveContentURLIndex)
+	} else {
+		slog.Info("no duplicate live moments to soft-delete before adding the content_url unique index",
+			"rows", 0, "index", models.MomentLiveContentURLIndex)
 	}
 	if err := tx.Exec(momentLiveContentURLIndexDDL).Error; err != nil {
 		return fmt.Errorf("create moment content index: %w", err)
