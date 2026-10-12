@@ -1,6 +1,32 @@
 package dtos
 
-import "time"
+import (
+	"time"
+
+	"github.com/gofrs/uuid"
+)
+
+// PublicEventResponse is the anonymous read of GET /api/events/:key. It keeps
+// the EventResponse JSON names of the fields it shares so older readers keep
+// working, and carries nothing about the organization, organizer contact,
+// capacity, configuration, guests or media processing.
+type PublicEventResponse struct {
+	ID                    uuid.UUID  `json:"id"`
+	Name                  string     `json:"name"`
+	Identifier            string     `json:"identifier"`
+	Description           string     `json:"description"`
+	CoverImageURL         string     `json:"cover_image_url"`
+	CoverViewURL          string     `json:"cover_view_url,omitempty"`
+	CoverViewURLExpiresAt *time.Time `json:"cover_view_url_expires_at,omitempty"`
+	ViewURL               string     `json:"view_url,omitempty"`
+	ViewURLExpiresAt      *time.Time `json:"view_url_expires_at,omitempty"`
+	EventDateTime         time.Time  `json:"event_date_time"`
+	Address               string     `json:"address"`
+	SecondAddress         string     `json:"second_address"`
+	Timezone              string     `json:"timezone"`
+	Language              string     `json:"language"`
+	OrganizerName         string     `json:"organizer_name"`
+}
 
 // EventMeta is the public-safe metadata used by OG tags and shared links.
 type EventMeta struct {
