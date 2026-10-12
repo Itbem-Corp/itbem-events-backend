@@ -3,6 +3,7 @@ package events
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/gofrs/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 type apiErrorBody struct {
@@ -150,4 +152,12 @@ func TestUpdateEvent_NullClientKeepsTheOrganization(t *testing.T) {
 	require.NotNil(t, saved.ClientID)
 	assert.Equal(t, clientID, *saved.ClientID)
 	assert.Equal(t, "Renombrado", saved.Name)
+}
+
+// Review S4: a vanished row is matched by sentinel (gorm.ErrRecordNotFound
+// from gormrepository.Update), not by its message.
+func TestRespondEventWriteErrorMapsRecordNotFoundSentinel(t *testing.T) {
+	c, rec := newEchoCtx(http.MethodPut, "/api/events/x", "")
+	require.NoError(t, respondEventWriteError(c, fmt.Errorf("update event: %w", gorm.ErrRecordNotFound), "Error updating event"))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
 }

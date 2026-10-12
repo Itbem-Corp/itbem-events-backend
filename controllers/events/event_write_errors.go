@@ -12,6 +12,7 @@ import (
 
 	"github.com/gofrs/uuid"
 	"github.com/labstack/echo/v4"
+	"gorm.io/gorm"
 )
 
 // Stable codes in the "error" field of event write failures, so the dashboard
@@ -64,7 +65,7 @@ func respondEventWriteError(c echo.Context, err error, fallback string) error {
 		return utils.Error(c, http.StatusConflict, "Ya existe un evento con ese nombre en esta organización.", eventErrorNameTaken)
 	case errors.Is(err, eventsrepository.ErrEventIdentifierAlreadyExists):
 		return utils.Error(c, http.StatusConflict, "Esa URL del evento ya está en uso. Elige otra.", eventErrorIdentifierTaken)
-	case err != nil && err.Error() == "record not found":
+	case errors.Is(err, gorm.ErrRecordNotFound):
 		return utils.Error(c, http.StatusNotFound, "Evento no encontrado", "")
 	}
 	slog.Error("event write failed", "operation", fallback, "error", err)
