@@ -154,6 +154,14 @@ type EventMemberRepository interface {
 	Remove(eventID, userID uuid.UUID) error
 }
 
+// ApplicationClientReach is implemented by client repositories that can tell
+// which of ids a user reaches inside one application: direct memberships plus
+// Owner/Admin inheritance that stops at another application's portal
+// organization (the application session boundary).
+type ApplicationClientReach interface {
+	ReachableClientIDsInApplication(userID uuid.UUID, applicationCode string, ids []uuid.UUID) (map[uuid.UUID]bool, error)
+}
+
 // EventSectionRepository is the data access contract for EventSection records.
 type EventSectionRepository interface {
 	CreateEventSection(m *models.EventSection) error
@@ -373,6 +381,14 @@ type ClientRepository interface {
 	DeleteAllMembers(clientID uuid.UUID) error
 	ListClientsByUser(userID uuid.UUID) ([]models.Client, error)
 	CountClientsByUsers(userIDs []uuid.UUID) (map[uuid.UUID]int64, error)
+}
+
+// ClientCodeRepository is optionally implemented by a ClientRepository to
+// report whether an organization code is already used by an organization
+// (including soft-deleted ones, which keep their unique index entry) or by an
+// application.
+type ClientCodeRepository interface {
+	ClientCodeTaken(code string) (bool, error)
 }
 
 type ClientMembersPageRepository interface {
