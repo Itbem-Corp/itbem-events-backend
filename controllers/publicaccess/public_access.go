@@ -119,21 +119,10 @@ func eventReadNow(deps EventReadDeps) time.Time {
 	return time.Now()
 }
 
+// EventAccessWindowOpen delegates to the shared rule in services/events so the
+// page-spec builders, invitations and these gates cannot drift apart.
 func EventAccessWindowOpen(cfg *models.EventConfig, now time.Time) bool {
-	if cfg == nil {
-		return true
-	}
-	if eventAccessTimeSet(cfg.ActiveFrom) && now.Before(cfg.ActiveFrom) {
-		return false
-	}
-	if cfg.ActiveUntil != nil && eventAccessTimeSet(*cfg.ActiveUntil) && now.After(*cfg.ActiveUntil) {
-		return false
-	}
-	return true
-}
-
-func eventAccessTimeSet(value time.Time) bool {
-	return !value.IsZero() && value.Year() > 1970
+	return eventsService.EventAccessWindowOpen(cfg, now)
 }
 
 func allowInvitationToken(eventID uuid.UUID, token string, deps EventReadDeps, now time.Time) bool {

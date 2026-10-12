@@ -133,6 +133,7 @@ type buildSpecDeps struct {
 	getGuestVersion                func(eventID uuid.UUID) (*time.Time, error)
 	getMomentVersion               func(eventID uuid.UUID) (*time.Time, error)
 	previewAuthorized              bool
+	now                            time.Time
 }
 
 // buildPageSpecFromEvent builds a PageSpec from an already-resolved event.
@@ -185,23 +186,9 @@ func buildPageSpecFromEventWithConfig(event *models.Event, deps buildSpecDeps, c
 		}
 	}
 
-	// 3. Build access control from EventConfig (best-effort — never blocks the page)
-	var access *dtos.PageSpecAccess
-	if cfg != nil {
-		isZero := cfg.ActiveFrom.IsZero() || cfg.ActiveFrom.Year() <= 1970
-		access = &dtos.PageSpecAccess{
-			PasswordProtected: cfg.HasAuthPasswordPreview(),
-			AccessVersion:     pageSpecAccessVersion(cfg),
-			PreviewAuthorized: deps.previewAuthorized,
-		}
-		if !isZero {
-			t := cfg.ActiveFrom
-			access.ActiveFrom = &t
-		}
-		if cfg.ActiveUntil != nil && !cfg.ActiveUntil.IsZero() {
-			access.ActiveUntil = cfg.ActiveUntil
-		}
-	}
+	// 3. Build access control from EventConfig. The window itself is enforced
+	// before this builder runs; these fields drive the public site's gates.
+	access := buildPageSpecAccess(cfg, deps.previewAuthorized, pageSpecBuildNow(deps.now))
 
 	// 4. Build meta
 	var eventDateTime *time.Time
@@ -266,6 +253,33 @@ func buildPageSpecFromEventWithConfig(event *models.Event, deps buildSpecDeps, c
 		Sections:    specSections,
 		MediaBucket: event.MediaBucket,
 	}, nil
+}
+
+func buildPageSpecAccess(cfg *models.EventConfig, previewAuthorized bool, now time.Time) *dtos.PageSpecAccess {
+	if cfg == nil {
+		return nil
+	}
+	access := &dtos.PageSpecAccess{
+		PasswordProtected: cfg.HasAuthPasswordPreview(),
+		AccessVersion:     pageSpecAccessVersion(cfg),
+		PreviewAuthorized: previewAuthorized,
+		WindowStatus:      EventAccessWindowStatus(cfg, now),
+	}
+	if EventAccessTimeSet(cfg.ActiveFrom) {
+		t := cfg.ActiveFrom
+		access.ActiveFrom = &t
+	}
+	if cfg.ActiveUntil != nil && !cfg.ActiveUntil.IsZero() {
+		access.ActiveUntil = cfg.ActiveUntil
+	}
+	return access
+}
+
+func pageSpecBuildNow(now time.Time) time.Time {
+	if now.IsZero() {
+		return time.Now()
+	}
+	return now
 }
 
 // loadPageSpecContentVersions overlaps the independent aggregate reads used by
@@ -796,14 +810,40 @@ func getPageSpec(deps pageSpecDeps, token string) (*dtos.PageSpec, error) {
 		return nil, ErrPageSpecInactive
 	}
 
-	return buildPageSpecFromEvent(event, buildSpecDeps{
+	cfg := loadEffectivePageSpecConfig(event.ID, deps.getConfig)
+	if !EventAccessWindowOpen(cfg, now) {
+		return windowLockedPageSpec(event, cfg, now), nil
+	}
+
+	return buildPageSpecFromEventWithConfig(event, buildSpecDeps{
 		getSections:                    deps.getSections,
 		getConfig:                      deps.getConfig,
 		getResourceVersion:             deps.getResourceVersion,
 		getResourceVersionBySectionIDs: deps.getResourceVersionBySectionIDs,
 		getGuestVersion:                deps.getGuestVersion,
 		getMomentVersion:               deps.getMomentVersion,
-	})
+		now:                            now,
+	}, cfg)
+}
+
+// windowLockedPageSpec is served when the caller may read the event but the
+// access window ("Disponible desde/hasta") is closed. It keeps meta.access so the
+// public site can render its "coming soon" / "ended" gate, and carries no
+// sections, address, contact, cover or theme.
+func windowLockedPageSpec(event *models.Event, cfg *models.EventConfig, now time.Time) *dtos.PageSpec {
+	return &dtos.PageSpec{
+		Meta: dtos.PageSpecMeta{
+			PageTitle:     event.Name,
+			EventID:       event.ID.String(),
+			Identifier:    event.Identifier,
+			Timezone:      event.Timezone,
+			Language:      event.Language,
+			EventType:     event.EventType.Name,
+			Access:        buildPageSpecAccess(cfg, false, now),
+			FooterVisible: false,
+		},
+		Sections: []dtos.PageSpecSection{},
+	}
 }
 
 func validPageSpecInvitationToken(deps identifierPageSpecDeps, eventID uuid.UUID, token string) bool {
@@ -872,6 +912,10 @@ func getPageSpecByIdentifier(deps identifierPageSpecDeps, identifier, previewTok
 			return nil, ErrPageSpecNotPublic
 		}
 	}
+	now := pageSpecNow(deps.now)
+	if !validPreview && !EventAccessWindowOpen(cfg, now) {
+		return windowLockedPageSpec(event, cfg, now), nil
+	}
 
 	return buildPageSpecFromEventWithConfig(event, buildSpecDeps{
 		getSections:                    deps.getSections,
@@ -881,6 +925,7 @@ func getPageSpecByIdentifier(deps identifierPageSpecDeps, identifier, previewTok
 		getGuestVersion:                deps.getGuestVersion,
 		getMomentVersion:               deps.getMomentVersion,
 		previewAuthorized:              validPreview,
+		now:                            now,
 	}, cfg)
 }
 

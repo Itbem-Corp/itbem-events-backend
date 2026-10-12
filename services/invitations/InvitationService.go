@@ -447,20 +447,7 @@ func (s *InvitationService) invitationEventNow() time.Time {
 }
 
 func invitationEventAccessWindowOpen(cfg *models.EventConfig, now time.Time) bool {
-	if cfg == nil {
-		return true
-	}
-	if invitationEventAccessTimeSet(cfg.ActiveFrom) && now.Before(cfg.ActiveFrom) {
-		return false
-	}
-	if cfg.ActiveUntil != nil && invitationEventAccessTimeSet(*cfg.ActiveUntil) && now.After(*cfg.ActiveUntil) {
-		return false
-	}
-	return true
-}
-
-func invitationEventAccessTimeSet(value time.Time) bool {
-	return !value.IsZero() && value.Year() > 1970
+	return eventsService.EventAccessWindowOpen(cfg, now)
 }
 
 // normalizeRSVPMethod keeps the rsvp_method an invitation token holder sends
