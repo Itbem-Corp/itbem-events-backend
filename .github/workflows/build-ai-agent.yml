@@ -77,7 +77,8 @@ concurrency:
 
 jobs:
   harness-isolation:
-    runs-on: windows-latest
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: [self-hosted, Windows, X64, itbem-org-ci]
     timeout-minutes: 5
     steps:
       - name: Check out source without persisting credentials
@@ -95,7 +96,8 @@ jobs:
         run: ./scripts/Test-HarnessCosts.ps1
 
   localstack-integration:
-    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || fromJSON('["self-hosted","Linux","X64","itbem-wsl-ci"]') }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: [self-hosted, Linux, X64, itbem-org-ci]
     timeout-minutes: 10
     services:
       localstack:
@@ -124,7 +126,7 @@ jobs:
       - name: Prove isolated transport and durable redelivery twice
         env:
           ITBEM_LOCALSTACK_E2E: '1'
-          ITBEM_LOCALSTACK_ENDPOINT: http://127.0.0.1:${{ job.services.localstack.ports[4566] }}
+          ITBEM_LOCALSTACK_ENDPOINT: http://127.0.0.1:${{ job.services.localstack.ports['4566'] }}
         shell: bash
         run: |
           set -o pipefail
@@ -160,7 +162,8 @@ jobs:
 
   build:
     needs: [harness-isolation, localstack-integration]
-    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || fromJSON('["self-hosted","Linux","X64","itbem-wsl-ci"]') }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: [self-hosted, Linux, X64, itbem-org-ci]
     timeout-minutes: 30
 
     steps:
@@ -239,7 +242,8 @@ jobs:
 
   artifact-replay:
     needs: build
-    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || fromJSON('["self-hosted","Linux","X64","itbem-wsl-ci"]') }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: [self-hosted, Linux, X64, itbem-org-ci]
     timeout-minutes: 15
     permissions:
       contents: read

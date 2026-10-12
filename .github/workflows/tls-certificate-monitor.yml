@@ -14,8 +14,9 @@ concurrency:
 
 jobs:
   monitor:
-    if: github.ref == 'refs/heads/main'
-    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || fromJSON('["self-hosted","Linux","X64","itbem-wsl-ci"]') }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.ref == 'refs/heads/main') }}
+    runs-on: [self-hosted, Linux, X64, itbem-org-ci]
+    timeout-minutes: 45
     permissions:
       contents: read
       id-token: write
