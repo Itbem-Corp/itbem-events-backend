@@ -356,6 +356,9 @@ func migrateModels(db *gorm.DB) error {
 		if err := migrateEventIdentityIntegrity(tx); err != nil {
 			return fmt.Errorf("migrate event identity integrity: %w", err)
 		}
+		if err := repairInvalidEventTimezones(tx); err != nil {
+			return err
+		}
 		// Early worker prototypes created this table and let Postgres choose the
 		// foreign-key name. The backend now owns the shared schema and GORM creates
 		// fk_event_analytics_rollups_event with the intended update/delete policy.
