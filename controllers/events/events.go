@@ -724,13 +724,10 @@ func GetPageSpec(c echo.Context) error {
 
 	spec, err := eventsService.GetPageSpecByToken(token)
 	if err != nil {
-		if errors.Is(err, eventsService.ErrPageSpecTokenExpired) {
-			return utils.Error(c, http.StatusUnauthorized, "Invalid invitation token", err.Error())
+		if handled, respErr := respondPageSpecAccessError(c, err); handled {
+			return respErr
 		}
-		if errors.Is(err, eventsService.ErrPageSpecInactive) {
-			return utils.Error(c, http.StatusForbidden, "Event is not public", "")
-		}
-		return utils.Error(c, http.StatusNotFound, "Page spec not found", err.Error())
+		return utils.Error(c, http.StatusNotFound, "Page spec not found", "")
 	}
 
 	return utils.Success(c, http.StatusOK, "Page spec loaded", pageSpecPublicResponse(c, spec))
@@ -747,13 +744,43 @@ func GetPageSpecByIdentifier(c echo.Context) error {
 
 	spec, err := eventsService.GetPageSpecByIdentifier(identifier, utils.PublicPreviewToken(c), utils.PublicInvitationQueryToken(c))
 	if err != nil {
-		if errors.Is(err, eventsService.ErrPageSpecNotPublic) || errors.Is(err, eventsService.ErrPageSpecInactive) {
-			return utils.Error(c, http.StatusForbidden, "Event is not public", "")
+		if handled, respErr := respondPageSpecAccessError(c, err); handled {
+			return respErr
 		}
-		return utils.Error(c, http.StatusNotFound, "Page spec not found", err.Error())
+		return utils.Error(c, http.StatusNotFound, "Page spec not found", "")
 	}
 
 	return utils.Success(c, http.StatusOK, "Page spec loaded", pageSpecPublicResponse(c, spec))
+}
+
+// Public page-spec error codes (field "code", repeated in "error") the public
+// site branches on.
+const (
+	PageSpecTokenInvalidCode = "invitation_token_invalid"
+	PageSpecTokenExpiredCode = "invitation_token_expired"
+	PageSpecEventGoneCode    = "event_gone"
+	PageSpecNotPublicCode    = "event_not_public"
+)
+
+func pageSpecError(c echo.Context, status int, message, code string) error {
+	return c.JSON(status, dtos.PublicErrorResponse{Status: status, Message: message, Code: code, Error: code})
+}
+
+// respondPageSpecAccessError maps the page-spec access errors shared by the
+// token and identifier routes: 401 invalid/expired link, 410 deleted event,
+// 403 not public (no token) or inactive event.
+func respondPageSpecAccessError(c echo.Context, err error) (bool, error) {
+	switch {
+	case errors.Is(err, eventsService.ErrPageSpecTokenExpired):
+		return true, pageSpecError(c, http.StatusUnauthorized, "Este enlace ya no es válido o expiró. Pide al organizador uno nuevo.", PageSpecTokenExpiredCode)
+	case errors.Is(err, eventsService.ErrPageSpecTokenNotFound):
+		return true, pageSpecError(c, http.StatusUnauthorized, "Este enlace ya no es válido o expiró. Pide al organizador uno nuevo.", PageSpecTokenInvalidCode)
+	case errors.Is(err, eventsService.ErrPageSpecEventGone):
+		return true, pageSpecError(c, http.StatusGone, "Este evento ya no está disponible", PageSpecEventGoneCode)
+	case errors.Is(err, eventsService.ErrPageSpecNotPublic), errors.Is(err, eventsService.ErrPageSpecInactive):
+		return true, pageSpecError(c, http.StatusForbidden, "Event is not public", PageSpecNotPublicCode)
+	}
+	return false, nil
 }
 
 // POST /api/events/:identifier/view

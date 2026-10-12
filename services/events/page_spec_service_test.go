@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gofrs/uuid"
+	"gorm.io/gorm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -169,7 +170,8 @@ func TestGetPageSpec_InvitationNotFound(t *testing.T) {
 	spec, err := getPageSpec(deps, "ABC123")
 	assert.Nil(t, spec)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invitation not found")
+	// GST-36: a revoked link (invitation deleted) is an invalid token.
+	assert.ErrorIs(t, err, ErrPageSpecTokenNotFound)
 }
 
 func TestGetPageSpec_Success_WithMusic(t *testing.T) {
@@ -905,8 +907,59 @@ func TestGetPageSpecByIdentifier_BlocksPrivateEventWithExpiredInvitationToken(t 
 	spec, err := getPageSpecByIdentifier(deps, "grad-izapa-2025", "", "invite-expired")
 	assert.Nil(t, spec)
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, ErrPageSpecNotPublic))
-	assert.False(t, invitationLoaded)
+	// PUB-33/43: an expired link of this event is a 401 "expired", not the
+	// 403 "not published" (the invitation is read to confirm the event).
+	assert.True(t, errors.Is(err, ErrPageSpecTokenExpired))
+	assert.True(t, invitationLoaded)
+}
+
+// PUB-74: an unknown or other-event token on a private event is "invalid";
+// with no token at all the event is just not public.
+func TestGetPageSpecByIdentifier_PrivateEventTokenErrors(t *testing.T) {
+	otherEvent := uuid.Must(uuid.NewV4())
+	deps := identifierPageSpecDeps{
+		getEventByIdentifier: func(string) (*models.Event, error) { return stubEvent(""), nil },
+		getToken: func(token string) (*models.InvitationAccessToken, error) {
+			if token == "other-event" {
+				return &models.InvitationAccessToken{InvitationID: testInvitationID}, nil
+			}
+			return nil, errors.New("not found")
+		},
+		getInvitation: func(id uuid.UUID) (*models.Invitation, error) {
+			return &models.Invitation{ID: id, EventID: otherEvent}, nil
+		},
+		getConfig: func(uuid.UUID) (*models.EventConfig, error) { return &models.EventConfig{IsPublic: false}, nil },
+	}
+
+	_, err := getPageSpecByIdentifier(deps, "grad-izapa-2025", "", "nope")
+	assert.ErrorIs(t, err, ErrPageSpecTokenNotFound)
+	_, err = getPageSpecByIdentifier(deps, "grad-izapa-2025", "", "other-event")
+	assert.ErrorIs(t, err, ErrPageSpecTokenNotFound)
+	_, err = getPageSpecByIdentifier(deps, "grad-izapa-2025", "", "")
+	assert.ErrorIs(t, err, ErrPageSpecNotPublic)
+}
+
+// EVT-93: a deleted event's identifier is 410 event_gone on both routes.
+func TestGetPageSpec_DeletedEventIsGone(t *testing.T) {
+	_, err := getPageSpecByIdentifier(identifierPageSpecDeps{
+		getEventByIdentifier: func(string) (*models.Event, error) { return nil, gorm.ErrRecordNotFound },
+		identifierDeleted:    func(string) (bool, error) { return true, nil },
+	}, "deleted-event", "", "")
+	assert.ErrorIs(t, err, ErrPageSpecEventGone)
+
+	_, err = getPageSpecByIdentifier(identifierPageSpecDeps{
+		getEventByIdentifier: func(string) (*models.Event, error) { return nil, gorm.ErrRecordNotFound },
+		identifierDeleted:    func(string) (bool, error) { return false, nil },
+	}, "never-existed", "", "")
+	assert.Error(t, err)
+	assert.NotErrorIs(t, err, ErrPageSpecEventGone)
+
+	_, err = getPageSpec(pageSpecDeps{
+		getToken:      func(string) (*models.InvitationAccessToken, error) { return stubToken(), nil },
+		getInvitation: func(uuid.UUID) (*models.Invitation, error) { return stubInvitation(), nil },
+		getEvent:      func(uuid.UUID) (*models.Event, error) { return nil, gorm.ErrRecordNotFound },
+	}, "ABC123")
+	assert.ErrorIs(t, err, ErrPageSpecEventGone)
 }
 
 func TestGetPageSpecByIdentifier_UsesInjectedClockForInvitationTokenExpiry(t *testing.T) {

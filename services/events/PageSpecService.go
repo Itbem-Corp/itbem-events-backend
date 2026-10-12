@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gofrs/uuid"
+	"gorm.io/gorm"
 )
 
 var _pageSpecSvc *PageSpecService
@@ -25,7 +26,17 @@ var (
 	ErrPageSpecInactive      = errors.New("event page is inactive")
 	ErrPageSpecTokenExpired  = errors.New("token expired")
 	ErrPageSpecTokenNotFound = errors.New("token not found")
+	// ErrPageSpecEventGone: the event behind the identifier or the invitation
+	// was deleted (410 event_gone, like the invitation ByToken route).
+	ErrPageSpecEventGone = errors.New("event deleted")
 )
+
+// PageSpecDeletedIdentifierRepository is implemented by the production events
+// repository: it tells a deleted event's identifier apart from one that never
+// existed.
+type PageSpecDeletedIdentifierRepository interface {
+	IdentifierDeleted(identifier string) (bool, error)
+}
 
 const defaultPageSpecMaxUploadsPerGuest = 30
 
@@ -124,6 +135,7 @@ type identifierPageSpecDeps struct {
 	getGuestVersion                func(eventID uuid.UUID) (*time.Time, error)
 	getMomentVersion               func(eventID uuid.UUID) (*time.Time, error)
 	validatePreviewToken           func(token string, eventID uuid.UUID) bool
+	identifierDeleted              func(identifier string) (bool, error)
 	now                            func() time.Time
 }
 
@@ -821,7 +833,9 @@ func getPageSpec(deps pageSpecDeps, token string) (*dtos.PageSpec, error) {
 	// 2. Access token → invitation → event ID
 	invitation, err := deps.getInvitation(accessToken.InvitationID)
 	if err != nil || invitation == nil {
-		return nil, fmt.Errorf("invitation not found")
+		// A revoked link (guest deleted) soft-deletes its invitation: the
+		// token is no longer valid, not "page not found".
+		return nil, ErrPageSpecTokenNotFound
 	}
 	if !InvitationHeldByLiveGuest(deps.invitationHasLiveGuest, invitation.ID) {
 		return nil, ErrPageSpecTokenNotFound
@@ -829,6 +843,9 @@ func getPageSpec(deps pageSpecDeps, token string) (*dtos.PageSpec, error) {
 
 	// 3. Fetch event
 	event, err := deps.getEvent(invitation.EventID)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrPageSpecEventGone
+	}
 	if err != nil || event == nil {
 		return nil, fmt.Errorf("event not found")
 	}
@@ -873,22 +890,35 @@ func windowLockedPageSpec(event *models.Event, cfg *models.EventConfig, now time
 }
 
 func validPageSpecInvitationToken(deps identifierPageSpecDeps, eventID uuid.UUID, token string) bool {
-	if token == "" || deps.getToken == nil || deps.getInvitation == nil {
-		return false
+	return pageSpecInvitationTokenError(deps, eventID, token) == nil
+}
+
+// pageSpecInvitationTokenError checks an invitation token against the event:
+// nil when it opens the event, ErrPageSpecTokenExpired when it expired, and
+// ErrPageSpecTokenNotFound for a missing, unknown, revoked (guest deleted) or
+// other-event token.
+func pageSpecInvitationTokenError(deps identifierPageSpecDeps, eventID uuid.UUID, token string) error {
+	if strings.TrimSpace(token) == "" || deps.getToken == nil || deps.getInvitation == nil {
+		return ErrPageSpecTokenNotFound
 	}
 	now := pageSpecNow(deps.now)
 	accessToken, err := deps.getToken(token)
 	if err != nil || accessToken == nil {
-		return false
-	}
-	if isExpiredPageSpecAccessToken(accessToken, now) {
-		return false
+		return ErrPageSpecTokenNotFound
 	}
 	invitation, err := deps.getInvitation(accessToken.InvitationID)
 	if err != nil || invitation == nil || invitation.EventID != eventID {
-		return false
+		return ErrPageSpecTokenNotFound
 	}
-	return InvitationHeldByLiveGuest(deps.invitationHasLiveGuest, invitation.ID)
+	if !InvitationHeldByLiveGuest(deps.invitationHasLiveGuest, invitation.ID) {
+		return ErrPageSpecTokenNotFound
+	}
+	// Expiry is reported only for a token of this event, so another event's
+	// expired link never reveals anything beyond "invalid".
+	if isExpiredPageSpecAccessToken(accessToken, now) {
+		return ErrPageSpecTokenExpired
+	}
+	return nil
 }
 
 func validPageSpecPreviewToken(deps identifierPageSpecDeps, eventID uuid.UUID, token string) bool {
@@ -922,6 +952,11 @@ func isExpiredPageSpecAccessToken(accessToken *models.InvitationAccessToken, now
 func getPageSpecByIdentifier(deps identifierPageSpecDeps, identifier, previewToken, invitationToken string) (*dtos.PageSpec, error) {
 	event, err := deps.getEventByIdentifier(identifier)
 	if err != nil || event == nil {
+		if deps.identifierDeleted != nil {
+			if deleted, deletedErr := deps.identifierDeleted(identifier); deletedErr == nil && deleted {
+				return nil, ErrPageSpecEventGone
+			}
+		}
 		return nil, fmt.Errorf("event not found")
 	}
 
@@ -933,9 +968,15 @@ func getPageSpecByIdentifier(deps identifierPageSpecDeps, identifier, previewTok
 	if !event.IsActive && !validPreview {
 		return nil, ErrPageSpecInactive
 	}
-	if !cfg.IsPublic {
-		if !validPreview && !validPageSpecInvitationToken(deps, event.ID, invitationToken) {
+	if !cfg.IsPublic && !validPreview {
+		// No token: the event is simply not public (403). A token that does
+		// not open it is the guest's link failing (401 invalid/expired), so
+		// the public site can say the link expired instead of "not published".
+		if strings.TrimSpace(invitationToken) == "" {
 			return nil, ErrPageSpecNotPublic
+		}
+		if tokenErr := pageSpecInvitationTokenError(deps, event.ID, invitationToken); tokenErr != nil {
+			return nil, tokenErr
 		}
 	}
 	now := pageSpecNow(deps.now)
@@ -1007,6 +1048,10 @@ func (s *PageSpecService) GetPageSpecByIdentifier(identifier, previewToken, invi
 	if s.moments != nil {
 		getMomentVersion = s.moments.LatestPublicMomentUpdatedAtByEventID
 	}
+	var identifierDeleted func(string) (bool, error)
+	if deletedRepo, ok := s.events.(PageSpecDeletedIdentifierRepository); ok {
+		identifierDeleted = deletedRepo.IdentifierDeleted
+	}
 	return getPageSpecByIdentifier(identifierPageSpecDeps{
 		getEventByIdentifier:           s.events.GetEventByIdentifier,
 		getToken:                       accessTokenLookup(s.accessTokens),
@@ -1019,6 +1064,7 @@ func (s *PageSpecService) GetPageSpecByIdentifier(identifier, previewToken, invi
 		getGuestVersion:                getGuestVersion,
 		getMomentVersion:               getMomentVersion,
 		validatePreviewToken:           previewtoken.Validate,
+		identifierDeleted:              identifierDeleted,
 	}, identifier, previewToken, invitationToken)
 }
 

@@ -543,7 +543,7 @@ func TestGetPageSpec_ExpiredTokenReturns401(t *testing.T) {
 
 	require.NoError(t, GetPageSpec(c))
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.Contains(t, rec.Body.String(), `"message":"Invalid invitation token"`)
+	assert.Contains(t, rec.Body.String(), `"code":"invitation_token_expired"`)
 }
 
 func TestGetPageSpec_InactiveEventReturns403(t *testing.T) {

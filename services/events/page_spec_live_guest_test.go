@@ -46,5 +46,5 @@ func TestGetPageSpecByIdentifier_RejectsInvitationWithoutLiveGuest(t *testing.T)
 
 	spec, err := getPageSpecByIdentifier(deps, "grad-izapa-2025", "", "ABC123")
 	assert.Nil(t, spec)
-	assert.ErrorIs(t, err, ErrPageSpecNotPublic)
+	assert.ErrorIs(t, err, ErrPageSpecTokenNotFound) // GST-36: revoked link
 }
