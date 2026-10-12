@@ -232,6 +232,7 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	public.GET("/events/section/:sectionId/attendees", guests.GetAttendees) // SDUI: Graduados por sección
 	public.GET("/events/phrases", events.ListPhrases)
 	public.GET("/events/:identifier/meta", events.GetEventMeta)
+	public.GET("/events/:identifier/cover-image", events.GetEventCoverImage)    // og:image estable (redirige a URL fresca)
 	public.GET("/events/:identifier/page-spec", events.GetPageSpecByIdentifier) // SDUI: PageSpec por identifier (vista previa)
 	public.GET("/events/:key", events.GetEvents)
 	public.POST("/events/:identifier/view", events.TrackView)                  // Incrementa contador de vistas

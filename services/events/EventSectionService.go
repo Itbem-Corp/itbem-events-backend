@@ -7,6 +7,7 @@ import (
 	"events-stocks/services/ports"
 	"events-stocks/utils"
 	"sort"
+	"time"
 
 	"github.com/gofrs/uuid"
 )
@@ -71,6 +72,34 @@ func (s *EventSectionService) UpdateEventSection(obj *models.EventSection) error
 		return err
 	}
 	return s.invalidateEventSectionCache()
+}
+
+// UpdateEventSectionIfUnmodified saves obj only when the stored section still
+// has updated_at == expected (microsecond precision); otherwise it returns
+// ports.ErrEventSectionConflict and nothing is written (STU-N3).
+func (s *EventSectionService) UpdateEventSectionIfUnmodified(obj *models.EventSection, expected time.Time) error {
+	if conditional, ok := s.repo.(ports.ConditionalEventSectionUpdater); ok {
+		if err := conditional.UpdateEventSectionIfUnmodified(obj, expected); err != nil {
+			return err
+		}
+		return s.invalidateEventSectionCache()
+	}
+	// Repositories without a conditional write (test doubles) get a
+	// read-compare-write; the production repository is atomic.
+	current, err := s.repo.GetEventSectionByID(obj.ID)
+	if err != nil {
+		return err
+	}
+	if !SectionUpdatedAtMatches(current.UpdatedAt, expected) {
+		return ports.ErrEventSectionConflict
+	}
+	return s.UpdateEventSection(obj)
+}
+
+// SectionUpdatedAtMatches compares two updated_at values at the precision
+// Postgres stores (microseconds).
+func SectionUpdatedAtMatches(stored, expected time.Time) bool {
+	return stored.UTC().Truncate(time.Microsecond).Equal(expected.UTC().Truncate(time.Microsecond))
 }
 
 func (s *EventSectionService) DeleteEventSection(id uuid.UUID) error {

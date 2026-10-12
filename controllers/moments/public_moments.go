@@ -605,7 +605,7 @@ func allowMomentWallInvitation(c echo.Context, eventID uuid.UUID) (bool, error) 
 		return false, fmt.Errorf("invalid invitation token")
 	}
 	inv, err := publicInvitationRepo.GetInvitationByIDLite(token.InvitationID)
-	if err != nil || inv == nil || inv.EventID != eventID {
+	if err != nil || inv == nil || inv.EventID != eventID || !publicInvitationHeldByLiveGuest(inv.ID) {
 		return false, fmt.Errorf("token does not belong to this event")
 	}
 	setUploadQuotaInvitation(c, &token.InvitationID)
@@ -818,7 +818,7 @@ func CreatePublicMoment(c echo.Context) error {
 
 	// Verify token belongs to this event
 	inv, err := publicInvitationRepo.GetInvitationByIDLite(token.InvitationID)
-	if err != nil || inv == nil || inv.EventID != event.ID {
+	if err != nil || inv == nil || inv.EventID != event.ID || !publicInvitationHeldByLiveGuest(inv.ID) {
 		return utils.Error(c, http.StatusUnauthorized, "Token does not belong to this event", "")
 	}
 	setUploadQuotaInvitation(c, &token.InvitationID)
@@ -1245,7 +1245,7 @@ func validatePersonalUploadRequest(c echo.Context, identifier, prettyToken strin
 		return nil, nil, nil, newPublicUploadRequestError(http.StatusForbidden, "Event is not public", "")
 	}
 	inv, err := publicInvitationRepo.GetInvitationByIDLite(token.InvitationID)
-	if err != nil || inv == nil || inv.EventID != event.ID {
+	if err != nil || inv == nil || inv.EventID != event.ID || !publicInvitationHeldByLiveGuest(inv.ID) {
 		return nil, nil, nil, newPublicUploadRequestError(http.StatusUnauthorized, "Token does not belong to this event", "")
 	}
 	cfg := loadPublicEventConfig(event.ID)
@@ -1448,4 +1448,10 @@ func findConfirmedMoment(eventID uuid.UUID, objectKey string) (*models.Moment, e
 		return nil, nil
 	}
 	return moment, err
+}
+
+// publicInvitationHeldByLiveGuest rejects invitation tokens whose guest was
+// deleted (GST-1), including guests deleted before revocation existed.
+func publicInvitationHeldByLiveGuest(invitationID uuid.UUID) bool {
+	return eventsService.InvitationHeldByLiveGuest(eventsService.InvitationLiveGuestLookup(publicInvitationRepo), invitationID)
 }

@@ -504,7 +504,44 @@ func DeleteGuest(id uuid.UUID) error {
 	if err := gormrepository.GetByID(&guest, id); err != nil {
 		return err
 	}
-	return gormrepository.Delete(id, &models.Guest{})
+	return deleteGuestsAndRevokeInvitations(configuration.DB, []uuid.UUID{id}, time.Now().UTC())
+}
+
+// deleteGuestsAndRevokeInvitations soft-deletes the guests and, in the same
+// transaction, revokes what their invitation links can do: the invitation row
+// is soft-deleted and its access token(s) expire now, unless another live guest
+// still holds that invitation. Every public token check already rejects an
+// expired token or a missing invitation.
+func deleteGuestsAndRevokeInvitations(db *gorm.DB, ids []uuid.UUID, now time.Time) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		var invitationIDs []uuid.UUID
+		if err := tx.Model(&models.Guest{}).
+			Where("id IN ? AND invitation_id IS NOT NULL", ids).
+			Distinct().
+			Pluck("invitation_id", &invitationIDs).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("id IN ?", ids).Delete(&models.Guest{}).Error; err != nil {
+			return err
+		}
+		if len(invitationIDs) == 0 {
+			return nil
+		}
+		const noLiveGuest = "NOT EXISTS (SELECT 1 FROM guests WHERE guests.invitation_id = %s AND guests.deleted_at IS NULL)"
+		if err := tx.Model(&models.InvitationAccessToken{}).
+			Where("invitation_id IN ?", invitationIDs).
+			Where("expires_at IS NULL OR expires_at > ?", now).
+			Where(fmt.Sprintf(noLiveGuest, "invitation_access_tokens.invitation_id")).
+			Updates(map[string]interface{}{"expires_at": now, "updated_at": now}).Error; err != nil {
+			return err
+		}
+		return tx.Where("id IN ?", invitationIDs).
+			Where(fmt.Sprintf(noLiveGuest, "invitations.id")).
+			Delete(&models.Invitation{}).Error
+	})
 }
 
 func GetGuestByID(id uuid.UUID) (*models.Guest, error) {
@@ -535,12 +572,10 @@ func CreateGuests(models []models.Guest) error {
 	return gormrepository.InsertMany(models)
 }
 
-// BulkDeleteGuests soft-deletes multiple guests by ID.
+// BulkDeleteGuests soft-deletes multiple guests by ID and revokes their
+// invitation links (see deleteGuestsAndRevokeInvitations).
 func BulkDeleteGuests(ids []uuid.UUID) error {
-	if len(ids) == 0 {
-		return nil
-	}
-	return configuration.DB.Where("id IN ?", ids).Delete(&models.Guest{}).Error
+	return deleteGuestsAndRevokeInvitations(configuration.DB, ids, time.Now().UTC())
 }
 
 var errGuestsOutsideEvent = errors.New("one or more guests do not belong to event")
