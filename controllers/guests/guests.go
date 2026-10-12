@@ -510,6 +510,9 @@ func CreateGuest(c echo.Context) error {
 	if guest.GuestsCount > 0 {
 		guest.RSVPGuestCount = guest.GuestsCount
 	}
+	if err := validateGuestWrite(nil, &guest); err != nil {
+		return respondGuestWriteError(c, err)
+	}
 	if _, _, authErr := authz.RequireEventCapability(c, guest.EventID, authz.CapabilityGuestManage); authErr != nil {
 		return authz.Respond(c, authErr)
 	}
@@ -546,6 +549,18 @@ func CreateGuests(c echo.Context) error {
 		}
 		applyGuestWrite(&guests[i], write)
 		guests[i].EventID = guestWriteEventID(write.fields)
+		batchCount := guests[i]
+		if batchCount.RSVPGuestCount <= 0 && batchCount.GuestsCount > 0 {
+			batchCount.RSVPGuestCount = batchCount.GuestsCount
+		}
+		if err := validateGuestWrite(nil, &batchCount); err != nil {
+			var invalid *guestWriteError
+			if errors.As(err, &invalid) {
+				return utils.Error(c, http.StatusBadRequest,
+					"Invitado "+strconv.Itoa(i+1)+": "+invalid.Message, invalid.Code)
+			}
+			return respondGuestWriteError(c, err)
+		}
 	}
 
 	eventID := guests[0].EventID
@@ -590,6 +605,7 @@ func UpdateGuest(c echo.Context) error {
 	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
 	}
+	stored := *guest
 	// Only allowlisted columns change: id, event_id, invitation_id, rsvp_token_id,
 	// rsvp_at and created_at keep the stored values the authz check loaded.
 	applyGuestWrite(guest, write)
@@ -602,6 +618,9 @@ func UpdateGuest(c echo.Context) error {
 	}
 	if err := c.Validate(guest); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Validation error", err.Error())
+	}
+	if err := validateGuestWrite(&stored, guest); err != nil {
+		return respondGuestWriteError(c, err)
 	}
 	if write.tableSet {
 		if err := checkGuestTables(guest.EventID, []models.Guest{*guest}); err != nil {
