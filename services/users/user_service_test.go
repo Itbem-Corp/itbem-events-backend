@@ -858,8 +858,8 @@ func TestAdminDeleteUser_Success(t *testing.T) {
 		},
 	}
 
-	svc := NewAdminUserService(userRepo, nil, authRepo)
-	err := svc.DeleteUser(userID)
+	svc := NewAdminUserService(userRepo, &membershipClientRepo{}, authRepo)
+	err := svc.DeleteUser(uuid.Must(uuid.NewV4()), userID)
 
 	require.NoError(t, err)
 	assert.Equal(t, "sub", deletedSub)
