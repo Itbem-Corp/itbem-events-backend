@@ -56,6 +56,25 @@ func guestCSVStatus(guest models.Guest) string {
 	return status
 }
 
+// guestCSVStatusLabel is the Spanish value written to the export's status
+// column (GST-84): Pendiente, Confirmado, Declinado. Unknown codes are written
+// as they are. The dashboard CSV import ignores the status column (imported
+// guests start as pending), so this is a display format only; external
+// consumers that parsed the former English codes (PENDING, CONFIRMED,
+// DECLINED) must map these labels.
+func guestCSVStatusLabel(guest models.Guest) string {
+	switch status := guestCSVStatus(guest); status {
+	case "PENDING":
+		return "Pendiente"
+	case "CONFIRMED":
+		return "Confirmado"
+	case "DECLINED":
+		return "Declinado"
+	default:
+		return status
+	}
+}
+
 func guestCSVTable(guest models.Guest) string {
 	if guest.Table != nil && strings.TrimSpace(guest.Table.Name) != "" {
 		return strings.TrimSpace(guest.Table.Name)
@@ -144,7 +163,7 @@ func ExportGuestsCSV(c echo.Context) error {
 				respondedAt = guest.UpdatedAt.UTC().Format(time.RFC3339)
 			}
 			writeGuestCSVRow(writer,
-				strings.TrimSpace(guest.FirstName+" "+guest.LastName), guest.Email, guest.Phone, guestCSVStatus(guest),
+				strings.TrimSpace(guest.FirstName+" "+guest.LastName), guest.Email, guest.Phone, guestCSVStatusLabel(guest),
 				guest.RSVPMethod, strconv.Itoa(max(partySize-1, 0)), respondedAt, guest.CreatedAt.UTC().Format(time.RFC3339),
 			)
 		} else if invitationView {
@@ -153,13 +172,13 @@ func ExportGuestsCSV(c echo.Context) error {
 				respondedAt = guest.RSVPAt.UTC().Format(time.RFC3339)
 			}
 			writeGuestCSVRow(writer,
-				strings.TrimSpace(guest.FirstName+" "+guest.LastName), guest.Email, guest.Phone, guestCSVStatus(guest),
+				strings.TrimSpace(guest.FirstName+" "+guest.LastName), guest.Email, guest.Phone, guestCSVStatusLabel(guest),
 				respondedAt, guest.RSVPMethod, strconv.Itoa(max(partySize-1, 0)),
 			)
 		} else {
 			writeGuestCSVRow(writer,
 				guest.FirstName, guest.LastName, guest.Email, guest.Phone, guestCSVTable(guest), strconv.Itoa(partySize),
-				strconv.Itoa(max(partySize-1, 0)), guestCSVStatus(guest), guest.DietaryRestrictions, guest.RSVPNotes, guest.Notes,
+				strconv.Itoa(max(partySize-1, 0)), guestCSVStatusLabel(guest), guest.DietaryRestrictions, guest.RSVPNotes, guest.Notes,
 			)
 		}
 	}
@@ -510,11 +529,17 @@ func CreateGuest(c echo.Context) error {
 	if guest.GuestsCount > 0 {
 		guest.RSVPGuestCount = guest.GuestsCount
 	}
+	if err := validateGuestWrite(nil, &guest); err != nil {
+		return respondGuestWriteError(c, err)
+	}
 	if _, _, authErr := authz.RequireEventCapability(c, guest.EventID, authz.CapabilityGuestManage); authErr != nil {
 		return authz.Respond(c, authErr)
 	}
 	if err := checkGuestTables(guest.EventID, []models.Guest{guest}); err != nil {
 		return respondGuestTableError(c, err)
+	}
+	if err := checkNewGuestSeats(guest.EventID, []models.Guest{guest}); err != nil {
+		return respondGuestSeatsError(c, err)
 	}
 
 	guests := []models.Guest{guest}
@@ -546,6 +571,18 @@ func CreateGuests(c echo.Context) error {
 		}
 		applyGuestWrite(&guests[i], write)
 		guests[i].EventID = guestWriteEventID(write.fields)
+		batchCount := guests[i]
+		if batchCount.RSVPGuestCount <= 0 && batchCount.GuestsCount > 0 {
+			batchCount.RSVPGuestCount = batchCount.GuestsCount
+		}
+		if err := validateGuestWrite(nil, &batchCount); err != nil {
+			var invalid *guestWriteError
+			if errors.As(err, &invalid) {
+				return utils.Error(c, http.StatusBadRequest,
+					"Invitado "+strconv.Itoa(i+1)+": "+invalid.Message, invalid.Code)
+			}
+			return respondGuestWriteError(c, err)
+		}
 	}
 
 	eventID := guests[0].EventID
@@ -565,6 +602,9 @@ func CreateGuests(c echo.Context) error {
 	}
 	if err := checkGuestTables(eventID, guests); err != nil {
 		return respondGuestTableError(c, err)
+	}
+	if err := checkNewGuestSeats(eventID, guests); err != nil {
+		return respondGuestSeatsError(c, err)
 	}
 
 	if err := guestSvc.CreateGuestsWithInvitations(guests); err != nil {
@@ -590,6 +630,7 @@ func UpdateGuest(c echo.Context) error {
 	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
 	}
+	stored := *guest
 	// Only allowlisted columns change: id, event_id, invitation_id, rsvp_token_id,
 	// rsvp_at and created_at keep the stored values the authz check loaded.
 	applyGuestWrite(guest, write)
@@ -603,10 +644,16 @@ func UpdateGuest(c echo.Context) error {
 	if err := c.Validate(guest); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Validation error", err.Error())
 	}
+	if err := validateGuestWrite(&stored, guest); err != nil {
+		return respondGuestWriteError(c, err)
+	}
 	if write.tableSet {
 		if err := checkGuestTables(guest.EventID, []models.Guest{*guest}); err != nil {
 			return respondGuestTableError(c, err)
 		}
+	}
+	if err := checkUpdatedGuestSeats(&stored, guest); err != nil {
+		return respondGuestSeatsError(c, err)
 	}
 	if err := guestSvc.UpdateGuest(guest); err != nil {
 		return utils.WriteFailed(c, "Error updating guest", err)

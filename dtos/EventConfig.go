@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"events-stocks/internal/publicaccessproof"
 	"events-stocks/models"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gofrs/uuid"
 )
@@ -172,7 +174,11 @@ func (p EventConfigPatch) ApplyTo(config *models.EventConfig) error {
 			if err := decodeString(raw, &value); err != nil {
 				return fieldError(field, err)
 			}
-			config.AuthPasswordPreview = strings.TrimSpace(value)
+			value = strings.TrimSpace(value)
+			if err := validateNewEventPassword(value, config.NormalizedAuthPasswordPreview()); err != nil {
+				return fieldError(field, err)
+			}
+			config.AuthPasswordPreview = value
 		case "notify_on_moment_upload":
 			if err := decodeBool(raw, &config.NotifyOnMomentUpload); err != nil {
 				return fieldError(field, err)
@@ -309,6 +315,28 @@ func (p EventConfigPatch) ApplyTo(config *models.EventConfig) error {
 		return fieldError("active_until", errors.New("must be after active_from"))
 	}
 
+	return nil
+}
+
+const (
+	eventPasswordMinLength = publicaccessproof.MinPasswordLength
+	eventPasswordMaxLength = publicaccessproof.MaxPasswordLength
+)
+
+// validateNewEventPassword applies length bounds only when the password is set
+// or changed, so a legacy short password keeps working until it is replaced and
+// an empty value still removes protection.
+func validateNewEventPassword(value, current string) error {
+	if value == "" || value == current {
+		return nil
+	}
+	length := utf8.RuneCountInString(value)
+	if length < eventPasswordMinLength {
+		return fmt.Errorf("must be at least %d characters", eventPasswordMinLength)
+	}
+	if length > eventPasswordMaxLength {
+		return fmt.Errorf("must be at most %d characters", eventPasswordMaxLength)
+	}
 	return nil
 }
 

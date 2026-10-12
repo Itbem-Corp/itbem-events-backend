@@ -380,12 +380,19 @@ func parseBulkMomentIDs(raw []string) (ids []uuid.UUID, message string, detail s
 // without an event, falls back to RequireMomentCapability, so a missing id
 // still answers 404 and an unlinked moment keeps its per-moment rule.
 func authorizeBulkMoments(c echo.Context, ids []uuid.UUID, capability authz.Capability) error {
+	_, err := loadAndAuthorizeBulkMoments(c, ids, capability)
+	return err
+}
+
+// loadAndAuthorizeBulkMoments is authorizeBulkMoments that also returns the
+// moments it loaded (the bulk delete purges their media afterwards).
+func loadAndAuthorizeBulkMoments(c echo.Context, ids []uuid.UUID, capability authz.Capability) ([]models.Moment, error) {
 	if momentSvc == nil {
-		return &authz.Failure{Status: http.StatusInternalServerError, Message: "Moment service unavailable"}
+		return nil, &authz.Failure{Status: http.StatusInternalServerError, Message: "Moment service unavailable"}
 	}
 	moments, err := momentSvc.GetMomentsByIDs(ids)
 	if err != nil {
-		return &authz.Failure{Status: http.StatusInternalServerError, Message: "Moment lookup failed", Detail: err.Error()}
+		return nil, &authz.Failure{Status: http.StatusInternalServerError, Message: "Moment lookup failed", Detail: err.Error()}
 	}
 	byID := make(map[uuid.UUID]*models.Moment, len(moments))
 	for i := range moments {
@@ -396,7 +403,7 @@ func authorizeBulkMoments(c echo.Context, ids []uuid.UUID, capability authz.Capa
 		moment, found := byID[id]
 		if !found || moment.EventID == nil {
 			if _, _, authErr := authz.RequireMomentCapability(c, id, capability); authErr != nil {
-				return authErr
+				return nil, authErr
 			}
 			continue
 		}
@@ -404,11 +411,11 @@ func authorizeBulkMoments(c echo.Context, ids []uuid.UUID, capability authz.Capa
 			continue
 		}
 		if _, _, authErr := authz.RequireEventCapability(c, *moment.EventID, capability); authErr != nil {
-			return authErr
+			return nil, authErr
 		}
 		checkedEvents[*moment.EventID] = struct{}{}
 	}
-	return nil
+	return moments, nil
 }
 
 func ReorderMoments(c echo.Context) error {
@@ -799,6 +806,19 @@ func UpdateMomentContent(c echo.Context) error {
 		if errors.Is(err, momentsService.ErrStaleMomentProcessingCallback) {
 			return utils.Error(c, http.StatusConflict, "Stale processing callback", err.Error())
 		}
+		var deleted *momentsService.DeletedMomentCallbackError
+		if errors.As(err, &deleted) {
+			// MOM-4: the moment was deleted while its job ran. Answer 200 so the
+			// worker does not retry into the DLQ, and remove what the job wrote.
+			if deleted.Moment != nil {
+				extra := []string{contentURL, thumbnailURL}
+				for _, variant := range body.MediaVariants {
+					extra = append(extra, variant.ObjectKey)
+				}
+				scheduleMomentMediaPurge([]models.Moment{*deleted.Moment}, extra...)
+			}
+			return utils.Success(c, http.StatusOK, "Moment was deleted; callback ignored", map[string]bool{"ignored": true})
+		}
 		return utils.WriteFailed(c, "Error updating moment", err)
 	}
 
@@ -841,12 +861,16 @@ func DeleteMoment(c echo.Context) error {
 		return utils.Error(c, http.StatusBadRequest, "Invalid UUID", err.Error())
 	}
 
-	if _, _, authErr := authz.RequireMomentCapability(c, id, authz.CapabilityEventManage); authErr != nil {
+	_, moment, authErr := authz.RequireMomentCapability(c, id, authz.CapabilityEventManage)
+	if authErr != nil {
 		return authz.Respond(c, authErr)
 	}
 
 	if err := momentSvc.DeleteMoment(id); err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Error deleting moment", err.Error())
+	}
+	if moment != nil {
+		scheduleMomentMediaPurge([]models.Moment{*moment})
 	}
 
 	return utils.Success(c, http.StatusOK, "Moment deleted", nil)
@@ -864,13 +888,15 @@ func BulkDeleteMoments(c echo.Context) error {
 	if message != "" {
 		return utils.Error(c, http.StatusBadRequest, message, detail)
 	}
-	if authErr := authorizeBulkMoments(c, ids, authz.CapabilityEventManage); authErr != nil {
+	moments, authErr := loadAndAuthorizeBulkMoments(c, ids, authz.CapabilityEventManage)
+	if authErr != nil {
 		return authz.Respond(c, authErr)
 	}
 
 	if err := momentSvc.BulkDeleteMoments(ids); err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Error deleting moments", err.Error())
 	}
+	scheduleMomentMediaPurge(moments)
 	return utils.Success(c, http.StatusOK, "Moments deleted", nil)
 }
 

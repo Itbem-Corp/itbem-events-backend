@@ -17,6 +17,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -33,6 +34,7 @@ import (
 	"events-stocks/repositories/eventsrepository"
 	invitationaccesstokenrepository "events-stocks/repositories/invitationaccesstokenrepository"
 	"events-stocks/repositories/invitationrepository"
+	"events-stocks/repositories/momentrepository"
 	"events-stocks/repositories/redisrepository"
 )
 
@@ -304,4 +306,140 @@ func TestListPublicMoments_WallEnabled_ReturnsEmptyList(t *testing.T) {
 	assert.Equal(t, false, data["share_uploads_enabled"])
 	items, _ := data["items"].([]interface{})
 	assert.Empty(t, items)
+}
+
+func newRawMoment(eventID uuid.UUID, key string) models.Moment {
+	return models.Moment{ID: uuid.Must(uuid.NewV4()), EventID: &eventID, ContentURL: key, ProcessingStatus: "pending"}
+}
+
+func cleanupEventMoments(t *testing.T, eventID uuid.UUID) {
+	t.Helper()
+	t.Cleanup(func() { configuration.DB.Unscoped().Where("event_id = ?", eventID).Delete(&models.Moment{}) })
+}
+
+// MOM-6: the live (event_id, content_url) unique index exists after the
+// startup migration, so a second live moment of the same upload is refused
+// with ErrDuplicateMomentContent, while a soft-deleted copy or a text moment
+// does not block anything.
+func TestMomentContentUniqueness_IndexRefusesASecondLiveCopy(t *testing.T) {
+	fx := setupMomentsEvent(t, sharedUploadOpts{allowUploads: true})
+	cleanupEventMoments(t, fx.eventID)
+	key := "moments/" + fx.eventID.String() + "/raw/" + uuid.Must(uuid.NewV4()).String() + ".jpg"
+
+	first := newRawMoment(fx.eventID, key)
+	require.NoError(t, momentrepository.CreateMoment(&first))
+	second := newRawMoment(fx.eventID, key)
+	err := momentrepository.CreateMoment(&second)
+	require.ErrorIs(t, err, momentrepository.ErrDuplicateMomentContent)
+
+	// The confirm lookup finds the first copy by its raw key, also after
+	// processing moved content_url to the optimized object.
+	found, err := momentrepository.GetMomentByEventIDAndContentURL(fx.eventID, key)
+	require.NoError(t, err)
+	assert.Equal(t, first.ID, found.ID)
+	require.NoError(t, configuration.DB.Model(&models.Moment{}).Where("id = ?", first.ID).
+		Updates(map[string]interface{}{"content_url": "moments/" + fx.eventID.String() + "/photos/" + first.ID.String() + ".webp", "processing_input_key": key}).Error)
+	found, err = momentrepository.GetMomentByEventIDAndContentURL(fx.eventID, key)
+	require.NoError(t, err)
+	assert.Equal(t, first.ID, found.ID)
+
+	// Soft-deleted copies and text moments are outside the index.
+	require.NoError(t, configuration.DB.Delete(&models.Moment{}, "id = ?", first.ID).Error)
+	third := newRawMoment(fx.eventID, "moments/"+fx.eventID.String()+"/photos/"+first.ID.String()+".webp")
+	require.NoError(t, momentrepository.CreateMoment(&third))
+	textA, textB := newRawMoment(fx.eventID, ""), newRawMoment(fx.eventID, "")
+	require.NoError(t, momentrepository.CreateMoment(&textA))
+	require.NoError(t, momentrepository.CreateMoment(&textB))
+}
+
+// MOM-6: two concurrent confirms of the same upload create exactly one moment.
+func TestMomentContentUniqueness_ConcurrentCreatesKeepOne(t *testing.T) {
+	fx := setupMomentsEvent(t, sharedUploadOpts{allowUploads: true})
+	cleanupEventMoments(t, fx.eventID)
+	key := "moments/" + fx.eventID.String() + "/raw/" + uuid.Must(uuid.NewV4()).String() + ".jpg"
+	const writers = 8
+	var wg sync.WaitGroup
+	errs := make([]error, writers)
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			moment := newRawMoment(fx.eventID, key)
+			errs[i] = momentrepository.CreateMoment(&moment)
+		}(i)
+	}
+	wg.Wait()
+	created := 0
+	for _, err := range errs {
+		if err == nil {
+			created++
+			continue
+		}
+		require.ErrorIs(t, err, momentrepository.ErrDuplicateMomentContent)
+	}
+	assert.Equal(t, 1, created)
+	var live int64
+	configuration.DB.Model(&models.Moment{}).Where("event_id = ? AND content_url = ?", fx.eventID, key).Count(&live)
+	assert.Equal(t, int64(1), live)
+}
+
+// MOM-6 migration: duplicates left by the race before the index existed are
+// soft-deleted (the approved copy survives) and the index is then built. A
+// second run is a no-op.
+func TestMomentContentUniqueness_MigrationSoftDeletesExistingDuplicates(t *testing.T) {
+	fx := setupMomentsEvent(t, sharedUploadOpts{allowUploads: true})
+	cleanupEventMoments(t, fx.eventID)
+	db := configuration.DB
+	require.NoError(t, db.Exec("DROP INDEX IF EXISTS "+models.MomentLiveContentURLIndex).Error)
+	key := "moments/" + fx.eventID.String() + "/raw/" + uuid.Must(uuid.NewV4()).String() + ".jpg"
+	older := newRawMoment(fx.eventID, key)
+	older.CreatedAt = time.Now().Add(-time.Hour)
+	approved := newRawMoment(fx.eventID, key)
+	approved.IsApproved = true
+	newer := newRawMoment(fx.eventID, key)
+	for _, moment := range []*models.Moment{&older, &approved, &newer} {
+		require.NoError(t, db.Omit("Invitation", "MomentType", "Guest").Create(moment).Error)
+	}
+
+	require.NoError(t, configuration.MigrateModelsForTest(db))
+	require.NoError(t, configuration.MigrateModelsForTest(db), "idempotent")
+
+	var live []models.Moment
+	require.NoError(t, db.Where("event_id = ? AND content_url = ?", fx.eventID, key).Find(&live).Error)
+	require.Len(t, live, 1)
+	assert.Equal(t, approved.ID, live[0].ID)
+	var softDeleted int64
+	db.Unscoped().Model(&models.Moment{}).Where("event_id = ? AND content_url = ? AND deleted_at IS NOT NULL", fx.eventID, key).Count(&softDeleted)
+	assert.Equal(t, int64(2), softDeleted, "duplicates are soft-deleted, not removed")
+	var exists bool
+	require.NoError(t, db.Raw("SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = ?)", models.MomentLiveContentURLIndex).Scan(&exists).Error)
+	assert.True(t, exists)
+}
+
+// MOM-3/MOM-4 repository reads: a deleted moment is still readable unscoped,
+// and the purge reference check sees only live moments outside the purge.
+func TestMomentDeletion_RepositoryReads(t *testing.T) {
+	fx := setupMomentsEvent(t, sharedUploadOpts{allowUploads: true})
+	cleanupEventMoments(t, fx.eventID)
+	raw := "moments/" + fx.eventID.String() + "/raw/" + uuid.Must(uuid.NewV4()).String() + ".jpg"
+	deleted := newRawMoment(fx.eventID, "moments/"+fx.eventID.String()+"/photos/a.webp")
+	deleted.ProcessingInputKey = raw
+	survivor := newRawMoment(fx.eventID, "moments/"+fx.eventID.String()+"/photos/b.webp")
+	survivor.ProcessingInputKey = raw
+	require.NoError(t, momentrepository.CreateMoment(&deleted))
+	require.NoError(t, momentrepository.CreateMoment(&survivor))
+	require.NoError(t, momentrepository.DeleteMoment(deleted.ID))
+
+	_, err := momentrepository.GetMomentByID(deleted.ID)
+	require.Error(t, err)
+	unscoped, err := momentrepository.GetMomentByIDUnscoped(deleted.ID)
+	require.NoError(t, err)
+	assert.Equal(t, raw, unscoped.ProcessingInputKey)
+
+	refs, err := momentrepository.LiveMomentKeyReferences(fx.eventID, []uuid.UUID{deleted.ID}, []string{raw, deleted.ContentURL})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]bool{raw: true}, refs)
+	refs, err = momentrepository.LiveMomentKeyReferences(fx.eventID, []uuid.UUID{deleted.ID, survivor.ID}, []string{raw})
+	require.NoError(t, err)
+	assert.Empty(t, refs)
 }

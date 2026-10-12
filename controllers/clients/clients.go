@@ -120,6 +120,9 @@ func CreateNewClient(c echo.Context) error {
 		newClient, err = scopedClientSvc.CreateClientWithLogo(name, clientTypeID, user.ID, parentID, file, header)
 	}
 	if err != nil {
+		if resourcesService.IsInvalidMediaFile(err) {
+			return utils.Error(c, http.StatusBadRequest, resourcesService.InvalidMediaFileMessage, resourcesService.InvalidMediaFileCode)
+		}
 		status, detail := resourcesService.UploadErrorResponse(err)
 		if validations.IsValidationError(err) {
 			return utils.Error(c, status, "Invalid logo", detail)
@@ -632,6 +635,9 @@ func UpdateClient(c echo.Context) error {
 		defer file.Close()
 		filename, err := clientServiceForContext(c).UploadClientLogo(file, header, clientID)
 		if err != nil {
+			if resourcesService.IsInvalidMediaFile(err) {
+				return utils.Error(c, http.StatusBadRequest, resourcesService.InvalidMediaFileMessage, resourcesService.InvalidMediaFileCode)
+			}
 			status, detail := resourcesService.UploadErrorResponse(err)
 			if validations.IsValidationError(err) {
 				return utils.Error(c, status, "Invalid logo", detail)

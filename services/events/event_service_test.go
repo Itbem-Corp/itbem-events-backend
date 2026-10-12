@@ -949,8 +949,10 @@ func TestBuildPageSpecInjectsMomentWallRuntimeConfig(t *testing.T) {
 	assert.Equal(t, true, openConfig["share_uploads_enabled"])
 	assert.Equal(t, false, openConfig["published"])
 	assert.Equal(t, float64(12), openConfig["max_uploads_per_guest"])
-	assert.Equal(t, "Sube tus mejores fotos", openConfig["moment_request_message"])
-	assert.Equal(t, "Sube tus mejores fotos", openConfig["subtitle"])
+	// STU-4: the section's own subtitle wins over the event default and
+	// feeds moment_request_message, which the public component prefers.
+	assert.Equal(t, "Comparte algo", openConfig["moment_request_message"])
+	assert.Equal(t, "Comparte algo", openConfig["subtitle"])
 
 	publishedSpec, err := buildPageSpecFromEventWithConfig(event, deps, &models.EventConfig{
 		ID:                  eventID,

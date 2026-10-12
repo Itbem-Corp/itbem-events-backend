@@ -54,7 +54,7 @@ func uploadEventCoverForService(c echo.Context, eventID uuid.UUID, existingEvent
 	rawPath, contentType, _, err := svc.UploadRawEventCover(file, header, eventID.String())
 	if err != nil {
 		status, detail := Resources.UploadErrorResponse(err)
-		return utils.Error(c, status, "Failed to upload cover", detail)
+		return utils.Error(c, status, Resources.UploadErrorMessage(err, "Failed to upload cover"), detail)
 	}
 	jobID := uuid.Must(uuid.NewV4()).String()
 	message := dtos.NewMediaProcessMessage(eventID.String(), eventID.String(), rawPath, svc.Bucket, contentType, false)
