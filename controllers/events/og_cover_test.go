@@ -94,3 +94,32 @@ func TestGetEventCoverImage_NoCoverIsNotFound(t *testing.T) {
 	code, _ := getCoverImage(t, "sin-portada")
 	assert.Equal(t, http.StatusNotFound, code)
 }
+
+// Review S3: an organizer-entered external cover URL is never redirected to.
+func TestGetEventCoverImage_ExternalAbsoluteCoverIsNotFound(t *testing.T) {
+	for _, cover := range []string{"https://evil.example.com/phish.png", "http://example.org/a.jpg", "data:image/png;base64,AAAA", "//evil.example.com/x.png"} {
+		eventID := uuid.Must(uuid.NewV4())
+		setupCoverImageTest(t,
+			&models.Event{ID: eventID, Identifier: "externa", IsActive: true, CoverImageURL: cover},
+			&models.EventConfig{ID: eventID, IsPublic: true})
+
+		code, header := getCoverImage(t, "externa")
+		assert.Equal(t, http.StatusNotFound, code, cover)
+		assert.Empty(t, header.Get("Location"), cover)
+	}
+}
+
+func TestCoverStorageKeyAcceptsOnlyOwnStorage(t *testing.T) {
+	key, ok := coverStorageKey("events/boda/cover.webp", "media-bucket")
+	assert.True(t, ok)
+	assert.Equal(t, "events/boda/cover.webp", key)
+
+	key, ok = coverStorageKey("https://media-bucket.s3.us-east-1.amazonaws.com/events/boda/cover.webp", "media-bucket")
+	assert.True(t, ok, "a legacy URL of the event bucket is presigned again")
+	assert.Equal(t, "events/boda/cover.webp", key)
+
+	_, ok = coverStorageKey("https://other-bucket.s3.us-east-1.amazonaws.com/events/boda/cover.webp", "media-bucket")
+	assert.False(t, ok, "another bucket is not our storage")
+	_, ok = coverStorageKey("https://evil.example.com/cover.webp", "media-bucket")
+	assert.False(t, ok)
+}

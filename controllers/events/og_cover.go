@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"strings"
 
+	"events-stocks/repositories/awsrepository"
 	"events-stocks/utils"
 
 	"github.com/labstack/echo/v4"
@@ -33,6 +34,23 @@ func ogImageURL(identifier, cover string) string {
 	return EventCoverImagePath(identifier)
 }
 
+// coverStorageKey returns the object key of a cover stored in our media
+// storage: a plain key, or a legacy absolute URL of the event bucket (S3,
+// s3:// or the configured CDN_BASE_URL) normalized back to its key. Any other
+// absolute URL (an organizer-entered external link, javascript:, data:...) is
+// rejected, so the route only ever redirects to a fresh presigned URL of our
+// own storage and is never an open redirector.
+func coverStorageKey(cover, bucket string) (string, bool) {
+	if strings.HasPrefix(strings.TrimSpace(cover), "//") {
+		return "", false // protocol-relative: a host, not a key
+	}
+	key := strings.TrimSpace(awsrepository.S3KeyFromURL(cover, bucket))
+	if key == "" || utils.IsAbsoluteURLLike(key) || strings.Contains(key, "://") {
+		return "", false
+	}
+	return key, true
+}
+
 // GetEventCoverImage redirects (302) to a fresh view URL of the event cover.
 // It uses the same read gate as /meta, so a password-protected or inactive
 // event never reveals its cover; any denial or a missing cover is 404.
@@ -55,18 +73,13 @@ func GetEventCoverImage(c echo.Context) error {
 	if !access.Allowed || cover == "" {
 		return utils.Error(c, http.StatusNotFound, "Portada no encontrada", "cover_not_found")
 	}
-	target := cover
-	if utils.IsAbsoluteURLLike(cover) {
-		lower := strings.ToLower(cover)
-		if !strings.HasPrefix(lower, "https://") && !strings.HasPrefix(lower, "http://") {
-			return utils.Error(c, http.StatusNotFound, "Portada no encontrada", "cover_not_found")
-		}
-	} else {
-		viewURL, expiresAt := resourceViewURLWithExpiry(cover, eventCoverRedirectTTLMinutes, event.MediaBucket)
-		if expiresAt == nil || viewURL == "" {
-			return utils.Error(c, http.StatusServiceUnavailable, "La portada no está disponible por ahora", "cover_unavailable")
-		}
-		target = viewURL
+	key, ok := coverStorageKey(cover, event.MediaBucket)
+	if !ok {
+		return utils.Error(c, http.StatusNotFound, "Portada no encontrada", "cover_not_found")
+	}
+	target, expiresAt := resourceViewURLWithExpiry(key, eventCoverRedirectTTLMinutes, event.MediaBucket)
+	if expiresAt == nil || target == "" {
+		return utils.Error(c, http.StatusServiceUnavailable, "La portada no está disponible por ahora", "cover_unavailable")
 	}
 	if c.Response().Header().Get(echo.HeaderCacheControl) == "" {
 		c.Response().Header().Set(echo.HeaderCacheControl, eventCoverRedirectCacheControl)
