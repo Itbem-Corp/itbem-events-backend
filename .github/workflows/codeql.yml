@@ -13,7 +13,8 @@ permissions:
 jobs:
   sbom:
     if: github.event_name != 'pull_request'
-    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || fromJSON('["self-hosted","Linux","X64","itbem-wsl-ci"]') }}
+    runs-on: [self-hosted, Linux, X64, itbem-org-ci]
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -31,7 +32,8 @@ jobs:
 
   analyze:
     if: github.event_name != 'pull_request'
-    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || fromJSON('["self-hosted","Linux","X64","itbem-wsl-ci"]') }}
+    runs-on: [self-hosted, Linux, X64, itbem-org-ci]
+    timeout-minutes: 45
     permissions:
       actions: read
       contents: read
