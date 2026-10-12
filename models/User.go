@@ -21,6 +21,9 @@ type User struct {
 	RootLevel      int    `gorm:"default:0;index" json:"root_level"`
 	IsRoot         bool   `gorm:"default:false" json:"is_root"`
 	AuthTenantCode string `gorm:"-" json:"-"`
+	// SessionApplicationCode is the product of the authenticated request
+	// (from the Cognito audience). Request-scoped, never stored.
+	SessionApplicationCode string `gorm:"-" json:"-"`
 	// Relaciones (Has Many)
 	EventMembers  []EventMember  `gorm:"foreignKey:UserID" json:"event_members,omitempty"`
 	ClientMembers []ClientMember `gorm:"foreignKey:UserID" json:"client_members,omitempty"`

@@ -51,6 +51,21 @@ func clientServiceForContext(c echo.Context) *clients.ClientService {
 	return clientSvc.WithTenantScope(tenantCode, bucket)
 }
 
+// clientAuthzService is the client service for an organization check by id
+// on behalf of user: members stay inside their session application (no other
+// product's portal tree, ROLES-N2), platform admins keep their behaviour.
+func clientAuthzService(c echo.Context, user *models.User) *clients.ClientService {
+	return withApplicationScope(c, user, clientSvc)
+}
+
+func withApplicationScope(c echo.Context, user *models.User, svc *clients.ClientService) *clients.ClientService {
+	if svc == nil || user == nil || user.IsPlatformAdmin() {
+		return svc
+	}
+	tenantCode, _ := c.Get("tenant_code").(string)
+	return svc.WithApplicationScope(sessionApplicationCode(c, strings.ToLower(strings.TrimSpace(tenantCode))))
+}
+
 func operationalRootMayNotManageOrganization(c echo.Context, user *models.User) bool {
 	if user.EffectiveRootLevel() != models.RootLevelOperational {
 		return false
@@ -130,7 +145,7 @@ func CreateNewClient(c echo.Context) error {
 	}
 
 	var newClient *models.Client
-	scopedClientSvc := clientServiceForContext(c)
+	scopedClientSvc := withApplicationScope(c, user, clientServiceForContext(c))
 	if user.IsPrimaryRoot() {
 		newClient, err = scopedClientSvc.CreateClientWithLogoAsPrimaryRoot(name, clientTypeID, user.ID, parentID, file, header)
 	} else {
@@ -196,7 +211,7 @@ func GetClient(c echo.Context) error {
 	if user.IsPrimaryRoot() {
 		client, err = clientSvc.GetClientDetailsAsPrimaryRoot(clientID)
 	} else {
-		client, err = clientSvc.GetClientDetails(clientID, user.ID)
+		client, err = clientAuthzService(c, user).GetClientDetails(clientID, user.ID)
 	}
 	if err != nil {
 		if err.Error() == "access denied: user is not a member of this client hierarchy" {
@@ -390,7 +405,7 @@ func InviteUser(c echo.Context) error {
 	}
 
 	if !platformTeamManager(requester) {
-		if err := clientSvc.CanManageClientMembers(req.ClientID, requester.ID); err != nil {
+		if err := clientAuthzService(c, requester).CanManageClientMembers(req.ClientID, requester.ID); err != nil {
 			return utils.Error(c, http.StatusForbidden, "Permission Denied", "You cannot add members to this client")
 		}
 	}
@@ -398,7 +413,7 @@ func InviteUser(c echo.Context) error {
 	if platformTeamManager(requester) {
 		rolePermissionErr = clientSvc.CanAssignClientRoleAsRoot(requester, req.RoleID)
 	} else {
-		rolePermissionErr = clientSvc.CanAssignClientRole(req.ClientID, requester.ID, req.RoleID)
+		rolePermissionErr = clientAuthzService(c, requester).CanAssignClientRole(req.ClientID, requester.ID, req.RoleID)
 	}
 	if rolePermissionErr != nil {
 		return utils.Error(c, http.StatusForbidden, "Permission Denied", rolePermissionErr.Error())
@@ -464,7 +479,7 @@ func DeleteClient(c echo.Context) error {
 	if user.IsPrimaryRoot() {
 		err = clientSvc.DeleteClientAsPrimaryRoot(clientID)
 	} else {
-		err = clientSvc.DeleteClient(clientID, user.ID)
+		err = clientAuthzService(c, user).DeleteClient(clientID, user.ID)
 	}
 	if err != nil {
 		switch {
@@ -506,7 +521,7 @@ func CreateClientMember(c echo.Context) error {
 	}
 
 	if !platformTeamManager(requester) {
-		if err := clientSvc.CanManageClientMembers(req.ClientID, requester.ID); err != nil {
+		if err := clientAuthzService(c, requester).CanManageClientMembers(req.ClientID, requester.ID); err != nil {
 			return utils.Error(c, http.StatusForbidden, "Permission Denied", "You cannot add members to this client")
 		}
 	}
@@ -514,7 +529,7 @@ func CreateClientMember(c echo.Context) error {
 	if platformTeamManager(requester) {
 		rolePermissionErr = clientSvc.CanAssignClientRoleAsRoot(requester, req.RoleID)
 	} else {
-		rolePermissionErr = clientSvc.CanAssignClientRole(req.ClientID, requester.ID, req.RoleID)
+		rolePermissionErr = clientAuthzService(c, requester).CanAssignClientRole(req.ClientID, requester.ID, req.RoleID)
 	}
 	if rolePermissionErr != nil {
 		return utils.Error(c, http.StatusForbidden, "Permission Denied", rolePermissionErr.Error())
@@ -578,7 +593,7 @@ func ListClientMembers(c echo.Context) error {
 		if user.IsPlatformAdmin() {
 			members, total, listErr = clientSvc.ListClientMembersPageAsRoot(targetClientID, page, pageSize, c.QueryParam("search"))
 		} else {
-			members, total, listErr = clientSvc.ListClientMembersPage(targetClientID, user.ID, page, pageSize, c.QueryParam("search"))
+			members, total, listErr = clientAuthzService(c, user).ListClientMembersPage(targetClientID, user.ID, page, pageSize, c.QueryParam("search"))
 		}
 		if listErr != nil {
 			return utils.Error(c, http.StatusForbidden, "Access Denied", listErr.Error())
@@ -591,7 +606,7 @@ func ListClientMembers(c echo.Context) error {
 	if user.IsPlatformAdmin() {
 		members, err = clientSvc.ListClientMembersAsRoot(targetClientID)
 	} else {
-		members, err = clientSvc.ListClientMembers(targetClientID, user.ID)
+		members, err = clientAuthzService(c, user).ListClientMembers(targetClientID, user.ID)
 	}
 	if err != nil {
 		return utils.Error(c, http.StatusForbidden, "Access Denied", err.Error())
@@ -626,7 +641,7 @@ func RemoveMember(c echo.Context) error {
 	if platformTeamManager(requester) {
 		removeErr = clientSvc.RemoveClientMemberAsRoot(clientID, targetUserID)
 	} else {
-		removeErr = clientSvc.RemoveClientMember(clientID, requester.ID, targetUserID)
+		removeErr = clientAuthzService(c, requester).RemoveClientMember(clientID, requester.ID, targetUserID)
 	}
 	if removeErr != nil {
 		return utils.Error(c, http.StatusForbidden, "Operation failed", removeErr.Error())
@@ -675,7 +690,7 @@ func UpdateMemberRole(c echo.Context) error {
 	if platformTeamManager(requester) {
 		updateErr = clientSvc.UpdateClientMemberRoleAsRoot(requester, clientID, targetUserID, req.NewRoleID)
 	} else {
-		updateErr = clientSvc.UpdateClientMemberRole(clientID, requester.ID, targetUserID, req.NewRoleID)
+		updateErr = clientAuthzService(c, requester).UpdateClientMemberRole(clientID, requester.ID, targetUserID, req.NewRoleID)
 	}
 	if updateErr != nil {
 		return utils.Error(c, http.StatusForbidden, "Operation failed", updateErr.Error())
@@ -713,7 +728,7 @@ func UpdateClient(c echo.Context) error {
 
 	// Authorization happens inside UpdateClientWithLogo BEFORE the logo is
 	// uploaded (ADM-8): a caller without OWNER access never writes to storage.
-	res, err := clientServiceForContext(c).UpdateClientWithLogo(clientID, user.ID, user.IsPrimaryRoot(), name, file, header, removeLogo)
+	res, err := withApplicationScope(c, user, clientServiceForContext(c)).UpdateClientWithLogo(clientID, user.ID, user.IsPrimaryRoot(), name, file, header, removeLogo)
 	if err != nil {
 		switch {
 		case errors.Is(err, clients.ErrClientPermissionDenied):
