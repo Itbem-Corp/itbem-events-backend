@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"events-stocks/models"
+	"events-stocks/repositories/momentrepository"
 
 	"github.com/gofrs/uuid"
 )
@@ -15,6 +16,10 @@ import (
 // no-op: the media worker treats any non-2xx other than 409 as retryable, so
 // an error status would only push the job to the DLQ (MOM-4).
 var ErrMomentDeleted = errors.New("moment was deleted")
+
+// ErrDuplicateMomentContent is CreateMoment losing the race to another
+// confirm of the same upload (MOM-6); the caller returns the existing moment.
+var ErrDuplicateMomentContent = momentrepository.ErrDuplicateMomentContent
 
 // DeletedMomentCallbackError carries the soft-deleted moment, when its row
 // still exists, so the handler can remove the objects the late job wrote.

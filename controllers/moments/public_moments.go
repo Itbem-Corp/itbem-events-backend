@@ -1451,8 +1451,19 @@ func confirmPresignedMoment(c echo.Context, event *models.Event, cfg *models.Eve
 		ProcessingStatus: "pending",
 	}
 	if err := momentsService.CreateMoment(&moment); err != nil {
+		if errors.Is(err, momentsService.ErrDuplicateMomentContent) {
+			// MOM-6: a concurrent confirm of this upload won. Keep its object,
+			// give back this request's quota slot and answer with its moment.
+			if quotaReserved {
+				rollbackUploadLimit(event.ID.String(), ip)
+			}
+			if existing, lookupErr := findConfirmedMoment(event.ID, objectKey); lookupErr == nil && existing != nil {
+				return existing, nil
+			}
+			return nil, utils.Error(c, http.StatusConflict, "Upload already confirmed", "")
+		}
 		cleanupMomentUpload(event.ID.String(), ip, objectKey, quotaReserved, eventResSvc)
-		return nil, utils.Error(c, http.StatusInternalServerError, "Error saving moment", err.Error())
+		return nil, utils.Error(c, http.StatusInternalServerError, "Error saving moment", "")
 	}
 	if tagErr := eventResSvc.MarkMomentUploadConfirmed(ctx, objectKey); tagErr != nil {
 		slog.Warn("could not mark moment upload as confirmed", "event_id", event.ID, "moment_id", moment.ID, "object_key", objectKey, "error", tagErr)
