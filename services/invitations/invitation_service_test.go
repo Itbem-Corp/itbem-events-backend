@@ -9,6 +9,7 @@ import (
 	eventsService "events-stocks/services/events"
 	"events-stocks/services/ports"
 	"events-stocks/utils"
+	"strings"
 	"testing"
 	"time"
 
@@ -853,6 +854,69 @@ func TestConfirmRSVP_NormalizesStatusAndMethod(t *testing.T) {
 	require.NotNil(t, capturedGuest)
 	assert.Equal(t, "confirmed", capturedGuest.RSVPStatus)
 	assert.Equal(t, "web", capturedGuest.RSVPMethod)
+}
+
+// An invitation token holder may only record the channels the public site and
+// the dashboard know as guest answers; "host" (organizer or door check-in) and
+// any other text are stored as "web".
+func TestConfirmRSVP_RestrictsMethodToPublicAllowlist(t *testing.T) {
+	cases := map[string]string{
+		"web":                     "web",
+		" APP ":                   "app",
+		"":                        "web",
+		"host":                    "web",
+		" HOST ":                  "web",
+		"admin":                   "web",
+		"=HYPERLINK(\"x\")":       "web",
+		strings.Repeat("w", 4096): "web",
+	}
+	for method, want := range cases {
+		name := method
+		if len(name) > 20 {
+			name = name[:20]
+		}
+		t.Run(name, func(t *testing.T) {
+			invitationID := uuid.Must(uuid.NewV4())
+			var capturedGuest *models.Guest
+			var capturedLog *models.InvitationLog
+			tokenRepo := &mockAccessTokenRepo{
+				GetByPrettyTokenFunc: func(code string) (*models.InvitationAccessToken, error) {
+					return &models.InvitationAccessToken{ID: uuid.Must(uuid.NewV4()), InvitationID: invitationID, PrettyToken: code}, nil
+				},
+			}
+			invRepo := &mockInvitationRepo{
+				GetInvitationByIDLiteFunc: func(id uuid.UUID) (*models.Invitation, error) {
+					return &models.Invitation{ID: invitationID, MaxGuests: 3}, nil
+				},
+			}
+			guestRepo := &mockGuestRepo{
+				GetGuestByInvitationIDFunc: func(uuid.UUID) (*models.Guest, error) {
+					return &models.Guest{ID: uuid.Must(uuid.NewV4()), InvitationID: &invitationID, RSVPMethod: "web"}, nil
+				},
+				UpdateGuestFunc: func(g *models.Guest) error {
+					copied := *g
+					capturedGuest = &copied
+					return nil
+				},
+			}
+			logRepo := &mockInvitationLogRepo{
+				CreateInvitationLogFunc: func(entry *models.InvitationLog) error {
+					copied := *entry
+					capturedLog = &copied
+					return nil
+				},
+			}
+
+			svc := newService(invRepo, guestRepo, tokenRepo, logRepo, nil)
+			_, err := svc.ConfirmRSVP("VALID-TOKEN", "confirmed", method, 1, "")
+
+			require.NoError(t, err)
+			require.NotNil(t, capturedGuest)
+			assert.Equal(t, want, capturedGuest.RSVPMethod)
+			require.NotNil(t, capturedLog)
+			assert.Contains(t, capturedLog.Response, "via "+want+" ")
+		})
+	}
 }
 
 func TestConfirmRSVP_ExceedsMaxGuests_ExactBoundary(t *testing.T) {

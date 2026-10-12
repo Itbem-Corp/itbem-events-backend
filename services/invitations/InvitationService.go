@@ -391,12 +391,19 @@ func invitationEventAccessTimeSet(value time.Time) bool {
 	return !value.IsZero() && value.Year() > 1970
 }
 
+// normalizeRSVPMethod keeps the rsvp_method an invitation token holder sends
+// to the channels a guest can answer through: "web" (what the public site
+// sends) and "app" (the other guest channel the dashboard shows). "host" is
+// the organizer's own answer and what a door check-in writes, so an anonymous
+// caller must not record it; it and any other text are stored as "web", which
+// keeps every deployed page working instead of answering 400.
 func normalizeRSVPMethod(method string) string {
-	method = strings.ToLower(strings.TrimSpace(method))
-	if method == "" {
+	switch method = strings.ToLower(strings.TrimSpace(method)); method {
+	case "web", "app":
+		return method
+	default:
 		return "web"
 	}
-	return method
 }
 
 func isValidRSVPStatus(status string) bool {
