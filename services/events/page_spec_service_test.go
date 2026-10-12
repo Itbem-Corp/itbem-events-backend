@@ -261,8 +261,8 @@ func TestBuildPageSpec_UnwrapsLegacyEncodedSectionConfig(t *testing.T) {
 	assert.Equal(t, "https://maps.example.com", config["mapUrl"])
 }
 
-func TestBuildPageSpec_InjectsCountdownTargetDateFromEventDateTime(t *testing.T) {
-	event := stubEvent("")
+func countdownTargetDate(t *testing.T, event *models.Event, sectionConfig string) interface{} {
+	t.Helper()
 	spec, err := buildPageSpecFromEvent(event, buildSpecDeps{
 		getSections: func(eventID uuid.UUID) ([]models.EventSection, error) {
 			return []models.EventSection{
@@ -270,21 +270,42 @@ func TestBuildPageSpec_InjectsCountdownTargetDateFromEventDateTime(t *testing.T)
 					ID:            testSectionID1,
 					EventID:       eventID,
 					ComponentType: "CountdownHeader",
-					Config:        `{"heading":"EL GRAN DIA","targetDate":"2025-01-01T00:00"}`,
+					Config:        sectionConfig,
 					Order:         1,
 					IsVisible:     true,
 				},
 			}, nil
 		},
 	})
-
 	require.NoError(t, err)
 	require.Len(t, spec.Sections, 1)
-
 	var config map[string]interface{}
 	require.NoError(t, json.Unmarshal(spec.Sections[0].Config, &config))
 	assert.Equal(t, "EL GRAN DIA", config["heading"])
-	assert.Equal(t, event.EventDateTime.Format(time.RFC3339), config["targetDate"])
+	return config["targetDate"]
+}
+
+func TestBuildPageSpec_InjectsCountdownTargetDateFromEventDateTime(t *testing.T) {
+	event := stubEvent("")
+	for _, sectionConfig := range []string{
+		`{"heading":"EL GRAN DIA"}`,
+		`{"heading":"EL GRAN DIA","targetDate":""}`,
+		`{"heading":"EL GRAN DIA","targetDate":"no es fecha"}`,
+	} {
+		assert.Equal(t, event.EventDateTime.Format(time.RFC3339), countdownTargetDate(t, event, sectionConfig), sectionConfig)
+	}
+}
+
+// STU-3: the Studio "fecha objetivo" was always overwritten by the event
+// date. A valid section date wins; a zone-less editor value is read in the
+// event's timezone so every visitor counts down to the same instant.
+func TestBuildPageSpec_CountdownRespectsTheSectionTargetDate(t *testing.T) {
+	event := stubEvent("") // America/Mexico_City
+	assert.Equal(t, "2025-01-01T00:00:00-06:00", countdownTargetDate(t, event, `{"heading":"EL GRAN DIA","targetDate":"2025-01-01T00:00"}`))
+	assert.Equal(t, "2025-03-04T18:30:00Z", countdownTargetDate(t, event, `{"heading":"EL GRAN DIA","targetDate":"2025-03-04T18:30:00Z"}`))
+
+	event.Timezone = ""
+	assert.Equal(t, "2025-01-01T00:00:00Z", countdownTargetDate(t, event, `{"heading":"EL GRAN DIA","targetDate":"2025-01-01T00:00"}`))
 }
 
 func TestBuildPageSpec_SortsSectionsByOrderWithStableTieBreak(t *testing.T) {
@@ -2094,4 +2115,42 @@ func TestBuildPageSpec_LegacyVisibilityDefaultsKeepSectionsAroundOpenUploads(t *
 	assert.Equal(t, true, cfg["share_uploads_enabled"])
 	assert.Equal(t, false, cfg["published"])
 	assert.Equal(t, false, cfg["moments_wall_published"])
+}
+
+// STU-4: the section's own MomentWall copy wins over the event default; the
+// upload/visibility flags stay backend-authoritative.
+func TestGetPageSpec_MomentWallKeepsSectionCopyButNotGates(t *testing.T) {
+	sections := []models.EventSection{{
+		ID:            testSectionID1,
+		EventID:       testEventID,
+		ComponentType: "MomentWall",
+		Config:        `{"title":"Momentos","subtitle":"Sube tus fotos de la fiesta","moment_request_message":"Mensaje propio","allow_uploads":true,"published":false,"identifier":"otro-evento"}`,
+		Order:         1,
+		IsVisible:     true,
+	}}
+	deps := pageSpecDeps{
+		getToken:      func(token string) (*models.InvitationAccessToken, error) { return stubToken(), nil },
+		getInvitation: func(id uuid.UUID) (*models.Invitation, error) { return stubInvitation(), nil },
+		getEvent:      func(id uuid.UUID) (*models.Event, error) { return stubEvent(""), nil },
+		getSections:   func(eventID uuid.UUID) ([]models.EventSection, error) { return sections, nil },
+		getConfig: func(id uuid.UUID) (*models.EventConfig, error) {
+			return &models.EventConfig{
+				AllowUploads:                false,
+				ShowMomentWall:              true,
+				DefaultMomentRequestMessage: "Comparte tus mejores recuerdos con nosotros",
+			}, nil
+		},
+	}
+
+	spec, err := getPageSpec(deps, "ABC123")
+	require.NoError(t, err)
+	require.Len(t, spec.Sections, 1)
+	var cfg map[string]interface{}
+	require.NoError(t, json.Unmarshal(spec.Sections[0].Config, &cfg))
+	assert.Equal(t, "Momentos", cfg["title"])
+	assert.Equal(t, "Sube tus fotos de la fiesta", cfg["subtitle"])
+	assert.Equal(t, "Mensaje propio", cfg["moment_request_message"])
+	assert.Equal(t, false, cfg["allow_uploads"], "the section cannot open uploads the event config keeps closed")
+	assert.Equal(t, true, cfg["published"])
+	assert.Equal(t, "grad-izapa-2025", cfg["identifier"])
 }
