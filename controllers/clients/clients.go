@@ -6,7 +6,9 @@ import (
 	"events-stocks/internal/authz"
 	"events-stocks/internal/products"
 	"events-stocks/internal/tenantresources"
+	"events-stocks/middleware/applicationaccess"
 	"events-stocks/models"
+	"events-stocks/services/applications"
 	"events-stocks/services/clients"
 	resourcesService "events-stocks/services/resources"
 	"events-stocks/services/users"
@@ -221,6 +223,14 @@ func ListMyClients(c echo.Context) error {
 	}
 	tenantCode, _ := c.Get("tenant_code").(string)
 	tenantCode = strings.ToLower(strings.TrimSpace(tenantCode))
+	// A member (not a platform admin) only lists the organizations their
+	// application session can enter: Owner/Admin inheritance stops at another
+	// product's portal organization (ROLES-N2). Platform admins keep the
+	// platform-wide list.
+	applicationCode := ""
+	if !user.IsPlatformAdmin() {
+		applicationCode = sessionApplicationCode(c, tenantCode)
+	}
 	if products.AllowsPlatformAuthority(tenantCode) {
 		tenantCode = ""
 	}
@@ -239,8 +249,9 @@ func ListMyClients(c echo.Context) error {
 		}
 		query := dtos.ClientsListQuery{
 			Page: page, PageSize: pageSize,
-			Search:     strings.TrimSpace(c.QueryParam("search")),
-			TenantCode: tenantCode,
+			Search:          strings.TrimSpace(c.QueryParam("search")),
+			TenantCode:      tenantCode,
+			ApplicationCode: applicationCode,
 		}
 		myClients, total, err := clientSvc.ListClientsPaginated(userID, query)
 		if err != nil {
@@ -257,10 +268,10 @@ func ListMyClients(c echo.Context) error {
 		})
 	}
 
-	if tenantCode != "" {
+	if tenantCode != "" || applicationCode != "" {
 		myClients, _, err := clientSvc.ListClientsPaginated(
 			&user.ID,
-			dtos.ClientsListQuery{Page: 1, PageSize: 1000, TenantCode: tenantCode},
+			dtos.ClientsListQuery{Page: 1, PageSize: 1000, TenantCode: tenantCode, ApplicationCode: applicationCode},
 		)
 		if err != nil {
 			return utils.Error(c, http.StatusInternalServerError, "Error fetching clients", err.Error())
@@ -290,6 +301,21 @@ func ListMyClients(c echo.Context) error {
 	}
 
 	return utils.Success(c, http.StatusOK, "User clients", dtos.NewClientResponses(myClients))
+}
+
+// sessionApplicationCode is the product of the authenticated application
+// session (set by applicationaccess.Require), falling back to the resolved
+// tenant. Empty when neither names a known product.
+func sessionApplicationCode(c echo.Context, tenantCode string) string {
+	if session, ok := c.Get(applicationaccess.ContextKey).(*applications.Session); ok && session != nil {
+		if code := strings.ToLower(strings.TrimSpace(session.Application.Code)); code != "" {
+			return code
+		}
+	}
+	if definition, ok := products.Resolve(tenantCode); ok {
+		return definition.Code.String()
+	}
+	return ""
 }
 
 func GetMySubClients(c echo.Context) error {

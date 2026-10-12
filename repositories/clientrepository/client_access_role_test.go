@@ -78,3 +78,34 @@ func TestListClientsPaginatedAttachesAccessRoles(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// ROLES-N2: with an application code the reach stops at another
+// application's portal organization, in the list, the count and the
+// access-role lookup alike.
+func TestListClientsPaginatedApplicationScopeStopsAtForeignPortals(t *testing.T) {
+	mock := clientRepoTestDB(t)
+	userID := uuid.Must(uuid.NewV4())
+	clientID := uuid.Must(uuid.NewV4())
+	boundary := `.*reachable_clients.*FROM applications other\s+WHERE LOWER\(other\.code\) = LOWER\(child\.code\) AND LOWER\(other\.code\) <> \$2`
+
+	mock.ExpectQuery(`(?s)SELECT COUNT` + boundary).
+		WithArgs(userID, "eventiapp").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(`(?s)SELECT DISTINCT clients` + boundary).
+		WithArgs(userID, "eventiapp", sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name"}).AddRow(clientID, "EventiApp"))
+	mock.ExpectQuery(`SELECT scoped_access\.client_id` + boundary).
+		WithArgs(userID, "eventiapp", clientID).
+		WillReturnRows(sqlmock.NewRows([]string{"client_id", "access_role"}).AddRow(clientID, "OWNER"))
+
+	clients, _, err := ListClientsPaginated(&userID, dtos.ClientsListQuery{Page: 1, PageSize: 20, ApplicationCode: " EventiApp "})
+	if err != nil {
+		t.Fatalf("ListClientsPaginated: %v", err)
+	}
+	if len(clients) != 1 || clients[0].AccessRole != "OWNER" {
+		t.Fatalf("unexpected clients: %#v", clients)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
