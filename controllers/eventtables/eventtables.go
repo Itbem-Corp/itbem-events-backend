@@ -149,7 +149,7 @@ func UpdateTable(c echo.Context) error {
 		table.SortOrder = *sortOrder
 	}
 	if err := tableSvc.UpdateTable(table); err != nil {
-		return utils.Error(c, http.StatusInternalServerError, "Error updating table", err.Error())
+		return utils.WriteFailed(c, "Error updating table", err)
 	}
 	return utils.Success(c, http.StatusOK, "Table updated", dtos.NewEventTableResponse(*table))
 }

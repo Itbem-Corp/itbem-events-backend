@@ -913,7 +913,7 @@ func CreatePublicMoment(c echo.Context) error {
 
 	if err := momentsService.CreateMoment(&moment); err != nil {
 		cleanupMomentUpload(event.ID.String(), c.RealIP(), rawKey, quotaReserved, eventResSvc)
-		return utils.Error(c, http.StatusInternalServerError, "Error saving moment", err.Error())
+		return utils.WriteFailed(c, "Error saving moment", err)
 	}
 
 	// A queue failure is persisted as terminal "failed" by the service. The raw
@@ -976,7 +976,7 @@ func CreateSharedMoment(c echo.Context) error {
 
 	if err := momentsService.CreateMoment(&moment); err != nil {
 		cleanupMomentUpload(event.ID.String(), c.RealIP(), rawKey, quotaReserved, eventResSvc)
-		return utils.Error(c, http.StatusInternalServerError, "Error saving moment", err.Error())
+		return utils.WriteFailed(c, "Error saving moment", err)
 	}
 
 	momentsService.EnqueueMediaProcessing(&moment, rawKey, eventResSvc.Bucket, contentType)

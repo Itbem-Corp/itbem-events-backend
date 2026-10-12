@@ -484,10 +484,10 @@ func UpdateFileContent(c echo.Context) error {
 	if path != resource.Path {
 		resource.Path = path
 		if err := scopedResourceSvc.UpdateResource(resource); err != nil {
-			return utils.Error(c, http.StatusInternalServerError, "Failed to update resource path", err.Error())
+			return utils.WriteFailed(c, "Failed to update resource path", err)
 		}
 	} else if err := scopedResourceSvc.TouchResourceUpdatedAt(resource, time.Now().UTC()); err != nil {
-		return utils.Error(c, http.StatusInternalServerError, "Failed to update resource timestamp", err.Error())
+		return utils.WriteFailed(c, "Failed to update resource timestamp", err)
 	}
 
 	viewURL, _ := scopedResourceSvc.GetPresignedURLWithTTL(path, Resources.ResourceMutationURLTTLMinutes)
@@ -539,13 +539,13 @@ func ReplaceFile(c echo.Context) error {
 			if cleanupErr := scopedResourceSvc.DeleteObjectByPath(path); cleanupErr != nil {
 				slog.Error("replacement resource rollback failed", "resource_id", resource.ID, "path", path, "error", cleanupErr)
 			}
-			return utils.Error(c, http.StatusInternalServerError, "Failed to update resource path", err.Error())
+			return utils.WriteFailed(c, "Failed to update resource path", err)
 		}
 		if cleanupErr := scopedResourceSvc.DeleteObjectByPath(oldPath); cleanupErr != nil {
 			slog.Warn("old replacement resource cleanup failed", "resource_id", resource.ID, "path", oldPath, "error", cleanupErr)
 		}
 	} else if err := scopedResourceSvc.TouchResourceUpdatedAt(resource, time.Now().UTC()); err != nil {
-		return utils.Error(c, http.StatusInternalServerError, "Failed to update resource timestamp", err.Error())
+		return utils.WriteFailed(c, "Failed to update resource timestamp", err)
 	}
 
 	viewURL, _ := scopedResourceSvc.GetPresignedURLWithTTL(path, Resources.ResourceMutationURLTTLMinutes)

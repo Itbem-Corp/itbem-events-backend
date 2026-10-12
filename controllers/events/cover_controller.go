@@ -101,7 +101,7 @@ func uploadCoverSynchronously(c echo.Context, file multipart.File, header *multi
 	oldPath, oldVariants, err := eventSvc.ReplaceCoverImageWithVariants(eventID, path, variants)
 	if err != nil {
 		cleanupCoverObjects(path, variants, svc)
-		return utils.Error(c, http.StatusInternalServerError, "Failed to update event", err.Error())
+		return utils.WriteFailed(c, "Failed to update event", err)
 	}
 	cleanupCoverObjects(oldPath, oldVariants, svc)
 	_ = svc.DeleteObjectByPath(rawPath)
@@ -190,7 +190,7 @@ func UpdateEventCoverContent(c echo.Context) error {
 		if errors.Is(err, eventsService.ErrInvalidCoverProcessingTransition) {
 			return utils.Error(c, http.StatusBadRequest, "Invalid cover processing callback", err.Error())
 		}
-		return utils.Error(c, http.StatusInternalServerError, "Failed to update cover processing", err.Error())
+		return utils.WriteFailed(c, "Failed to update cover processing", err)
 	}
 	if body.ProcessingStatus == "done" {
 		cleanupCoverObjects(oldPath, oldVariants, coverResourceSvc.WithBucket(event.MediaBucket))

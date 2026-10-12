@@ -681,7 +681,7 @@ func UpdateMoment(c echo.Context) error {
 	}
 
 	if err := momentSvc.UpdateMoment(existing); err != nil {
-		return utils.Error(c, http.StatusInternalServerError, "Error updating moment", err.Error())
+		return utils.WriteFailed(c, "Error updating moment", err)
 	}
 
 	if req.Description != nil && existing.EventID != nil {
@@ -799,7 +799,7 @@ func UpdateMomentContent(c echo.Context) error {
 		if errors.Is(err, momentsService.ErrStaleMomentProcessingCallback) {
 			return utils.Error(c, http.StatusConflict, "Stale processing callback", err.Error())
 		}
-		return utils.Error(c, http.StatusInternalServerError, "Error updating moment", err.Error())
+		return utils.WriteFailed(c, "Error updating moment", err)
 	}
 
 	return utils.Success(c, http.StatusOK, "Moment content updated", nil)

@@ -609,7 +609,7 @@ func UpdateGuest(c echo.Context) error {
 		}
 	}
 	if err := guestSvc.UpdateGuest(guest); err != nil {
-		return utils.Error(c, http.StatusInternalServerError, "Error updating guest", err.Error())
+		return utils.WriteFailed(c, "Error updating guest", err)
 	}
 
 	updatedGuest := guest

@@ -92,7 +92,7 @@ func UpdateSection(c echo.Context) error {
 		return utils.Error(c, http.StatusBadRequest, "Invalid section config", err.Error())
 	}
 	if err := eventSectionSvc.UpdateEventSection(section); err != nil {
-		return utils.Error(c, http.StatusInternalServerError, "Error updating section", err.Error())
+		return utils.WriteFailed(c, "Error updating section", err)
 	}
 
 	return utils.Success(c, http.StatusOK, "Section updated", dtos.NewEventSectionResponse(*section))
