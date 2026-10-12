@@ -104,6 +104,11 @@ To grant a member access:
 2. Enable the desired application for that organization.
 3. Create or activate the member/application entitlement.
 
+The boot seed (`seeds.SeedApplications`, run on every start) only inserts
+missing rows. It never re-enables a member/application entitlement or a
+brand-root product that an operator disabled; `models.Client` AfterCreate still
+upserts, because a new membership is an explicit grant.
+
 Removing an entitlement invalidates the application session cache and blocks
 the next request or token refresh. Removing the Cognito user is not required and
 would incorrectly remove access to their other products.
