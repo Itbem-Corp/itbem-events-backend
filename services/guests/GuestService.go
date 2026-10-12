@@ -10,12 +10,14 @@ import (
 	"events-stocks/services/ports"
 	"events-stocks/utils"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/gofrs/uuid"
 	"golang.org/x/sync/errgroup"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type rsvpTokenWriter interface {
@@ -128,8 +130,11 @@ func (s *GuestService) CreateGuestsWithInvitations(guests []models.Guest) error 
 		if guests[i].RSVPGuestCount <= 0 && guests[i].GuestsCount > 0 {
 			guests[i].RSVPGuestCount = guests[i].GuestsCount
 		}
+		// Both references are server-owned: the guest gets its own new
+		// invitation, and its RSVP token is linked later by the RSVP flow.
 		invID := uuid.Must(uuid.NewV4())
 		guests[i].InvitationID = &invID
+		guests[i].RSVPTokenID = nil
 		invitations = append(invitations, models.Invitation{
 			ID:          invID,
 			EventID:     guests[i].EventID,
@@ -183,7 +188,10 @@ func (s *GuestService) CreateGuestsWithInvitations(guests []models.Guest) error 
 		if err := tx.Create(&invitations).Error; err != nil {
 			return err
 		}
-		if err := tx.Create(&guests).Error; err != nil {
+		// Omit associations so a nested table or guest_status object on a guest
+		// can never insert rows into another event's tables or the shared
+		// status catalog; table_id and guest_status_id are written as columns.
+		if err := tx.Omit(clause.Associations).Create(&guests).Error; err != nil {
 			return err
 		}
 		if err := tx.Create(&tokens).Error; err != nil {
@@ -227,6 +235,11 @@ func (s *GuestService) UpdateGuest(obj *models.Guest) error {
 		obj.IsHost = true
 	}
 	s.syncRSVPMetadata(obj, oldGuest)
+	// A host edit of the RSVP replaces what a door check-in wrote; dropping
+	// the provenance keeps a later undo from restoring a superseded answer.
+	if oldGuest != nil && guestRSVPChanged(oldGuest, obj) {
+		obj.ClearDoorCheckin()
+	}
 	if err := s.repo.UpdateGuest(obj); err != nil {
 		return err
 	}
@@ -432,14 +445,13 @@ func rsvpAnalyticsField(status string) string {
 }
 
 func (s *GuestService) updateInvitationMaxGuests(obj *models.Guest, oldGuest *models.Guest) error {
-	if s.invitations == nil || obj.MaxGuests <= 0 {
+	if s.invitations == nil || obj.MaxGuests <= 0 || oldGuest == nil {
 		return nil
 	}
 
-	invitationID := obj.InvitationID
-	if invitationID == nil && oldGuest != nil {
-		invitationID = oldGuest.InvitationID
-	}
+	// The stored row picks the invitation: obj is built from a request and must
+	// never point the MaxGuests sync at another (possibly foreign) invitation.
+	invitationID := oldGuest.InvitationID
 	if invitationID == nil || *invitationID == uuid.Nil {
 		return nil
 	}
@@ -449,6 +461,13 @@ func (s *GuestService) updateInvitationMaxGuests(obj *models.Guest, oldGuest *mo
 		return err
 	}
 	if invitation == nil {
+		return nil
+	}
+	// A stored link to another event's invitation (left by older writes) never
+	// lets this event's guest manager change that event's seat count.
+	if invitation.EventID != oldGuest.EventID {
+		slog.Warn("guest invitation belongs to another event; max_guests not synced",
+			"guest_id", oldGuest.ID, "event_id", oldGuest.EventID)
 		return nil
 	}
 	if invitation.MaxGuests == obj.MaxGuests {
@@ -492,22 +511,186 @@ func (s *GuestService) BulkDeleteGuests(ids []uuid.UUID) error {
 	return s.invalidateGuestsCacheForEvents(eventIDs)
 }
 
-type bulkGuestStatusRepository interface {
-	BulkUpdateGuestStatus(eventID uuid.UUID, ids []uuid.UUID, statusID uuid.UUID, rsvpStatus, rsvpMethod string) error
+// guestStatusTransitionRepository locks guests of one event, lets apply pick
+// their new RSVP values and writes back the guests apply returns, atomically
+// (guestrepository.TransitionGuestStatuses).
+type guestStatusTransitionRepository interface {
+	TransitionGuestStatuses(eventID uuid.UUID, ids []uuid.UUID, apply func(locked []models.Guest) ([]models.Guest, error)) error
 }
 
+// guestStatusStep moves one locked guest and reports whether it must be
+// written; an error aborts the whole transition.
+type guestStatusStep func(guest *models.Guest, now time.Time) (write bool, err error)
+
+// ErrCheckinNotUndoable means a guest in an undo request is confirmed, but not
+// by a door check-in that is still in place (their own RSVP, a host answer from
+// the dashboard, or an RSVP written after the check-in). Undoing it would
+// rewrite that answer, so the whole request is refused.
+var ErrCheckinNotUndoable = errors.New("guest was not checked in at the door")
+
+// BulkUpdateGuestStatus moves each guest to statusID and rsvpStatus with the
+// bookkeeping of a single PUT /guests/:id: rsvp_at is stamped only when the
+// guest's RSVP status changes and the RSVP analytics follow each guest's move.
+// It replaces whatever a door check-in wrote, so the check-in provenance is
+// cleared. The caller makes sure statusID's code is rsvpStatus.
 func (s *GuestService) BulkUpdateGuestStatus(eventID uuid.UUID, ids []uuid.UUID, statusID uuid.UUID, rsvpStatus, rsvpMethod string) error {
+	return s.transitionGuestStatuses(eventID, ids, func(guest *models.Guest, now time.Time) (bool, error) {
+		setGuestRSVP(guest, statusID, rsvpStatus, rsvpMethod, now)
+		guest.ClearDoorCheckin()
+		return true, nil
+	})
+}
+
+// CheckInGuests is the door check-in: each guest becomes confirmed by the host
+// (confirmedStatusID, rsvp_method host) and the RSVP they had before is kept in
+// the checkin_previous_* columns, with when and by whom, so UndoGuestCheckins
+// can give it back. A guest who is still checked in at the door is left as is,
+// which keeps the first provenance and makes a repeated check-in a no-op.
+func (s *GuestService) CheckInGuests(eventID uuid.UUID, ids []uuid.UUID, confirmedStatusID, checkedInBy uuid.UUID) error {
+	return s.transitionGuestStatuses(eventID, ids, func(guest *models.Guest, now time.Time) (bool, error) {
+		if guest.DoorCheckedIn() {
+			if guest.GuestStatusID == confirmedStatusID {
+				return false, nil
+			}
+		} else {
+			recordDoorCheckin(guest, checkedInBy, now)
+		}
+		setGuestRSVP(guest, confirmedStatusID, "confirmed", "host", now)
+		return true, nil
+	})
+}
+
+// UndoGuestCheckins reverses door check-ins: a guest still checked in at the
+// door gets back the RSVP status, guest status, method and rsvp_at recorded
+// when they were checked in, and the provenance is cleared. A guest who is not
+// confirmed has nothing to undo and is left untouched, so repeated or
+// concurrent undos are idempotent. A guest confirmed any other way fails the
+// whole request with ErrCheckinNotUndoable.
+func (s *GuestService) UndoGuestCheckins(eventID uuid.UUID, ids []uuid.UUID) error {
+	return s.transitionGuestStatuses(eventID, ids, func(guest *models.Guest, _ time.Time) (bool, error) {
+		if guest.DoorCheckedIn() {
+			restoreDoorCheckin(guest)
+			return true, nil
+		}
+		if effectiveRSVPStatus(guest) == "confirmed" {
+			return false, fmt.Errorf("%w: guest %s", ErrCheckinNotUndoable, guest.ID)
+		}
+		return false, nil
+	})
+}
+
+func recordDoorCheckin(guest *models.Guest, checkedInBy uuid.UUID, now time.Time) {
+	previousStatus, previousMethod, previousStatusID := guest.RSVPStatus, guest.RSVPMethod, guest.GuestStatusID
+	checkedInAt := now
+	guest.CheckedInAt = &checkedInAt
+	guest.CheckedInByUserID = nil
+	if checkedInBy != uuid.Nil {
+		guest.CheckedInByUserID = &checkedInBy
+	}
+	guest.CheckinPreviousRSVPStatus = &previousStatus
+	guest.CheckinPreviousRSVPMethod = &previousMethod
+	guest.CheckinPreviousGuestStatusID = &previousStatusID
+	guest.CheckinPreviousRSVPAt = nil
+	if guest.RSVPAt != nil {
+		previousAt := *guest.RSVPAt
+		guest.CheckinPreviousRSVPAt = &previousAt
+	}
+}
+
+func restoreDoorCheckin(guest *models.Guest) {
+	guest.RSVPStatus = ""
+	if guest.CheckinPreviousRSVPStatus != nil {
+		guest.RSVPStatus = *guest.CheckinPreviousRSVPStatus
+	}
+	guest.RSVPMethod = ""
+	if guest.CheckinPreviousRSVPMethod != nil {
+		guest.RSVPMethod = *guest.CheckinPreviousRSVPMethod
+	}
+	if guest.CheckinPreviousGuestStatusID != nil {
+		guest.GuestStatusID = *guest.CheckinPreviousGuestStatusID
+		guest.StatusID = *guest.CheckinPreviousGuestStatusID
+	}
+	guest.RSVPAt = guest.CheckinPreviousRSVPAt
+	guest.ClearDoorCheckin()
+}
+
+// effectiveRSVPStatus is the status the guest list and the check-in counts
+// show: the guest's own rsvp_status, else the catalog status code, else
+// pending (ListCheckinGuests' status expression).
+func effectiveRSVPStatus(guest *models.Guest) string {
+	if status := strings.ToLower(strings.TrimSpace(guest.RSVPStatus)); status != "" {
+		return status
+	}
+	if code := strings.ToLower(strings.TrimSpace(guest.GuestStatus.Code)); code != "" {
+		return code
+	}
+	return "pending"
+}
+
+// guestRSVPChanged reports whether a guest write changes the RSVP columns a
+// door check-in sets.
+func guestRSVPChanged(before, after *models.Guest) bool {
+	return normalizeRSVPStatus(before.RSVPStatus) != normalizeRSVPStatus(after.RSVPStatus) ||
+		!strings.EqualFold(strings.TrimSpace(before.RSVPMethod), strings.TrimSpace(after.RSVPMethod)) ||
+		before.GuestStatusID != after.GuestStatusID
+}
+
+// transitionGuestStatuses runs step on every guest of eventID named by ids in
+// one locked transaction, then counts the RSVP analytics of the guests that
+// moved (only after the commit) and drops their caches.
+func (s *GuestService) transitionGuestStatuses(eventID uuid.UUID, ids []uuid.UUID, step guestStatusStep) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	repo, ok := s.repo.(bulkGuestStatusRepository)
+	repo, ok := s.repo.(guestStatusTransitionRepository)
 	if !ok {
-		return fmt.Errorf("bulk guest status repository unavailable")
+		return fmt.Errorf("guest status transition repository unavailable")
 	}
-	if err := repo.BulkUpdateGuestStatus(eventID, ids, statusID, rsvpStatus, rsvpMethod); err != nil {
+	type rsvpMove struct{ from, to string }
+	var moves []rsvpMove
+	now := time.Now()
+	err := repo.TransitionGuestStatuses(eventID, ids, func(locked []models.Guest) ([]models.Guest, error) {
+		moves = moves[:0]
+		changed := make([]models.Guest, 0, len(locked))
+		for i := range locked {
+			from := locked[i].RSVPStatus
+			write, err := step(&locked[i], now)
+			if err != nil {
+				return nil, err
+			}
+			if write {
+				changed = append(changed, locked[i])
+				moves = append(moves, rsvpMove{from: from, to: locked[i].RSVPStatus})
+			}
+		}
+		return changed, nil
+	})
+	if err != nil {
 		return err
 	}
+	for _, move := range moves {
+		trackRSVPAnalyticsTransition(eventID, move.from, move.to)
+	}
+	if s.cache != nil {
+		for _, id := range ids {
+			_ = s.cache.Invalidate("guests", id.String())
+		}
+	}
 	return s.invalidateGuestsCacheForEvent(eventID)
+}
+
+// setGuestRSVP writes a host-side RSVP: both status columns, rsvp_status and
+// rsvp_method, and a fresh rsvp_at only when the RSVP status changes (the rule
+// syncRSVPMetadata applies to single updates).
+func setGuestRSVP(guest *models.Guest, statusID uuid.UUID, rsvpStatus, rsvpMethod string, now time.Time) {
+	if normalizeRSVPStatus(guest.RSVPStatus) != normalizeRSVPStatus(rsvpStatus) {
+		stamped := now
+		guest.RSVPAt = &stamped
+	}
+	guest.GuestStatusID = statusID
+	guest.StatusID = statusID
+	guest.RSVPStatus = rsvpStatus
+	guest.RSVPMethod = rsvpMethod
 }
 
 func (s *GuestService) ListGuestsByEventID(eventID uuid.UUID) ([]models.Guest, error) {

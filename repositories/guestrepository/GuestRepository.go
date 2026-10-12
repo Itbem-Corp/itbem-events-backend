@@ -9,7 +9,6 @@ import (
 	"events-stocks/repositories/gormrepository"
 	"events-stocks/repositories/gueststatusrepository"
 	"events-stocks/utils"
-	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -17,6 +16,7 @@ import (
 	"github.com/gofrs/uuid"
 	"golang.org/x/sync/errgroup"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var pendingStatusID uuid.UUID
@@ -86,32 +86,80 @@ func ListGuestsByEventID(eventID uuid.UUID) ([]models.Guest, error) {
 	return list, err
 }
 
-func ListCheckinGuests(eventID uuid.UUID, query dtos.CheckinGuestsListQuery) ([]models.Guest, int64, error) {
-	statusExpr := "LOWER(BTRIM(COALESCE(NULLIF(BTRIM(guests.rsvp_status), ''), \"GuestStatus\".code, 'pending')))"
-	baseQuery := func() *gorm.DB {
-		base := configuration.DB.Model(&models.Guest{}).
-			Joins("LEFT JOIN invitation_access_tokens ON invitation_access_tokens.invitation_id = guests.invitation_id").
-			Joins("LEFT JOIN invitations ON invitations.id = guests.invitation_id AND invitations.deleted_at IS NULL").
-			Joins("GuestStatus").
-			Joins("Table").
-			Where("guests.event_id = ?", eventID)
+const checkinStatusExpr = "LOWER(BTRIM(COALESCE(NULLIF(BTRIM(guests.rsvp_status), ''), \"GuestStatus\".code, 'pending')))"
 
-		if qr := strings.TrimSpace(query.QR); qr != "" {
-			base = base.Where("CAST(guests.id AS TEXT) = ? OR invitation_access_tokens.pretty_token = ?", qr, qr)
-		} else if search := strings.TrimSpace(query.Search); search != "" {
+// checkinGuestsBaseQuery is the filter shared by the check-in list, the
+// guest-manager pages (page:, invitations:) and the CSV export.
+func checkinGuestsBaseQuery(db *gorm.DB, eventID uuid.UUID, query dtos.CheckinGuestsListQuery) *gorm.DB {
+	base := db.Model(&models.Guest{}).
+		Joins("LEFT JOIN invitation_access_tokens ON invitation_access_tokens.invitation_id = guests.invitation_id").
+		Joins("LEFT JOIN invitations ON invitations.id = guests.invitation_id AND invitations.deleted_at IS NULL").
+		Joins("GuestStatus").
+		Joins("Table").
+		Where("guests.event_id = ?", eventID)
+
+	if qr := strings.TrimSpace(query.QR); qr != "" {
+		base = base.Where("CAST(guests.id AS TEXT) = ? OR invitation_access_tokens.pretty_token = ?", qr, qr)
+	} else if search := strings.TrimSpace(query.Search); search != "" {
+		if query.DoorSearch {
+			base = whereDoorGuestSearch(base, search)
+		} else {
 			pattern := "%" + strings.ToLower(search) + "%"
 			base = base.Where(`LOWER(CONCAT_WS(' ', guests.first_name, guests.last_name, guests.email, guests.phone, guests.table_number, "Table".name)) LIKE ?`, pattern)
 		}
+	}
 
-		switch strings.ToUpper(strings.TrimSpace(query.Filter)) {
-		case "CONFIRMED":
-			base = base.Where(statusExpr + " = 'confirmed'")
-		case "PENDING":
-			base = base.Where(statusExpr + " = 'pending'")
-		case "DECLINED":
-			base = base.Where(statusExpr + " = 'declined'")
+	switch strings.ToUpper(strings.TrimSpace(query.Filter)) {
+	case "CONFIRMED":
+		base = base.Where(checkinStatusExpr + " = 'confirmed'")
+	case "PENDING":
+		base = base.Where(checkinStatusExpr + " = 'pending'")
+	case "DECLINED":
+		base = base.Where(checkinStatusExpr + " = 'declined'")
+	}
+	return base
+}
+
+// likeEscaper makes \ % and _ match themselves in a LIKE ... ESCAPE '\' pattern.
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
+// whereDoorGuestSearch is the search of the check-in surfaces. Their callers
+// (checkin:run, door-only roles included) never see email or phone, so only
+// the name and the table match by substring; email and phone match only their
+// complete value, and the search cannot read them back one character at a time.
+func whereDoorGuestSearch(base *gorm.DB, search string) *gorm.DB {
+	conditions := []string{
+		`LOWER(CONCAT_WS(' ', guests.first_name, guests.last_name, guests.table_number, "Table".name)) LIKE ? ESCAPE '\'`,
+		"LOWER(BTRIM(guests.email)) = LOWER(?)",
+	}
+	args := []interface{}{"%" + likeEscaper.Replace(strings.ToLower(search)) + "%", search}
+	if digits := phoneSearchDigits(search); digits != "" {
+		conditions = append(conditions, "regexp_replace(guests.phone, '[^0-9]', '', 'g') = ?")
+		args = append(args, digits)
+	}
+	return base.Where("("+strings.Join(conditions, " OR ")+")", args...)
+}
+
+// phoneSearchDigits returns the digits of a search written as a phone number
+// (digits, spaces and + - . ( ) only), or "" for any other search.
+func phoneSearchDigits(search string) string {
+	var digits strings.Builder
+	for _, r := range search {
+		switch {
+		case r >= '0' && r <= '9':
+			digits.WriteRune(r)
+		case r == ' ' || r == '+' || r == '-' || r == '.' || r == '(' || r == ')':
+		default:
+			return ""
 		}
-		return base
+	}
+	return digits.String()
+}
+
+func ListCheckinGuests(eventID uuid.UUID, query dtos.CheckinGuestsListQuery) ([]models.Guest, int64, error) {
+	statusExpr := checkinStatusExpr
+	baseQuery := func() *gorm.DB {
+		return checkinGuestsBaseQuery(configuration.DB, eventID, query)
 	}
 
 	var total int64
@@ -471,32 +519,112 @@ func BulkDeleteGuests(ids []uuid.UUID) error {
 	return configuration.DB.Where("id IN ?", ids).Delete(&models.Guest{}).Error
 }
 
-func BulkUpdateGuestStatus(eventID uuid.UUID, ids []uuid.UUID, statusID uuid.UUID, rsvpStatus, rsvpMethod string) error {
+var errGuestsOutsideEvent = errors.New("one or more guests do not belong to event")
+
+// TransitionGuestStatuses changes the RSVP state of guests of one event in a
+// single transaction. It locks the guests named by ids (SELECT ... FOR UPDATE,
+// in id order so two concurrent calls cannot deadlock), fails when any id is
+// not a live guest of eventID, lets apply decide each guest's new values from
+// the locked rows and writes back, for the guests apply returns, only the
+// columns guestStatusTransitionValues lists.
+func TransitionGuestStatuses(eventID uuid.UUID, ids []uuid.UUID, apply func(locked []models.Guest) ([]models.Guest, error)) error {
 	if len(ids) == 0 {
 		return nil
 	}
 	return configuration.DB.Transaction(func(tx *gorm.DB) error {
-		var statusCount int64
-		if err := tx.Model(&models.GuestStatus{}).Where("id = ?", statusID).Count(&statusCount).Error; err != nil {
+		var locked []models.Guest
+		if err := lockGuestsForStatusTransition(tx, eventID, ids).Find(&locked).Error; err != nil {
 			return err
 		}
-		if statusCount != 1 {
-			return fmt.Errorf("guest status does not exist")
+		if len(locked) != len(ids) {
+			return errGuestsOutsideEvent
 		}
-		result := tx.Model(&models.Guest{}).
-			Where("event_id = ? AND id IN ?", eventID, ids).
-			Updates(map[string]interface{}{
-				"guest_status_id": statusID,
-				"rsvp_status":     rsvpStatus, "rsvp_method": rsvpMethod,
-			})
-		if result.Error != nil {
-			return result.Error
+		if err := attachGuestStatuses(tx, locked); err != nil {
+			return err
 		}
-		if result.RowsAffected != int64(len(ids)) {
-			return fmt.Errorf("one or more guests do not belong to event")
+		changed, err := apply(locked)
+		if err != nil {
+			return err
+		}
+		for i := range changed {
+			result := tx.Model(&models.Guest{}).
+				Where("id = ? AND event_id = ?", changed[i].ID, eventID).
+				Updates(guestStatusTransitionValues(&changed[i]))
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return errGuestsOutsideEvent
+			}
 		}
 		return nil
 	})
+}
+
+func lockGuestsForStatusTransition(tx *gorm.DB, eventID uuid.UUID, ids []uuid.UUID) *gorm.DB {
+	return tx.Model(&models.Guest{}).
+		Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("event_id = ? AND id IN ?", eventID, ids).
+		Order("id")
+}
+
+// attachGuestStatuses loads the catalog status of each locked guest (one
+// query, not locked) so a transition can fall back to its code when the
+// guest's rsvp_status is empty, as the check-in list does.
+func attachGuestStatuses(tx *gorm.DB, guests []models.Guest) error {
+	statusIDs := make([]uuid.UUID, 0, len(guests))
+	seen := make(map[uuid.UUID]struct{}, len(guests))
+	for i := range guests {
+		id := guests[i].GuestStatusID
+		if _, ok := seen[id]; ok || id == uuid.Nil {
+			continue
+		}
+		seen[id] = struct{}{}
+		statusIDs = append(statusIDs, id)
+	}
+	if len(statusIDs) == 0 {
+		return nil
+	}
+	var statuses []models.GuestStatus
+	if err := tx.Where("id IN ?", statusIDs).Find(&statuses).Error; err != nil {
+		return err
+	}
+	byID := make(map[uuid.UUID]models.GuestStatus, len(statuses))
+	for _, status := range statuses {
+		byID[status.ID] = status
+	}
+	for i := range guests {
+		if status, ok := byID[guests[i].GuestStatusID]; ok {
+			guests[i].GuestStatus = status
+			guests[i].Status = &guests[i].GuestStatus
+		}
+	}
+	return nil
+}
+
+// guestStatusTransitionValues is everything a status transition may write:
+// the RSVP columns and the door check-in provenance; no other guest column is
+// touched. Nil pointers become untyped NULLs.
+func guestStatusTransitionValues(guest *models.Guest) map[string]interface{} {
+	return map[string]interface{}{
+		"guest_status_id":                  guest.GuestStatusID,
+		"rsvp_status":                      guest.RSVPStatus,
+		"rsvp_method":                      guest.RSVPMethod,
+		"rsvp_at":                          sqlNullable(guest.RSVPAt),
+		"checked_in_at":                    sqlNullable(guest.CheckedInAt),
+		"checked_in_by_user_id":            sqlNullable(guest.CheckedInByUserID),
+		"checkin_previous_rsvp_status":     sqlNullable(guest.CheckinPreviousRSVPStatus),
+		"checkin_previous_guest_status_id": sqlNullable(guest.CheckinPreviousGuestStatusID),
+		"checkin_previous_rsvp_method":     sqlNullable(guest.CheckinPreviousRSVPMethod),
+		"checkin_previous_rsvp_at":         sqlNullable(guest.CheckinPreviousRSVPAt),
+	}
+}
+
+func sqlNullable[T any](value *T) interface{} {
+	if value == nil {
+		return nil
+	}
+	return *value
 }
 
 // ListAttendeesByEventID returns guests for an event ordered by display order.
@@ -550,8 +678,8 @@ func (r *GuestRepo) GetGuestByInvitationID(id uuid.UUID) (*models.Guest, error) 
 func (r *GuestRepo) CreateGuests(guests []models.Guest) error { return CreateGuests(guests) }
 func (r *GuestRepo) GetPendingStatusID() uuid.UUID            { return GetPendingStatusID() }
 func (r *GuestRepo) BulkDeleteGuests(ids []uuid.UUID) error   { return BulkDeleteGuests(ids) }
-func (r *GuestRepo) BulkUpdateGuestStatus(eventID uuid.UUID, ids []uuid.UUID, statusID uuid.UUID, rsvpStatus, rsvpMethod string) error {
-	return BulkUpdateGuestStatus(eventID, ids, statusID, rsvpStatus, rsvpMethod)
+func (r *GuestRepo) TransitionGuestStatuses(eventID uuid.UUID, ids []uuid.UUID, apply func(locked []models.Guest) ([]models.Guest, error)) error {
+	return TransitionGuestStatuses(eventID, ids, apply)
 }
 func (r *GuestRepo) ListGuestsByEventID(eventID uuid.UUID) ([]models.Guest, error) {
 	return ListGuestsByEventID(eventID)

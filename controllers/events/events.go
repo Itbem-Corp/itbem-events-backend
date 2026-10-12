@@ -424,8 +424,10 @@ func GetEvent(c echo.Context) error {
 	var shareSummary dtos.GuestShareSummary
 	var sections []models.EventSection
 	var configErr, guestSummariesErr, sectionsErr error
+	var canManageEvent, canManageGuests bool
+	var manageEventPanic, manageGuestsPanic any
 	var wait sync.WaitGroup
-	wait.Add(3)
+	wait.Add(5)
 	go func() {
 		defer wait.Done()
 		config, configErr = eventConfigSvc.GetEventConfigByID(id)
@@ -438,7 +440,23 @@ func GetEvent(c echo.Context) error {
 		defer wait.Done()
 		sections, sectionsErr = eventsService.ListEventSectionsByEventID(id)
 	}()
+	go func() {
+		defer wait.Done()
+		canManageEvent, manageEventPanic = eventDetailCapability(c, id, authz.CapabilityEventManage)
+	}()
+	go func() {
+		defer wait.Done()
+		canManageGuests, manageGuestsPanic = eventDetailCapability(c, id, authz.CapabilityGuestManage)
+	}()
 	wait.Wait()
+	// Re-panic on the request goroutine so Echo's recovery middleware handles
+	// an authorization dependency panic, as authz itself does.
+	if manageEventPanic != nil {
+		panic(manageEventPanic)
+	}
+	if manageGuestsPanic != nil {
+		panic(manageGuestsPanic)
+	}
 	if configErr != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Error loading event config", configErr.Error())
 	}
@@ -453,12 +471,46 @@ func GetEvent(c echo.Context) error {
 	}
 
 	response := eventResponseWithCoverView(event)
+	if !canManageEvent {
+		response.EventConfig.RedactAccessSecret()
+		response.Config.RedactAccessSecret()
+	}
+	if !canManageGuests {
+		// first_pending carries a guest's email and invitation pretty token,
+		// which is a bearer credential for the public RSVP routes. The counts
+		// stay: the dashboard caches the workspace only when the object exists.
+		shareSummary.FirstPending = nil
+	}
 	response.GuestSummary = &guestSummary
 	response.GuestShareSummary = &shareSummary
 	response.EventSections = dtos.NewEventSectionResponses(sections)
 
 	return utils.Success(c, http.StatusOK, "Event loaded", response)
 }
+
+// eventDetailCapability reports whether the caller of GET /events/:id/detail
+// holds a capability beyond view, which decides whether protected fields are
+// included. It never fails the request: any authorization error, including a
+// failed lookup, means "no" and the fields are left out. A panic is returned
+// instead of raised because this runs off the request goroutine.
+func eventDetailCapability(c echo.Context, eventID uuid.UUID, capability authz.Capability) (allowed bool, panicValue any) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			allowed, panicValue = false, recovered
+		}
+	}()
+	_, _, err := authz.RequireEventCapability(c, eventID, capability)
+	if err == nil {
+		return true, nil
+	}
+	var failure *authz.Failure
+	if !errors.As(err, &failure) || failure.Status != http.StatusForbidden {
+		slog.Warn("event detail capability check failed; omitting protected fields",
+			"event_id", eventID, "capability", string(capability), "error", err)
+	}
+	return false, nil
+}
+
 
 // GET /api/events/:key (public group). Anonymous read of one event by UUID or
 // identifier, behind the same gate as /meta: active, access window, password

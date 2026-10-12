@@ -57,14 +57,14 @@ requires an explicit HTTP(S) preview URL before QA can start.
 
 | File | Purpose |
 |------|---------|
-| `GuestService.go` | CRUD + bulk operations for guests |
+| `GuestService.go` | CRUD + bulk operations for guests. `CreateGuestsWithInvitations` inserts guests with `Omit(clause.Associations)` (a nested table or status object never creates rows) and owns both references: each guest gets a new invitation and `rsvp_token_id` is cleared (the RSVP flow links the token). `UpdateGuest` syncs `max_guests` to the guest's stored invitation only, never one named by the caller, and only when that invitation's `event_id` is the guest's event (otherwise nothing is written and a warning with the guest and event ids is logged), and clears the door check-in provenance when the RSVP status, method or status changes. Bulk status goes through `transitionGuestStatuses` (locked `TransitionGuestStatuses`, then per-guest RSVP analytics and cache invalidation): `CheckInGuests` (door check-in, records the previous RSVP), `UndoGuestCheckins` (restores it; `ErrCheckinNotUndoable` for a guest confirmed any other way) and `BulkUpdateGuestStatus` (guest:manage status change, the organizer's plain confirmation included; clears the provenance). `rsvp_at` is stamped only when the RSVP status changes. |
 | `GuestStatusService.go` | Catalog CRUD for guest statuses |
 
 ### Invitations Domain (`services/invitations/`)
 
 | File | Purpose |
 |------|---------|
-| `InvitationService.go` | Send/track invitations, RSVP logic |
+| `InvitationService.go` | Send/track invitations, RSVP logic. `ConfirmRSVPWithResult` stores `rsvp_method` only as `web` or `app` (anything else, `host` included, becomes `web`) and clears the guest's door check-in provenance. |
 
 ### Clients Domain (`services/clients/`)
 
@@ -102,7 +102,7 @@ requires an explicit HTTP(S) preview URL before QA can start.
 | File | Purpose |
 |------|---------|
 | `services/templates/DesignTemplateService.go` | Design template CRUD |
-| `services/moments/MomentService.go` | Event moment CRUD + async media job enqueue |
+| `services/moments/MomentService.go` | Event moment CRUD + async media job enqueue. `GetMomentsByIDs` loads a bulk request's moments in one query so the bulk handlers authorize once per event. `IsEventMomentKey(eventID, key)` accepts only `moments/<eventID>/...`, bare or under `organizations/<uuid>/` (no absolute URLs, `..` or backslashes); `POST /moments` uses it before storing a key the admin response will presign. |
 | `services/moments/MomentTypeService.go` | Moment type catalog |
 
 ### Colors Domain (`services/colors/`)

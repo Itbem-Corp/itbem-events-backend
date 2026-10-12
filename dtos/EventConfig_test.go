@@ -477,3 +477,30 @@ func TestNewEventConfigResponsePreservesExplicitAllFalseVisibility(t *testing.T)
 	assert.False(t, response.ShowMomentWall)
 	assert.False(t, response.MomentsWallPublished)
 }
+
+func TestEventConfigResponseRedactAccessSecretBlanksOnlyThePassword(t *testing.T) {
+	eventID := uuid.Must(uuid.NewV4())
+	response := NewEventConfigResponse(&models.EventConfig{
+		ID:                  eventID,
+		IsAuthPreview:       true,
+		AuthPasswordPreview: " secreto ",
+		AllowUploads:        true,
+		MaxUploadsPerGuest:  12,
+	}, eventID)
+	require.Equal(t, "secreto", response.AuthPasswordPreview)
+
+	response.RedactAccessSecret()
+
+	assert.Equal(t, "", response.AuthPasswordPreview)
+	assert.True(t, response.IsAuthPreview, "callers still learn that the event is password protected")
+	assert.True(t, response.AllowUploads)
+	assert.Equal(t, 12, response.MaxUploadsPerGuest)
+	raw, err := json.Marshal(response)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "secreto")
+}
+
+func TestEventConfigResponseRedactAccessSecretIsNilSafe(t *testing.T) {
+	var response *EventConfigResponse
+	assert.NotPanics(t, func() { response.RedactAccessSecret() })
+}

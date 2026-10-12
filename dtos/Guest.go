@@ -50,6 +50,9 @@ type GuestResponse struct {
 	DietaryRestrictions string               `json:"dietary_restrictions"`
 	RSVPNotes           string               `json:"rsvp_notes"`
 	Notes               string               `json:"notes"`
+	// CheckedInAt is set while the guest is checked in at the door (PATCH
+	// /guests/bulk/status); check-in staff may undo only those check-ins.
+	CheckedInAt *time.Time `json:"checked_in_at,omitempty"`
 }
 
 type CheckinGuestsListQuery struct {
@@ -63,6 +66,10 @@ type CheckinGuestsListQuery struct {
 	// SkipTotal is reserved for composed workspace loads that obtain the
 	// authoritative total from the event summary in the same response.
 	SkipTotal bool
+	// DoorSearch is set only by the check-in surfaces (checkin:run), whose
+	// callers never see contact data: Search then matches name and table by
+	// substring, and email and phone only by their complete value.
+	DoorSearch bool
 }
 
 type CheckinGuestsPageResponse struct {
@@ -75,10 +82,78 @@ type CheckinGuestsPageResponse struct {
 	ShareSummary *GuestShareSummary `json:"share_summary,omitempty"`
 }
 
+// CheckinGuest is the door-staff projection of a guest, returned by every
+// surface gated by checkin:run (GET /guests/checkin:<event> and
+// GET /events/:id/checkin-workspace). checkin:run is granted to door-only
+// roles, so it carries what the dashboard check-in page renders and patches
+// (name, table, party size and RSVP state) plus the ids the dashboard Guest
+// type requires. Contact data, notes, dietary restrictions and invitation or
+// RSVP tokens are deliberately absent: the QR scanner resolves a scanned token
+// on the server through the qr query, so no token needs to reach the client.
+type CheckinGuest struct {
+	ID             uuid.UUID            `json:"id"`
+	EventID        uuid.UUID            `json:"event_id"`
+	FirstName      string               `json:"first_name"`
+	LastName       string               `json:"last_name"`
+	TableID        *uuid.UUID           `json:"table_id,omitempty"`
+	Table          *EventTableResponse  `json:"table,omitempty"`
+	TableNumber    string               `json:"table_number,omitempty"`
+	GuestStatusID  uuid.UUID            `json:"guest_status_id"`
+	GuestStatus    *GuestStatusResponse `json:"guest_status,omitempty"`
+	StatusID       uuid.UUID            `json:"status_id"`
+	Status         *GuestStatusResponse `json:"status,omitempty"`
+	GuestsCount    int                  `json:"guests_count"`
+	RSVPStatus     string               `json:"rsvp_status"`
+	RSVPGuestCount int                  `json:"rsvp_guest_count"`
+	// CheckedInAt is set while the guest is checked in at the door; the
+	// check-in page offers undo only for those guests. Who checked the guest
+	// in and the previous RSVP stay server-side.
+	CheckedInAt *time.Time `json:"checked_in_at,omitempty"`
+}
+
+// CheckinGuestListResponse is the paged check-in list. CheckinGuestsPageResponse,
+// despite its name, is the guest-manager list (page: and invitations: keys)
+// and keeps the full GuestResponse.
+type CheckinGuestListResponse struct {
+	Data       []CheckinGuest `json:"data"`
+	Total      int64          `json:"total"`
+	Page       int            `json:"page"`
+	PageSize   int            `json:"page_size"`
+	TotalPages int            `json:"total_pages"`
+	Summary    *GuestSummary  `json:"summary,omitempty"`
+}
+
 type CheckinWorkspaceResponse struct {
-	Event    EventResponse             `json:"event"`
-	Statuses []GuestStatusResponse     `json:"statuses"`
-	Guests   CheckinGuestsPageResponse `json:"guests"`
+	Event    EventResponse            `json:"event"`
+	Statuses []GuestStatusResponse    `json:"statuses"`
+	Guests   CheckinGuestListResponse `json:"guests"`
+}
+
+func NewCheckinGuestResponses(guests []models.Guest) []CheckinGuest {
+	response := make([]CheckinGuest, 0, len(guests))
+	for i := range guests {
+		guest := &guests[i]
+		statusID := guestStatusIDForResponse(*guest)
+		status := guestStatusForResponse(*guest)
+		response = append(response, CheckinGuest{
+			ID:             guest.ID,
+			EventID:        guest.EventID,
+			FirstName:      guest.FirstName,
+			LastName:       guest.LastName,
+			TableID:        guest.TableID,
+			Table:          eventTableResponsePtr(guest.Table),
+			TableNumber:    guest.TableNumber,
+			GuestStatusID:  statusID,
+			GuestStatus:    status,
+			StatusID:       statusID,
+			Status:         status,
+			GuestsCount:    guest.GuestsCount,
+			RSVPStatus:     guest.RSVPStatus,
+			RSVPGuestCount: guest.RSVPGuestCount,
+			CheckedInAt:    guest.CheckedInAt,
+		})
+	}
+	return response
 }
 
 func eventTableResponsePtr(table *models.EventTable) *EventTableResponse {
@@ -157,6 +232,7 @@ func NewGuestResponse(guest *models.Guest) GuestResponse {
 		DietaryRestrictions: guest.DietaryRestrictions,
 		RSVPNotes:           guest.RSVPNotes,
 		Notes:               guest.Notes,
+		CheckedInAt:         guest.CheckedInAt,
 	}
 }
 

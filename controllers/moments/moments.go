@@ -7,12 +7,15 @@ import (
 	"events-stocks/dtos"
 	"events-stocks/internal/authz"
 	"events-stocks/models"
+	"events-stocks/repositories/guestrepository"
+	"events-stocks/repositories/invitationrepository"
 	eventsService "events-stocks/services/events"
 	momentsService "events-stocks/services/moments"
 	resourcesService "events-stocks/services/resources"
 	"events-stocks/utils"
 	"github.com/gofrs/uuid"
 	"github.com/labstack/echo/v4"
+	"gorm.io/gorm"
 	"net/http"
 	"os"
 	"strconv"
@@ -341,6 +344,73 @@ func ListMomentActivity(c echo.Context) error {
 	})
 }
 
+// maxBulkMomentIDs bounds bulk-approve, bulk delete and reorder. The dashboard
+// sends whole-event lists without chunking, so the cap sits well above
+// realistic per-event counts; batch reoptimize keeps its own cap of 200.
+const maxBulkMomentIDs = 5000
+
+// parseBulkMomentIDs validates the size of a bulk moment id list and returns
+// its distinct ids in request order. A non-empty message means 400.
+func parseBulkMomentIDs(raw []string) (ids []uuid.UUID, message string, detail string) {
+	if len(raw) == 0 {
+		return nil, "No IDs provided", ""
+	}
+	if len(raw) > maxBulkMomentIDs {
+		return nil, "Too many IDs", "max " + strconv.Itoa(maxBulkMomentIDs)
+	}
+	ids = make([]uuid.UUID, 0, len(raw))
+	seen := make(map[uuid.UUID]struct{}, len(raw))
+	for _, idStr := range raw {
+		id, err := uuid.FromString(idStr)
+		if err != nil {
+			return nil, "Invalid UUID: " + idStr, ""
+		}
+		if _, duplicate := seen[id]; duplicate {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	return ids, "", ""
+}
+
+// authorizeBulkMoments checks capability on every moment of a bulk request with
+// one batch lookup and one event check per distinct event, instead of a full
+// authz chain per moment. A moment the batch lookup does not return, or one
+// without an event, falls back to RequireMomentCapability, so a missing id
+// still answers 404 and an unlinked moment keeps its per-moment rule.
+func authorizeBulkMoments(c echo.Context, ids []uuid.UUID, capability authz.Capability) error {
+	if momentSvc == nil {
+		return &authz.Failure{Status: http.StatusInternalServerError, Message: "Moment service unavailable"}
+	}
+	moments, err := momentSvc.GetMomentsByIDs(ids)
+	if err != nil {
+		return &authz.Failure{Status: http.StatusInternalServerError, Message: "Moment lookup failed", Detail: err.Error()}
+	}
+	byID := make(map[uuid.UUID]*models.Moment, len(moments))
+	for i := range moments {
+		byID[moments[i].ID] = &moments[i]
+	}
+	checkedEvents := make(map[uuid.UUID]struct{})
+	for _, id := range ids {
+		moment, found := byID[id]
+		if !found || moment.EventID == nil {
+			if _, _, authErr := authz.RequireMomentCapability(c, id, capability); authErr != nil {
+				return authErr
+			}
+			continue
+		}
+		if _, checked := checkedEvents[*moment.EventID]; checked {
+			continue
+		}
+		if _, _, authErr := authz.RequireEventCapability(c, *moment.EventID, capability); authErr != nil {
+			return authErr
+		}
+		checkedEvents[*moment.EventID] = struct{}{}
+	}
+	return nil
+}
+
 func ReorderMoments(c echo.Context) error {
 	var body []struct {
 		ID    string `json:"id"`
@@ -352,17 +422,28 @@ func ReorderMoments(c echo.Context) error {
 	if len(body) == 0 {
 		return utils.Error(c, http.StatusBadRequest, "No moments provided", "")
 	}
+	if len(body) > maxBulkMomentIDs {
+		return utils.Error(c, http.StatusBadRequest, "Too many IDs", "max "+strconv.Itoa(maxBulkMomentIDs))
+	}
 
 	updates := make(map[uuid.UUID]int, len(body))
+	ids := make([]uuid.UUID, 0, len(body))
 	for _, item := range body {
 		id, err := uuid.FromString(item.ID)
 		if err != nil {
 			return utils.Error(c, http.StatusBadRequest, "Invalid UUID: "+item.ID, "")
 		}
-		if _, _, authErr := authz.RequireMomentCapability(c, id, authz.CapabilityEventManage); authErr != nil {
-			return authz.Respond(c, authErr)
+		if previous, duplicate := updates[id]; duplicate {
+			if previous != item.Order {
+				return utils.Error(c, http.StatusBadRequest, "Conflicting order for moment", id.String())
+			}
+			continue
 		}
 		updates[id] = item.Order
+		ids = append(ids, id)
+	}
+	if authErr := authorizeBulkMoments(c, ids, authz.CapabilityEventManage); authErr != nil {
+		return authz.Respond(c, authErr)
 	}
 
 	if err := momentSvc.BulkUpdateOrder(updates); err != nil {
@@ -441,12 +522,91 @@ func BackfillMomentVariants(c echo.Context) error {
 	return utils.Success(c, http.StatusAccepted, "Moment variant backfill batch evaluated", dtos.MomentBatchResultResponse{Succeeded: succeeded, Skipped: skipped, Failed: failed})
 }
 
+// momentGuestByID and momentInvitationByID resolve the guest and invitation a
+// dashboard-created moment names, so they can be checked against its event;
+// tests replace them.
+var (
+	momentGuestByID      = guestrepository.GetGuestByID
+	momentInvitationByID = invitationrepository.GetInvitationByIDLite
+)
+
+var errMomentReferenceOutsideEvent = errors.New("guest_id or invitation_id does not belong to this event")
+
+// momentCreatePayload is the allowlist of moment columns POST /moments
+// accepts, under the same keys c.Bind read from models.Moment. Server-owned
+// columns (id, media bucket, processing_*, media_variants, error and size
+// metrics, timestamps) and the nested invitation, guest and moment_type
+// objects are absent: a dashboard create cannot claim a processed state,
+// point a variant at a foreign key, or insert rows through GORM associations.
+type momentCreatePayload struct {
+	EventID      *uuid.UUID `json:"event_id"`
+	InvitationID *uuid.UUID `json:"invitation_id"`
+	MomentTypeID *uuid.UUID `json:"moment_type_id"`
+	GuestID      *uuid.UUID `json:"guest_id"`
+	Title        string     `json:"title"`
+	Description  string     `json:"description"`
+	ContentURL   string     `json:"content_url"`
+	ThumbnailURL string     `json:"thumbnail_url"`
+	ContentType  string     `json:"content_type"`
+	IsApproved   bool       `json:"is_approved"`
+	Order        int        `json:"order"`
+}
+
+func (p momentCreatePayload) moment() models.Moment {
+	return models.Moment{
+		EventID:      nonNilUUID(p.EventID),
+		InvitationID: nonNilUUID(p.InvitationID),
+		MomentTypeID: nonNilUUID(p.MomentTypeID),
+		GuestID:      nonNilUUID(p.GuestID),
+		Title:        p.Title,
+		Description:  p.Description,
+		ContentURL:   strings.TrimSpace(p.ContentURL),
+		ThumbnailURL: strings.TrimSpace(p.ThumbnailURL),
+		ContentType:  p.ContentType,
+		IsApproved:   p.IsApproved,
+		Order:        p.Order,
+	}
+}
+
+// nonNilUUID treats the nil UUID as an absent reference.
+func nonNilUUID(id *uuid.UUID) *uuid.UUID {
+	if id == nil || *id == uuid.Nil {
+		return nil
+	}
+	return id
+}
+
+// checkMomentReferences makes sure a moment only names a guest or invitation
+// of its own event; an id that does not exist is rejected the same way.
+func checkMomentReferences(eventID uuid.UUID, guestID, invitationID *uuid.UUID) error {
+	if guestID != nil {
+		guest, err := momentGuestByID(*guestID)
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		if err != nil || guest == nil || guest.EventID != eventID {
+			return errMomentReferenceOutsideEvent
+		}
+	}
+	if invitationID != nil {
+		invitation, err := momentInvitationByID(*invitationID)
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		if err != nil || invitation == nil || invitation.EventID != eventID {
+			return errMomentReferenceOutsideEvent
+		}
+	}
+	return nil
+}
+
 // POST /moments
 func CreateMoment(c echo.Context) error {
-	var moment models.Moment
-	if err := c.Bind(&moment); err != nil {
+	var payload momentCreatePayload
+	if err := c.Bind(&payload); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
 	}
+	moment := payload.moment()
 	if err := c.Validate(&moment); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Validation error", err.Error())
 	}
@@ -455,6 +615,19 @@ func CreateMoment(c echo.Context) error {
 	}
 	if _, _, authErr := authz.RequireEventCapability(c, *moment.EventID, authz.CapabilityEventManage); authErr != nil {
 		return authz.Respond(c, authErr)
+	}
+	// Admin responses presign content_url and thumbnail_url, so only keys of
+	// this event's moments are stored.
+	for _, key := range []string{moment.ContentURL, moment.ThumbnailURL} {
+		if key != "" && !momentsService.IsEventMomentKey(*moment.EventID, key) {
+			return utils.Error(c, http.StatusBadRequest, "Archivo inválido", "moment_content_outside_event")
+		}
+	}
+	if err := checkMomentReferences(*moment.EventID, moment.GuestID, moment.InvitationID); err != nil {
+		if errors.Is(err, errMomentReferenceOutsideEvent) {
+			return utils.Error(c, http.StatusBadRequest, "Referencia inválida", "reference_outside_event")
+		}
+		return utils.Error(c, http.StatusInternalServerError, "Error loading moment references", err.Error())
 	}
 
 	if err := momentSvc.CreateMoment(&moment); err != nil {
@@ -687,20 +860,12 @@ func BulkDeleteMoments(c echo.Context) error {
 	if err := c.Bind(&body); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
 	}
-	if len(body.IDs) == 0 {
-		return utils.Error(c, http.StatusBadRequest, "No IDs provided", "")
+	ids, message, detail := parseBulkMomentIDs(body.IDs)
+	if message != "" {
+		return utils.Error(c, http.StatusBadRequest, message, detail)
 	}
-
-	ids := make([]uuid.UUID, 0, len(body.IDs))
-	for _, idStr := range body.IDs {
-		id, err := uuid.FromString(idStr)
-		if err != nil {
-			return utils.Error(c, http.StatusBadRequest, "Invalid UUID: "+idStr, "")
-		}
-		if _, _, authErr := authz.RequireMomentCapability(c, id, authz.CapabilityEventManage); authErr != nil {
-			return authz.Respond(c, authErr)
-		}
-		ids = append(ids, id)
+	if authErr := authorizeBulkMoments(c, ids, authz.CapabilityEventManage); authErr != nil {
+		return authz.Respond(c, authErr)
 	}
 
 	if err := momentSvc.BulkDeleteMoments(ids); err != nil {
@@ -741,22 +906,12 @@ func BulkApproveRejectMoments(c echo.Context) error {
 	if err := c.Bind(&body); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
 	}
-	if len(body.IDs) == 0 {
-		return utils.Error(c, http.StatusBadRequest, "No IDs provided", "")
+	uuids, message, detail := parseBulkMomentIDs(body.IDs)
+	if message != "" {
+		return utils.Error(c, http.StatusBadRequest, message, detail)
 	}
-
-	uuids := make([]uuid.UUID, 0, len(body.IDs))
-	for _, idStr := range body.IDs {
-		id, err := uuid.FromString(idStr)
-		if err != nil {
-			return utils.Error(c, http.StatusBadRequest, "Invalid UUID: "+idStr, "")
-		}
-		uuids = append(uuids, id)
-	}
-	for _, id := range uuids {
-		if _, _, authErr := authz.RequireMomentCapability(c, id, authz.CapabilityEventManage); authErr != nil {
-			return authz.Respond(c, authErr)
-		}
+	if authErr := authorizeBulkMoments(c, uuids, authz.CapabilityEventManage); authErr != nil {
+		return authz.Respond(c, authErr)
 	}
 
 	isApproved := false

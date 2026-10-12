@@ -9,6 +9,7 @@ import (
 	"events-stocks/dtos"
 	"events-stocks/internal/authz"
 	"events-stocks/models"
+	"events-stocks/repositories/eventtablerepository"
 	eventsService "events-stocks/services/events"
 	guestService "events-stocks/services/guests"
 	"events-stocks/services/ports"
@@ -16,6 +17,7 @@ import (
 	"events-stocks/utils"
 	"github.com/gofrs/uuid"
 	"github.com/labstack/echo/v4"
+	"gorm.io/gorm"
 	"io"
 	"net/http"
 	"strconv"
@@ -25,7 +27,23 @@ import (
 
 var errAttendeeServiceUnavailable = errors.New("attendee service unavailable")
 
+// guestTablesInEvent counts how many of a guest write's table ids are live
+// tables of the guest's event, in one query per request; tests replace it.
+var guestTablesInEvent = eventtablerepository.CountEventTablesInEvent
+
+// guestStatusByID resolves the catalog status named by a bulk status change so
+// a check-in-only caller can be limited to the confirmed status; tests replace it.
+var guestStatusByID = guestService.GetGuestStatusByID
+
 const maxGuestCSVRows = 250000
+
+// maxBulkGuestIDs bounds DELETE /guests/bulk (same limit as bulk/status).
+const maxBulkGuestIDs = 100
+
+// maxGuestBatchSize bounds POST /guests/batch. It matches the dashboard's
+// GUEST_CSV_MAX_ROWS and keeps the guest INSERT (about 32 columns per row)
+// under Postgres's 65,535 bind parameters.
+const maxGuestBatchSize = 1000
 
 func guestCSVStatus(guest models.Guest) string {
 	status := strings.ToUpper(strings.TrimSpace(guest.RSVPStatus))
@@ -47,6 +65,34 @@ func guestCSVTable(guest models.Guest) string {
 		return table
 	}
 	return "Mesa " + table
+}
+
+// csvSafeCell neutralizes spreadsheet formula injection (CWE-1236): a cell whose
+// first character after leading spaces is = + - @ TAB or CR is evaluated as a
+// formula by Excel, LibreOffice and Google Sheets, so it gets a leading quote.
+// Guest names, contact fields, notes and RSVP free text reach this export from
+// the dashboard and from anonymous RSVP submissions.
+func csvSafeCell(value string) string {
+	trimmed := strings.TrimLeft(value, " ")
+	if trimmed == "" {
+		return value
+	}
+	switch trimmed[0] {
+	case '=', '+', '-', '@', '\t', '\r':
+		return "'" + value
+	}
+	return value
+}
+
+// writeGuestCSVRow writes one data row with every cell passed through
+// csvSafeCell. Write errors are sticky and surface through writer.Error()
+// after Flush, which ExportGuestsCSV checks.
+func writeGuestCSVRow(writer *csv.Writer, cells ...string) {
+	safe := make([]string, len(cells))
+	for i, cell := range cells {
+		safe[i] = csvSafeCell(cell)
+	}
+	_ = writer.Write(safe)
 }
 
 func ExportGuestsCSV(c echo.Context) error {
@@ -97,24 +143,24 @@ func ExportGuestsCSV(c echo.Context) error {
 			} else if !strings.EqualFold(guestCSVStatus(guest), "PENDING") && !guest.UpdatedAt.IsZero() {
 				respondedAt = guest.UpdatedAt.UTC().Format(time.RFC3339)
 			}
-			_ = writer.Write([]string{
-				strings.TrimSpace(guest.FirstName + " " + guest.LastName), guest.Email, guest.Phone, guestCSVStatus(guest),
+			writeGuestCSVRow(writer,
+				strings.TrimSpace(guest.FirstName+" "+guest.LastName), guest.Email, guest.Phone, guestCSVStatus(guest),
 				guest.RSVPMethod, strconv.Itoa(max(partySize-1, 0)), respondedAt, guest.CreatedAt.UTC().Format(time.RFC3339),
-			})
+			)
 		} else if invitationView {
 			respondedAt := ""
 			if guest.RSVPAt != nil {
 				respondedAt = guest.RSVPAt.UTC().Format(time.RFC3339)
 			}
-			_ = writer.Write([]string{
-				strings.TrimSpace(guest.FirstName + " " + guest.LastName), guest.Email, guest.Phone, guestCSVStatus(guest),
+			writeGuestCSVRow(writer,
+				strings.TrimSpace(guest.FirstName+" "+guest.LastName), guest.Email, guest.Phone, guestCSVStatus(guest),
 				respondedAt, guest.RSVPMethod, strconv.Itoa(max(partySize-1, 0)),
-			})
+			)
 		} else {
-			_ = writer.Write([]string{
+			writeGuestCSVRow(writer,
 				guest.FirstName, guest.LastName, guest.Email, guest.Phone, guestCSVTable(guest), strconv.Itoa(partySize),
 				strconv.Itoa(max(partySize-1, 0)), guestCSVStatus(guest), guest.DietaryRestrictions, guest.RSVPNotes, guest.Notes,
-			})
+			)
 		}
 	}
 	writer.Flush()
@@ -143,7 +189,7 @@ func GetCheckinWorkspace(c echo.Context) error {
 		return authz.Respond(c, authErr)
 	}
 
-	query := dtos.CheckinGuestsListQuery{Page: 1, PageSize: 60, Filter: "ALL", SkipTotal: true}
+	query := dtos.CheckinGuestsListQuery{Page: 1, PageSize: 60, Filter: "ALL", SkipTotal: true, DoorSearch: true}
 	var pageGuests []models.Guest
 	var total int64
 	var summary dtos.GuestSummary
@@ -172,8 +218,8 @@ func GetCheckinWorkspace(c echo.Context) error {
 	}
 	total = summary.Total
 
-	page := dtos.CheckinGuestsPageResponse{
-		Data: dtos.NewGuestResponses(pageGuests), Total: total, Page: 1, PageSize: 60,
+	page := dtos.CheckinGuestListResponse{
+		Data: dtos.NewCheckinGuestResponses(pageGuests), Total: total, Page: 1, PageSize: 60,
 		TotalPages: int((total + 59) / 60), Summary: &summary,
 	}
 	return utils.Success(c, http.StatusOK, "Check-in workspace loaded", dtos.CheckinWorkspaceResponse{
@@ -257,7 +303,8 @@ func GetGuests(c echo.Context) error {
 	}
 
 	if strings.HasPrefix(keyParam, "checkin:") || strings.HasPrefix(keyParam, "page:") || strings.HasPrefix(keyParam, "invitations:") {
-		includeSummary := strings.HasPrefix(keyParam, "checkin:")
+		checkinView := strings.HasPrefix(keyParam, "checkin:")
+		includeSummary := checkinView
 		includeShareSummary := strings.HasPrefix(keyParam, "invitations:")
 		eventIDStr := strings.TrimPrefix(strings.TrimPrefix(strings.TrimPrefix(keyParam, "checkin:"), "page:"), "invitations:")
 		eventID, err := uuid.FromString(eventIDStr)
@@ -265,7 +312,7 @@ func GetGuests(c echo.Context) error {
 			return utils.Error(c, http.StatusBadRequest, "Invalid event UUID", err.Error())
 		}
 		capability := authz.CapabilityGuestManage
-		if strings.HasPrefix(keyParam, "checkin:") {
+		if checkinView {
 			capability = authz.CapabilityCheckin
 		}
 		if _, _, authErr := authz.RequireEventCapability(c, eventID, capability); authErr != nil {
@@ -282,6 +329,8 @@ func GetGuests(c echo.Context) error {
 		query := dtos.CheckinGuestsListQuery{
 			Page: page, PageSize: pageSize, Search: c.QueryParam("search"), Filter: c.QueryParam("filter"), QR: c.QueryParam("qr"),
 			Sort: c.QueryParam("sort"), Direction: c.QueryParam("direction"),
+			// checkin:run never sees contact data, so it cannot search it by substring either.
+			DoorSearch: checkinView,
 		}
 		var guests []models.Guest
 		var total int64
@@ -348,6 +397,13 @@ func GetGuests(c echo.Context) error {
 			}
 		}
 		totalPages := int((total + int64(pageSize) - 1) / int64(pageSize))
+		if checkinView {
+			// checkin:run reaches door-only roles: no contact data, notes or tokens.
+			return utils.Success(c, http.StatusOK, "Check-in guests loaded", dtos.CheckinGuestListResponse{
+				Data: dtos.NewCheckinGuestResponses(guests), Total: total, Page: page, PageSize: pageSize, TotalPages: totalPages,
+				Summary: summary,
+			})
+		}
 		return utils.Success(c, http.StatusOK, "Check-in guests loaded", dtos.CheckinGuestsPageResponse{
 			Data: dtos.NewGuestResponses(guests), Total: total, Page: page, PageSize: pageSize, TotalPages: totalPages,
 			Summary: summary, ShareSummary: shareSummary,
@@ -438,14 +494,13 @@ func EnsureRSVPToken(c echo.Context) error {
 
 // POST /guests
 func CreateGuest(c echo.Context) error {
-	rawBody := readJSONRequestBody(c)
-	requestFields := decodeJSONRequestFields(rawBody)
-
-	var guest models.Guest
-	if err := c.Bind(&guest); err != nil {
+	write, err := decodeGuestWrite(readJSONRequestBody(c))
+	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
 	}
-	applyGuestJSONAliases(&guest, requestFields)
+	var guest models.Guest
+	applyGuestWrite(&guest, write)
+	guest.EventID = guestWriteEventID(write.fields)
 	if err := c.Validate(&guest); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Validation error", err.Error())
 	}
@@ -458,6 +513,9 @@ func CreateGuest(c echo.Context) error {
 	if _, _, authErr := authz.RequireEventCapability(c, guest.EventID, authz.CapabilityGuestManage); authErr != nil {
 		return authz.Respond(c, authErr)
 	}
+	if err := checkGuestTables(guest.EventID, []models.Guest{guest}); err != nil {
+		return respondGuestTableError(c, err)
+	}
 
 	guests := []models.Guest{guest}
 	if err := guestSvc.CreateGuestsWithInvitations(guests); err != nil {
@@ -467,21 +525,27 @@ func CreateGuest(c echo.Context) error {
 }
 
 func CreateGuests(c echo.Context) error {
-	rawBody := readJSONRequestBody(c)
-	requestItems := decodeJSONRequestFieldList(rawBody)
-
-	var guests []models.Guest
-	if err := c.Bind(&guests); err != nil {
-		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
-	}
-	for i := range guests {
-		if i < len(requestItems) {
-			applyGuestJSONAliases(&guests[i], requestItems[i])
+	var items []json.RawMessage
+	if rawBody := readJSONRequestBody(c); len(bytes.TrimSpace(rawBody)) > 0 {
+		if err := json.Unmarshal(rawBody, &items); err != nil {
+			return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
 		}
 	}
-
-	if len(guests) == 0 {
+	if len(items) == 0 {
 		return utils.Error(c, http.StatusBadRequest, "No guests provided", "")
+	}
+	if len(items) > maxGuestBatchSize {
+		return utils.Error(c, http.StatusBadRequest, "Too many guests", "max "+strconv.Itoa(maxGuestBatchSize))
+	}
+
+	guests := make([]models.Guest, len(items))
+	for i, item := range items {
+		write, err := decodeGuestWrite(item)
+		if err != nil {
+			return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
+		}
+		applyGuestWrite(&guests[i], write)
+		guests[i].EventID = guestWriteEventID(write.fields)
 	}
 
 	eventID := guests[0].EventID
@@ -498,6 +562,9 @@ func CreateGuests(c echo.Context) error {
 	}
 	if _, _, authErr := authz.RequireEventCapability(c, eventID, authz.CapabilityGuestManage); authErr != nil {
 		return authz.Respond(c, authErr)
+	}
+	if err := checkGuestTables(eventID, guests); err != nil {
+		return respondGuestTableError(c, err)
 	}
 
 	if err := guestSvc.CreateGuestsWithInvitations(guests); err != nil {
@@ -519,16 +586,14 @@ func UpdateGuest(c echo.Context) error {
 	if authErr != nil {
 		return authz.Respond(c, authErr)
 	}
-	rawBody := readJSONRequestBody(c)
-	requestFields := decodeJSONRequestFields(rawBody)
-	originalEventID := guest.EventID
-	if err := c.Bind(guest); err != nil {
+	write, err := decodeGuestWrite(readJSONRequestBody(c))
+	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
 	}
-	applyGuestJSONAliases(guest, requestFields)
-	guest.ID = id
-	guest.EventID = originalEventID
-	if guestCountFieldPresent(requestFields) {
+	// Only allowlisted columns change: id, event_id, invitation_id, rsvp_token_id,
+	// rsvp_at and created_at keep the stored values the authz check loaded.
+	applyGuestWrite(guest, write)
+	if guestCountFieldPresent(write.fields) {
 		if guest.GuestsCount > 0 {
 			guest.RSVPGuestCount = guest.GuestsCount
 		} else {
@@ -537,6 +602,11 @@ func UpdateGuest(c echo.Context) error {
 	}
 	if err := c.Validate(guest); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Validation error", err.Error())
+	}
+	if write.tableSet {
+		if err := checkGuestTables(guest.EventID, []models.Guest{*guest}); err != nil {
+			return respondGuestTableError(c, err)
+		}
 	}
 	if err := guestSvc.UpdateGuest(guest); err != nil {
 		return utils.Error(c, http.StatusInternalServerError, "Error updating guest", err.Error())
@@ -548,6 +618,197 @@ func UpdateGuest(c echo.Context) error {
 	}
 
 	return utils.Success(c, http.StatusOK, "Guest updated", dtos.NewGuestResponse(updatedGuest))
+}
+
+// guestWritePayload is the allowlist of guest columns a dashboard client may
+// set through POST /guests, POST /guests/batch and PUT /guests/:id, under their
+// snake_case names. Server-owned columns (id, invitation_id, rsvp_token_id,
+// rsvp_at, created_at, updated_at, pretty_token), event_id (read separately on
+// create, ignored on update) and the nested table, guest_status and status
+// objects are deliberately absent, so they are dropped instead of reaching
+// GORM. Pointers keep an absent key or JSON null apart from a written zero
+// value, and a wrong JSON type still fails as it did with c.Bind. table_id is
+// parsed in decodeGuestWrite because "" must clear it; camel and Pascal
+// aliases come from applyGuestJSONAliases.
+type guestWritePayload struct {
+	FirstName           *string             `json:"first_name"`
+	LastName            *string             `json:"last_name"`
+	Nickname            *string             `json:"nickname"`
+	Email               *string             `json:"email"`
+	Phone               *string             `json:"phone"`
+	ShowContactInfo     *bool               `json:"show_contact_info"`
+	Role                *string             `json:"role"`
+	Bio                 *string             `json:"bio"`
+	Headline            *string             `json:"headline"`
+	Signature           *string             `json:"signature"`
+	Order               *int                `json:"order"`
+	ImageURL            *string             `json:"image_url"`
+	Image1URL           *string             `json:"image1_url"`
+	Image2URL           *string             `json:"image2_url"`
+	Image3URL           *string             `json:"image3_url"`
+	TableNumber         *string             `json:"table_number"`
+	IsHost              *bool               `json:"is_host"`
+	Notes               *string             `json:"notes"`
+	RSVPNotes           *string             `json:"rsvp_notes"`
+	DietaryRestrictions *string             `json:"dietary_restrictions"`
+	GuestsCount         *int                `json:"guests_count"`
+	RSVPGuestCount      *int                `json:"rsvp_guest_count"`
+	MaxGuests           *int                `json:"max_guests"`
+	GuestStatusID       *guestStatusIDValue `json:"guest_status_id"`
+	StatusID            *guestStatusIDValue `json:"status_id"`
+	RSVPStatus          *string             `json:"rsvp_status"`
+	RSVPMethod          *string             `json:"rsvp_method"`
+}
+
+var errInvalidGuestStatusID = errors.New("status_id must be a UUID, an empty string or null")
+
+// guestStatusIDValue is a snake_case status id in a guest write. It reads ""
+// as the nil UUID, which applyGuestWrite ignores exactly like the camel and
+// Pascal aliases; a value that is not a UUID string still fails the request.
+type guestStatusIDValue uuid.UUID
+
+func (v *guestStatusIDValue) UnmarshalJSON(raw []byte) error {
+	id, ok := parseJSONUUID(raw)
+	if !ok {
+		return errInvalidGuestStatusID
+	}
+	*v = guestStatusIDValue(id)
+	return nil
+}
+
+// guestWrite is one decoded guest request object: the allowlisted snake_case
+// fields, the raw fields for the alias setters, and the table_id change.
+type guestWrite struct {
+	payload  guestWritePayload
+	fields   jsonRequestFields
+	tableSet bool
+	tableID  *uuid.UUID
+}
+
+var errInvalidGuestTableID = errors.New("table_id must be a UUID, an empty string or null")
+var errGuestTableOutsideEvent = errors.New("table_id does not belong to this event")
+
+func decodeGuestWrite(raw []byte) (guestWrite, error) {
+	write := guestWrite{fields: jsonRequestFields{}}
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return write, nil
+	}
+	if err := json.Unmarshal(raw, &write.payload); err != nil {
+		return write, err
+	}
+	if err := json.Unmarshal(raw, &write.fields); err != nil {
+		return write, err
+	}
+	if write.fields == nil {
+		write.fields = jsonRequestFields{}
+	}
+	if tableRaw := rawJSONValue(write.fields, "tableId", "tableID", "TableID", "TableId", "table_id"); tableRaw != nil {
+		write.tableSet = true
+		if !isJSONNull(tableRaw) {
+			tableID, ok := parseJSONUUID(tableRaw)
+			if !ok {
+				return write, errInvalidGuestTableID
+			}
+			if tableID != uuid.Nil {
+				write.tableID = &tableID
+			}
+		}
+	}
+	return write, nil
+}
+
+func applyGuestWrite(guest *models.Guest, write guestWrite) {
+	p := write.payload
+	setIfPresent(&guest.FirstName, p.FirstName)
+	setIfPresent(&guest.LastName, p.LastName)
+	setIfPresent(&guest.Nickname, p.Nickname)
+	setIfPresent(&guest.Email, p.Email)
+	setIfPresent(&guest.Phone, p.Phone)
+	setIfPresent(&guest.ShowContactInfo, p.ShowContactInfo)
+	setIfPresent(&guest.Role, p.Role)
+	setIfPresent(&guest.Bio, p.Bio)
+	setIfPresent(&guest.Headline, p.Headline)
+	setIfPresent(&guest.Signature, p.Signature)
+	setIfPresent(&guest.Order, p.Order)
+	setIfPresent(&guest.ImageURL, p.ImageURL)
+	setIfPresent(&guest.Image1URL, p.Image1URL)
+	setIfPresent(&guest.Image2URL, p.Image2URL)
+	setIfPresent(&guest.Image3URL, p.Image3URL)
+	setIfPresent(&guest.TableNumber, p.TableNumber)
+	setIfPresent(&guest.IsHost, p.IsHost)
+	setIfPresent(&guest.Notes, p.Notes)
+	setIfPresent(&guest.RSVPNotes, p.RSVPNotes)
+	setIfPresent(&guest.DietaryRestrictions, p.DietaryRestrictions)
+	setIfPresent(&guest.GuestsCount, p.GuestsCount)
+	setIfPresent(&guest.RSVPGuestCount, p.RSVPGuestCount)
+	setIfPresent(&guest.MaxGuests, p.MaxGuests)
+	setIfPresent(&guest.RSVPStatus, p.RSVPStatus)
+	setIfPresent(&guest.RSVPMethod, p.RSVPMethod)
+	// Both status columns move together and status_id wins, as it does in
+	// models.Guest.BeforeSave. "" or the nil UUID leaves the stored status in
+	// place under every spelling of the key (see setGuestStatusID).
+	for _, statusID := range []*guestStatusIDValue{p.GuestStatusID, p.StatusID} {
+		if statusID != nil {
+			setGuestStatusID(guest, uuid.UUID(*statusID))
+		}
+	}
+	applyGuestJSONAliases(guest, write.fields)
+	if write.tableSet {
+		guest.TableID = write.tableID
+		guest.Table = nil
+	}
+}
+
+func setIfPresent[T any](dst *T, value *T) {
+	if value != nil {
+		*dst = *value
+	}
+}
+
+// guestWriteEventID reads the event of a guest create from event_id or one of
+// its aliases (an alias wins, as it did over c.Bind).
+func guestWriteEventID(fields jsonRequestFields) uuid.UUID {
+	eventID := uuid.Nil
+	setUUID(fields, []string{"event_id"}, func(value uuid.UUID) { eventID = value })
+	setUUID(fields, []string{"eventId", "eventID", "EventID", "EventId"}, func(value uuid.UUID) { eventID = value })
+	return eventID
+}
+
+// checkGuestTables makes sure every table_id of a guest write names a live
+// (not soft-deleted) table of eventID; nil (no table) is always valid. The
+// distinct ids are checked with one query, so a batch of any size costs one
+// lookup.
+func checkGuestTables(eventID uuid.UUID, guests []models.Guest) error {
+	seen := make(map[uuid.UUID]struct{})
+	ids := make([]uuid.UUID, 0)
+	for i := range guests {
+		if guests[i].TableID == nil {
+			continue
+		}
+		if _, ok := seen[*guests[i].TableID]; ok {
+			continue
+		}
+		seen[*guests[i].TableID] = struct{}{}
+		ids = append(ids, *guests[i].TableID)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	count, err := guestTablesInEvent(eventID, ids)
+	if err != nil {
+		return err
+	}
+	if count != int64(len(ids)) {
+		return errGuestTableOutsideEvent
+	}
+	return nil
+}
+
+func respondGuestTableError(c echo.Context, err error) error {
+	if errors.Is(err, errGuestTableOutsideEvent) {
+		return utils.Error(c, http.StatusBadRequest, "Mesa inválida", "table_outside_event")
+	}
+	return utils.Error(c, http.StatusInternalServerError, "Error loading table", err.Error())
 }
 
 type jsonRequestFields map[string]json.RawMessage
@@ -567,35 +828,15 @@ func readJSONRequestBody(c echo.Context) []byte {
 	return raw
 }
 
-func decodeJSONRequestFields(raw []byte) jsonRequestFields {
-	fields := make(jsonRequestFields)
-	if len(raw) == 0 {
-		return fields
-	}
-
-	var payload jsonRequestFields
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return fields
-	}
-	return payload
-}
-
-func decodeJSONRequestFieldList(raw []byte) []jsonRequestFields {
-	if len(raw) == 0 {
-		return nil
-	}
-
-	var items []jsonRequestFields
-	if err := json.Unmarshal(raw, &items); err != nil {
-		return nil
-	}
-	return items
-}
-
+// guestCountFieldPresent reports whether the request set the party size; a
+// JSON null counts as absent.
 func guestCountFieldPresent(fields jsonRequestFields) bool {
-	return rawJSONValue(fields, "guests_count", "guest_count", "guestCount", "GuestCount", "guestsCount", "GuestsCount") != nil
+	raw := rawJSONValue(fields, "guests_count", "guest_count", "guestCount", "GuestCount", "guestsCount", "GuestsCount")
+	return raw != nil && !isJSONNull(raw)
 }
 
+// applyGuestJSONAliases applies the camel and Pascal spellings of the writable
+// guest fields, which deployed clients still send.
 func applyGuestJSONAliases(guest *models.Guest, fields jsonRequestFields) {
 	if guest == nil || len(fields) == 0 {
 		return
@@ -628,19 +869,31 @@ func applyGuestJSONAliases(guest *models.Guest, fields jsonRequestFields) {
 	setInt(fields, []string{"rsvpGuestCount", "RSVPGuestCount", "RsvpGuestCount"}, func(value int) { guest.RSVPGuestCount = value })
 	setInt(fields, []string{"public_order", "publicOrder", "PublicOrder", "display_order", "displayOrder", "DisplayOrder", "sort_order", "sortOrder", "SortOrder", "Order"}, func(value int) { guest.Order = value })
 
-	setUUID(fields, []string{"eventId", "eventID", "EventID", "EventId"}, func(value uuid.UUID) { guest.EventID = value })
 	setUUID(fields, []string{"statusId", "statusID", "StatusID", "StatusId"}, func(value uuid.UUID) {
-		guest.StatusID = value
-		guest.GuestStatusID = value
+		setGuestStatusID(guest, value)
 	})
 	setUUID(fields, []string{"guestStatusId", "guestStatusID", "GuestStatusID", "GuestStatusId"}, func(value uuid.UUID) {
-		guest.StatusID = value
-		guest.GuestStatusID = value
+		setGuestStatusID(guest, value)
 	})
-	setUUID(fields, []string{"rsvpTokenId", "rsvpTokenID", "RSVPTokenID", "RsvpTokenId"}, func(value uuid.UUID) { guest.RSVPTokenID = &value })
-	setUUIDPtr(fields, []string{"tableId", "tableID", "TableID", "TableId"}, func(value *uuid.UUID) { guest.TableID = value })
-	setUUIDPtr(fields, []string{"invitationId", "invitationID", "InvitationID", "InvitationId"}, func(value *uuid.UUID) { guest.InvitationID = value })
-	setTimePtr(fields, []string{"rsvpAt", "RSVPAt", "RsvpAt"}, func(value *time.Time) { guest.RSVPAt = value })
+	// event_id, table_id and the server-owned invitation_id, rsvp_token_id and
+	// rsvp_at have no alias here: see guestWriteEventID and decodeGuestWrite.
+}
+
+// setGuestStatusID moves both status columns to statusID. The nil UUID (which
+// is also what "" parses to) means "not sent" and keeps the stored status, so
+// no spelling of the key can zero a guest's status.
+func setGuestStatusID(guest *models.Guest, statusID uuid.UUID) {
+	if statusID == uuid.Nil {
+		return
+	}
+	guest.StatusID = statusID
+	guest.GuestStatusID = statusID
+}
+
+// isJSONNull reports a JSON null, which the scalar setters treat as an absent
+// field so a client that sends a whole object with nulls keeps stored values.
+func isJSONNull(raw json.RawMessage) bool {
+	return string(bytes.TrimSpace(raw)) == "null"
 }
 
 func rawJSONValue(fields jsonRequestFields, keys ...string) json.RawMessage {
@@ -654,7 +907,7 @@ func rawJSONValue(fields jsonRequestFields, keys ...string) json.RawMessage {
 
 func setString(fields jsonRequestFields, keys []string, assign func(string)) {
 	raw := rawJSONValue(fields, keys...)
-	if raw == nil {
+	if raw == nil || isJSONNull(raw) {
 		return
 	}
 	var value string
@@ -665,7 +918,7 @@ func setString(fields jsonRequestFields, keys []string, assign func(string)) {
 
 func setBool(fields jsonRequestFields, keys []string, assign func(bool)) {
 	raw := rawJSONValue(fields, keys...)
-	if raw == nil {
+	if raw == nil || isJSONNull(raw) {
 		return
 	}
 	var value bool
@@ -676,7 +929,7 @@ func setBool(fields jsonRequestFields, keys []string, assign func(bool)) {
 
 func setInt(fields jsonRequestFields, keys []string, assign func(int)) {
 	raw := rawJSONValue(fields, keys...)
-	if raw == nil {
+	if raw == nil || isJSONNull(raw) {
 		return
 	}
 	var value int
@@ -699,58 +952,13 @@ func setInt(fields jsonRequestFields, keys []string, assign func(int)) {
 
 func setUUID(fields jsonRequestFields, keys []string, assign func(uuid.UUID)) {
 	raw := rawJSONValue(fields, keys...)
-	if raw == nil {
+	if raw == nil || isJSONNull(raw) {
 		return
 	}
 	id, ok := parseJSONUUID(raw)
 	if ok {
 		assign(id)
 	}
-}
-
-func setUUIDPtr(fields jsonRequestFields, keys []string, assign func(*uuid.UUID)) {
-	raw := rawJSONValue(fields, keys...)
-	if raw == nil {
-		return
-	}
-	if string(raw) == "null" {
-		assign(nil)
-		return
-	}
-	id, ok := parseJSONUUID(raw)
-	if !ok {
-		return
-	}
-	if id == uuid.Nil {
-		assign(nil)
-		return
-	}
-	assign(&id)
-}
-
-func setTimePtr(fields jsonRequestFields, keys []string, assign func(*time.Time)) {
-	raw := rawJSONValue(fields, keys...)
-	if raw == nil {
-		return
-	}
-	if string(raw) == "null" {
-		assign(nil)
-		return
-	}
-	var text string
-	if err := json.Unmarshal(raw, &text); err != nil {
-		return
-	}
-	text = strings.TrimSpace(text)
-	if text == "" {
-		assign(nil)
-		return
-	}
-	parsed, err := time.Parse(time.RFC3339, text)
-	if err != nil {
-		return
-	}
-	assign(&parsed)
 }
 
 func parseJSONUUID(raw json.RawMessage) (uuid.UUID, bool) {
@@ -786,12 +994,22 @@ func BulkDeleteGuests(c echo.Context) error {
 	if len(body.IDs) == 0 {
 		return utils.Error(c, http.StatusBadRequest, "No IDs provided", "")
 	}
+	// Each id costs an authz lookup chain and a service lookup, so the list is
+	// capped like PATCH /guests/bulk/status and deduplicated before authz.
+	if len(body.IDs) > maxBulkGuestIDs {
+		return utils.Error(c, http.StatusBadRequest, "Too many IDs", "max "+strconv.Itoa(maxBulkGuestIDs))
+	}
 	uuids := make([]uuid.UUID, 0, len(body.IDs))
+	seen := make(map[uuid.UUID]struct{}, len(body.IDs))
 	for _, id := range body.IDs {
 		u, err := uuid.FromString(id)
 		if err != nil {
 			return utils.Error(c, http.StatusBadRequest, "Invalid UUID: "+id, err.Error())
 		}
+		if _, duplicate := seen[u]; duplicate {
+			continue
+		}
+		seen[u] = struct{}{}
 		uuids = append(uuids, u)
 	}
 	for _, id := range uuids {
@@ -806,6 +1024,27 @@ func BulkDeleteGuests(c echo.Context) error {
 	return utils.Success(c, http.StatusOK, "Guests deleted", nil)
 }
 
+const bulkCheckinOnlyDetail = "Without guest:manage only check-in is allowed: rsvp_status confirmed with the confirmed guest status, or action undo_checkin"
+
+// The actions PATCH /guests/bulk/status takes; no action means "set the status
+// in the body".
+const (
+	bulkActionCheckin     = "checkin"
+	bulkActionUndoCheckin = "undo_checkin"
+)
+
+// PATCH /guests/bulk/status — checkin:run on event_id.
+//   - action checkin (confirmed status only) is the door check-in, open to every
+//     checkin:run caller; it records what the guest had before so it can be
+//     undone. A plain confirmed body from a caller without guest:manage, who
+//     can do nothing but check guests in, is the door check-in too.
+//   - a plain body from a guest:manage caller is the organizer's own answer,
+//     confirmed included (the guests panel's bulk Confirmar): it is written like
+//     PUT /guests/:id and clears any door check-in, so check-in staff cannot
+//     undo it.
+//   - action undo_checkin reverses door check-ins (status fields are ignored),
+//     also with checkin:run alone; a guest confirmed any other way answers 409.
+//   - pending and declined need guest:manage.
 func BulkUpdateGuestStatus(c echo.Context) error {
 	var body struct {
 		EventID       string   `json:"event_id"`
@@ -814,6 +1053,7 @@ func BulkUpdateGuestStatus(c echo.Context) error {
 		GuestStatusID string   `json:"guest_status_id"`
 		RSVPStatus    string   `json:"rsvp_status"`
 		RSVPMethod    string   `json:"rsvp_method"`
+		Action        string   `json:"action"`
 	}
 	if err := c.Bind(&body); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
@@ -822,23 +1062,16 @@ func BulkUpdateGuestStatus(c echo.Context) error {
 	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid event_id", err.Error())
 	}
-	if _, _, authErr := authz.RequireEventCapability(c, eventID, authz.CapabilityCheckin); authErr != nil {
+	user, _, authErr := authz.RequireEventCapability(c, eventID, authz.CapabilityCheckin)
+	if authErr != nil {
 		return authz.Respond(c, authErr)
 	}
 	if len(body.IDs) == 0 || len(body.IDs) > 100 {
 		return utils.Error(c, http.StatusBadRequest, "Invalid IDs", "ids must contain between 1 and 100 guests")
 	}
-	statusIDRaw := strings.TrimSpace(body.StatusID)
-	if statusIDRaw == "" {
-		statusIDRaw = strings.TrimSpace(body.GuestStatusID)
-	}
-	statusID, err := uuid.FromString(statusIDRaw)
-	if err != nil {
-		return utils.Error(c, http.StatusBadRequest, "Invalid status_id", err.Error())
-	}
-	rsvpStatus := strings.ToLower(strings.TrimSpace(body.RSVPStatus))
-	if rsvpStatus != "pending" && rsvpStatus != "confirmed" && rsvpStatus != "declined" {
-		return utils.Error(c, http.StatusBadRequest, "Invalid rsvp_status", "expected pending, confirmed, or declined")
+	action := strings.ToLower(strings.TrimSpace(body.Action))
+	if action != "" && action != bulkActionCheckin && action != bulkActionUndoCheckin {
+		return utils.Error(c, http.StatusBadRequest, "Invalid action", "expected "+bulkActionCheckin+", "+bulkActionUndoCheckin+" or no action")
 	}
 	rsvpMethod := strings.ToLower(strings.TrimSpace(body.RSVPMethod))
 	if rsvpMethod == "" {
@@ -860,10 +1093,90 @@ func BulkUpdateGuestStatus(c echo.Context) error {
 		seen[id] = struct{}{}
 		ids = append(ids, id)
 	}
+	if action == bulkActionUndoCheckin {
+		if err := guestSvc.UndoGuestCheckins(eventID, ids); err != nil {
+			if errors.Is(err, guestService.ErrCheckinNotUndoable) {
+				return utils.Error(c, http.StatusConflict, "Check-in cannot be undone",
+					err.Error()+"; it is confirmed by an RSVP that is not a door check-in, which only guest:manage may change")
+			}
+			return utils.Error(c, http.StatusBadRequest, "Error undoing guest check-ins", err.Error())
+		}
+		return utils.Success(c, http.StatusOK, "Guest check-ins undone", nil)
+	}
+	statusIDRaw := strings.TrimSpace(body.StatusID)
+	if statusIDRaw == "" {
+		statusIDRaw = strings.TrimSpace(body.GuestStatusID)
+	}
+	statusID, err := uuid.FromString(statusIDRaw)
+	if err != nil {
+		return utils.Error(c, http.StatusBadRequest, "Invalid status_id", err.Error())
+	}
+	rsvpStatus := strings.ToLower(strings.TrimSpace(body.RSVPStatus))
+	if rsvpStatus != "pending" && rsvpStatus != "confirmed" && rsvpStatus != "declined" {
+		return utils.Error(c, http.StatusBadRequest, "Invalid rsvp_status", "expected pending, confirmed, or declined")
+	}
+	if action == bulkActionCheckin && rsvpStatus != "confirmed" {
+		return utils.Error(c, http.StatusBadRequest, "Invalid rsvp_status", "action "+bulkActionCheckin+" expects rsvp_status confirmed with the confirmed guest status")
+	}
+	status, err := guestStatusByID(statusID)
+	if errors.Is(err, gorm.ErrRecordNotFound) || (err == nil && status == nil) {
+		return utils.Error(c, http.StatusBadRequest, "Invalid status_id", "guest status does not exist")
+	}
+	if err != nil {
+		return utils.Error(c, http.StatusInternalServerError, "Error loading guest status", err.Error())
+	}
+	// Both columns describe one RSVP state; a status_id whose code is not
+	// rsvp_status would leave the guest list and the check-in counts (which
+	// read rsvp_status first) disagreeing with the status shown elsewhere.
+	if strings.ToLower(strings.TrimSpace(status.Code)) != rsvpStatus {
+		return utils.Error(c, http.StatusBadRequest, "status_id does not match rsvp_status", "the guest status code must equal rsvp_status")
+	}
+	// Only a door check-in records provenance, because only a door check-in
+	// may be undone by check-in staff. Without guest:manage a confirmed body
+	// can only be a check-in; with it, only action checkin says so, and the
+	// plain body is the organizer's answer. Pending and declined could rewrite
+	// the guest's own RSVP and need guest:manage; check-in staff take a
+	// check-in back with action undo_checkin instead.
+	doorCheckin := action == bulkActionCheckin
+	if !doorCheckin {
+		managesGuests, authErr := callerManagesGuests(c, eventID)
+		if authErr != nil {
+			return authz.Respond(c, authErr)
+		}
+		switch {
+		case managesGuests:
+			// The organizer's answer: BulkUpdateGuestStatus below.
+		case rsvpStatus == "confirmed":
+			doorCheckin = true
+		default:
+			return utils.Error(c, http.StatusForbidden, "Access denied", bulkCheckinOnlyDetail)
+		}
+	}
+	if doorCheckin {
+		if err := guestSvc.CheckInGuests(eventID, ids, statusID, user.ID); err != nil {
+			return utils.Error(c, http.StatusBadRequest, "Error updating guest statuses", err.Error())
+		}
+		return utils.Success(c, http.StatusOK, "Guest statuses updated", nil)
+	}
 	if err := guestSvc.BulkUpdateGuestStatus(eventID, ids, statusID, rsvpStatus, rsvpMethod); err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Error updating guest statuses", err.Error())
 	}
 	return utils.Success(c, http.StatusOK, "Guest statuses updated", nil)
+}
+
+// callerManagesGuests reports whether the caller, already allowed checkin:run
+// on eventID, also has guest:manage there. Only a 403 means "no"; any other
+// failure (a lookup error) is returned so the request writes nothing.
+func callerManagesGuests(c echo.Context, eventID uuid.UUID) (bool, error) {
+	_, _, err := authz.RequireEventCapability(c, eventID, authz.CapabilityGuestManage)
+	if err == nil {
+		return true, nil
+	}
+	var failure *authz.Failure
+	if errors.As(err, &failure) && failure.Status == http.StatusForbidden {
+		return false, nil
+	}
+	return false, err
 }
 
 // DELETE /guests/:id

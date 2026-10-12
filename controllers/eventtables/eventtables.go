@@ -29,12 +29,15 @@ func InitEventTablesController(svc *eventsService.EventTableService, guestServic
 	}
 }
 
+// GetSeatingWorkspace returns every guest's name, email and RSVP state next to
+// the tables, so it needs guest:manage like GET /guests/seating:<id> and the
+// table mutations. ListTables keeps plain view access: it returns no guest data.
 func GetSeatingWorkspace(c echo.Context) error {
 	eventID, err := uuid.FromString(c.Param("id"))
 	if err != nil {
 		return utils.Error(c, http.StatusBadRequest, "Invalid UUID", err.Error())
 	}
-	if _, _, authErr := authz.RequireEventAccess(c, eventID); authErr != nil {
+	if _, _, authErr := authz.RequireEventCapability(c, eventID, authz.CapabilityGuestManage); authErr != nil {
 		return authz.Respond(c, authErr)
 	}
 	if tableSvc == nil || seatingGuestSvc == nil {

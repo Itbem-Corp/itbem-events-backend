@@ -45,6 +45,21 @@ func GetEventTableByID(id uuid.UUID) (*models.EventTable, error) {
 	return &table, nil
 }
 
+// CountEventTablesInEvent counts how many of ids are live tables of eventID.
+// Soft-deleted tables are excluded by GORM's scope, so a caller that passes
+// distinct ids can compare the count with len(ids) to validate them all at
+// once.
+func CountEventTablesInEvent(eventID uuid.UUID, ids []uuid.UUID) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	var count int64
+	err := configuration.DB.Model(&models.EventTable{}).
+		Where("event_id = ? AND id IN ?", eventID, ids).
+		Count(&count).Error
+	return count, err
+}
+
 func ListEventTablesByEventID(eventID uuid.UUID) ([]models.EventTable, error) {
 	var list []models.EventTable
 	err := configuration.DB.
