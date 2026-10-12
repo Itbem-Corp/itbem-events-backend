@@ -22,8 +22,8 @@ type ClientSummaryResponse struct {
 	// starts with "INHERITED_"). Only meaningful on caller/user-scoped lists.
 	Inherited bool       `json:"inherited"`
 	ParentID  *uuid.UUID `json:"parent_id,omitempty"`
-	CreatedAt    time.Time           `json:"created_at"`
-	UpdatedAt    time.Time           `json:"updated_at"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
 }
 
 type ClientResponse struct {
@@ -37,6 +37,10 @@ type ClientsListQuery struct {
 	PageSize   int
 	Search     string
 	TenantCode string
+	// ApplicationCode, when set, stops Owner/Admin inheritance at another
+	// application's portal organization (same boundary as the application
+	// session), so a product session never lists another product's tree.
+	ApplicationCode string
 }
 
 type ClientsPageResponse struct {

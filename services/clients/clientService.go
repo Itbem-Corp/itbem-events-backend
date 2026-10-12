@@ -42,8 +42,6 @@ var (
 	ErrClientLogoUpload          = errors.New("organization logo upload failed")
 )
 
-
-
 // _clientSvc is the package-level singleton set by internal/app.
 var _clientSvc *ClientService
 
@@ -127,6 +125,10 @@ type ClientService struct {
 	cache          ports.CacheRepository
 	tx             ports.Transactor
 	tenantCode     string
+	// applicationCode is the session product of a request-scoped service
+	// (WithApplicationScope). When set, every organization check by id also
+	// requires the application-scoped reach (portal stop, ROLES-N2).
+	applicationCode string
 }
 
 func NewClientService(
@@ -171,6 +173,39 @@ func (s *ClientService) WithTenantScope(tenantCode, bucket string) *ClientServic
 	return &clone
 }
 
+// WithApplicationScope returns a request-scoped copy whose organization
+// checks by id stay inside applicationCode: Owner/Admin inheritance does not
+// reach another application's portal tree, the same boundary as the
+// organization lists and the session. An empty code keeps the unscoped
+// behaviour (internal callers that check a third user's membership).
+func (s *ClientService) WithApplicationScope(applicationCode string) *ClientService {
+	if s == nil {
+		return nil
+	}
+	clone := *s
+	clone.applicationCode = strings.ToLower(strings.TrimSpace(applicationCode))
+	return &clone
+}
+
+// checkAccess is CheckAccessRecursive plus, for an application-scoped
+// service, the application reach. It fails closed when the repository cannot
+// answer the reach question.
+func (s *ClientService) checkAccess(userID, clientID uuid.UUID) (bool, string) {
+	allowed, role := s.clientRepo.CheckAccessRecursive(userID, clientID)
+	if !allowed || s.applicationCode == "" {
+		return allowed, role
+	}
+	reach, ok := s.clientRepo.(ports.ApplicationClientReach)
+	if !ok {
+		return false, ""
+	}
+	reachable, err := reach.ReachableClientIDsInApplication(userID, s.applicationCode, []uuid.UUID{clientID})
+	if err != nil || !reachable[clientID] {
+		return false, ""
+	}
+	return allowed, role
+}
+
 func normalizeTenantCode(value string) string {
 	return products.NormalizeOrDefault(value).String()
 }
@@ -197,7 +232,7 @@ func (s *ClientService) createClient(name string, clientTypeID uuid.UUID, ownerU
 		}
 	} else {
 		if !primaryRoot {
-			allowed, role := s.clientRepo.CheckAccessRecursive(ownerUserID, *parentID)
+			allowed, role := s.checkAccess(ownerUserID, *parentID)
 			roleUpper := strings.ToUpper(role)
 			if !allowed || (roleUpper != "OWNER" && roleUpper != "INHERITED_OWNER") {
 				return nil, fmt.Errorf("%w: owner access required on parent organization", ErrClientPermissionDenied)
@@ -284,7 +319,7 @@ func (s *ClientService) createClient(name string, clientTypeID uuid.UUID, ownerU
 func (s *ClientService) CreatableClientTypeCodes(requesterID uuid.UUID, parentID *uuid.UUID, primaryRoot bool) ([]string, error) {
 	if parentID != nil {
 		if !primaryRoot {
-			allowed, role := s.clientRepo.CheckAccessRecursive(requesterID, *parentID)
+			allowed, role := s.checkAccess(requesterID, *parentID)
 			roleUpper := strings.ToUpper(role)
 			if !allowed || (roleUpper != "OWNER" && roleUpper != "INHERITED_OWNER") {
 				return nil, fmt.Errorf("%w: owner access required on parent organization", ErrClientPermissionDenied)
@@ -369,9 +404,9 @@ func containsFold(values []string, expected string) bool {
 }
 
 func (s *ClientService) GetClientDetails(clientID, userID uuid.UUID) (*models.Client, error) {
-	allowed, _ := s.clientRepo.CheckAccessRecursive(userID, clientID)
+	allowed, _ := s.checkAccess(userID, clientID)
 	if !allowed {
-		return nil, fmt.Errorf("access denied: user is not a member of this client hierarchy")
+		return nil, fmt.Errorf("%w: user is not a member of this client hierarchy", ErrClientAccessDenied)
 	}
 	return s.clientRepo.GetClientByID(clientID)
 }
@@ -452,7 +487,7 @@ func (s *ClientService) authorizeClientUpdate(clientID, requesterID uuid.UUID, p
 	if primaryRoot {
 		return nil
 	}
-	allowed, role := s.clientRepo.CheckAccessRecursive(requesterID, clientID)
+	allowed, role := s.checkAccess(requesterID, clientID)
 	roleUpper := strings.ToUpper(role)
 	if !allowed || (roleUpper != "OWNER" && roleUpper != "INHERITED_OWNER") {
 		return ErrClientPermissionDenied
@@ -585,12 +620,46 @@ func (s *ClientService) invalidateAllMyClients() {
 }
 
 func (s *ClientService) GetClientChildren(parentID, userID uuid.UUID) ([]models.Client, error) {
-	allowed, role := s.clientRepo.CheckAccessRecursive(userID, parentID)
+	allowed, role := s.checkAccess(userID, parentID)
 	role = strings.TrimPrefix(strings.ToUpper(role), "INHERITED_")
 	if !allowed || (role != "OWNER" && role != "ADMIN") {
-		return nil, fmt.Errorf("access denied")
+		return nil, ErrClientAccessDenied
 	}
 	return s.clientRepo.GetChildrenClients(parentID)
+}
+
+// GetClientChildrenInApplication is GetClientChildren for a member of one
+// application session: the parent must be inside the application's reach
+// and children that are another application's portal (with their trees) are
+// left out, the same boundary as GET /api/clients (ROLES-N2).
+func (s *ClientService) GetClientChildrenInApplication(parentID, userID uuid.UUID, applicationCode string) ([]models.Client, error) {
+	children, err := s.GetClientChildren(parentID, userID)
+	if err != nil {
+		return nil, err
+	}
+	reach, ok := s.clientRepo.(ports.ApplicationClientReach)
+	if !ok || strings.TrimSpace(applicationCode) == "" {
+		return children, nil
+	}
+	ids := make([]uuid.UUID, 0, len(children)+1)
+	ids = append(ids, parentID)
+	for _, child := range children {
+		ids = append(ids, child.ID)
+	}
+	reachable, err := reach.ReachableClientIDsInApplication(userID, applicationCode, ids)
+	if err != nil {
+		return nil, err
+	}
+	if !reachable[parentID] {
+		return nil, ErrClientAccessDenied
+	}
+	scoped := make([]models.Client, 0, len(children))
+	for _, child := range children {
+		if reachable[child.ID] {
+			scoped = append(scoped, child)
+		}
+	}
+	return scoped, nil
 }
 
 func (s *ClientService) GetClientChildrenAsPrimaryRoot(parentID uuid.UUID) ([]models.Client, error) {
@@ -607,7 +676,7 @@ func (s *ClientService) DeleteClientAsPrimaryRoot(clientID uuid.UUID) error {
 
 func (s *ClientService) deleteClient(clientID, requesterID uuid.UUID, primaryRoot bool) error {
 	if !primaryRoot {
-		allowed, role := s.clientRepo.CheckAccessRecursive(requesterID, clientID)
+		allowed, role := s.checkAccess(requesterID, clientID)
 		if !allowed {
 			return ErrClientAccessDenied
 		}
@@ -685,7 +754,7 @@ func (s *ClientService) AddUserToClient(clientID, userID, roleID uuid.UUID) erro
 }
 
 func (s *ClientService) CanManageClientMembers(clientID, requesterID uuid.UUID) error {
-	allowed, role := s.clientRepo.CheckAccessRecursive(requesterID, clientID)
+	allowed, role := s.checkAccess(requesterID, clientID)
 	roleUpper := strings.ToUpper(role)
 	if !allowed || (roleUpper != "OWNER" && roleUpper != "ADMIN" && roleUpper != "INHERITED_OWNER" && roleUpper != "INHERITED_ADMIN") {
 		return fmt.Errorf("permission denied: cannot manage members for this client")
@@ -694,7 +763,7 @@ func (s *ClientService) CanManageClientMembers(clientID, requesterID uuid.UUID) 
 }
 
 func (s *ClientService) CanAssignClientRole(clientID, requesterID, roleID uuid.UUID) error {
-	allowed, roleCode := s.clientRepo.CheckAccessRecursive(requesterID, clientID)
+	allowed, roleCode := s.checkAccess(requesterID, clientID)
 	if !allowed {
 		return fmt.Errorf("permission denied: cannot manage members for this client")
 	}
@@ -750,7 +819,7 @@ func (s *ClientService) GetDirectMemberRole(userID, clientID uuid.UUID) (string,
 // for presentation of assignable roles; mutation paths still validate the
 // hierarchy again server-side.
 func (s *ClientService) GetEffectiveMemberRole(userID, clientID uuid.UUID) (string, error) {
-	allowed, roleCode := s.clientRepo.CheckAccessRecursive(userID, clientID)
+	allowed, roleCode := s.checkAccess(userID, clientID)
 	if !allowed || roleCode == "" {
 		return "", fmt.Errorf("user is not a member of this organization")
 	}
@@ -762,7 +831,7 @@ func (s *ClientService) GetEffectiveMemberRole(userID, clientID uuid.UUID) (stri
 // check. This keeps propagation consistent: an inherited administrator can
 // manage a child organization, but never a peer or superior role.
 func (s *ClientService) getEffectiveManagerRole(clientID, requesterID uuid.UUID) (*models.ClientRole, error) {
-	allowed, roleCode := s.clientRepo.CheckAccessRecursive(requesterID, clientID)
+	allowed, roleCode := s.checkAccess(requesterID, clientID)
 	if allowed && roleCode != "" {
 		switch strings.TrimPrefix(strings.ToUpper(roleCode), "INHERITED_") {
 		case "OWNER":

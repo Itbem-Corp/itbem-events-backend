@@ -35,11 +35,51 @@ const scopedAccessJoin = `JOIN (
 				ORDER BY client_id, depth ASC
 			) scoped_access ON scoped_access.client_id = clients.id`
 
+// applicationScopedAccessJoin is scopedAccessJoin with the application
+// session boundary (services/applications SessionService.organizationAccess):
+// Owner/Admin inheritance never descends into an organization that is
+// another application's portal (its code is another application's code), so
+// an EventiApp owner of the platform organization does not reach the ITBEM or
+// Cafetton House portal trees. Parameters: user id, application code.
+const applicationScopedAccessJoin = `JOIN (
+				WITH RECURSIVE reachable_clients AS (
+					SELECT cm.client_id, cr.code AS role_code, 0 AS depth
+					FROM client_members cm
+					JOIN client_roles cr ON cr.id = cm.client_role_id
+					WHERE cm.user_id = ? AND cm.is_active = true
+					UNION ALL
+					SELECT child.id, reachable_clients.role_code, reachable_clients.depth + 1
+					FROM clients child
+					JOIN reachable_clients ON child.parent_id = reachable_clients.client_id
+					WHERE child.deleted_at IS NULL
+						AND UPPER(reachable_clients.role_code) IN ('OWNER', 'ADMIN')
+						AND reachable_clients.depth < 31
+						AND NOT EXISTS (
+							SELECT 1 FROM applications other
+							WHERE LOWER(other.code) = LOWER(child.code) AND LOWER(other.code) <> ?
+						)
+				)
+				SELECT DISTINCT ON (client_id)
+					client_id,
+					CASE WHEN depth = 0 THEN role_code ELSE 'INHERITED_' || role_code END AS access_role
+				FROM reachable_clients
+				ORDER BY client_id, depth ASC
+			) scoped_access ON scoped_access.client_id = clients.id`
+
+// scopedAccess picks the reach join for a list query.
+func scopedAccess(userID uuid.UUID, applicationCode string) (string, []interface{}) {
+	if code := strings.ToLower(strings.TrimSpace(applicationCode)); code != "" {
+		return applicationScopedAccessJoin, []interface{}{userID, code}
+	}
+	return scopedAccessJoin, []interface{}{userID}
+}
+
 func ListClientsPaginated(userID *uuid.UUID, query dtos.ClientsListQuery) ([]models.Client, int64, error) {
 	baseQuery := func() *gorm.DB {
 		base := gormrepository.DB().Model(&models.Client{})
 		if userID != nil {
-			base = base.Joins(scopedAccessJoin, *userID)
+			join, args := scopedAccess(*userID, query.ApplicationCode)
+			base = base.Joins(join, args...)
 		}
 		if tenantCode := strings.ToLower(strings.TrimSpace(query.TenantCode)); tenantCode != "" {
 			base = base.Where(`
@@ -85,7 +125,68 @@ func ListClientsPaginated(userID *uuid.UUID, query dtos.ClientsListQuery) ([]mod
 	if err := group.Wait(); err != nil {
 		return nil, 0, err
 	}
+	if userID != nil {
+		if err := attachAccessRoles(*userID, query.ApplicationCode, clients); err != nil {
+			return nil, 0, err
+		}
+	}
 	return clients, total, nil
+}
+
+// ReachableClientIDsInApplication returns which of ids the user reaches with
+// the application-scoped reach (see applicationScopedAccessJoin).
+func ReachableClientIDsInApplication(userID uuid.UUID, applicationCode string, ids []uuid.UUID) (map[uuid.UUID]bool, error) {
+	reachable := make(map[uuid.UUID]bool, len(ids))
+	if len(ids) == 0 {
+		return reachable, nil
+	}
+	join, args := scopedAccess(userID, applicationCode)
+	var found []uuid.UUID
+	if err := gormrepository.DB().Table("clients").
+		Joins(join, args...).
+		Where("clients.id IN ? AND clients.deleted_at IS NULL", ids).
+		Pluck("clients.id", &found).Error; err != nil {
+		return nil, err
+	}
+	for _, id := range found {
+		reachable[id] = true
+	}
+	return reachable, nil
+}
+
+// attachAccessRoles fills the read-only Client.AccessRole projection. The
+// field is `gorm:"-"` (it is never a column), so GORM drops the access_role
+// column of the list query when scanning; it is loaded here for the page's
+// ids from the same scoped reach. Without it every row looked direct
+// (inherited=false) and owner-based checks saw no role at all.
+func attachAccessRoles(userID uuid.UUID, applicationCode string, clients []models.Client) error {
+	if len(clients) == 0 {
+		return nil
+	}
+	ids := make([]uuid.UUID, len(clients))
+	for i := range clients {
+		ids[i] = clients[i].ID
+	}
+	var rows []struct {
+		ClientID   uuid.UUID
+		AccessRole string
+	}
+	join, args := scopedAccess(userID, applicationCode)
+	if err := gormrepository.DB().Table("clients").
+		Joins(join, args...).
+		Where("clients.id IN ?", ids).
+		Select("scoped_access.client_id AS client_id, scoped_access.access_role AS access_role").
+		Scan(&rows).Error; err != nil {
+		return err
+	}
+	roles := make(map[uuid.UUID]string, len(rows))
+	for _, row := range rows {
+		roles[row.ClientID] = row.AccessRole
+	}
+	for i := range clients {
+		clients[i].AccessRole = roles[clients[i].ID]
+	}
+	return nil
 }
 
 // CountUserClientStatuses counts the organizations the user can reach over
@@ -390,6 +491,9 @@ func (r *ClientRepo) ListClientsPaginated(userID *uuid.UUID, query dtos.ClientsL
 }
 func (r *ClientRepo) GetChildrenClients(parentID uuid.UUID) ([]models.Client, error) {
 	return GetChildrenClients(parentID)
+}
+func (r *ClientRepo) ReachableClientIDsInApplication(userID uuid.UUID, applicationCode string, ids []uuid.UUID) (map[uuid.UUID]bool, error) {
+	return ReachableClientIDsInApplication(userID, applicationCode, ids)
 }
 func (r *ClientRepo) CheckAccessRecursive(userID, targetClientID uuid.UUID) (bool, string) {
 	return CheckAccessRecursive(userID, targetClientID)
