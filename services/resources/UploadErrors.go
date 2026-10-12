@@ -82,6 +82,12 @@ func (e InvalidMediaFileError) Error() string {
 	return InvalidMediaFileCode + ": " + e.Reason
 }
 
+// ErrImageDecode marks an image whose bytes the optimizer cannot decode
+// (corrupt or mislabeled): the file is the problem, so it maps to
+// InvalidMediaFileError. Any other optimizer failure (I/O, libvips support,
+// processing) stays a server error.
+var ErrImageDecode = errors.New("image content could not be decoded")
+
 func IsInvalidMediaFile(err error) bool {
 	var target InvalidMediaFileError
 	return errors.As(err, &target)

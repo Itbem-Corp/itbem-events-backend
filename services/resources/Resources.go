@@ -1267,8 +1267,8 @@ func (rs *ResourceService) sanitizeAndOptimizeUpload(
 	if err != nil {
 		// The allowlisted type passed but libvips could not decode the bytes
 		// (corrupt or mislabeled file): the file is the problem, not the
-		// service (STU-43).
-		return nil, "", "", InvalidMediaFileError{Reason: fmt.Sprintf("decode %s: %v", contentType, err)}
+		// service (STU-43). Other optimizer failures are server errors.
+		return nil, "", "", optimizerUploadError(contentType, err)
 	}
 
 	// Usa filename forzado o genera UUID
@@ -1280,6 +1280,16 @@ func (rs *ResourceService) sanitizeAndOptimizeUpload(
 
 	finalName = updateFilenameExtension(baseName, newContentType)
 	return optimized, finalName, newContentType, nil
+}
+
+// optimizerUploadError maps an optimizer failure: only a decode failure is
+// the file's fault (400 invalid_media_file); I/O, missing format support or a
+// processing failure stays a server error with the generic upload message.
+func optimizerUploadError(contentType string, err error) error {
+	if errors.Is(err, ErrImageDecode) {
+		return InvalidMediaFileError{Reason: fmt.Sprintf("decode %s: %v", contentType, err)}
+	}
+	return fmt.Errorf("failed to optimize image: %w", err)
 }
 
 // mediaKindMismatch reports a declared raster image or video whose sniffed
