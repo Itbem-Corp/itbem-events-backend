@@ -875,6 +875,10 @@ func TestSeatingCapacity_PlanAndAssignAreStrict(t *testing.T) {
 	configuration.DB.Model(&models.EventTable{}).Where("event_id = ? AND name = ?", f.event.ID, "Mesa chica").Count(&created)
 	assert.Zero(t, created)
 
+	// A guest of another event (or a deleted table) is a stale reference.
+	err = eventtablerepository.AssignGuestsToTables(f.event.ID, map[uuid.UUID]*uuid.UUID{uuid.Must(uuid.NewV4()): &f.roomy.ID})
+	assert.ErrorIs(t, err, eventtablerepository.ErrSeatingReferenceStale)
+
 	// The single-guest check counts the same way.
 	requireOverCapacity(t, eventtablerepository.CheckSeatsFit(configuration.DB, f.event.ID, f.table.ID, nil, 1, 0), f.table.ID, 5, 4)
 	require.NoError(t, eventtablerepository.CheckSeatsFit(configuration.DB, f.event.ID, f.table.ID, []uuid.UUID{f.seated.ID}, 2, 0))

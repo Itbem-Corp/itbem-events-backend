@@ -47,13 +47,17 @@ const TableOverCapacityCode = "table_over_capacity"
 // TableOverCapacityResponse is the body of the 409:
 //
 //	{"status":409,"code":"table_over_capacity","error":"table_over_capacity",
-//	 "message":"<Spanish>","data":{"table_ids":[...],"tables":[{table_id,name,capacity,seats}]}}
+//	 "message":"<Spanish>","table_ids":[...],
+//	 "data":{"table_ids":[...],"tables":[{table_id,name,capacity,seats}]}}
 type TableOverCapacityResponse struct {
-	Status  int                   `json:"status"`
-	Code    string                `json:"code"`
-	Error   string                `json:"error"`
-	Message string                `json:"message"`
-	Data    TableOverCapacityData `json:"data"`
+	Status  int    `json:"status"`
+	Code    string `json:"code"`
+	Error   string `json:"error"`
+	Message string `json:"message"`
+	// TableIDs repeats data.table_ids at the top level, where the dashboard
+	// reads it first.
+	TableIDs []uuid.UUID           `json:"table_ids"`
+	Data     TableOverCapacityData `json:"data"`
 }
 
 type TableOverCapacityData struct {
@@ -79,10 +83,11 @@ func NewTableOverCapacityResponse(err *TableOverCapacityError) TableOverCapacity
 		message = "Estas mesas no tienen lugar suficiente: " + strings.Join(names, ", ") + "."
 	}
 	return TableOverCapacityResponse{
-		Status:  409,
-		Code:    TableOverCapacityCode,
-		Error:   TableOverCapacityCode,
-		Message: message,
-		Data:    TableOverCapacityData{TableIDs: err.TableIDs(), Tables: err.Tables},
+		Status:   409,
+		Code:     TableOverCapacityCode,
+		Error:    TableOverCapacityCode,
+		Message:  message,
+		TableIDs: err.TableIDs(),
+		Data:     TableOverCapacityData{TableIDs: err.TableIDs(), Tables: err.Tables},
 	}
 }

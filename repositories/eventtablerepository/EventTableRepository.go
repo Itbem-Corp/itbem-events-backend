@@ -1,6 +1,7 @@
 package eventtablerepository
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -12,6 +13,12 @@ import (
 	"github.com/gofrs/uuid"
 	"gorm.io/gorm"
 )
+
+// ErrSeatingReferenceStale is a seating write that names a guest or table
+// that is no longer a live part of the event (deleted, or of another event):
+// the client's draft is stale and must be reloaded. Handlers answer 409 with
+// code "seating_plan_stale".
+var ErrSeatingReferenceStale = errors.New("seating plan references a guest or table that is not in the event")
 
 type EventTableRepo struct{}
 
@@ -92,7 +99,7 @@ func AssignGuestsToTables(eventID uuid.UUID, assignments map[uuid.UUID]*uuid.UUI
 				return err
 			}
 			if count != int64(len(tableIDs)) {
-				return fmt.Errorf("one or more tables do not belong to event")
+				return fmt.Errorf("%w: one or more tables do not belong to event", ErrSeatingReferenceStale)
 			}
 		}
 
@@ -117,7 +124,7 @@ func AssignGuestsToTables(eventID uuid.UUID, assignments map[uuid.UUID]*uuid.UUI
 				return result.Error
 			}
 			if result.RowsAffected == 0 {
-				return fmt.Errorf("guest %s does not belong to event", guestID)
+				return fmt.Errorf("%w: guest %s does not belong to event", ErrSeatingReferenceStale, guestID)
 			}
 		}
 		return checkTableCapacity(tx, eventID, gaining)
@@ -166,7 +173,7 @@ func SaveSeatingPlan(eventID uuid.UUID, plan dtos.SeatingPlanSaveRequest) ([]mod
 				return result.Error
 			}
 			if result.RowsAffected == 0 {
-				return fmt.Errorf("table %s does not belong to event", tableID)
+				return fmt.Errorf("%w: table %s does not belong to event", ErrSeatingReferenceStale, tableID)
 			}
 			if previous, ok := previousCapacity[tableID]; ok && item.Capacity < previous {
 				capacityLowered = append(capacityLowered, tableID)
@@ -212,7 +219,7 @@ func SaveSeatingPlan(eventID uuid.UUID, plan dtos.SeatingPlanSaveRequest) ([]mod
 					}
 				}
 				if _, deleted := deletedSet[resolved]; deleted {
-					return fmt.Errorf("cannot assign guest to a deleted table")
+					return fmt.Errorf("%w: cannot assign guest to a deleted table", ErrSeatingReferenceStale)
 				}
 				if _, seen := seenAssignmentTables[resolved]; !seen {
 					seenAssignmentTables[resolved] = struct{}{}
@@ -228,7 +235,7 @@ func SaveSeatingPlan(eventID uuid.UUID, plan dtos.SeatingPlanSaveRequest) ([]mod
 				return err
 			}
 			if count != int64(len(assignmentTableIDs)) {
-				return fmt.Errorf("one or more assignment tables do not belong to event")
+				return fmt.Errorf("%w: one or more assignment tables do not belong to event", ErrSeatingReferenceStale)
 			}
 		}
 		capacityChecked := append([]uuid.UUID(nil), capacityLowered...)
@@ -250,7 +257,7 @@ func SaveSeatingPlan(eventID uuid.UUID, plan dtos.SeatingPlanSaveRequest) ([]mod
 				return err
 			}
 			if len(current) != len(guestIDs) {
-				return fmt.Errorf("one or more guests do not belong to event")
+				return fmt.Errorf("%w: one or more guests do not belong to event", ErrSeatingReferenceStale)
 			}
 			next := make(map[uuid.UUID]*uuid.UUID, len(resolvedAssignments))
 			for _, assignment := range resolvedAssignments {
@@ -279,7 +286,7 @@ func SaveSeatingPlan(eventID uuid.UUID, plan dtos.SeatingPlanSaveRequest) ([]mod
 				return result.Error
 			}
 			if result.RowsAffected != int64(len(deletedIDs)) {
-				return fmt.Errorf("one or more deleted tables do not belong to event")
+				return fmt.Errorf("%w: one or more deleted tables do not belong to event", ErrSeatingReferenceStale)
 			}
 		}
 
