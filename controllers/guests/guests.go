@@ -57,8 +57,11 @@ func guestCSVStatus(guest models.Guest) string {
 }
 
 // guestCSVStatusLabel is the Spanish value written to the export's status
-// column (GST-84). The dashboard import maps both these labels and the
-// English codes. Unknown codes are written as they are.
+// column (GST-84): Pendiente, Confirmado, Declinado. Unknown codes are written
+// as they are. The dashboard CSV import ignores the status column (imported
+// guests start as pending), so this is a display format only; external
+// consumers that parsed the former English codes (PENDING, CONFIRMED,
+// DECLINED) must map these labels.
 func guestCSVStatusLabel(guest models.Guest) string {
 	switch status := guestCSVStatus(guest); status {
 	case "PENDING":
