@@ -38,12 +38,13 @@
 | `repositories/eventsrepository/event_client_scope.go` | `ConfigureEventClientScope` and `withEventClientGrants`: ORs active event-client grants into user-scoped event lists while `EVENT_CLIENT_ACCESS` is on (same predicates as authorization) |
 | `repositories/eventclientrepository/EventClientRepository.go` | Event-client grants: `HasActiveGrant`, counts, `ActiveGrantedEventIDs`, per-event and per-organization lists, candidates, assignments page, `FindLiveUsersByEmail`, `HasMembershipInOrganizationTree`, `Grant` (revokes stale rows of a previous organization, then `ON CONFLICT DO NOTHING` on the active index), `Revoke`, `RevokeAllForEvent`, `RevokeAllForOrganizationUser`. Active = not revoked, event not deleted and still in the grant organization, organization active, holder without any `client_members` row there |
 | `repositories/eventmemberrepository/EventMemberRepository.go` | Event assignments; `RolesForUser` batches roles for many events |
+| `repositories/eventtablerepository/EventTableRepository.go` | Seating tables (physical table `tables`): CRUD, `AssignGuestsToTables`, `SaveSeatingPlan`. `CountEventTablesInEvent(eventID, ids)` counts the live (not soft-deleted) tables of the event among `ids` in one query; guest create/update compare it with the number of distinct ids. |
 
 ### Guests & Invitations
 
 | Path | Purpose |
 |------|---------|
-| `repositories/guestrepository/GuestRepository.go` | Guest CRUD + bulk ops |
+| `repositories/guestrepository/GuestRepository.go` | Guest CRUD + bulk ops. `TransitionGuestStatuses(eventID, ids, apply)` locks the event's guests (`FOR UPDATE`, id order), fails when an id is not a live guest of the event, attaches their catalog status, lets `apply` pick new values and writes back only the RSVP and door check-in columns, in one transaction. |
 | `repositories/gueststatusrepository/GuestStatusRepository.go` | GuestStatus catalog |
 | `repositories/invitationrepository/InvitationRepository.go` | Invitation CRUD |
 | `repositories/invitationlogrepository/InvitationLogRepository.go` | Log insertion |

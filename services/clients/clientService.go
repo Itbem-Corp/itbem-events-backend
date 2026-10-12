@@ -3,8 +3,10 @@ package clients
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"events-stocks/configuration/constants"
 	"events-stocks/dtos"
+	"events-stocks/internal/authz"
 	"events-stocks/internal/products"
 	"events-stocks/models"
 	"events-stocks/services/cacheutil"
@@ -70,6 +72,15 @@ func UpdateClientMemberRole(clientID, requesterID, targetUserID, newRoleID uuid.
 
 func ListClientMembers(targetClientID, requesterID uuid.UUID) ([]models.ClientMember, error) {
 	return _clientSvc.ListClientMembers(targetClientID, requesterID)
+}
+
+// AuthorizeMemberTarget is the entry point for controllers outside the
+// clients domain (member application toggles, event assignments).
+func AuthorizeMemberTarget(requester *models.User, clientID, targetUserID uuid.UUID, lookupUser UserLookup) error {
+	if _clientSvc == nil {
+		return fmt.Errorf("client service is not configured")
+	}
+	return _clientSvc.AuthorizeMemberTarget(requester, clientID, targetUserID, lookupUser)
 }
 
 func CreateClientWithLogo(
@@ -522,13 +533,22 @@ func (s *ClientService) CanAssignClientRole(clientID, requesterID, roleID uuid.U
 	return nil
 }
 
-func (s *ClientService) CanAssignClientRoleAsRoot(roleID uuid.UUID) error {
+// CanAssignClientRoleAsRoot is the platform-root counterpart of
+// CanAssignClientRole. No root assigns Owner from member management, and a
+// root assigns only roles whose capabilities its own level holds
+// (authz.PlatformRootMayGrantRole): a Root 2 can never hand an account it
+// controls the event or organization powers it lacks itself (Admin, Event
+// manager, Editor). A requester that is not a platform root is denied.
+func (s *ClientService) CanAssignClientRoleAsRoot(requester *models.User, roleID uuid.UUID) error {
 	targetRole, err := s.clientRoleRepo.GetByID(roleID)
 	if err != nil {
 		return fmt.Errorf("invalid role")
 	}
 	if targetRole.Hierarchy <= 1 {
 		return fmt.Errorf("permission denied: the owner role cannot be assigned from member management")
+	}
+	if !authz.PlatformRootMayGrantRole(requester, targetRole.Code) {
+		return fmt.Errorf("permission denied: your platform administrator level cannot assign a role with more capabilities than its own")
 	}
 	return nil
 }
@@ -577,6 +597,82 @@ func (s *ClientService) getEffectiveManagerRole(clientID, requesterID uuid.UUID)
 	}
 	if role.Hierarchy > 2 {
 		return nil, fmt.Errorf("permission denied: cannot manage members for this client")
+	}
+	return role, nil
+}
+
+// ErrMemberTargetDenied is returned by AuthorizeMemberTarget when the
+// requester may not change the target member's access.
+var ErrMemberTargetDenied = errors.New("permission denied")
+
+// UserLookup loads a user account by ID (users.GetUserByID in production).
+type UserLookup func(userID uuid.UUID) (*models.User, error)
+
+// AuthorizeMemberTarget applies the delegation invariant to actions that
+// change another member's access inside clientID without going through the
+// direct-membership rank checks (application entitlements, event assignments,
+// and adding an existing account with InviteUser, whose new direct
+// membership would take precedence over an inherited Owner/Admin role). The
+// caller must already have checked members:manage on clientID.
+//
+//   - A primary root may act on any member.
+//   - Nobody else may act on a platform-root account.
+//   - An operational root may act on any member except an Owner.
+//   - An organization Owner/Admin may act only on members whose effective
+//     role in clientID ranks strictly below its own (the CanAssignClientRole
+//     rule), which also excludes itself.
+//
+// A target without a user row or without access to clientID has no rank to
+// protect; the caller's own validation decides what happens to it. Lookup
+// failures are returned unwrapped so callers can tell them from a denial.
+func (s *ClientService) AuthorizeMemberTarget(requester *models.User, clientID, targetUserID uuid.UUID, lookupUser UserLookup) error {
+	if requester == nil {
+		return fmt.Errorf("%w: unknown requester", ErrMemberTargetDenied)
+	}
+	if requester.IsPrimaryRoot() {
+		return nil
+	}
+	if lookupUser == nil {
+		return fmt.Errorf("member target lookup is not configured")
+	}
+	target, err := lookupUser(targetUserID)
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return fmt.Errorf("load target user: %w", err)
+	}
+	if err == nil && target != nil && target.IsPlatformAdmin() {
+		return fmt.Errorf("%w: platform-root accounts are managed only by a primary root", ErrMemberTargetDenied)
+	}
+	targetRole, err := s.memberTargetRole(clientID, targetUserID)
+	if err != nil {
+		return err
+	}
+	if requester.IsPlatformAdmin() {
+		if targetRole != nil && targetRole.Hierarchy <= 1 {
+			return fmt.Errorf("%w: the organization owner's access cannot be changed", ErrMemberTargetDenied)
+		}
+		return nil
+	}
+	myRole, err := s.getEffectiveManagerRole(clientID, requester.ID)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrMemberTargetDenied, err)
+	}
+	if targetUserID == requester.ID || (targetRole != nil && myRole.Hierarchy >= targetRole.Hierarchy) {
+		return fmt.Errorf("%w: you cannot change the access of a member with equal or higher hierarchy", ErrMemberTargetDenied)
+	}
+	return nil
+}
+
+// memberTargetRole resolves the target's effective (direct or inherited)
+// role in clientID, or nil when it has no access there.
+func (s *ClientService) memberTargetRole(clientID, targetUserID uuid.UUID) (*models.ClientRole, error) {
+	allowed, roleCode := s.clientRepo.CheckAccessRecursive(targetUserID, clientID)
+	if !allowed || roleCode == "" {
+		return nil, nil
+	}
+	code := strings.TrimPrefix(strings.ToUpper(roleCode), "INHERITED_")
+	role, err := s.clientRoleRepo.GetByCode(code)
+	if err != nil || role == nil {
+		return nil, fmt.Errorf("resolve target member role %q: %v", code, err)
 	}
 	return role, nil
 }
@@ -644,7 +740,9 @@ func (s *ClientService) UpdateClientMemberRole(clientID, requesterID, targetUser
 	return nil
 }
 
-func (s *ClientService) UpdateClientMemberRoleAsRoot(clientID, targetUserID, newRoleID uuid.UUID) error {
+// UpdateClientMemberRoleAsRoot re-roles a member on the platform path: never
+// an Owner, and only to a role CanAssignClientRoleAsRoot lets requester grant.
+func (s *ClientService) UpdateClientMemberRoleAsRoot(requester *models.User, clientID, targetUserID, newRoleID uuid.UUID) error {
 	targetRole, err := s.clientRepo.GetMemberRole(clientID, targetUserID)
 	if err != nil {
 		return fmt.Errorf("target user is not a member")
@@ -652,7 +750,7 @@ func (s *ClientService) UpdateClientMemberRoleAsRoot(clientID, targetUserID, new
 	if targetRole.Hierarchy <= 1 {
 		return fmt.Errorf("permission denied: the organization owner cannot be modified")
 	}
-	if err := s.CanAssignClientRoleAsRoot(newRoleID); err != nil {
+	if err := s.CanAssignClientRoleAsRoot(requester, newRoleID); err != nil {
 		return err
 	}
 	if err := s.clientRepo.UpdateMemberRole(clientID, targetUserID, newRoleID); err != nil {

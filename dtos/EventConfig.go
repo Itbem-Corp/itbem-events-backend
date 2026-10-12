@@ -105,6 +105,16 @@ func NewEventConfigResponse(config *models.EventConfig, eventID uuid.UUID) Event
 	}
 }
 
+// RedactAccessSecret blanks the plaintext event access password for callers
+// without event:manage. IsAuthPreview stays, so they still know the event is
+// password protected.
+func (r *EventConfigResponse) RedactAccessSecret() {
+	if r == nil {
+		return
+	}
+	r.AuthPasswordPreview = ""
+}
+
 func eventConfigResponseTime(value time.Time) *time.Time {
 	if value.IsZero() {
 		return nil

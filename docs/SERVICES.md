@@ -66,20 +66,20 @@ requires an explicit HTTP(S) preview URL before QA can start.
 
 | File | Purpose |
 |------|---------|
-| `GuestService.go` | CRUD + bulk operations for guests |
+| `GuestService.go` | CRUD + bulk operations for guests. `CreateGuestsWithInvitations` inserts guests with `Omit(clause.Associations)` (a nested table or status object never creates rows) and owns both references: each guest gets a new invitation and `rsvp_token_id` is cleared (the RSVP flow links the token). `UpdateGuest` syncs `max_guests` to the guest's stored invitation only, never one named by the caller, and only when that invitation's `event_id` is the guest's event (otherwise nothing is written and a warning with the guest and event ids is logged), and clears the door check-in provenance when the RSVP status, method or status changes. Bulk status goes through `transitionGuestStatuses` (locked `TransitionGuestStatuses`, then per-guest RSVP analytics and cache invalidation): `CheckInGuests` (door check-in, records the previous RSVP), `UndoGuestCheckins` (restores it; `ErrCheckinNotUndoable` for a guest confirmed any other way) and `BulkUpdateGuestStatus` (guest:manage status change, the organizer's plain confirmation included; clears the provenance). `rsvp_at` is stamped only when the RSVP status changes. |
 | `GuestStatusService.go` | Catalog CRUD for guest statuses |
 
 ### Invitations Domain (`services/invitations/`)
 
 | File | Purpose |
 |------|---------|
-| `InvitationService.go` | Send/track invitations, RSVP logic |
+| `InvitationService.go` | Send/track invitations, RSVP logic. `ConfirmRSVPWithResult` stores `rsvp_method` only as `web` or `app` (anything else, `host` included, becomes `web`) and clears the guest's door check-in provenance. |
 
 ### Clients Domain (`services/clients/`)
 
 | File | Purpose |
 |------|---------|
-| `clientService.go` | Multi-tenant client CRUD, hierarchy |
+| `clientService.go` | Multi-tenant client CRUD, hierarchy, member management and member-target ranking (`AuthorizeMemberTarget`) |
 
 ### Client Roles/Types (`services/clientroles/`, `services/clienttypes/`)
 
@@ -92,8 +92,8 @@ requires an explicit HTTP(S) preview URL before QA can start.
 
 | File | Purpose |
 |------|---------|
-| `UserService.go` | User profile, Cognito sync, avatar |
-| `AdminUserService.go` | Admin user management (list, activate, deactivate) |
+| `UserService.go` | User profile, Cognito sync, avatar, root-level delegation (`SetUserRootLevel`) |
+| `AdminUserService.go` | Admin user management (list, activate, deactivate, delete); refuses to delete or deactivate primary roots |
 
 ### Resources Domain (`services/resources/`)
 
@@ -111,7 +111,7 @@ requires an explicit HTTP(S) preview URL before QA can start.
 | File | Purpose |
 |------|---------|
 | `services/templates/DesignTemplateService.go` | Design template CRUD |
-| `services/moments/MomentService.go` | Event moment CRUD + async media job enqueue |
+| `services/moments/MomentService.go` | Event moment CRUD + async media job enqueue. `GetMomentsByIDs` loads a bulk request's moments in one query so the bulk handlers authorize once per event. `IsEventMomentKey(eventID, key)` accepts only `moments/<eventID>/...`, bare or under `organizations/<uuid>/` (no absolute URLs, `..` or backslashes); `POST /moments` uses it before storing a key the admin response will presign. |
 | `services/moments/MomentTypeService.go` | Moment type catalog |
 
 ### Colors Domain (`services/colors/`)
@@ -192,6 +192,14 @@ Every service has an injectable struct with a constructor. The structs are used 
 | `ResourceService` | `NewResourceService(cfg, deps...)` | `ports.ResourceRepository`, `ports.ObjectStorageRepository`, `ports.CacheRepository` |
 
 > **`AdminUserService.ListAllUsers(query dtos.AdminUsersListQuery)`** - accepts pagination plus optional `search` and `status` filters. Returns typed rows with `data`, `total`, `page`, `page_size`, `total_pages`. Page defaults to 1, page_size defaults to 50, max 200, and filtering/pagination happens in the repository query.
+
+> **`UserService.SetUserRootLevel(userID, level)`** - accepts only `0` or `2` (anything else is an error mapped to `400`), writes `root_level=level` and clears the legacy `is_root` flag. It returns `gorm.ErrRecordNotFound` for an unknown user (`404`) and the sentinel `users.ErrProtectedRootAccount` when the target is a primary root (`IsPrimaryRoot()`: level 1 or a legacy `is_root` account), which the controller maps to `409 Protected account`. Level 1 cannot be restored through the API, so this also blocks self-demotion and losing the last primary root. Callers are gated by `authz.RequirePrimaryRoot`.
+
+> **`AdminUserService.DeleteUser(userID)` / `AdminUserService.SetUserActive(userID, false)` / `UserService.DeleteFullAccount(cognitoSub)`** - return the sentinel `users.ErrProtectedRootAccount` (wrapped) when the stored account is a primary root (`IsPrimaryRoot()`), before touching Cognito or the database; the controllers map it to `409 Protected account`. `SetUserActive(userID, true)` stays allowed for primary roots so a disabled one can be recovered.
+
+> **`ClientService.AuthorizeMemberTarget(requester, clientID, targetUserID, lookupUser)`** (package entry `clients.AuthorizeMemberTarget`) - delegation check for actions that change another member's access without changing their organization role (member application toggles in `controllers/sessions`, event assignments in `controllers/eventmembers`) and for adding an existing account (`controllers/clients` `InviteUser`, since the new direct membership takes precedence over an inherited Owner/Admin role). Callers check `members:manage` first. A primary root may act on anyone; nobody else on a platform-root account; Root 2 on anyone except an Owner (effective role hierarchy 1); an Owner/Admin only on members whose effective (direct or `INHERITED_`) role ranks strictly below its own, never itself. A target with no user row or no access to `clientID` has no rank. Denials wrap `clients.ErrMemberTargetDenied` (`403`); lookup or role-resolution failures are returned unwrapped (`500`). `lookupUser` is `users.GetUserByID` in production.
+
+> **`ClientService.CanAssignClientRoleAsRoot(requester, roleID)` / `ClientService.UpdateClientMemberRoleAsRoot(requester, clientID, targetUserID, newRoleID)`** - platform-root member path (`controllers/clients` `InviteUser`, `CreateClientMember`, `UpdateMemberRole`). Never assigns Owner (hierarchy 1) and never re-roles an Owner. The role must also pass `authz.PlatformRootMayGrantRole(requester, role.Code)`: the requester's root level must hold every capability the role carries, so Root 1 may grant any role below Owner and Root 2 only Check-in, Analyst, Member or Viewer (never Admin, Event manager or Editor). A requester that is not a platform root is denied. `GET /api/catalogs/roles` filters the platform-root catalog with the same predicate.
 
 All interfaces are defined in `services/ports/ports.go`.
 

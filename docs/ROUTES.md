@@ -33,7 +33,7 @@
 
 ### Invitations / RSVP
 - `GET /api/invitations/ByToken?token=...` → `invitations.GetInvitationByToken` — recommended for URL-sensitive tokens. Query aliases accepted: `token`, `Token`, `invitation_token`, `invitationToken`, `InvitationToken`, `pretty_token`, `prettyToken`, `PrettyToken`. `GET /api/invitations/ByToken/:token` is still registered for simple legacy tokens.
-- `POST /api/invitations/rsvp` → `invitations.ConfirmRSVP`
+- `POST /api/invitations/rsvp` → `invitations.ConfirmRSVP` — `rsvp_method` (any of `method`, `Method`, `rsvp_method`, `rsvpMethod`, `RSVPMethod`) is stored only as `web` or `app`; `host` (the organizer's answer and what a door check-in writes), empty and any other text are stored as `web`, never a 400. The guest's own answer clears the door check-in provenance (see `PATCH /api/guests/bulk/status`).
 
 ### Public Moments (MomentWall)
 - `GET /api/events/:identifier/moments` → `moments.ListPublicMoments` — Paginated wall. Query: `?page=1&limit=20` (max 50). Returns only `is_approved=true AND processing_status IN ('','done')`. Response: `{ items, total, page, limit, has_more, published, uploads_remaining, uploads_used }`. Cached in Redis (`moments:wall:{eventID}:p{n}:l{n}`, TTL 5min). If `EventConfig.AuthPasswordPreview` is set, callers must send `X-Event-Access-Token` from `POST /api/events/:identifier/verify-access` unless `preview_token` is valid.
@@ -130,17 +130,29 @@ Legacy v1/v2 events remain auditable but cannot authorize a v3 action.
 - `DELETE /api/events/:id` → `events.DeleteEvent`
 - `POST /api/events/:id/cover` → `events.UploadEventCover` — Stores a validated source, returns `202` plus a signed pending preview, and queues responsive processing. The previous public cover remains active until a generation-matched terminal callback succeeds. Local environments without SQS retain a synchronous fallback.
 - `DELETE /api/events/:id/cover` → `events.DeleteEventCover` — Clears `cover_image_url` and best-effort deletes the old S3 object.
-- `POST /api/events/covers/backfill` → `events.BackfillEventCovers` — Root-only bounded/idempotent backfill for legacy covers without responsive variants.
+- `POST /api/events/covers/backfill` → `events.BackfillEventCovers` — Primary-root-only (level 1; Root 2, standard users and other-product sessions get `403`) bounded/idempotent backfill for legacy covers without responsive variants. The candidate scan is global across tenants.
 - `PUT /api/events/:id/cover/content` → `events.UpdateEventCoverContent` — Internal authenticated media callback; rejects stale generations with `409`.
-- `POST /api/moments/backfill` → `moments.BackfillMomentVariants` — Root-only bounded/idempotent discovery and requeue of legacy image moments without variants.
+- `POST /api/moments/backfill` → `moments.BackfillMomentVariants` — Primary-root-only (level 1; Root 2, standard users and other-product sessions get `403`) bounded/idempotent discovery and requeue of legacy image moments without variants. The candidate scan is global across tenants.
 - `POST /api/events/:identifier/performance` → `events.TrackPerformance` — Public aggregate-only RUM ingestion with anonymous five-minute operational histograms retained for 48 hours.
 - `GET /api/events/:id/analytics` → `events.GetEventAnalytics` — GetEventAnalytics — returns EventAnalytics for the event
 
-- `GET /api/events/:id/detail` -> `events.GetEvent` - protected event detail by UUID for dashboard pages
+- `GET /api/events/:id/detail` -> `events.GetEvent` - protected event detail by UUID for dashboard pages. Requires event view access. Fields are redacted by capability: without `event:manage`, `event_config.auth_password_preview` and `config.auth_password_preview` are `""` (`is_auth_preview` stays); without `guest:manage`, `guest_share_summary.first_pending` (guest email + invitation pretty token) is omitted while the share counts stay. A failed capability lookup redacts (fails closed).
+- `GET /api/events/:id/capabilities` → `eventmembers.Capabilities` — Requires event view access; returns the caller's own capability booleans (`event:manage`, `event:delete`, `guest:manage`, `checkin:run`, `analytics:view`, `members:manage`) after event-assignment narrowing.
 
 ### Event Config (1:1 with Event, same ID)
-- `GET /api/events/:id/config` → `eventconfig.GetEventConfig`
-- `PUT /api/events/:id/config` → `eventconfig.UpdateEventConfig` — validates public availability: `active_until` must be strictly after `active_from` when both are set; blank `active_until` is allowed.
+- `GET /api/events/:id/config` → `eventconfig.GetEventConfig` — Requires `event:manage` (the config includes the plaintext `auth_password_preview`).
+- `PUT /api/events/:id/config` → `eventconfig.UpdateEventConfig` — Requires `event:manage`. Validates public availability: `active_until` must be strictly after `active_from` when both are set; blank `active_until` is allowed.
+- `GET /api/events/:id/studio-workspace` → `eventconfig.GetStudioWorkspace` — Requires `event:manage`. Returns `{event, config, sections}` for Studio's first paint; `config` is the same full payload as `GET /config`, including `auth_password_preview`.
+
+### Tables / Seating
+- `GET /api/events/:id/tables` → `eventtables.ListTables` — Requires event view access; returns table id, name, capacity and sort order only (no guest data).
+- `GET /api/events/:id/seating-workspace` → `eventtables.GetSeatingWorkspace` — Requires `guest:manage`. Returns `{tables, guests}` where each guest carries name, email, table and RSVP status (same projection as `GET /guests/seating:<id>`).
+- `POST /api/events/:id/tables`, `PUT /api/events/:id/tables/assign`, `PUT /api/events/:id/tables/plan`, `PUT /api/tables/:id`, `DELETE /api/tables/:id` → `eventtables.*` — Require `guest:manage`.
+
+### Check-in
+- `GET /api/events/:id/checkin-workspace` → `guests.GetCheckinWorkspace` — Requires `checkin:run`. Returns `{event, statuses, guests}`; `guests` is the first page (60) of the door projection `dtos.CheckinGuest` with the event summary: id, event_id, first/last name, table (`table_id`, `table`, `table_number`), `guest_status`/`status` with ids, `guests_count`, `rsvp_status`, `rsvp_guest_count`, and `checked_in_at` while a door check-in is in place. No email, phone, notes, RSVP notes, dietary restrictions, `pretty_token`, `invitation_id` or `rsvp_token_id`, for any caller.
+- `GET /api/guests/checkin:<eventID>` → `guests.GetGuests` — Requires `checkin:run`. Paged (`page`, `page_size` 1-100, `search`, `filter`, `qr`, `sort`, `direction`) door projection, same fields as the workspace, plus `summary`. `qr` matches the guest id or invitation `pretty_token` exactly on the server, so the scanner never needs the token in the response. `search` is the door search (`DoorSearch`): a substring of the name or the table (number or name), with `%`, `_` and `\` matched literally; email only as the complete address (case-insensitive) and phone only as the complete number (digits compared, formatting ignored). A partial email or phone matches nothing, so the list cannot be used to read contact data back. `page:`, `invitations:` and the CSV export keep the substring search over name, email, phone and table.
+- `PATCH /api/guests/bulk/status` → `guests.BulkUpdateGuestStatus` — Requires `checkin:run`. Body `{event_id, ids (1-100), status_id|guest_status_id, rsvp_status, rsvp_method: "host", action?: "checkin"|"undo_checkin"}`; returns no guest data. Without `guest:manage` a caller can only check guests in and undo door check-ins; the full rules are under Guests.
 
 ### Event Sections
 - `GET /api/events/:id/sections` → `eventsection.ListSectionsByEvent`
@@ -160,21 +172,36 @@ Legacy v1/v2 events remain auditable but cannot authorize a v3 action.
 - `POST /api/fonts/upload` → `fonts.UploadFonts` — root only
 
 ### Guests
-- `GET /api/guests/:key` → `guests.GetGuests` — protected; supports `all:<eventID>` or a guest UUID, access-checked before returning cached data
-- `POST /api/guests` → `guests.CreateGuest`
-- `POST /api/guests/batch` → `guests.CreateGuests` — atomic batch: creates guests + invitations + tokens in one transaction
-- `PUT /api/guests/:id` → `guests.UpdateGuest`
-- `DELETE /api/guests/bulk` → `guests.BulkDeleteGuests` — body: `{"ids": ["uuid1", "uuid2"]}`. Soft-deletes multiple guests and invalidates per-event Redis cache.
+- `GET /api/guests/:key` → `guests.GetGuests` — protected; supports `all:<eventID>`, `page:<eventID>`, `invitations:<eventID>`, `seating:<eventID>`, `analytics:<eventID>`, `share:<eventID>` and a guest UUID (all `guest:manage`), `summary:<eventID>` (`analytics:view`) and `checkin:<eventID>` (`checkin:run`, door projection; see Check-in). `page:` and `invitations:` return the full guest record, including `pretty_token`.
+- `GET /api/events/:id/guests/export` → `guests.ExportGuestsCSV` — `guest:manage`. CSV download (`?view=` default, `invitations` or `rsvp`; same `search`/`filter`/`sort`/`direction` as the guest list; 413 above 250,000 rows). Every data cell is neutralized against spreadsheet formula injection: a cell whose first character after leading spaces is `= + - @`, TAB or CR gets a leading `'` (so `+52 55…` exports as `'+52 55…`). Header rows are constants.
+- `POST /api/guests` → `guests.CreateGuest` — `guest:manage` on `event_id`. Body fields are an allowlist (`guestWritePayload` in `controllers/guests/guests.go`, snake_case plus the camel/Pascal aliases): `first_name`, `last_name`, `nickname`, `email`, `phone`, `show_contact_info`, `role`, `bio`, `headline`, `signature`, `order`, `image_url`, `image1_url`..`image3_url`, `table_number`, `table_id`, `is_host`, `notes`, `rsvp_notes`, `dietary_restrictions`, `guests_count`, `rsvp_guest_count`, `max_guests`, `status_id`/`guest_status_id`, `rsvp_status`, `rsvp_method`, plus `event_id`. Anything else (`id`, `invitation_id`, `rsvp_token_id`, `rsvp_at`, `created_at`, `updated_at`, `pretty_token`, nested `table`/`guest_status`/`status` objects) is silently ignored. `invitation_id` and `rsvp_token_id` are server-owned: the guest always gets its own new invitation and token. `table_id` `""`/`null` means no table; any other value must be a live (not soft-deleted) table of the same event, else 400 `{"message":"Mesa inválida","error":"table_outside_event"}` and nothing is written. A status id under any spelling (`status_id`, `guest_status_id`, `statusId`, `GuestStatusID`...) that is `""` or the nil UUID is "not sent" and keeps the stored status (pending on create); a snake_case status id that is not a UUID string answers 400.
+- `POST /api/guests/batch` → `guests.CreateGuests` — atomic batch: creates guests + invitations + tokens in one transaction. Max 1000 guests (400 `Too many guests`), all of one event; same field allowlist and `table_id` rule as `POST /api/guests`. The batch's distinct table ids are checked in one query; one bad table rejects the whole batch (400 `table_outside_event`) and nothing is created.
+- `PUT /api/guests/:id` → `guests.UpdateGuest` — `guest:manage`. Same field allowlist as create; `event_id` and the server-owned columns in the body are ignored, JSON `null` leaves a stored value unchanged, `invitation_id` and `rsvp_token_id` can never be changed here (every spelling is ignored), so a guest cannot be linked to another event's invitation or token and the response's `pretty_token` is always the guest's own. A body without any `table_id` key keeps the stored table; `""`/`null` clears it; any other value must be a live table of the guest's event, else 400 `{"message":"Mesa inválida","error":"table_outside_event"}` and nothing is written. `max_guests` syncs the guest's stored invitation only, and only when that invitation belongs to the guest's event (a legacy link to another event's invitation is left untouched and logged).
+- `DELETE /api/guests/bulk` → `guests.BulkDeleteGuests` — `guest:manage` per guest. Body: `{"ids": ["uuid1", "uuid2"]}`, max 100 ids (400 `Too many IDs`), duplicates collapsed. Soft-deletes multiple guests and invalidates per-event Redis cache.
+- `PATCH /api/guests/bulk/status` → `guests.BulkUpdateGuestStatus` — `checkin:run` on `event_id`. Body: `{"event_id", "ids" (1-100, no duplicates), "status_id"|"guest_status_id", "rsvp_status": "pending"|"confirmed"|"declined", "rsvp_method": "host", "action"?: "checkin"|"undo_checkin"}`. The status must exist (400 `Invalid status_id`) and its catalog code must equal `rsvp_status` (400 `status_id does not match rsvp_status`), for every caller. All writes lock the guests (`FOR UPDATE`) in one transaction; a guest outside `event_id` fails the request (400) and nothing is written. Like `PUT /api/guests/:id`, `rsvp_at` is stamped only when a guest's RSVP status changes and the `rsvp_confirmed`/`rsvp_declined` analytics move per guest.
+  - **Check-in** (`"action": "checkin"` with `rsvp_status` `confirmed` and the confirmed status, from any `checkin:run` caller; or the same body without `action` from a caller without `guest:manage`, who can only check guests in). Sets confirmed/`host` and records the door check-in provenance (`checked_in_at`, `checked_in_by_user_id` and the previous RSVP status, guest status, method and `rsvp_at`). A guest still checked in at the door is left untouched (a repeat check-in is a no-op). `action: checkin` with any other `rsvp_status` answers 400 `Invalid rsvp_status`.
+  - **Organizer confirmation** (`rsvp_status` `confirmed` without `action`, from a `guest:manage` caller, e.g. the guests panel's bulk Confirmar): written like `PUT /api/guests/:id`. Sets confirmed/`host`, records no provenance and clears a door check-in already in place, so check-in staff cannot undo it (409). A guest manager checking guests in at the door sends `"action": "checkin"`. If the `guest:manage` check fails with anything but 403, that error is returned and nothing is written.
+  - **Undo** (`"action": "undo_checkin"`; status fields are ignored): any `checkin:run` caller. A guest still checked in at the door (provenance present, confirmed, `host`) gets the recorded previous values back and the provenance is cleared; a guest who is not confirmed is a no-op (double and concurrent undos are idempotent). A guest confirmed any other way (their own RSVP, an organizer confirmation through `PUT /api/guests/:id` or this endpoint, only the status code, an RSVP given after the check-in) answers 409 `Check-in cannot be undone` and nothing is written. Any other `action` answers 400 `Invalid action`.
+  - **Pending or declined**: needs `guest:manage` as well (403 `Access denied` otherwise); clears the door check-in provenance.
+  - Any other RSVP write clears the provenance too (`PUT /api/guests/:id` when `rsvp_status`, `rsvp_method` or the status changes, and the public RSVP), so an undo can never restore a superseded answer. Guest responses carry `checked_in_at` while a door check-in is in place.
 - `DELETE /api/guests/:id` → `guests.DeleteGuest`
+
+### Event Members (team assignments)
+- `GET /api/events/:id/capabilities` → `eventmembers.Capabilities` — the caller's effective event capabilities.
+- `GET /api/events/:id/members` → `eventmembers.List` — `members:manage` on the event.
+- `PUT /api/events/:id/members` → `eventmembers.Upsert` — body `{"user_id": UUID, "role": "EVENT_OWNER|MANAGER|EDITOR|CHECKIN|ANALYST|VIEWER"}`; `members:manage` plus `clients.AuthorizeMemberTarget` on the event's organization (same ranking as member application access). Denied → `403 Permission Denied`; target without organization access → `400`.
+- `DELETE /api/events/:id/members/:user_id` → `eventmembers.Remove` — same authorization as `Upsert`; a deleted account has no rank, so its stale assignment can still be removed.
 
 ### Moments
 - `GET /api/moments` → `moments.ListMoments` — supports `?event_id=<uuid>` to filter by event. When `event_id` is provided, only returns moments with `processing_status NOT IN ('pending','processing')` — i.e., fully optimized by Lambda or legacy uploads. S3 media keys in `content_url` / `thumbnail_url` are returned as presigned URLs for the dashboard.
-- `POST /api/moments/bulk-approve` → `moments.BulkApproveRejectMoments` — Bulk approve or reject moments. Body: `{"ids": ["uuid1", "uuid2"], "is_approved": true}`. Returns 200 OK. Invalidates Redis cache.
-- `DELETE /api/moments/bulk` → `moments.BulkDeleteMoments` — Bulk delete moments. Body: `{"ids": ["uuid1", "uuid2"]}`. Returns 200 OK. Invalidates Redis cache and per-event wall cache.
+- `POST /api/moments/bulk-approve` → `moments.BulkApproveRejectMoments` — Bulk approve or reject moments. Body: `{"ids": ["uuid1", "uuid2"], "is_approved": true}`, max 5000 ids (400 `Too many IDs`), duplicates collapsed. Authorized with one batch lookup and one `event:manage` check per distinct event (a missing id is 404; a moment without an event falls back to the per-moment check). Returns 200 OK. Invalidates Redis cache.
+- `DELETE /api/moments/bulk` → `moments.BulkDeleteMoments` — Bulk delete moments. Body: `{"ids": ["uuid1", "uuid2"]}`, same 5000-id cap, dedupe and per-event authorization as bulk-approve. Returns 200 OK. Invalidates Redis cache and per-event wall cache.
+- `PATCH /api/moments/reorder` → `moments.ReorderMoments` — Body: `[{"id": "uuid", "order": 1}]`, max 5000 items (400 `Too many IDs`). The same id twice with the same order collapses; with different orders it is a 400. Same per-event `event:manage` authorization as bulk-approve.
+- `POST /api/moments/batch/reoptimize` → `moments.BatchReoptimizeMoments` — Body: `{"ids": [...]}`, max 200 ids, `event:manage` per moment. Response: `{succeeded, skipped, failed}`.
 - `GET /api/moments/:id` → `moments.GetMoment`
-- `POST /api/moments` → `moments.CreateMoment`
+- `POST /api/moments` → `moments.CreateMoment` — `event:manage` on `event_id`. Body fields are an allowlist (`momentCreatePayload` in `controllers/moments/moments.go`): `event_id`, `title`, `description`, `content_url`, `thumbnail_url`, `content_type`, `is_approved`, `order`, `moment_type_id`, `guest_id`, `invitation_id`. Anything else (`id`, `processing_*`, `media_variants`, `error_message`, size metrics, nested `guest`/`invitation`/`moment_type` objects) is ignored, so a new moment never starts in a processed state. `content_url` and `thumbnail_url`, when not empty, must be keys of this event's moments: `moments/<event_id>/<...>`, bare or under `organizations/<uuid>/` (`momentsService.IsEventMomentKey`); absolute URLs, other prefixes, `..` and backslashes answer 400 `{"message":"Archivo inválido","error":"moment_content_outside_event"}`. `guest_id` and `invitation_id` (the nil UUID means none) must name a guest or invitation of the same event, else 400 `{"message":"Referencia inválida","error":"reference_outside_event"}`. These checks run after authorization and before any write; the admin response therefore only presigns keys of the event.
 - `PUT /api/moments/:id/requeue` → `moments.RequeueMoment` — Admin action to retry failed/stuck Lambda processing. Resets `processing_status` to `"pending"` and re-publishes the SQS job. Returns 200 OK with updated moment. Requires raw S3 key to still be present in `content_url` (i.e. moment not yet fully optimized).
-- `PUT /api/moments/:id` → `moments.UpdateMoment` — Invalidates Redis wall cache for the event.
+- `PUT /api/moments/:id` → `moments.UpdateMoment` — `event:manage`. Binds only `title`, `description`, `is_approved` (also `isApproved`/`IsApproved`) and `order`; media keys, processing state, references and `event_id` in the body are ignored. Invalidates Redis wall cache for the event.
 - `DELETE /api/moments/:id` → `moments.DeleteMoment` — Invalidates Redis wall cache for the event.
 
 ### Clients / Organizations
@@ -184,11 +211,14 @@ Legacy v1/v2 events remain auditable but cannot authorize a v3 action.
 - `GET /api/clients/:id` → `clients.GetClient` (recursive)
 - `PUT /api/clients/:id` → `clients.UpdateClient`
 - `DELETE /api/clients/:id` → `clients.DeleteClient` (recursive)
-- `POST /api/clients/invite` → `clients.InviteUser`
+- `POST /api/clients/invite` → `clients.InviteUser` — body `{"client_id", "user_id" or "email", "role_id"}`; adds an existing account. Besides the member-write rules below, the account is ranked with `clients.AuthorizeMemberTarget` on its effective (direct or inherited) role in `client_id`, because the new direct membership takes precedence over an Owner/Admin role inherited from a parent organization: an Owner/Admin may only add accounts ranked strictly below its own effective role (never itself), Root 2 anyone except an Owner, only a primary root an Owner; nobody but a primary root a platform-root account. Denied → `403 Permission Denied` with nothing written.
 - `POST /api/clients/members` → `clients.CreateClientMember`
 - `GET /api/clients/members` → `clients.ListClientMembers`
 - `PUT /api/clients/members/:user_id` → `clients.UpdateMemberRole` (?client_id=...)
 - `DELETE /api/clients/members/:user_id` → `clients.RemoveMember` (?client_id=...)
+- `GET /api/clients/:id/member-applications/:user_id` → `sessions.ListMemberApplications` — `members:manage` on the organization; Root 2 cannot inspect platform-root accounts (`403`).
+- `PUT /api/clients/:id/member-applications/:user_id/:application_code` → `sessions.SetMemberApplication` — body `{"is_active": bool}`; `members:manage` plus `clients.AuthorizeMemberTarget`: an Owner/Admin may only toggle members ranked strictly below its own effective role (never itself), Root 2 any member except an Owner, only a primary root an Owner; nobody but a primary root a platform-root account. Denied → `403 Permission Denied`; application not enabled for the organization → `409`.
+- Member writes (`InviteUser`, `CreateClientMember`, `UpdateMemberRole`, `RemoveMember`): both platform-root levels (`IsPlatformAdmin()`; level 1, level 2 and legacy `is_root` accounts) take the root path and manage teams in any organization, but can never assign, change or remove an Owner (`403`); Root 2 also cannot target platform-root accounts (`403`). A root grants (`InviteUser`, `CreateClientMember`, `UpdateMemberRole`) only roles within its own capabilities (`authz.PlatformRootMayGrantRole`): Root 1 any role below Owner, Root 2 only Check-in, Analyst, Member or Viewer; Admin, Event manager or Editor from Root 2 → `403` before any account is created or membership written. Everyone else must hold Owner/Admin (direct or inherited) in that organization and can only manage roles below its own. A root entering a branded product (e.g. Cafetton House) is scoped to an ordinary identity and takes the membership path.
 - `GET /api/clients/:id/members/event-clients?page=&page_size=` → `eventclients.ListOrganizationGrants` — Owner/Admin (incl. inherited) and roots oversee every active event-client grant of the organization (`members:manage`; page size max 50). 404 `event_client_access_disabled` while `EVENT_CLIENT_ACCESS` is off or outside EventiApp.
 - `DELETE /api/clients/:id/members/event-clients/:user_id` → `eventclients.RevokeOrganizationUser` — revokes every grant of that person in the organization; `{revoked: n}`, 404 `event_client_not_found` when there is none.
 
@@ -207,25 +237,27 @@ Every route answers 404 `{message: "Función no disponible", error: "event_clien
 ### Users (self + admin)
 - `GET /api/users` → `users.GetUser` (my profile)
 - `PUT /api/users` → `users.UpdateUser`
-- `DELETE /api/users` → `users.DeleteUser`
+- `DELETE /api/users` → `users.DeleteUser` — closes the caller's own account (Cognito + local). A primary-root account (checked on the stored account, whatever product the caller entered through) gets `409 Protected account`.
 - `GET /api/users/all` → `users.ListAllUsers` — root only; paginated and filterable; query params: `?page=1&page_size=50&search=ana&status=active` (status: `active`, `inactive`, `root`; default page=1, page_size=50, max page_size=200)
 - `GET /api/users/:id` → `users.GetUserDetail` — root only
 - `GET /api/users/:id/clients` → `users.ListUserClients` — root only
 - `PUT /api/users/:id` → `users.UpdateUserDetail` — root only
-- `DELETE /api/users/:id` → `users.DeleteUserDetail` — root only
-- `PUT /api/users/:id/deactivate` → `users.DeactivateUser` — root only
-- `PUT /api/users/:id/activate` → `users.ActivateUser` — root only
+- `DELETE /api/users/:id` → `users.DeleteUserDetail` — primary root only; a primary-root target (another level 1, a legacy `is_root` account or the caller itself) → `409 Protected account`
+- `PUT /api/users/:id/deactivate` → `users.DeactivateUser` — root only; Root 2 cannot target platform-root accounts (`403`); a primary-root target, including the caller itself → `409 Protected account`
+- `PUT /api/users/:id/activate` → `users.ActivateUser` — root only; Root 2 cannot target platform-root accounts (`403`); re-activating a primary root stays allowed
+- `PUT /api/users/:id/root-level` → `users.UpdateUserRootLevel` — Primary-root-only (Root 2, standard users and other-product sessions get `403`). Body `{"root_level": 0|2}` grants or revokes operational Root 2 and returns the admin user summary. Level `1` is never assignable (`400`); a primary-root target (level 1 or a legacy `is_root` account, including the caller itself) is refused with `409 Protected account` because level 1 cannot be restored through the API; unknown user → `404`.
 - `POST /api/users/invite` → `users.InviteUser` — root only
 - `POST /api/users/avatar` → `users.UploadAvatar`
 - `DELETE /api/users/avatar` → `users.DeleteAvatar`
 
-### Cache Utilities (protected — root only)
-- `GET /api/cache/flush/:key` → `cache.FlushKey`
-- `GET /api/cache/flush-all` → `cache.FlushAll`
+### Cache Utilities (protected — primary root only)
+- `DELETE /api/cache/flush/:key` → `cache.FlushKey` — `authz.RequirePrimaryRoot`; Root 2 gets `403`. Audited by `middleware/audit`.
+- `DELETE /api/cache/flush-all` → `cache.FlushAll` — `authz.RequirePrimaryRoot`; Root 2 gets `403`. Audited by `middleware/audit`.
+- **Deprecated:** `GET /api/cache/flush/:key` and `GET /api/cache/flush-all` run the same handlers with the same guard, but `middleware/audit` records only `POST`/`PUT`/`PATCH`/`DELETE`, so a successful `GET` flush leaves no audit row. Use `DELETE`; the `GET` aliases stay only for compatibility until ops confirms no script depends on them.
 
 ### Catalogs
 - `GET /api/catalogs/client-types` → `clienttypes.ListClientTypes`
-- `GET /api/catalogs/roles` → `clientroles.ListClientRoles` (?client_id=...)
+- `GET /api/catalogs/roles` → `clientroles.ListClientRoles` (?client_id=...) — roles the caller may assign there: in any organization, a primary root gets every role below Owner and Root 2 only the roles within its own capabilities (Check-in, Analyst, Member, Viewer; never Admin, Event manager or Editor); everyone else needs a membership and gets the roles below its own (Owner/Admin only).
 - `GET /api/catalogs/design-templates` → `designtemplates.ListDesignTemplates` — list active design templates with color palettes and font sets
 - `GET /api/catalogs/design-templates/:id` → `designtemplates.GetDesignTemplate` — get single design template with full relations
 - `GET /api/catalogs/color-palettes` → `designtemplates.ListColorPalettes` — list color palettes with patterns and colors
@@ -269,6 +301,8 @@ cfg        := c.Get("config").(*models.Config)
 | `controllers/clienttypes/clientTypes.go` | `/api/catalogs/client-types` |
 | `controllers/clientroles/clientRoles.go` | `/api/catalogs/roles` |
 | `controllers/cache/cache.go` | `/api/cache*` |
+| `controllers/eventmembers/eventmembers.go` | `/api/events/:id/capabilities`, `/api/events/:id/members*` |
+| `controllers/sessions/sessions.go` | `/api/session*`, `/api/clients/:id/member-applications*` |
 | `controllers/health/health.go` | `/health` |
 | `controllers/eventconfig/eventconfig.go` | `/api/events/:id/config` |
 | `controllers/eventsection/eventsection.go` | `/api/events/:id/sections`, `/api/sections/:id` |
