@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -23,6 +24,45 @@ import (
 )
 
 const qualificationKeyID = "itbem-local-qualification"
+
+// identityName keeps an extra identity's token file name inside the token-file directory.
+var identityName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
+
+// extraIdentity is one more local user the issuer signs a token for, next to the primary one.
+type extraIdentity struct {
+	name, subject, email string
+}
+
+// identityFlags collects repeated --identity name:subject:email values.
+type identityFlags []extraIdentity
+
+func (f *identityFlags) String() string { return fmt.Sprint(len(*f)) }
+
+func (f *identityFlags) Set(value string) error {
+	parts := strings.Split(value, ":")
+	if len(parts) != 3 {
+		return fmt.Errorf("identity must be name:subject:email")
+	}
+	identity := extraIdentity{name: strings.TrimSpace(parts[0]), subject: strings.TrimSpace(parts[1]), email: strings.TrimSpace(parts[2])}
+	if !identityName.MatchString(identity.name) {
+		return fmt.Errorf("identity name must be lower-case letters, digits and dashes")
+	}
+	if identity.subject == "" || identity.email == "" {
+		return fmt.Errorf("identity %s needs a subject and an email", identity.name)
+	}
+	for _, existing := range *f {
+		if existing.name == identity.name || existing.subject == identity.subject {
+			return fmt.Errorf("identity %s repeats a name or subject", identity.name)
+		}
+	}
+	*f = append(*f, identity)
+	return nil
+}
+
+// identityTokenPath is where an extra identity's token goes: next to the primary token file.
+func identityTokenPath(tokenFile, name string) string {
+	return filepath.Join(filepath.Dir(tokenFile), name+".jwt")
+}
 
 type readyDocument struct {
 	IssuerURL string `json:"issuer_url"`
@@ -37,6 +77,8 @@ func main() {
 	tokenFile := flag.String("token-file", "", "required private path receiving the short-lived ID token")
 	readyFile := flag.String("ready-file", "", "required private path receiving non-secret issuer metadata")
 	tokenTTL := flag.Duration("token-ttl", 15*time.Minute, "short-lived qualification token lifetime")
+	var identities identityFlags
+	flag.Var(&identities, "identity", "extra local user name:subject:email (repeatable); its token is written to <token-file dir>/<name>.jwt")
 	flag.Parse()
 
 	if !strings.EqualFold(strings.TrimSpace(os.Getenv("ENV")), "local") {
@@ -52,6 +94,9 @@ func main() {
 		log.Fatal("token-ttl must be between one minute and one hour")
 	}
 	if err := validatePrivateOutputPaths(*tokenFile, *readyFile); err != nil {
+		log.Fatal(err)
+	}
+	if err := validateIdentityPaths(*tokenFile, *readyFile, strings.TrimSpace(*subject), identities); err != nil {
 		log.Fatal(err)
 	}
 
@@ -74,13 +119,27 @@ func main() {
 		log.Fatalf("write local qualification token: %v", err)
 	}
 	defer os.Remove(*tokenFile)
+	// log.Fatalf skips deferred removals: every exit from here removes what was already written, so a
+	// failed start never leaves a token that makes the next start fail (writePrivateFile is exclusive).
+	written := []string{*tokenFile}
+	fatal := func(format string, args ...any) {
+		removeAll(written)
+		log.Fatalf(format, args...)
+	}
+	identityPaths, err := writeIdentityTokens(privateKey, issuerURL, strings.TrimSpace(*audience), *tokenFile, identities, time.Now(), *tokenTTL)
+	if err != nil {
+		fatal("%v", err)
+	}
+	written = append(written, identityPaths...)
+	defer removeAll(identityPaths)
 	ready, err := json.Marshal(readyDocument{IssuerURL: issuerURL, JWKSURL: issuerURL + "/.well-known/jwks.json"})
 	if err != nil {
-		log.Fatalf("encode local issuer metadata: %v", err)
+		fatal("encode local issuer metadata: %v", err)
 	}
 	if err := writePrivateFile(*readyFile, ready); err != nil {
-		log.Fatalf("write local issuer metadata: %v", err)
+		fatal("write local issuer metadata: %v", err)
 	}
+	written = append(written, *readyFile)
 	defer os.Remove(*readyFile)
 
 	mux := http.NewServeMux()
@@ -111,7 +170,7 @@ func main() {
 	}()
 	fmt.Printf("local OIDC qualification issuer ready at %s\n", issuerURL)
 	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatalf("serve local OIDC qualification issuer: %v", err)
+		fatal("serve local OIDC qualification issuer: %v", err)
 	}
 }
 
@@ -146,6 +205,52 @@ func validatePrivateOutputPaths(tokenFile, readyFile string) error {
 		return fmt.Errorf("token-file and ready-file must be different paths")
 	}
 	return nil
+}
+
+// validateIdentityPaths refuses an extra identity whose token would overwrite the primary token or the ready
+// file, or that reuses the primary subject (two tokens for one user would not test two users).
+func validateIdentityPaths(tokenFile, readyFile, primarySubject string, identities identityFlags) error {
+	tokenPath, _ := filepath.Abs(tokenFile)
+	readyPath, _ := filepath.Abs(readyFile)
+	for _, identity := range identities {
+		path, err := filepath.Abs(identityTokenPath(tokenFile, identity.name))
+		if err != nil {
+			return fmt.Errorf("resolve identity %s: %w", identity.name, err)
+		}
+		if strings.EqualFold(path, tokenPath) || strings.EqualFold(path, readyPath) {
+			return fmt.Errorf("identity %s would overwrite token-file or ready-file", identity.name)
+		}
+		if identity.subject == primarySubject {
+			return fmt.Errorf("identity %s reuses the primary subject", identity.name)
+		}
+	}
+	return nil
+}
+
+// writeIdentityTokens signs and writes one token per extra identity. On failure it removes the ones it already
+// wrote and returns the error; on success it returns their paths for the caller to remove on exit.
+func writeIdentityTokens(privateKey *rsa.PrivateKey, issuer, audience, tokenFile string, identities identityFlags, now time.Time, ttl time.Duration) ([]string, error) {
+	var paths []string
+	for _, identity := range identities {
+		signed, err := signIdentityToken(privateKey, issuer, audience, identity.subject, identity.email, now, ttl)
+		if err != nil {
+			removeAll(paths)
+			return nil, fmt.Errorf("sign local identity %s: %w", identity.name, err)
+		}
+		path := identityTokenPath(tokenFile, identity.name)
+		if err := writePrivateFile(path, []byte(signed)); err != nil {
+			removeAll(paths)
+			return nil, fmt.Errorf("write local identity %s: %w", identity.name, err)
+		}
+		paths = append(paths, path)
+	}
+	return paths, nil
+}
+
+func removeAll(paths []string) {
+	for _, path := range paths {
+		_ = os.Remove(path)
+	}
 }
 
 func writePrivateFile(path string, contents []byte) error {

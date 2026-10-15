@@ -67,3 +67,42 @@ func TestJWKAndSignedTokenUseTheSameEphemeralKey(t *testing.T) {
 	require.Equal(t, "qa-root", claims["sub"])
 	require.Equal(t, "local-client", claims["aud"])
 }
+
+func TestIdentityFlagsParseAndRefuseRepeats(t *testing.T) {
+	var identities identityFlags
+	require.NoError(t, identities.Set("org-a:qa-org-a:org-a@local.invalid"))
+	require.NoError(t, identities.Set("org-b:qa-org-b:org-b@local.invalid"))
+	require.Equal(t, extraIdentity{name: "org-b", subject: "qa-org-b", email: "org-b@local.invalid"}, identities[1])
+	for _, bad := range []string{"org-a:qa-x:x@local.invalid", "org-c:qa-org-a:c@local.invalid", "Org C:s:e", "org-c:s", "org-c::e", "../x:s:e"} {
+		require.Error(t, identities.Set(bad), bad)
+	}
+	require.Len(t, identities, 2)
+}
+
+func TestIdentityTokensLiveNextToThePrimaryTokenWithoutOverwritingIt(t *testing.T) {
+	dir := t.TempDir()
+	token, ready := filepath.Join(dir, "id.jwt"), filepath.Join(dir, "ready.json")
+	require.Equal(t, filepath.Join(dir, "org-b.jwt"), identityTokenPath(token, "org-b"))
+	require.NoError(t, validateIdentityPaths(token, ready, "qa-root", identityFlags{{name: "org-b", subject: "qa-org-b", email: "b@local.invalid"}}))
+	require.Error(t, validateIdentityPaths(token, ready, "qa-root", identityFlags{{name: "id", subject: "qa-org-b", email: "b@local.invalid"}}))
+	require.Error(t, validateIdentityPaths(filepath.Join(dir, "x"), filepath.Join(dir, "org-b.jwt"), "qa-root", identityFlags{{name: "org-b", subject: "qa-org-b", email: "b@local.invalid"}}))
+	require.Error(t, validateIdentityPaths(token, ready, "qa-root", identityFlags{{name: "org-b", subject: "qa-root", email: "b@local.invalid"}}))
+}
+
+func TestIdentityTokensAreRemovedWhenALaterOneCannotBeWritten(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	dir := t.TempDir()
+	token := filepath.Join(dir, "id.jwt")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "org-b.jwt"), []byte("stale"), 0o600))
+	identities := identityFlags{{name: "org-a", subject: "qa-org-a", email: "a@local.invalid"}, {name: "org-b", subject: "qa-org-b", email: "b@local.invalid"}}
+	_, err = writeIdentityTokens(key, "http://127.0.0.1:19090", "local-client", token, identities, time.Now(), time.Minute)
+	require.ErrorContains(t, err, "org-b")
+	_, statErr := os.Stat(filepath.Join(dir, "org-a.jwt"))
+	require.True(t, os.IsNotExist(statErr), "the token written before the failure is removed")
+
+	require.NoError(t, os.Remove(filepath.Join(dir, "org-b.jwt")))
+	paths, err := writeIdentityTokens(key, "http://127.0.0.1:19090", "local-client", token, identities, time.Now(), time.Minute)
+	require.NoError(t, err)
+	require.Equal(t, []string{filepath.Join(dir, "org-a.jwt"), filepath.Join(dir, "org-b.jwt")}, paths)
+}
