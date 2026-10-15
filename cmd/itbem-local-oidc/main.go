@@ -119,23 +119,25 @@ func main() {
 		log.Fatalf("write local qualification token: %v", err)
 	}
 	defer os.Remove(*tokenFile)
-	for _, identity := range identities {
-		path := identityTokenPath(*tokenFile, identity.name)
-		signed, signErr := signIdentityToken(privateKey, issuerURL, strings.TrimSpace(*audience), identity.subject, identity.email, time.Now(), *tokenTTL)
-		if signErr != nil {
-			log.Fatalf("sign local identity %s: %v", identity.name, signErr)
-		}
-		if err := writePrivateFile(path, []byte(signed)); err != nil {
-			log.Fatalf("write local identity %s: %v", identity.name, err)
-		}
-		defer os.Remove(path)
+	// log.Fatalf skips deferred removals: every exit from here removes what was already written, so a
+	// failed start never leaves a token that makes the next start fail (writePrivateFile is exclusive).
+	written := []string{*tokenFile}
+	fatal := func(format string, args ...any) {
+		removeAll(written)
+		log.Fatalf(format, args...)
 	}
+	identityPaths, err := writeIdentityTokens(privateKey, issuerURL, strings.TrimSpace(*audience), *tokenFile, identities, time.Now(), *tokenTTL)
+	if err != nil {
+		fatal("%v", err)
+	}
+	written = append(written, identityPaths...)
+	defer removeAll(identityPaths)
 	ready, err := json.Marshal(readyDocument{IssuerURL: issuerURL, JWKSURL: issuerURL + "/.well-known/jwks.json"})
 	if err != nil {
-		log.Fatalf("encode local issuer metadata: %v", err)
+		fatal("encode local issuer metadata: %v", err)
 	}
 	if err := writePrivateFile(*readyFile, ready); err != nil {
-		log.Fatalf("write local issuer metadata: %v", err)
+		fatal("write local issuer metadata: %v", err)
 	}
 	defer os.Remove(*readyFile)
 
@@ -222,6 +224,32 @@ func validateIdentityPaths(tokenFile, readyFile, primarySubject string, identiti
 		}
 	}
 	return nil
+}
+
+// writeIdentityTokens signs and writes one token per extra identity. On failure it removes the ones it already
+// wrote and returns the error; on success it returns their paths for the caller to remove on exit.
+func writeIdentityTokens(privateKey *rsa.PrivateKey, issuer, audience, tokenFile string, identities identityFlags, now time.Time, ttl time.Duration) ([]string, error) {
+	var paths []string
+	for _, identity := range identities {
+		signed, err := signIdentityToken(privateKey, issuer, audience, identity.subject, identity.email, now, ttl)
+		if err != nil {
+			removeAll(paths)
+			return nil, fmt.Errorf("sign local identity %s: %w", identity.name, err)
+		}
+		path := identityTokenPath(tokenFile, identity.name)
+		if err := writePrivateFile(path, []byte(signed)); err != nil {
+			removeAll(paths)
+			return nil, fmt.Errorf("write local identity %s: %w", identity.name, err)
+		}
+		paths = append(paths, path)
+	}
+	return paths, nil
+}
+
+func removeAll(paths []string) {
+	for _, path := range paths {
+		_ = os.Remove(path)
+	}
 }
 
 func writePrivateFile(path string, contents []byte) error {
