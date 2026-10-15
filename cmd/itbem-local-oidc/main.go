@@ -139,6 +139,7 @@ func main() {
 	if err := writePrivateFile(*readyFile, ready); err != nil {
 		fatal("write local issuer metadata: %v", err)
 	}
+	written = append(written, *readyFile)
 	defer os.Remove(*readyFile)
 
 	mux := http.NewServeMux()
@@ -169,7 +170,7 @@ func main() {
 	}()
 	fmt.Printf("local OIDC qualification issuer ready at %s\n", issuerURL)
 	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatalf("serve local OIDC qualification issuer: %v", err)
+		fatal("serve local OIDC qualification issuer: %v", err)
 	}
 }
 
