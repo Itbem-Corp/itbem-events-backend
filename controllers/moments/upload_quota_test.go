@@ -156,7 +156,7 @@ func TestUploadQuota_IPBackstopStopsRotatingDeviceIDs(t *testing.T) {
 func TestUploadQuota_BackstopMultiplierEnvironment(t *testing.T) {
 	t.Setenv(UploadIPBackstopMultiplierEnvironment, "")
 	assert.Equal(t, int64(300), uploadIPBackstopLimit(30))
-	assert.Equal(t, int64(300), uploadIPBackstopLimit(0), "the default per-guest limit is 30")
+	assert.Equal(t, int64(500), uploadIPBackstopLimit(0), "the default per-guest limit is 50")
 	t.Setenv(UploadIPBackstopMultiplierEnvironment, "25")
 	assert.Equal(t, int64(750), uploadIPBackstopLimit(30))
 	for _, invalid := range []string{"0", "-3", "abc"} {

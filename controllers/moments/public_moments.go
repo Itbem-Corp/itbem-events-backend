@@ -219,8 +219,8 @@ func getEventByIdentifier(identifier string) (*models.Event, error) {
 const uploadWindowDays = 30
 
 // defaultMaxUploadsPerIP is the global fallback when EventConfig.MaxUploadsPerGuest is 0.
-// 30 = allows up to 3 batches of 10 files from the shared upload page.
-const defaultMaxUploadsPerIP = 30
+// 50 = allows up to 5 batches of 10 files from the shared upload page.
+const defaultMaxUploadsPerIP = 50
 
 var publicMomentVideoExtensions = map[string]bool{
 	".3gp":  true,

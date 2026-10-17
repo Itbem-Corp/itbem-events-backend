@@ -15,7 +15,7 @@ import (
 
 // Upload quota keys (MOM-5 / SET-7). A whole venue often shares one public IP
 // (venue Wi-Fi, mobile CGNAT), so the per-guest quota (EventConfig
-// MaxUploadsPerGuest, default 30, over a 30-day window) is keyed, in order of
+// MaxUploadsPerGuest, default 50, over a 30-day window) is keyed, in order of
 // priority, by:
 //
 //  1. the invitation, when the request carries a valid invitation token of

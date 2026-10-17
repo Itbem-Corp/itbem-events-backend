@@ -54,7 +54,7 @@ func NewDefaultEventConfig(id uuid.UUID) *models.EventConfig {
 		ShowHeader:           true,
 		ShowFooter:           true,
 		ShowEventSchedule:    true,
-		MaxUploadsPerGuest:   30,
+		MaxUploadsPerGuest:   50,
 		AutoApproveUploads:   false,
 		IsPublic:             false,
 		IsAuthPreview:        false,

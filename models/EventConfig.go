@@ -38,9 +38,9 @@ type EventConfig struct {
 	ShowMomentWall              bool            `json:"show_moment_wall"`
 	VisibilityConfigured        bool            `gorm:"default:false" json:"visibility_configured"`
 	ShareUploadsEnabled         bool            `json:"share_uploads_enabled"` // allow QR-code uploads without personal token
-	// MaxUploadsPerGuest is the per-IP upload limit for this event (default 30).
+	// MaxUploadsPerGuest is the per-IP upload limit for this event (default 50).
 	// Set to 0 to use the global default. Enables freemium differentiation.
-	MaxUploadsPerGuest int `gorm:"default:30" json:"max_uploads_per_guest"`
+	MaxUploadsPerGuest int `gorm:"default:50" json:"max_uploads_per_guest"`
 	// AutoApproveUploads automatically approves all incoming moments without admin review.
 	// Useful for trusted events or internal corporate gatherings.
 	AutoApproveUploads bool           `gorm:"default:false" json:"auto_approve_uploads"`

@@ -70,10 +70,10 @@ func TestUploadLimitReachedPayloadIncludesQuota(t *testing.T) {
 }
 
 func TestUploadLimitReachedPayloadUsesDefaultQuotaWhenLimitUnset(t *testing.T) {
-	payload := uploadLimitReachedPayload("Evento Demo", 0, 31)
+	payload := uploadLimitReachedPayload("Evento Demo", 0, 51)
 
 	assert.Equal(t, int64(defaultMaxUploadsPerIP), payload.UploadsLimit)
-	assert.Equal(t, int64(31), payload.UploadsUsed)
+	assert.Equal(t, int64(51), payload.UploadsUsed)
 	assert.Equal(t, int64(0), payload.UploadsRemaining)
 }
 

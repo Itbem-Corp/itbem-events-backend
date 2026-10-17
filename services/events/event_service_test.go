@@ -731,7 +731,7 @@ func TestNewDefaultEventConfig_MatchesDashboardDefaults(t *testing.T) {
 	assert.True(t, cfg.VisibilityConfigured)
 	assert.True(t, cfg.ShowContactSection)
 	assert.True(t, cfg.ShowEventSchedule)
-	assert.Equal(t, 30, cfg.MaxUploadsPerGuest)
+	assert.Equal(t, 50, cfg.MaxUploadsPerGuest)
 }
 
 func TestEventConfigService_GetEventConfigByID_NormalizesLegacyVisibilityDefaults(t *testing.T) {
