@@ -38,7 +38,7 @@ type PageSpecDeletedIdentifierRepository interface {
 	DeletedEventIDsByIdentifier(identifier string) ([]uuid.UUID, error)
 }
 
-const defaultPageSpecMaxUploadsPerGuest = 30
+const defaultPageSpecMaxUploadsPerGuest = 50
 
 func SetDefaultPageSpecService(svc *PageSpecService) {
 	_pageSpecSvc = svc
