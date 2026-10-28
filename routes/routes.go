@@ -238,6 +238,7 @@ func ConfigurarRutas(e *echo.Echo, cfg *models.Config) {
 	public.GET("/events/:key", events.GetEvents)
 	public.POST("/events/:identifier/view", events.TrackView)                  // Incrementa contador de vistas
 	public.POST("/events/:identifier/performance", events.TrackPerformance)    // RUM agregado, sin PII
+	public.POST("/events/:identifier/upload-timings", events.TrackUploadTimings) // tiempos de subida agregados, sin PII
 	public.POST("/events/:identifier/verify-access", events.VerifyEventAccess) // Verifica contraseña
 
 	// Public moments: read-only wall endpoint with the public body limit/rate limit.

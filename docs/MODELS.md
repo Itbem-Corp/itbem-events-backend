@@ -21,6 +21,7 @@ Event     Event          `gorm:"foreignKey:EventID" json:"event,omitempty"`
 - `Event` keeps the last completed `cover_image_url` and `cover_variants` public while a replacement is represented by `cover_pending_url`, `cover_processing_status`, `cover_processing_job_id`, and a monotonic `cover_processing_generation`.
 - Only the matching job/generation can advance `pending -> processing -> done|failed`; failure never removes the last completed cover.
 - `PublicPerformanceWindowBucket` is a global five-minute histogram keyed by window, route, metric, and fixed bucket. It contains no event, visitor, credential, IP, user-agent, or URL identifier and is pruned after 48 hours.
+- `EventUploadTimingDaily` (EV-53) is a daily per-event histogram of client-measured guest upload phase durations. Unique index `idx_event_upload_timing` on (event_id, bucket_date, phase[preview|optimize|presign|put|confirm|total], kind[photo|heic|video|other], platform[ios_safari|ios_other|android|desktop], outcome[done|error], bucket_index); fields upper_bound (ms), sample_count. No IP, user agent, file name, MIME type, size or guest data. Additive via AutoMigrate.
 
 ## Core Domain Models
 
