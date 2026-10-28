@@ -40,9 +40,14 @@ func GetEventAnalytics(c echo.Context) error {
 	var analytics *models.EventAnalytics
 	var rollup *models.EventAnalyticsRollup
 	var performance []dtos.PerformanceMetricSummary
-	var analyticsErr, rollupErr, performanceErr error
+	var uploadTimings []dtos.UploadTimingSummary
+	var analyticsErr, rollupErr, performanceErr, uploadTimingsErr error
 	var wait sync.WaitGroup
-	wait.Add(3)
+	wait.Add(4)
+	go func() {
+		defer wait.Done()
+		uploadTimings, uploadTimingsErr = loadUploadTimingSummary(eventID, 7, time.Now().UTC())
+	}()
 	go func() {
 		defer wait.Done()
 		analytics, analyticsErr = eventsService.GetEventAnalyticsBaseByEventID(eventID)
@@ -59,6 +64,13 @@ func GetEventAnalytics(c echo.Context) error {
 	if performanceErr != nil {
 		slog.Warn("performance analytics unavailable", "event_id", eventID, "error", performanceErr)
 		performance = []dtos.PerformanceMetricSummary{}
+	}
+	if uploadTimingsErr != nil {
+		slog.Warn("upload timing analytics unavailable", "event_id", eventID, "error", uploadTimingsErr)
+		uploadTimings = nil
+	}
+	if uploadTimings == nil {
+		uploadTimings = []dtos.UploadTimingSummary{}
 	}
 	if analyticsErr != nil {
 		if errors.Is(analyticsErr, gorm.ErrRecordNotFound) {
@@ -78,6 +90,7 @@ func GetEventAnalytics(c echo.Context) error {
 			response := dtos.NewEventAnalyticsResponse(analytics)
 			response.Guests = guestSummary
 			response.Performance = performance
+			response.UploadTimings = uploadTimings
 			if rollup.ComputedAt.IsZero() || time.Since(rollup.ComputedAt) >= analyticsRollupMaxAge {
 				requestAnalyticsRollup(c.Request().Context(), eventID, tenantCodeFromContext(c))
 			}
@@ -96,6 +109,7 @@ func GetEventAnalytics(c echo.Context) error {
 		return utils.Error(c, http.StatusInternalServerError, "Error fetching analytics", err.Error())
 	}
 	response.Performance = performance
+	response.UploadTimings = uploadTimings
 	requestAnalyticsRollup(c.Request().Context(), eventID, tenantCodeFromContext(c))
 	return utils.Success(c, http.StatusOK, "Analytics loaded", response)
 }

@@ -44,6 +44,7 @@ var modelsWithoutSeed = []interface{}{
 	&models.EventAnalyticsRollup{},
 	&models.EventPerformanceDaily{},
 	&models.EventPerformanceBucketDaily{},
+	&models.EventUploadTimingDaily{},
 	&models.PublicPerformanceWindowBucket{},
 	&models.User{},
 	&models.EventMember{},
