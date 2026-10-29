@@ -78,7 +78,7 @@ concurrency:
 jobs:
   harness-isolation:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: [self-hosted, Windows, X64, itbem-org-ci]
+    runs-on: windows-latest
     timeout-minutes: 5
     steps:
       - name: Check out source without persisting credentials
@@ -97,7 +97,7 @@ jobs:
 
   localstack-integration:
     if: github.event_name != 'pull_request'
-    runs-on: [self-hosted, Linux, X64, itbem-org-ci]
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     services:
       localstack:
@@ -163,7 +163,7 @@ jobs:
   build:
     needs: [harness-isolation, localstack-integration]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: [self-hosted, Linux, X64, itbem-org-ci]
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     steps:
@@ -243,7 +243,7 @@ jobs:
   artifact-replay:
     needs: build
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: [self-hosted, Linux, X64, itbem-org-ci]
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: read

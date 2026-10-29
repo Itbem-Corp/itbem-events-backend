@@ -1,6 +1,8 @@
-name: Deploy Backend to EC2
+name: Deploy Backend to Mac mini
 
 on:
+  pull_request:
+    branches: [main]
   push:
     branches:
       - main
@@ -30,7 +32,7 @@ jobs:
   validate:
     name: Build & test
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: [self-hosted, Linux, X64, itbem-org-ci]
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     outputs:
       revision: ${{ steps.revision.outputs.sha }}
@@ -47,8 +49,8 @@ jobs:
         id: revision
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Verify preinstalled libvips
-        run: pkg-config --exists vips
+      - name: Install libvips build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvips-dev pkg-config
 
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -91,6 +93,7 @@ jobs:
         run: |
           bash scripts/deploy/deploy-ec2-candidate_test.sh
           python3 -m unittest scripts/deploy/test_render_docker_env.py scripts/tests/test_rds_recovery.py
+          python3 -m unittest scripts/deploy/test_pull_mac_release.py
 
       - name: Test fail-closed alert verifier
         env:
@@ -142,461 +145,91 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  deploy:
-    name: Deploy candidate and promote
+  runtime-image:
+    name: Build and scan production image
     needs: validate
-    # Main is the production promotion lane. A manual run remains available for
-    # incident response, but still requires its explicit confirmation.
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.ref == 'refs/heads/main' && (github.event_name == 'push' ||   (github.event_name == 'workflow_dispatch' && inputs.confirm_production == true))) }}
-    runs-on: [self-hosted, Linux, X64, itbem-org-ci]
-    timeout-minutes: 45
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.validate.outputs.revision }}
+          persist-credentials: false
+      - name: Build the validated runtime image
+        env:
+          REVISION: ${{ needs.validate.outputs.revision }}
+        run: docker build --pull --build-arg "SOURCE_REVISION=$REVISION" --tag "eventiapp-api:sha-$REVISION" .
+      - name: Block high and critical runtime vulnerabilities
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          image-ref: eventiapp-api:sha-${{ needs.validate.outputs.revision }}
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          scanners: vuln
+          version: v0.69.3
+      - name: Export the scanned image
+        env:
+          REVISION: ${{ needs.validate.outputs.revision }}
+        run: |
+          set -euo pipefail
+          docker save "eventiapp-api:sha-$REVISION" | gzip -1 > "$RUNNER_TEMP/docker-image.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mac-api-runtime-${{ needs.validate.outputs.revision }}
+          path: ${{ runner.temp }}/docker-image.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+
+  deploy:
+    name: Publish and verify Mac mini release
+    needs: [validate, runtime-image]
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.confirm_production == true))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
     environment: production
     permissions:
-      contents: read
-      id-token: write
-
+      contents: write
     steps:
-      - name: Checkout validated revision
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ needs.validate.outputs.revision }}
           persist-credentials: false
           submodules: recursive
-
-      - name: Setup Go for production security preflight
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: '1.26.9'
-          cache: true
-
-      - name: Validate independent production secrets
+      - name: Record approved Linux agent artifact
         env:
-          ENV: production
-          EVENT_PREVIEW_SECRET: ${{ secrets.EVENT_PREVIEW_SECRET }}
-          EVENT_ACCESS_SECRET: ${{ secrets.EVENT_ACCESS_SECRET }}
-          INTERNAL_API_SECRET: ${{ secrets.INTERNAL_API_SECRET }}
-          ORGANIZATION_CONTEXT_SECRET: ${{ secrets.ORGANIZATION_CONTEXT_SECRET }}
-          ORGANIZATION_CONTEXT_SECRET_PREVIOUS: ${{ secrets.ORGANIZATION_CONTEXT_SECRET_PREVIOUS }}
-          INTERNAL_API_SECRET_PREVIOUS: ${{ secrets.INTERNAL_API_SECRET_PREVIOUS }}
-        run: go run ./cmd/security-preflight
-
-      - name: Record approved Linux agent release
-        env:
-          REVISION: ${{ needs.validate.outputs.revision }}
           AGENT_RELEASE_SHA256: ${{ needs.validate.outputs.agent_release_sha256 }}
         run: |
           set -euo pipefail
-          [[ "$AGENT_RELEASE_SHA256" =~ ^[a-f0-9]{64}$ ]] || {
-            echo 'Validated Linux agent digest is unavailable' >&2
-            exit 1
-          }
-          {
-            echo '### Validated Linux agent release'
-            echo
-            echo "- Source revision: \`$REVISION\`"
-            echo "- SHA-256: \`$AGENT_RELEASE_SHA256\`"
-            echo "- Artifact: \`itbem-ai-agent-release-$REVISION\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      # Build the immutable image on the runner. The EC2 host no longer clones
-      # the repository or persists a GitHub PAT in ~/.git-credentials.
-      - name: Build deployment image
-        env:
-          REVISION: ${{ needs.validate.outputs.revision }}
-          IMAGE_TAG: ${{ env.IMAGE_REPOSITORY }}:sha-${{ needs.validate.outputs.revision }}
-        run: |
-          docker build --pull --build-arg "SOURCE_REVISION=$REVISION" --tag "$IMAGE_TAG" .
-          [[ "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE_TAG")" == "$REVISION" ]]
-
-      - name: Require the provisioned production deployment boundary
-        env:
-          AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-          DB_INSTANCE_ID: ${{ vars.BACKEND_DB_INSTANCE_ID }}
-          EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
-          EC2_USER: ${{ vars.EC2_USER }}
-          EC2_HOST: ${{ vars.EC2_HOST }}
-          BACKEND_PORT: ${{ vars.BACKEND_PORT }}
-          BACKEND_CANDIDATE_PORT: ${{ vars.BACKEND_CANDIDATE_PORT || '18080' }}
-        run: |
-          set -euo pipefail
-          test -n "$AWS_DEPLOY_ROLE_ARN" || { echo "AWS_DEPLOY_ROLE_ARN environment variable is required"; exit 1; }
-          [[ "$AWS_DEPLOY_ROLE_ARN" == arn:aws*:iam::*:role/eventiapp-github-backend-production ]] || {
-            echo "AWS_DEPLOY_ROLE_ARN is not the provisioned backend production role"
-            exit 1
-          }
-          test -n "$DB_INSTANCE_ID" || { echo "BACKEND_DB_INSTANCE_ID environment variable is required"; exit 1; }
-          [[ "$EC2_INSTANCE_ID" =~ ^i-[0-9a-f]+$ ]] || { echo "EC2_INSTANCE_ID is invalid"; exit 1; }
-          [[ "$EC2_USER" =~ ^[A-Za-z_][A-Za-z0-9_-]{0,31}$ ]] || { echo "EC2_USER is invalid"; exit 1; }
-          [[ "$EC2_HOST" =~ ^[A-Za-z0-9.-]+$ ]] || { echo "EC2_HOST is invalid"; exit 1; }
-          [[ "$BACKEND_PORT" =~ ^[0-9]{2,5}$ && "$BACKEND_PORT" -le 65535 ]] || { echo "BACKEND_PORT is invalid"; exit 1; }
-          [[ "$BACKEND_CANDIDATE_PORT" =~ ^[0-9]{2,5}$ && "$BACKEND_CANDIDATE_PORT" -le 65535 ]] || { echo "BACKEND_CANDIDATE_PORT is invalid"; exit 1; }
-          [[ "$BACKEND_PORT" != "$BACKEND_CANDIDATE_PORT" ]] || { echo "candidate and production ports must differ"; exit 1; }
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@451ce2a72e8d729a59ebeaacab82dbce58e7af4c # v6
+          [[ "$AGENT_RELEASE_SHA256" =~ ^[a-f0-9]{64}$ ]]
+          echo "Validated agent artifact SHA-256: $AGENT_RELEASE_SHA256" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-          role-session-name: eventiapp-backend-${{ github.run_id }}
-          aws-region: us-east-2
-
-      - name: Require confirmed host and public-health alert routes
+          name: mac-api-runtime-${{ needs.validate.outputs.revision }}
+          path: ${{ runner.temp }}
+      - name: Load the scanned runtime image
+        run: docker load --input "$RUNNER_TEMP/docker-image.tar.gz"
+      - name: Publish the approved immutable release
+        id: release
         env:
-          BACKEND_ALERT_EMAIL: ${{ secrets.BACKEND_ALERT_EMAIL }}
-          EXPECTED_EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
-        run: |
-          set -euo pipefail
-          HOST_STACK=eventiapp-backend-prod-observability
-          HOST_INSTANCE_ID="$(aws cloudformation describe-stacks \
-            --stack-name "$HOST_STACK" \
-            --region us-east-2 \
-            --query "Stacks[0].Outputs[?OutputKey=='MonitoredEC2InstanceId'].OutputValue" \
-            --output text)"
-          [[ "$HOST_INSTANCE_ID" == "$EXPECTED_EC2_INSTANCE_ID" ]] || {
-            echo "Host alarm monitors ${HOST_INSTANCE_ID:-<missing>}, expected ${EXPECTED_EC2_INSTANCE_ID}" >&2
-            exit 1
-          }
-          HOST_TOPIC_ARN="$(aws cloudformation describe-stacks \
-            --stack-name "$HOST_STACK" \
-            --region us-east-2 \
-            --query "Stacks[0].Outputs[?OutputKey=='AlertTopicArn'].OutputValue" \
-            --output text)"
-          AWS_REGION=us-east-2 AWS_DEFAULT_REGION=us-east-2 python3 scripts/verify_alerting.py \
-            --topic-arn "$HOST_TOPIC_ARN" \
-            --email "$BACKEND_ALERT_EMAIL" \
-            --alarm-prefix "eventiapp-backend-" \
-            --alarm-suffix=-prod \
-            --expected-alarm "eventiapp-backend-ec2-system-status-prod" \
-            --expected-alarm "eventiapp-backend-ec2-instance-status-prod" \
-            --expected-alarm "eventiapp-backend-host-prod" \
-            --expected-alarm "eventiapp-backend-public-5xx-prod" \
-            --expected-alarm "eventiapp-backend-rds-free-storage-prod" \
-            --expected-alarm "eventiapp-backend-rds-connections-prod" \
-            --expected-alarm "eventiapp-backend-audit-persistence-failures-prod" \
-            --routed-alarm "eventiapp-backend-host-prod" \
-            --routed-alarm "eventiapp-backend-public-5xx-prod" \
-            --routed-alarm "eventiapp-backend-rds-free-storage-prod" \
-            --routed-alarm "eventiapp-backend-rds-connections-prod" \
-            --routed-alarm "eventiapp-backend-audit-persistence-failures-prod"
-
-          PUBLIC_STACK=eventiapp-backend-prod-public-health-observability
-          MONITORED_FQDN="$(aws cloudformation describe-stacks \
-            --stack-name "$PUBLIC_STACK" \
-            --region us-east-1 \
-            --query "Stacks[0].Outputs[?OutputKey=='MonitoredFQDN'].OutputValue" \
-            --output text)"
-          [[ "$MONITORED_FQDN" == "api.eventiapp.com.mx" ]] || {
-            echo "Public-health alarm monitors ${MONITORED_FQDN:-<missing>}, expected api.eventiapp.com.mx" >&2
-            exit 1
-          }
-          PUBLIC_TOPIC_ARN="$(aws cloudformation describe-stacks \
-            --stack-name "$PUBLIC_STACK" \
-            --region us-east-1 \
-            --query "Stacks[0].Outputs[?OutputKey=='AlertTopicArn'].OutputValue" \
-            --output text)"
-          AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 python3 scripts/verify_alerting.py \
-            --topic-arn "$PUBLIC_TOPIC_ARN" \
-            --email "$BACKEND_ALERT_EMAIL" \
-            --alarm-prefix "eventiapp-backend-public-health-" \
-            --alarm-suffix=-prod \
-            --expected-alarm "eventiapp-backend-public-health-prod" \
-            --routed-alarm "eventiapp-backend-public-health-prod"
-
-      - name: Publish immutable image to ECR
-        id: image
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/deploy/publish-mac-release.py --service api --image "eventiapp-api:sha-$GITHUB_SHA" --archive "$RUNNER_TEMP/docker-image.tar.gz"
+      - name: Wait for the Mac to promote this exact revision
+        if: steps.release.outputs.published == 'true'
         env:
           REVISION: ${{ needs.validate.outputs.revision }}
-          IMAGE_TAG: ${{ env.IMAGE_REPOSITORY }}:sha-${{ needs.validate.outputs.revision }}
         run: |
           set -euo pipefail
-          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
-          ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.us-east-2.amazonaws.com"
-          ECR_URI="${ACCOUNT_ID}.dkr.ecr.us-east-2.amazonaws.com/${IMAGE_REPOSITORY}"
-          aws ecr get-login-password --region us-east-2 | docker login --username AWS --password-stdin "$ECR_REGISTRY"
-          DIGEST="$(aws ecr describe-images \
-            --repository-name "$IMAGE_REPOSITORY" \
-            --image-ids imageTag="sha-${REVISION}" \
-            --query 'imageDetails[0].imageDigest' \
-            --output text 2>/dev/null || true)"
-          if [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]; then
-            docker pull "$ECR_URI@$DIGEST" >/dev/null
-            REMOTE_REVISION="$(docker image inspect \
-              --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
-              "$ECR_URI@$DIGEST")"
-            [[ "$REMOTE_REVISION" == "$REVISION" ]] || {
-              echo 'Existing immutable image does not identify the requested revision' >&2
-              exit 1
-            }
-            echo "Reusing verified immutable image $ECR_URI@$DIGEST"
-          else
-            docker tag "$IMAGE_TAG" "$ECR_URI:sha-${REVISION}"
-            docker push "$ECR_URI:sha-${REVISION}"
-            DIGEST="$(aws ecr describe-images --repository-name "$IMAGE_REPOSITORY" --image-ids imageTag="sha-${REVISION}" --query 'imageDetails[0].imageDigest' --output text)"
-          fi
-          [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo "ECR did not return an immutable digest" >&2; exit 1; }
-          echo "reference=${ECR_URI}@${DIGEST}" >> "$GITHUB_OUTPUT"
-
-      - name: Load runtime secret from Parameter Store
-        shell: bash
-        run: |
-          set -euo pipefail
-          redis_password="$(aws ssm get-parameter \
-            --name /eventiapp/backend/prod/redis-auth-token \
-            --with-decryption \
-            --query 'Parameter.Value' \
-            --output text)"
-          test "${#redis_password}" -ge 32
-          echo "::add-mask::$redis_password"
-          echo "REDIS_PASSWORD=$redis_password" >> "$GITHUB_ENV"
-
-      - name: Render runtime environment without shell interpolation
-        env:
-          PORT: ${{ vars.BACKEND_PORT }}
-          AWS_REGION: ${{ secrets.BACKEND_AWS_REGION }}
-          S3_REGION: ${{ secrets.BACKEND_S3_REGION }}
-          ENV: production
-          SOURCE_REVISION: ${{ needs.validate.outputs.revision }}
-          COGNITO_USER_POOL_ID: ${{ secrets.BACKEND_COGNITO_USER_POOL_ID }}
-          COGNITO_AWS_REGION: ${{ secrets.BACKEND_COGNITO_AWS_REGION }}
-          COGNITO_ALLOWED_CLIENT_IDS: ${{ secrets.BACKEND_COGNITO_ALLOWED_CLIENT_IDS }}
-          COGNITO_TENANT_CLIENT_MAP: ${{ secrets.BACKEND_COGNITO_TENANT_CLIENT_MAP }}
-          TENANT_HOST_MAP: ${{ secrets.BACKEND_TENANT_HOST_MAP }}
-          AWS_BUCKET_NAME: ${{ secrets.AWS_BUCKET_NAME }}
-          TENANT_BUCKET_MAP: ${{ secrets.BACKEND_TENANT_BUCKET_MAP }}
-          CDN_BASE_URL: ${{ secrets.CDN_BASE_URL }}
-          DB_HOST: ${{ secrets.BACKEND_DB_HOST }}
-          DB_USER: ${{ secrets.BACKEND_DB_USER }}
-          DB_PASSWORD: ${{ secrets.BACKEND_DB_PASSWORD }}
-          DB_NAME: ${{ secrets.BACKEND_DB_NAME }}
-          DB_PORT: ${{ secrets.BACKEND_DB_PORT }}
-          DB_TIMEZONE: ${{ secrets.BACKEND_DB_TIMEZONE }}
-          REDIS_HOST: ${{ secrets.BACKEND_REDIS_HOST }}
-          REDIS_DB: ${{ secrets.BACKEND_REDIS_DB }}
-          REDIS_TLS: ${{ secrets.BACKEND_REDIS_TLS }}
-          GOOGLE_CLIENT_ID: ${{ secrets.BACKEND_GOOGLE_CLIENT_ID }}
-          GOOGLE_CLIENT_SECRET: ${{ secrets.BACKEND_GOOGLE_CLIENT_SECRET }}
-          CORS_ALLOW_ORIGINS: ${{ secrets.CORS_ALLOW_ORIGINS }}
-          INTERNAL_API_SECRET: ${{ secrets.INTERNAL_API_SECRET }}
-          INTERNAL_API_SECRET_PREVIOUS: ${{ secrets.INTERNAL_API_SECRET_PREVIOUS }}
-          EVENT_PREVIEW_SECRET: ${{ secrets.EVENT_PREVIEW_SECRET }}
-          EVENT_ACCESS_SECRET: ${{ secrets.EVENT_ACCESS_SECRET }}
-          ORGANIZATION_CONTEXT_SECRET: ${{ secrets.ORGANIZATION_CONTEXT_SECRET }}
-          ORGANIZATION_CONTEXT_SECRET_PREVIOUS: ${{ secrets.ORGANIZATION_CONTEXT_SECRET_PREVIOUS }}
-          SQS_IMAGE_QUEUE_URL: ${{ secrets.SQS_IMAGE_QUEUE_URL }}
-          SQS_VIDEO_QUEUE_URL: ${{ secrets.SQS_VIDEO_QUEUE_URL }}
-          SQS_WORKER_QUEUE_URL: ${{ secrets.SQS_WORKER_QUEUE_URL }}
-          SNS_WORKER_TOPIC_ARN: ${{ secrets.SNS_WORKER_TOPIC_ARN }}
-          SQS_AUTOMATION_QUEUE_URL: ${{ secrets.SQS_AUTOMATION_QUEUE_URL }}
-          SQS_AUTOMATION_QUEUE_LANES_JSON: ${{ secrets.SQS_AUTOMATION_QUEUE_LANES_JSON }}
-          SQS_AUTOMATION_ROLE_DEAD_LETTER_QUEUE_URL: ${{ secrets.SQS_AUTOMATION_ROLE_DEAD_LETTER_QUEUE_URL }}
-          AUTOMATION_INPUT_BUCKET: ${{ secrets.AUTOMATION_INPUT_BUCKET }}
-          AUTOMATION_OUTPUT_BUCKET: ${{ secrets.AUTOMATION_OUTPUT_BUCKET }}
-          # Identifier only: provider keys remain in Secrets Manager and are
-          # resolved exclusively by the cloud inference gateway.
-          AI_PROVIDER_CREDENTIALS_SECRET_ID: ${{ vars.AI_PROVIDER_CREDENTIALS_SECRET_ID }}
-          AUTOMATION_CALLBACK_SECRET: ${{ secrets.AUTOMATION_CALLBACK_SECRET }}
-          AUTOMATION_ATTEMPT_POLICY_SIGNING_KEY: ${{ secrets.AUTOMATION_ATTEMPT_POLICY_SIGNING_KEY }}
-          AUTOMATION_ATTEMPT_POLICY_SIGNING_KEY_PREVIOUS: ${{ secrets.AUTOMATION_ATTEMPT_POLICY_SIGNING_KEY_PREVIOUS }}
-          ITBEM_GITHUB_APP_ID: ${{ secrets.ITBEM_GITHUB_APP_ID }}
-          ITBEM_GITHUB_INSTALLATION_IDS: ${{ secrets.ITBEM_GITHUB_INSTALLATION_IDS }}
-          ITBEM_GITHUB_APP_PRIVATE_KEY: ${{ secrets.ITBEM_GITHUB_APP_PRIVATE_KEY }}
-          ITBEM_GITHUB_SOURCE_APP_ID: ${{ secrets.ITBEM_GITHUB_SOURCE_APP_ID }}
-          ITBEM_GITHUB_SOURCE_INSTALLATION_IDS: ${{ secrets.ITBEM_GITHUB_SOURCE_INSTALLATION_IDS }}
-          ITBEM_GITHUB_SOURCE_APP_PRIVATE_KEY: ${{ secrets.ITBEM_GITHUB_SOURCE_APP_PRIVATE_KEY }}
-          ITBEM_GITHUB_REVIEW_WEBHOOK_SECRET: ${{ secrets.ITBEM_GITHUB_REVIEW_WEBHOOK_SECRET }}
-          ITBEM_GITHUB_REVIEW_REPOSITORIES: ${{ secrets.ITBEM_GITHUB_REVIEW_REPOSITORIES }}
-          GITHUB_REVIEW_WEBHOOK_SECRET: ${{ secrets.ITBEM_GITHUB_REVIEW_WEBHOOK_SECRET }}
-          GITHUB_REVIEW_REPOSITORIES: ${{ secrets.ITBEM_GITHUB_REVIEW_REPOSITORIES }}
-          # These are non-secret server-owned settings. They are passed through
-          # the same reviewed runtime env file so production reserves the exact
-          # provider/model and catalog used by local control-plane admission.
-          AUTOMATION_PRICING_JSON: ${{ vars.AUTOMATION_PRICING_JSON }}
-          AUTOMATION_PROVIDER_CATALOG_SYNC_HOURS: ${{ vars.AUTOMATION_PROVIDER_CATALOG_SYNC_HOURS }}
-          AUTOMATION_BUDGET_PROVIDER: ${{ vars.AUTOMATION_BUDGET_PROVIDER }}
-          AUTOMATION_BUDGET_MODEL: ${{ vars.AUTOMATION_BUDGET_MODEL }}
-          AUTOMATION_WORKSPACE_CATALOG_POLICY_JSON: ${{ vars.AUTOMATION_WORKSPACE_CATALOG_POLICY_JSON }}
-          # EventiApp event clients kill switch (on|off; unset = off). Toggle by
-          # changing the repository variable and re-running this deploy.
-          EVENT_CLIENT_ACCESS: ${{ vars.EVENT_CLIENT_ACCESS }}
-          # Authorization rollout flags (off|shadow|enforce; unset = off).
-          # Toggle = change the repository variable and re-run this deploy.
-          AUTHZ_PRODUCT_ENTITLEMENT: ${{ vars.AUTHZ_PRODUCT_ENTITLEMENT }}
-          AUTHZ_POLICY_CEILING: ${{ vars.AUTHZ_POLICY_CEILING }}
-        run: |
-          set -euo pipefail
-          if [[ -n "$SQS_AUTOMATION_QUEUE_URL" && -z "$AI_PROVIDER_CREDENTIALS_SECRET_ID" ]]; then
-            echo "AI_PROVIDER_CREDENTIALS_SECRET_ID is required whenever the deployed automation queue is enabled." >&2
-            exit 1
-          fi
-
-          LOCAL_ENV_FILE="${RUNNER_TEMP}/eventiapp-backend-${GITHUB_RUN_ID}.env"
-          python3 scripts/deploy/render_docker_env.py \
-            --output "$LOCAL_ENV_FILE" \
-            --required PORT \
-            --required AWS_REGION \
-            --required S3_REGION \
-            --required ENV \
-            --required SOURCE_REVISION \
-            --required COGNITO_USER_POOL_ID \
-            --required COGNITO_AWS_REGION \
-            --required AWS_BUCKET_NAME \
-            --required TENANT_BUCKET_MAP \
-            --required DB_HOST \
-            --required DB_USER \
-            --required DB_PASSWORD \
-            --required DB_NAME \
-            --required DB_PORT \
-            --required DB_TIMEZONE \
-            --required REDIS_HOST \
-            --required REDIS_DB \
-            --required REDIS_TLS \
-            --required GOOGLE_CLIENT_ID \
-            --required GOOGLE_CLIENT_SECRET \
-            --required INTERNAL_API_SECRET \
-            --required EVENT_PREVIEW_SECRET \
-            --required EVENT_ACCESS_SECRET \
-            --required ORGANIZATION_CONTEXT_SECRET \
-            --optional ORGANIZATION_CONTEXT_SECRET_PREVIOUS \
-            --required SQS_IMAGE_QUEUE_URL \
-            --required SQS_VIDEO_QUEUE_URL \
-            --required COGNITO_ALLOWED_CLIENT_IDS \
-            --required COGNITO_TENANT_CLIENT_MAP \
-            --required TENANT_HOST_MAP \
-            --optional CDN_BASE_URL \
-            --optional CORS_ALLOW_ORIGINS \
-            --optional REDIS_PASSWORD \
-            --optional INTERNAL_API_SECRET_PREVIOUS \
-            --optional SQS_WORKER_QUEUE_URL \
-            --required SQS_AUTOMATION_QUEUE_URL \
-            --required SQS_AUTOMATION_QUEUE_LANES_JSON \
-            --required SQS_AUTOMATION_ROLE_DEAD_LETTER_QUEUE_URL \
-            --required AUTOMATION_INPUT_BUCKET \
-            --required AUTOMATION_OUTPUT_BUCKET \
-            --required AUTOMATION_CALLBACK_SECRET \
-            --required AUTOMATION_ATTEMPT_POLICY_SIGNING_KEY \
-            --optional AUTOMATION_ATTEMPT_POLICY_SIGNING_KEY_PREVIOUS \
-            --required ITBEM_GITHUB_APP_ID \
-            --required ITBEM_GITHUB_INSTALLATION_IDS \
-            --required ITBEM_GITHUB_APP_PRIVATE_KEY \
-            --required ITBEM_GITHUB_SOURCE_APP_ID \
-            --required ITBEM_GITHUB_SOURCE_INSTALLATION_IDS \
-            --required ITBEM_GITHUB_SOURCE_APP_PRIVATE_KEY \
-            --required GITHUB_REVIEW_WEBHOOK_SECRET \
-            --required GITHUB_REVIEW_REPOSITORIES \
-            --optional AI_PROVIDER_CREDENTIALS_SECRET_ID \
-            --optional AUTOMATION_PRICING_JSON \
-            --optional AUTOMATION_PROVIDER_CATALOG_SYNC_HOURS \
-            --optional AUTOMATION_BUDGET_PROVIDER \
-            --optional AUTOMATION_BUDGET_MODEL \
-            --optional AUTOMATION_WORKSPACE_CATALOG_POLICY_JSON \
-            --optional EVENT_CLIENT_ACCESS \
-            --optional AUTHZ_PRODUCT_ENTITLEMENT \
-            --optional AUTHZ_POLICY_CEILING \
-            --required SNS_WORKER_TOPIC_ARN
-
-      - name: Verify existing automated database recovery coverage
-        env:
-          DB_INSTANCE_ID: ${{ vars.BACKEND_DB_INSTANCE_ID }}
-        run: python3 scripts/deploy/verify_rds_recovery.py --db-instance-id "$DB_INSTANCE_ID" --region us-east-2
-
-      - name: Deploy through SSM, health-gate promotion, and rollback on failure
-        env:
-          REVISION: ${{ needs.validate.outputs.revision }}
-          IMAGE_REFERENCE: ${{ steps.image.outputs.reference }}
-          BACKEND_PORT: ${{ vars.BACKEND_PORT }}
-          BACKEND_CANDIDATE_PORT: ${{ vars.BACKEND_CANDIDATE_PORT || '18080' }}
-          DELIVERY_BUCKET: eventiapp-backend-delivery-752279076974-us-east-2
-        run: |
-          set -euo pipefail
-          LOCAL_ENV_FILE="${RUNNER_TEMP}/eventiapp-backend-${GITHUB_RUN_ID}.env"
-          test -r "$LOCAL_ENV_FILE" || { echo "rendered runtime environment is missing"; exit 1; }
-          PREFIX="releases/${GITHUB_RUN_ID}"
-          ENV_KEY="${PREFIX}/runtime.env"
-          SCRIPT_KEY="${PREFIX}/deploy-ec2-candidate.sh"
-          aws s3 cp "$LOCAL_ENV_FILE" "s3://${DELIVERY_BUCKET}/${ENV_KEY}" --only-show-errors
-          aws s3 cp scripts/deploy/deploy-ec2-candidate.sh "s3://${DELIVERY_BUCKET}/${SCRIPT_KEY}" --only-show-errors
-          remote_script="$(cat <<REMOTE
-          set -Eeuo pipefail
-          deploy_dir='/var/lib/eventiapp-deploy/${GITHUB_RUN_ID}'
-          install -d -m 700 "\$deploy_dir"
-          trap 'rm -rf "\$deploy_dir"' EXIT
-          aws s3 cp 's3://${DELIVERY_BUCKET}/${ENV_KEY}' "\$deploy_dir/runtime.env" --only-show-errors
-          aws s3 cp 's3://${DELIVERY_BUCKET}/${SCRIPT_KEY}' "\$deploy_dir/deploy.sh" --only-show-errors
-          chmod 600 "\$deploy_dir/runtime.env"
-          chmod 700 "\$deploy_dir/deploy.sh"
-          command -v docker >/dev/null 2>&1 || sudo yum install -y docker
-          command -v curl >/dev/null 2>&1 || sudo yum install -y curl
-          command -v python3 >/dev/null 2>&1 || sudo yum install -y python3
-          sudo systemctl enable --now docker
-          ECR_REGISTRY="${IMAGE_REFERENCE%%/*}"
-          aws ecr get-login-password --region us-east-2 | sudo docker login --username AWS --password-stdin "\$ECR_REGISTRY"
-          sudo docker pull '${IMAGE_REFERENCE}'
-          IMAGE_TAG='${IMAGE_REFERENCE}' BACKEND_PORT='${BACKEND_PORT}' CANDIDATE_PORT='${BACKEND_CANDIDATE_PORT}' DEPLOY_ID='${GITHUB_RUN_ID}' ENV_FILE="\$deploy_dir/runtime.env" AWS_REGION='us-east-2' LOG_GROUP='/ec2/eventiapp-backend/prod' INSTANCE_ID='${{ vars.EC2_INSTANCE_ID }}' bash "\$deploy_dir/deploy.sh"
-          deployed_revision="\$(sudo docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' itbem-events-backend)"
-          [[ "\$deployed_revision" == '${REVISION}' ]]
-          printf 'deployed_revision=%s\n' "\$deployed_revision"
-          REMOTE
-          )"
-          remote_payload="$(printf '%s' "$remote_script" | base64 -w 0)"
-          [[ "$remote_payload" =~ ^[A-Za-z0-9+/]+={0,2}$ ]] || {
-            echo 'Could not encode the remote deployment command' >&2
-            exit 1
-          }
-          ssm_command="echo '$remote_payload' | base64 --decode | bash"
-          ssm_parameters="$(jq -cn --arg command "$ssm_command" '{commands: [$command]}')"
-          command_id="$(aws ssm send-command \
-            --instance-ids '${{ vars.EC2_INSTANCE_ID }}' \
-            --document-name AWS-RunShellScript \
-            --comment "EventiApp backend ${GITHUB_RUN_ID}" \
-            --parameters "$ssm_parameters" \
-            --timeout-seconds 1800 \
-            --query 'Command.CommandId' --output text)"
-          # The AWS CLI's built-in command-executed waiter gives up after
-          # roughly 100 seconds, while an image pull plus a candidate health
-          # gate may legitimately take longer. Poll explicitly up to the same
-          # 30-minute bound passed to SSM and preserve output on every terminal
-          # outcome.
-          for attempt in {1..180}; do
-            command_status="$(aws ssm get-command-invocation \
-              --command-id "$command_id" \
-              --instance-id '${{ vars.EC2_INSTANCE_ID }}' \
-              --query Status \
-              --output text 2>/dev/null || true)"
-            case "$command_status" in
-              Success)
-                break
-                ;;
-              Pending|InProgress|Delayed|"")
-                sleep 10
-                ;;
-              *)
-                aws ssm get-command-invocation --command-id "$command_id" --instance-id '${{ vars.EC2_INSTANCE_ID }}' \
-                  --query '{status:Status,stdout:StandardOutputContent,stderr:StandardErrorContent}' --output json
-                exit 1
-                ;;
-            esac
+          for attempt in {1..120}; do
+            ready=true
+            for domain in eventiapp.com.mx itbem.com.mx cafettonhouse.com; do
+              if ! curl --fail --silent --show-error --max-time 10 "https://api.$domain/health" |
+                jq -e --arg revision "$REVISION" '.data | .db == "ok" and .redis == "ok" and .environment == "production" and .source_revision == $revision' >/dev/null; then
+                ready=false
+              fi
+            done
+            if [[ "$ready" == true ]]; then exit 0; fi
+            sleep 5
           done
-          [[ "$command_status" == Success ]] || {
-            echo "SSM command did not complete within 30 minutes" >&2
-            aws ssm get-command-invocation --command-id "$command_id" --instance-id '${{ vars.EC2_INSTANCE_ID }}' \
-              --query '{status:Status,stdout:StandardOutputContent,stderr:StandardErrorContent}' --output json || true
-            exit 1
-          }
-          invocation_output="$(aws ssm get-command-invocation --command-id "$command_id" --instance-id '${{ vars.EC2_INSTANCE_ID }}' --query StandardOutputContent --output text)"
-          invocation_error="$(aws ssm get-command-invocation --command-id "$command_id" --instance-id '${{ vars.EC2_INSTANCE_ID }}' --query StandardErrorContent --output text)"
-          printf '%s\n' "$invocation_output"
-          [[ -z "$invocation_error" || "$invocation_error" == None ]] || printf '%s\n' "$invocation_error" >&2
-          grep -Fqx "deployed_revision=$REVISION" <<<"$invocation_output"
-
-      - name: Verify GitHub review webhook delivery
-        env:
-          ITBEM_GITHUB_APP_ID: ${{ secrets.ITBEM_GITHUB_APP_ID }}
-          ITBEM_GITHUB_APP_PRIVATE_KEY: ${{ secrets.ITBEM_GITHUB_APP_PRIVATE_KEY }}
-        run: python3 scripts/deploy/verify_github_app_webhook.py
-
-      - name: Remove ephemeral delivery artifacts
-        if: always()
-        run: |
-          rm -f "${RUNNER_TEMP}/eventiapp-backend-${GITHUB_RUN_ID}.env"
-          prefix="s3://eventiapp-backend-delivery-752279076974-us-east-2/releases/${GITHUB_RUN_ID}"
-          aws s3 rm "$prefix/runtime.env" --only-show-errors || true
-          aws s3 rm "$prefix/deploy.sh" --only-show-errors || true
+          echo 'The Mac has not confirmed this revision. Check its pull-deploy status and rollback log.' >&2
+          exit 1

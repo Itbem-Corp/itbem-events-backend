@@ -13,7 +13,7 @@ permissions:
 jobs:
   sbom:
     if: github.event_name != 'pull_request'
-    runs-on: [self-hosted, Linux, X64, itbem-org-ci]
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -32,7 +32,7 @@ jobs:
 
   analyze:
     if: github.event_name != 'pull_request'
-    runs-on: [self-hosted, Linux, X64, itbem-org-ci]
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
       actions: read
@@ -43,6 +43,8 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvips-dev pkg-config
       - uses: github/codeql-action/init@bce182f857edf1feab116e9795a3393d21977282 # v4
         with:
           languages: go

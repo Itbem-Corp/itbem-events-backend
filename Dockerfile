@@ -14,7 +14,7 @@ RUN go mod download
 
 COPY . ./
 
-RUN go build -v -trimpath -ldflags="-s -w" -o main ./cmd/api | tee /dev/stderr
+RUN go build -v -trimpath -ldflags="-s -w" -o main ./cmd/api
 
 # ---------- Etapa de ejecución ----------
 FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
