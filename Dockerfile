@@ -24,6 +24,7 @@ LABEL org.opencontainers.image.revision=$SOURCE_REVISION
 
 RUN apt-get -o Acquire::Retries=3 update && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
     libvips curl ca-certificates git util-linux && \
+    apt-get -o Acquire::Retries=3 upgrade -y && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

@@ -94,6 +94,7 @@ jobs:
           bash scripts/deploy/deploy-ec2-candidate_test.sh
           python3 -m unittest scripts/deploy/test_render_docker_env.py scripts/tests/test_rds_recovery.py
           python3 -m unittest scripts/deploy/test_pull_mac_release.py
+          python3 -m unittest scripts/deploy/test_runtime_findings.py
 
       - name: Test fail-closed alert verifier
         env:
@@ -159,14 +160,25 @@ jobs:
         env:
           REVISION: ${{ needs.validate.outputs.revision }}
         run: docker build --pull --build-arg "SOURCE_REVISION=$REVISION" --tag "eventiapp-api:sha-$REVISION" .
-      - name: Block high and critical runtime vulnerabilities
+      - name: Scan all high and critical runtime vulnerabilities
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
         with:
           image-ref: eventiapp-api:sha-${{ needs.validate.outputs.revision }}
           severity: HIGH,CRITICAL
-          exit-code: '1'
+          exit-code: '0'
+          format: json
+          output: ${{ runner.temp }}/runtime-vulnerabilities.json
           scanners: vuln
           version: v0.69.3
+      - name: Block high and critical findings with available fixes
+        run: python3 scripts/deploy/check-runtime-findings.py "$RUNNER_TEMP/runtime-vulnerabilities.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: runtime-vulnerability-report-${{ needs.validate.outputs.revision }}
+          path: ${{ runner.temp }}/runtime-vulnerabilities.json
+          if-no-files-found: error
+          retention-days: 7
       - name: Export the scanned image
         env:
           REVISION: ${{ needs.validate.outputs.revision }}
