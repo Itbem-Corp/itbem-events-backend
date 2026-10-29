@@ -1,5 +1,5 @@
 """Publish an immutable, digest-bound container archive for the Mac pull deployer."""
-import argparse, datetime, hashlib, json, os, pathlib, re, subprocess, urllib.error, urllib.request
+import argparse, datetime, hashlib, json, os, pathlib, re, subprocess, tarfile, urllib.error, urllib.request
 
 API = 'https://api.github.com'
 
@@ -37,11 +37,20 @@ def main():
         for chunk in iter(lambda: archive.read(1024 * 1024), b''): digest.update(chunk)
     size = args.archive.stat().st_size
     if not 0 < size <= 1024**3: raise RuntimeError('Container archive exceeds release limit')
+    with tarfile.open(args.archive, 'r:*') as archive:
+        entry = archive.getmember('manifest.json')
+        if not entry.isfile() or entry.size > 65536: raise RuntimeError('Invalid Docker archive manifest')
+        images = json.load(archive.extractfile(entry))
+        if len(images) != 1 or images[0].get('RepoTags') != [args.image]: raise RuntimeError('Archive image tag mismatch')
+        entry = archive.getmember(images[0]['Config'])
+        if not entry.isfile() or not 0 < entry.size <= 4 * 1024 * 1024: raise RuntimeError('Invalid image configuration')
+        config_digest = 'sha256:' + hashlib.sha256(archive.extractfile(entry).read()).hexdigest()
     run_id = os.environ['GITHUB_RUN_ID']; attempt = os.environ['GITHUB_RUN_ATTEMPT']
     if not run_id.isdigit() or not attempt.isdigit(): raise RuntimeError('Invalid workflow identity')
     tag = 'mac-' + args.service + '-' + revision + '-' + run_id + '-' + attempt
     manifest = {'schema_version': 1, 'service': args.service, 'repository': repo,
                 'source_revision': revision, 'image_tag': args.image, 'image_id': image['Id'],
+                'image_config_digest': config_digest,
                 'archive_sha256': digest.hexdigest(), 'archive_size': size,
                 'platform': 'linux/amd64', 'workflow_run_id': int(run_id),
                 'workflow_run_attempt': int(attempt), 'release_tag': tag}

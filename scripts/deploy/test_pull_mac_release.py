@@ -1,4 +1,4 @@
-import importlib.util, json, pathlib, tempfile, unittest, urllib.request
+import hashlib, importlib.util, io, json, pathlib, tarfile, tempfile, unittest, urllib.request
 from unittest import mock
 
 spec = importlib.util.spec_from_file_location('pull_release', pathlib.Path(__file__).with_name('pull-mac-release.py'))
@@ -9,7 +9,7 @@ class PullReleaseTests(unittest.TestCase):
         revision = 'a' * 40
         tag = 'mac-api-' + revision + '-123-1'
         manifest = {'schema_version': 1, 'service': 'api', 'repository': pull.SERVICES['api'],
-                    'source_revision': revision, 'platform': 'linux/amd64', 'image_id': 'sha256:' + 'b' * 64,
+                    'source_revision': revision, 'image_tag': 'eventiapp-api:sha-' + revision, 'platform': 'linux/amd64', 'image_id': 'sha256:' + 'b' * 64,
                     'archive_sha256': 'c' * 64, 'archive_size': 1024, 'workflow_run_id': 123,
                     'workflow_run_attempt': 1, 'release_tag': tag}
         return manifest, {'tag_name': tag, 'draft': False, 'prerelease': False}, revision
@@ -37,7 +37,7 @@ class PullReleaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory); original = b'API_IMAGE=old-image\nAPI_REVISION=' + b'd' * 40 + b'\nWORKERS_IMAGE=keep-workers\n'
             (root/'.env').write_bytes(original)
-            image = {'Architecture': 'amd64', 'Os': 'linux', 'Config': {'User': 'appuser', 'Labels': {'org.opencontainers.image.revision': manifest['source_revision']}}}
+            image = {'Id': 'sha256:' + 'f' * 64, 'Architecture': 'amd64', 'Os': 'linux', 'Config': {'User': 'appuser', 'Labels': {'org.opencontainers.image.revision': manifest['source_revision']}}}
             with mock.patch.object(pull, 'ROOT', root), mock.patch.object(pull.subprocess, 'check_output', return_value=json.dumps([image]).encode()), mock.patch.object(pull.subprocess, 'run'), mock.patch.object(pull, 'compose') as compose, mock.patch.object(pull, 'wait_healthy', side_effect=[False, True]) as ready:
                 with self.assertRaisesRegex(RuntimeError, 'previous image restored and healthy'): pull.promote('api', manifest)
                 self.assertEqual((root/'.env').read_bytes(), original)
@@ -46,7 +46,7 @@ class PullReleaseTests(unittest.TestCase):
 
     def test_loaded_image_with_wrong_revision_never_changes_configuration(self):
         manifest, _, _ = self.fixture()
-        wrong = {'Architecture': 'amd64', 'Os': 'linux', 'Config': {'User': 'appuser', 'Labels': {'org.opencontainers.image.revision': 'e' * 40}}}
+        wrong = {'Id': 'sha256:' + 'f' * 64, 'Architecture': 'amd64', 'Os': 'linux', 'Config': {'User': 'appuser', 'Labels': {'org.opencontainers.image.revision': 'e' * 40}}}
         with mock.patch.object(pull.subprocess, 'check_output', return_value=json.dumps([wrong]).encode()), mock.patch.object(pull, 'private_write') as write:
             with self.assertRaises(RuntimeError): pull.promote('api', manifest)
             write.assert_not_called()
@@ -61,7 +61,7 @@ class PullReleaseTests(unittest.TestCase):
                          'secrets/ai-provider/credentials.json': b'{"schema_version":2,"credentials":{"minimax":{"api_key":"synthetic-only"}}}'}
             for name, value in protected.items():
                 (root/name).write_bytes(value); (root/name).chmod(0o600)
-            image = {'Architecture': 'amd64', 'Os': 'linux', 'Config': {'User': 'appuser', 'Labels': {'org.opencontainers.image.revision': revision}}}
+            image = {'Id': 'sha256:' + 'f' * 64, 'Architecture': 'amd64', 'Os': 'linux', 'Config': {'User': 'appuser', 'Labels': {'org.opencontainers.image.revision': revision}}}
             with mock.patch.object(pull, 'ROOT', root), mock.patch.object(pull.subprocess, 'check_output', return_value=json.dumps([image]).encode()), mock.patch.object(pull.subprocess, 'run'), mock.patch.object(pull, 'compose'), mock.patch.object(pull, 'wait_healthy', return_value=True):
                 active = pull.promote('api', manifest)
             self.assertEqual(active['revision'], revision)
@@ -96,5 +96,49 @@ class PullReleaseTests(unittest.TestCase):
         with mock.patch.object(pull, 'GitHub', return_value=fake):
             self.assertEqual(pull.poll('api', {}, {'api': {'rejected_release_id': 7}}), 'rejected release held')
             fake.asset.assert_not_called()
+
+    def archive_fixture(self, directory):
+        manifest, _, revision = self.fixture()
+        config = {'architecture': 'amd64', 'os': 'linux', 'rootfs': {'diff_ids': ['sha256:' + '1' * 64]},
+                  'config': {'User': 'appuser', 'Labels': {'org.opencontainers.image.revision': revision}}}
+        raw = json.dumps(config).encode(); manifest['image_id'] = 'sha256:' + hashlib.sha256(raw).hexdigest()
+        archive = pathlib.Path(directory)/'image.tar.gz'
+        def write(tags, config_bytes=raw):
+            with tarfile.open(archive, 'w:gz') as output:
+                for name, value in [('manifest.json', json.dumps([{'Config': 'config.json', 'RepoTags': tags}]).encode()), ('config.json', config_bytes)]:
+                    member = tarfile.TarInfo(name); member.size = len(value)
+                    output.addfile(member, io.BytesIO(value))
+        write([manifest['image_tag']])
+        return manifest, config, archive, write
+
+    def test_classic_config_digest_and_containerd_native_id_are_both_verified(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            manifest, config, archive, _ = self.archive_fixture(directory)
+            verified = pull.validate_archive(archive, manifest)
+            native_id = 'sha256:' + 'f' * 64
+            self.assertNotEqual(native_id, manifest['image_id'])
+            (root/'.env').write_text('API_IMAGE=old\nAPI_REVISION=' + 'd' * 40 + '\n')
+            image = {'Id': native_id, 'Architecture': 'amd64', 'Os': 'linux', 'RootFS': {'Layers': config['rootfs']['diff_ids']}, 'Config': config['config']}
+            with mock.patch.object(pull, 'ROOT', root), mock.patch.object(pull.subprocess, 'check_output', return_value=json.dumps([image]).encode()) as inspect, mock.patch.object(pull.subprocess, 'run'), mock.patch.object(pull, 'compose'), mock.patch.object(pull, 'wait_healthy', return_value=True):
+                active = pull.promote('api', manifest, verified)
+                self.assertEqual(inspect.call_args.args[0][-1], manifest['image_tag'])
+            self.assertEqual(active['image_id'], native_id)
+            self.assertIn('API_IMAGE=' + native_id, (root/'.env').read_text())
+
+    def test_archive_configuration_or_tag_tampering_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest, _, archive, write = self.archive_fixture(directory)
+            write(['wrong:tag'])
+            with self.assertRaisesRegex(RuntimeError, 'tag mismatch'): pull.validate_archive(archive, manifest)
+            write([manifest['image_tag']], b'{"modified":true}')
+            with self.assertRaisesRegex(RuntimeError, 'digest mismatch'): pull.validate_archive(archive, manifest)
+
+    def test_loaded_filesystem_must_match_the_verified_config(self):
+        manifest, _, _ = self.fixture()
+        image = {'Id': 'sha256:' + 'f' * 64, 'RootFS': {'Layers': ['unexpected']}}
+        with mock.patch.object(pull.subprocess, 'check_output', return_value=json.dumps([image]).encode()), mock.patch.object(pull, 'private_write') as write:
+            with self.assertRaisesRegex(RuntimeError, 'filesystem'): pull.promote('api', manifest, {'rootfs': {'diff_ids': ['expected']}})
+            write.assert_not_called()
 
 if __name__ == '__main__': unittest.main()
