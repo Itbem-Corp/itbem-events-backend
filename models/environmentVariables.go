@@ -31,6 +31,9 @@ type Config struct {
 	// Map format: "client-id=eventiapp,other-client-id=itbem".
 	CognitoAllowedClientIds string `required:"false"`
 	CognitoTenantClientMap  string `required:"false"`
+	// CognitoTenantPools maps product codes to dedicated poolId/clientId pairs.
+	// Legacy app clients retain their original pool during gradual migration.
+	CognitoTenantPools string `required:"false"`
 	// OIDCIssuerURL and OIDCJWKSURL permit a disposable, signed identity
 	// provider during isolated local qualification. They are accepted only
 	// when ENV=local and both URLs resolve to loopback. Deployed environments

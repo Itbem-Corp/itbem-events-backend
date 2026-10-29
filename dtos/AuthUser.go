@@ -15,6 +15,8 @@ type AuthUser struct {
 	Username      string
 	Status        string
 	EmailVerified bool
+	// LegacySub is assigned only by the trusted cross-pool migration bridge.
+	LegacySub string
 }
 
 // CreateAuthUserRequest (Petición) 👈 Necesitas esto
