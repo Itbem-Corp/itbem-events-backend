@@ -1,5 +1,5 @@
 """Pull approved GitHub releases. No job executor, listener, or runner runs here."""
-import argparse, base64, fcntl, hashlib, json, os, pathlib, re, subprocess, tempfile, time, urllib.error, urllib.parse, urllib.request
+import argparse, base64, fcntl, hashlib, json, os, pathlib, re, subprocess, tarfile, tempfile, time, urllib.error, urllib.parse, urllib.request
 
 ROOT = pathlib.Path('/home/andbema/eventiapp')
 SERVICES = {'api': 'Itbem-Corp/itbem-events-backend', 'workers': 'Itbem-Corp/itbem-events-workers'}
@@ -82,12 +82,33 @@ def validate_manifest(manifest, release, service, current_main):
     if not SHA.fullmatch(revision) or revision != current_main: raise RuntimeError('Release is not the current main revision')
     if manifest.get('platform') != 'linux/amd64' or not IMAGE.fullmatch(manifest.get('image_id', '')):
         raise RuntimeError('Release image identity mismatch')
+    expected_tag = 'eventiapp-' + service + ':sha-' + revision
+    if manifest.get('image_tag') != expected_tag or not IMAGE.fullmatch(manifest.get('image_config_digest', manifest['image_id'])):
+        raise RuntimeError('Release image tag or configuration identity mismatch')
     if not re.fullmatch('[a-f0-9]{64}', manifest.get('archive_sha256', '')) or not 0 < manifest.get('archive_size', 0) <= 1024**3:
         raise RuntimeError('Invalid release archive digest or size')
     expected = 'mac-' + service + '-' + revision + '-' + str(manifest.get('workflow_run_id')) + '-' + str(manifest.get('workflow_run_attempt'))
     if not re.fullmatch(r'mac-' + service + r'-[a-f0-9]{40}-[0-9]+-[0-9]+', expected) or release.get('tag_name') != expected or manifest.get('release_tag') != expected:
         raise RuntimeError('Release tag does not identify its source and workflow')
     if release.get('draft') or release.get('prerelease'): raise RuntimeError('Unapproved release')
+
+def validate_archive(path, manifest):
+    # Docker's classic store identifies an image by its config digest; the
+    # containerd store may expose an OCI manifest/index ID instead. Bind the
+    # transport to the canonical config bytes, then use the loaded native ID.
+    with tarfile.open(path, 'r:*') as archive:
+        entry = archive.getmember('manifest.json')
+        if not entry.isfile() or entry.size > 65536: raise RuntimeError('Invalid Docker archive manifest')
+        images = json.load(archive.extractfile(entry))
+        if len(images) != 1 or images[0].get('RepoTags') != [manifest['image_tag']]:
+            raise RuntimeError('Docker archive tag mismatch')
+        entry = archive.getmember(images[0]['Config'])
+        if not entry.isfile() or not 0 < entry.size <= 4 * 1024 * 1024: raise RuntimeError('Invalid image configuration')
+        raw = archive.extractfile(entry).read()
+        digest = 'sha256:' + hashlib.sha256(raw).hexdigest()
+        if digest != manifest.get('image_config_digest', manifest['image_id']):
+            raise RuntimeError('Docker archive configuration digest mismatch')
+        return json.loads(raw)
 
 def compose(service):
     subprocess.run(['docker', 'compose', '--profile', 'application', 'up', '-d', '--no-deps', service], cwd=ROOT, check=True, timeout=420, stdout=subprocess.DEVNULL)
@@ -125,9 +146,13 @@ def wait_healthy(service, revision):
         time.sleep(3)
     return False
 
-def promote(service, manifest):
-    image_id = manifest['image_id']; revision = manifest['source_revision']
-    image = json.loads(subprocess.check_output(['docker', 'image', 'inspect', image_id]))[0]
+def promote(service, manifest, archive_config=None):
+    revision = manifest['source_revision']
+    image = json.loads(subprocess.check_output(['docker', 'image', 'inspect', manifest['image_tag']]))[0]
+    image_id = image['Id']
+    if not IMAGE.fullmatch(image_id): raise RuntimeError('Loaded image ID is invalid')
+    if archive_config is not None and image.get('RootFS', {}).get('Layers') != archive_config.get('rootfs', {}).get('diff_ids'):
+        raise RuntimeError('Loaded filesystem does not match the verified archive')
     if image['Architecture'] != 'amd64' or image['Os'] != 'linux' or image['Config'].get('Labels', {}).get('org.opencontainers.image.revision') != revision:
         raise RuntimeError('Loaded image does not match validated release')
     expected_user = 'appuser' if service == 'api' else '10001:10001'
@@ -178,9 +203,10 @@ def poll(service, config, state, retry=False, check=False):
                 raise RuntimeError('Release archive checksum mismatch')
             # Main may advance while downloading: never promote a stale build.
             if github.json(base + '/git/ref/heads/main')['object']['sha'] != main_sha: return 'release superseded while downloading'
-            subprocess.run(['docker', 'image', 'load', '--input', str(archive)], check=True, stdout=subprocess.DEVNULL, timeout=240)
             hold_release = True
-            active = promote(service, manifest)
+            archive_config = validate_archive(archive, manifest)
+            subprocess.run(['docker', 'image', 'load', '--input', str(archive)], check=True, stdout=subprocess.DEVNULL, timeout=240)
+            active = promote(service, manifest, archive_config)
         state[service] = {**active, 'release_id': release['id'], 'deployed_at': int(time.time()), 'status': 'healthy'}
         return 'deployed ' + main_sha
     except Exception:
