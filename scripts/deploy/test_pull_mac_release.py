@@ -51,6 +51,45 @@ class PullReleaseTests(unittest.TestCase):
             with self.assertRaises(RuntimeError): pull.promote('api', manifest)
             write.assert_not_called()
 
+    def test_successful_promotion_preserves_tenant_auth_queues_and_provider_keys(self):
+        manifest, _, revision = self.fixture()
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory); (root/'secrets/ai-provider').mkdir(parents=True)
+            (root/'.env').write_text('API_IMAGE=old\nAPI_REVISION=' + 'd' * 40 + '\nWORKERS_IMAGE=unchanged\n')
+            protected = {'secrets/api.env': b'ENV=production\nTENANT_HOST_MAP=all-three-tenants\nSQS_AUTOMATION_QUEUE_URL=existing-queue\nAUTOMATION_CALLBACK_SECRET=synthetic-only\nAUTOMATION_WORKSPACE_CATALOG_POLICY_JSON={"policy":"existing"}\n',
+                         'secrets/workers.env': b'SQS_WORKER_QUEUE_URL=existing-worker-queue\n',
+                         'secrets/ai-provider/credentials.json': b'{"schema_version":2,"credentials":{"minimax":{"api_key":"synthetic-only"}}}'}
+            for name, value in protected.items():
+                (root/name).write_bytes(value); (root/name).chmod(0o600)
+            image = {'Architecture': 'amd64', 'Os': 'linux', 'Config': {'User': 'appuser', 'Labels': {'org.opencontainers.image.revision': revision}}}
+            with mock.patch.object(pull, 'ROOT', root), mock.patch.object(pull.subprocess, 'check_output', return_value=json.dumps([image]).encode()), mock.patch.object(pull.subprocess, 'run'), mock.patch.object(pull, 'compose'), mock.patch.object(pull, 'wait_healthy', return_value=True):
+                active = pull.promote('api', manifest)
+            self.assertEqual(active['revision'], revision)
+            for name, value in protected.items(): self.assertEqual((root/name).read_bytes(), value)
+            self.assertIn('WORKERS_IMAGE=unchanged', (root/'.env').read_text())
+
+    def test_transient_download_failure_retries_without_restarting_production(self):
+        manifest, release, revision = self.fixture()
+        release.update({'id': 7, 'published_at': '2026-10-29', 'assets': [{'name': 'release-manifest.json'}, {'name': 'docker-image.tar.gz'}]})
+        fake = mock.Mock()
+        def metadata(path):
+            if '/releases?' in path: return [release]
+            if '/git/ref/heads/' in path: return {'object': {'sha': revision}}
+            return {'object': {'type': 'commit', 'sha': revision}}
+        def asset(value, destination=None):
+            if destination is None: return manifest
+            raise OSError('synthetic network failure')
+        fake.json.side_effect = metadata; fake.asset.side_effect = asset
+        state = {}
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory); (root/'deploy').mkdir()
+            with mock.patch.object(pull, 'ROOT', root), mock.patch.object(pull, 'GitHub', return_value=fake), mock.patch.object(pull, 'compose') as compose:
+                for _ in range(2):
+                    with self.assertRaises(OSError): pull.poll('api', {}, state)
+                    self.assertNotIn('rejected_release_id', state['api'])
+                compose.assert_not_called()
+        self.assertEqual(fake.asset.call_count, 4)
+
     def test_rejected_release_is_not_retried_every_poll(self):
         fake = mock.Mock()
         fake.json.return_value = [{'id': 7, 'tag_name': 'mac-api-' + 'a' * 40 + '-1-1', 'draft': False, 'prerelease': False, 'published_at': '2026-10-29'}]
