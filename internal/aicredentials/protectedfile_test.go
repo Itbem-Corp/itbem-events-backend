@@ -126,4 +126,3 @@ func TestProductionFileRejectsInsecureAndAmbiguousConfiguration(t *testing.T) {
 		t.Fatal("failed write changed credential bundle")
 	}
 }
-

@@ -577,4 +577,3 @@ func parseAuthorizationMode(name, raw string) capabilities.Mode {
 	}
 	return mode
 }
-

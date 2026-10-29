@@ -110,4 +110,3 @@ func (s *ProtectedFileStore) Put(_ context.Context, _ string, value []byte) erro
 	}
 	return nil
 }
-

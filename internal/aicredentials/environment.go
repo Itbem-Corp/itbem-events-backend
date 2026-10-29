@@ -72,4 +72,3 @@ func isLocalEnvironment(environment string) bool {
 		return false
 	}
 }
-

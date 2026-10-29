@@ -198,4 +198,3 @@ type Config struct {
 	// invalid = off.
 	AuthzPolicyCeiling string `required:"false" env:"AUTHZ_POLICY_CEILING"`
 }
-
