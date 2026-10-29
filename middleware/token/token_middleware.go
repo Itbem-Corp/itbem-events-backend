@@ -2,6 +2,7 @@ package token
 
 import (
 	"events-stocks/configuration"
+	"events-stocks/internal/cognitoidentity"
 	"events-stocks/internal/tenantresources"
 	"events-stocks/models"
 	"events-stocks/utils"
@@ -161,9 +162,6 @@ func validateIdentityClaims(claims jwt.MapClaims, cfg *models.Config) (string, s
 		return "", "", "", err
 	}
 	issuer := endpoints.issuer
-	if claims["iss"] != issuer {
-		return "", "", "", fmt.Errorf("issuer does not match configured user pool")
-	}
 	if tokenUse, _ := claims["token_use"].(string); tokenUse != "id" {
 		return "", "", "", fmt.Errorf("token_use must be id")
 	}
@@ -172,6 +170,24 @@ func validateIdentityClaims(claims jwt.MapClaims, cfg *models.Config) (string, s
 		return "", "", "", fmt.Errorf("aud claim is required")
 	}
 	allowed := allowedClientIDs(cfg)
+	pools, poolErr := cognitoidentity.Parse(cfg)
+	if poolErr != nil {
+		return "", "", "", poolErr
+	}
+	var dedicated *cognitoidentity.Pool
+	tenant := parseTenantClientMap(cfg.CognitoTenantClientMap)[audience]
+	for code, pool := range pools {
+		if pool.ClientID == audience {
+			copy := pool
+			dedicated = &copy
+			issuer = pool.Issuer()
+			tenant = code
+			allowed[audience] = struct{}{}
+		}
+	}
+	if claims["iss"] != issuer {
+		return "", "", "", fmt.Errorf("issuer does not match configured app client pool")
+	}
 	if len(allowed) == 0 {
 		return "", "", "", fmt.Errorf("no Cognito app clients are configured")
 	}
@@ -182,14 +198,65 @@ func validateIdentityClaims(claims jwt.MapClaims, cfg *models.Config) (string, s
 	if !ok || strings.TrimSpace(subject) == "" {
 		return "", "", "", fmt.Errorf("sub claim is required")
 	}
-	return subject, audience, parseTenantClientMap(cfg.CognitoTenantClientMap)[audience], nil
+	if dedicated != nil {
+		username, _ := claims["cognito:username"].(string)
+		legacy, _ := claims["custom:legacy_sub"].(string)
+		var identityErr error
+		subject, identityErr = cognitoidentity.CanonicalSubject(*dedicated, subject, username, legacy)
+		if identityErr != nil {
+			return "", "", "", identityErr
+		}
+	}
+	return subject, audience, tenant, nil
 }
 
 var (
 	jwks          *keyfunc.JWKS
 	jwksSourceURL string
 	jwksMu        sync.RWMutex
+	dedicatedJWKS = map[string]*keyfunc.JWKS{}
 )
+
+// Unverified claims select only a preconfigured endpoint. Signature and
+// issuer/audience binding are then checked against that same configured pool.
+// No URL or pool supplied by the caller is ever fetched.
+func keySetForToken(raw string, cfg *models.Config) (*keyfunc.JWKS, error) {
+	claims := jwt.MapClaims{}
+	if _, _, err := new(jwt.Parser).ParseUnverified(raw, claims); err != nil {
+		return nil, err
+	}
+	pools, err := cognitoidentity.Parse(cfg)
+	if err != nil {
+		return nil, err
+	}
+	audience, _ := claims["aud"].(string)
+	for _, pool := range pools {
+		if pool.ClientID != audience {
+			continue
+		}
+		if claims["iss"] != pool.Issuer() {
+			return nil, fmt.Errorf("dedicated pool issuer mismatch")
+		}
+		endpoint := pool.Issuer() + "/.well-known/jwks.json"
+		jwksMu.Lock()
+		defer jwksMu.Unlock()
+		if loaded := dedicatedJWKS[endpoint]; loaded != nil {
+			return loaded, nil
+		}
+		loaded, err := keyfunc.Get(endpoint, keyfunc.Options{RefreshInterval: time.Hour, RefreshRateLimit: 5 * time.Minute})
+		if err != nil {
+			return nil, err
+		}
+		dedicatedJWKS[endpoint] = loaded
+		return loaded, nil
+	}
+	if err := initJWKS(cfg); err != nil {
+		return nil, err
+	}
+	jwksMu.RLock()
+	defer jwksMu.RUnlock()
+	return jwks, nil
+}
 
 // initJWKS descarga las llaves públicas de AWS una sola vez y las cachea.
 // Goroutine-safe via double-checked locking.
@@ -250,12 +317,13 @@ func Autenticacion(cfg *models.Config) echo.MiddlewareFunc {
 			}
 			tokenString := parts[1]
 
-			if err := initJWKS(cfg); err != nil {
+			keys, keyErr := keySetForToken(tokenString, cfg)
+			if keyErr != nil {
 				return utils.Error(c, http.StatusInternalServerError, "Error interno", "No se pudo inicializar la configuración de autenticación")
 			}
 
 			// Validamos la firma del token con las llaves de AWS
-			token, err := jwt.Parse(tokenString, jwks.Keyfunc, jwt.WithLeeway(jwtClockSkew(cfg)))
+			token, err := jwt.Parse(tokenString, keys.Keyfunc, jwt.WithLeeway(jwtClockSkew(cfg)), jwt.WithValidMethods([]string{"RS256"}))
 			if err != nil {
 				return utils.Error(c, http.StatusUnauthorized, "Token inválido", err.Error())
 			}

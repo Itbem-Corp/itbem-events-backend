@@ -2,10 +2,12 @@ package awsrepository
 
 import (
 	"context"
+	"errors"
 	"events-stocks/configuration"
 	"events-stocks/dtos"
 	"events-stocks/internal/products"
 	"fmt"
+	"github.com/gofrs/uuid"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -15,11 +17,15 @@ import (
 
 func GetCognitoUser(ctx context.Context, sub string) (*dtos.AuthUser, error) {
 	cfg := configuration.LoadConfig()
-	client := configuration.GetCognitoClient()
+	target, targetErr := cognitoTargetForSubject(cfg, sub)
+	if targetErr != nil {
+		return nil, targetErr
+	}
+	client := target.client
 
 	output, err := client.AdminGetUser(ctx, &cognitoidentityprovider.AdminGetUserInput{
-		UserPoolId: aws.String(cfg.CognitoUserPoolId),
-		Username:   aws.String(sub),
+		UserPoolId: aws.String(target.pool),
+		Username:   aws.String(target.username),
 	})
 	if err != nil {
 		return nil, err
@@ -45,18 +51,28 @@ func GetCognitoUser(ctx context.Context, sub string) (*dtos.AuthUser, error) {
 			user.Subject = val
 		case "email_verified":
 			user.EmailVerified = strings.EqualFold(val, "true")
+		case "custom:legacy_sub":
+			user.LegacySub = val
 		}
 	}
 
+	if target.qualified {
+		target.username = aws.ToString(output.Username)
+		canonical, err := cognitoSubject(target, output.UserAttributes)
+		if err != nil {
+			return nil, err
+		}
+		user.Sub = canonical
+	}
 	return user, nil
 }
 
 func UpdateCognitoUserAttributes(ctx context.Context, sub string, attributes map[string]string) error {
-	cfg := configuration.LoadConfig()
-	client := configuration.GetCognitoClient()
-
 	var awsAttrs []types.AttributeType
 	for key, val := range attributes {
+		if key == "custom:legacy_sub" {
+			return fmt.Errorf("migration identity is immutable")
+		}
 		awsName := key
 		if key == "first_name" {
 			awsName = "given_name"
@@ -71,34 +87,34 @@ func UpdateCognitoUserAttributes(ctx context.Context, sub string, attributes map
 		})
 	}
 
-	_, err := client.AdminUpdateUserAttributes(ctx, &cognitoidentityprovider.AdminUpdateUserAttributesInput{
-		UserPoolId:     aws.String(cfg.CognitoUserPoolId),
-		Username:       aws.String(sub),
-		UserAttributes: awsAttrs,
+	return mutateCognitoIdentity(ctx, sub, func(target cognitoTarget) error {
+		_, err := target.client.AdminUpdateUserAttributes(ctx, &cognitoidentityprovider.AdminUpdateUserAttributesInput{UserPoolId: aws.String(target.pool), Username: aws.String(target.username), UserAttributes: awsAttrs})
+		return err
 	})
-
-	return err
 }
 
 func DeleteCognitoUser(ctx context.Context, sub string) error {
-	cfg := configuration.LoadConfig()
-	client := configuration.GetCognitoClient()
-
-	_, err := client.AdminDeleteUser(ctx, &cognitoidentityprovider.AdminDeleteUserInput{
-		UserPoolId: aws.String(cfg.CognitoUserPoolId),
-		Username:   aws.String(sub),
+	return mutateCognitoIdentity(ctx, sub, func(target cognitoTarget) error {
+		_, err := target.client.AdminDeleteUser(ctx, &cognitoidentityprovider.AdminDeleteUserInput{UserPoolId: aws.String(target.pool), Username: aws.String(target.username)})
+		return err
 	})
-
-	return err
 }
 
 func CreateCognitoUser(ctx context.Context, req dtos.CreateAuthUserRequest) (*dtos.AuthUser, error) {
 	cfg := configuration.LoadConfig()
 	client := configuration.GetCognitoClient()
+	target, targetErr := cognitoTargetForTenant(cfg, "eventiapp", req.Email)
+	if targetErr != nil {
+		return nil, targetErr
+	}
+	if target.qualified {
+		target.username = uuid.Must(uuid.NewV4()).String()
+	}
+	client = target.client
 
 	output, err := client.AdminCreateUser(ctx, &cognitoidentityprovider.AdminCreateUserInput{
-		UserPoolId:        aws.String(cfg.CognitoUserPoolId),
-		Username:          aws.String(req.Email),
+		UserPoolId:        aws.String(target.pool),
+		Username:          aws.String(target.username),
 		TemporaryPassword: aws.String(req.Password),
 		MessageAction:     types.MessageActionTypeSuppress,
 		UserAttributes: []types.AttributeType{
@@ -113,11 +129,14 @@ func CreateCognitoUser(ctx context.Context, req dtos.CreateAuthUserRequest) (*dt
 		return nil, err
 	}
 
-	newSub := *output.User.Username
+	newSub, subjectErr := cognitoSubject(target, output.User.Attributes)
+	if subjectErr != nil {
+		return nil, subjectErr
+	}
 
 	_, err = client.AdminSetUserPassword(ctx, &cognitoidentityprovider.AdminSetUserPasswordInput{
-		UserPoolId: aws.String(cfg.CognitoUserPoolId),
-		Username:   aws.String(req.Email),
+		UserPoolId: aws.String(target.pool),
+		Username:   aws.String(target.username),
 		Password:   aws.String(req.Password),
 		Permanent:  true,
 	})
@@ -136,27 +155,17 @@ func CreateCognitoUser(ctx context.Context, req dtos.CreateAuthUserRequest) (*dt
 }
 
 func DisableCognitoUser(ctx context.Context, sub string) error {
-	cfg := configuration.LoadConfig()
-	client := configuration.GetCognitoClient()
-
-	_, err := client.AdminDisableUser(ctx, &cognitoidentityprovider.AdminDisableUserInput{
-		UserPoolId: aws.String(cfg.CognitoUserPoolId),
-		Username:   aws.String(sub),
+	return mutateCognitoIdentity(ctx, sub, func(target cognitoTarget) error {
+		_, err := target.client.AdminDisableUser(ctx, &cognitoidentityprovider.AdminDisableUserInput{UserPoolId: aws.String(target.pool), Username: aws.String(target.username)})
+		return err
 	})
-
-	return err
 }
 
 func EnableCognitoUser(ctx context.Context, sub string) error {
-	cfg := configuration.LoadConfig()
-	client := configuration.GetCognitoClient()
-
-	_, err := client.AdminEnableUser(ctx, &cognitoidentityprovider.AdminEnableUserInput{
-		UserPoolId: aws.String(cfg.CognitoUserPoolId),
-		Username:   aws.String(sub),
+	return mutateCognitoIdentity(ctx, sub, func(target cognitoTarget) error {
+		_, err := target.client.AdminEnableUser(ctx, &cognitoidentityprovider.AdminEnableUserInput{UserPoolId: aws.String(target.pool), Username: aws.String(target.username)})
+		return err
 	})
-
-	return err
 }
 
 // ResendCognitoInvitation re-sends the pool's standard invitation message to
@@ -165,13 +174,29 @@ func EnableCognitoUser(ctx context.Context, sub string) error {
 // accounts that already changed their temporary password.
 func ResendCognitoInvitation(ctx context.Context, username string) error {
 	cfg := configuration.LoadConfig()
-	client := configuration.GetCognitoClient()
-	_, err := client.AdminCreateUser(ctx, &cognitoidentityprovider.AdminCreateUserInput{
-		UserPoolId:    aws.String(cfg.CognitoUserPoolId),
-		Username:      aws.String(username),
-		MessageAction: types.MessageActionTypeResend,
-	})
-	return err
+	targets, err := cognitoMutationTargets(ctx, cfg, username)
+	if err != nil {
+		return err
+	}
+	resent := false
+	for _, target := range targets {
+		user, err := target.client.AdminGetUser(ctx, &cognitoidentityprovider.AdminGetUserInput{UserPoolId: aws.String(target.pool), Username: aws.String(target.username)})
+		if err != nil {
+			return err
+		}
+		if user.UserStatus != types.UserStatusTypeForceChangePassword {
+			continue
+		}
+		_, err = target.client.AdminCreateUser(ctx, &cognitoidentityprovider.AdminCreateUserInput{UserPoolId: aws.String(target.pool), Username: aws.String(target.username), MessageAction: types.MessageActionTypeResend})
+		if err != nil {
+			return err
+		}
+		resent = true
+	}
+	if !resent {
+		return fmt.Errorf("user has no pending invitation")
+	}
+	return nil
 }
 
 func InviteCognitoUser(
@@ -192,24 +217,61 @@ func InviteCognitoUserForTenant(
 		return nil, fmt.Errorf("unsupported invitation tenant %q", tenantCode)
 	}
 	tenantCode = definition.Code.String()
+	target, targetErr := cognitoTargetForTenant(cfg, tenantCode, email)
+	if targetErr != nil {
+		return nil, targetErr
+	}
+	legacySub := ""
+	if target.qualified {
+		legacy, err := client.AdminGetUser(ctx, &cognitoidentityprovider.AdminGetUserInput{UserPoolId: aws.String(cfg.CognitoUserPoolId), Username: aws.String(email)})
+		var missing *types.UserNotFoundException
+		if err != nil && !errors.As(err, &missing) {
+			return nil, err
+		}
+		if legacy != nil {
+			if !legacy.Enabled {
+				return nil, fmt.Errorf("legacy identity is disabled")
+			}
+			legacySub = attrValue(legacy.UserAttributes, "sub")
+			if legacySub == "" {
+				return nil, fmt.Errorf("legacy identity is incomplete")
+			}
+			target.username = legacySub
+		} else {
+			target.username = uuid.Must(uuid.NewV4()).String()
+		}
+		client = target.client
+	}
+	attributes := []types.AttributeType{
+		{Name: aws.String("email"), Value: aws.String(email)},
+		{Name: aws.String("given_name"), Value: aws.String(firstName)},
+		{Name: aws.String("family_name"), Value: aws.String(lastName)},
+		{Name: aws.String("email_verified"), Value: aws.String("true")},
+		{Name: aws.String("custom:invited_via"), Value: aws.String(tenantCode)},
+	}
+	if legacySub != "" {
+		attributes = append(attributes, types.AttributeType{Name: aws.String("custom:legacy_sub"), Value: aws.String(legacySub)})
+	}
 
 	out, err := client.AdminCreateUser(ctx, &cognitoidentityprovider.AdminCreateUserInput{
-		UserPoolId: aws.String(cfg.CognitoUserPoolId),
-		Username:   aws.String(email),
-		UserAttributes: []types.AttributeType{
-			{Name: aws.String("email"), Value: aws.String(email)},
-			{Name: aws.String("given_name"), Value: aws.String(firstName)},
-			{Name: aws.String("family_name"), Value: aws.String(lastName)},
-			{Name: aws.String("email_verified"), Value: aws.String("true")},
-			// This attribute only selects the branding of the initial invitation.
-			// Authorization continues to come from application memberships and
-			// the signed app-client audience, never from this mutable attribute.
-			{Name: aws.String("custom:invited_via"), Value: aws.String(tenantCode)},
-		},
+		UserPoolId:     aws.String(target.pool),
+		Username:       aws.String(target.username),
+		UserAttributes: attributes,
 	})
 
 	if err != nil {
 		return nil, err
+	}
+	if target.qualified {
+		if out.User == nil {
+			return nil, fmt.Errorf("Cognito invitation returned no identity")
+		}
+		target.username = aws.ToString(out.User.Username)
+		canonical, err := cognitoSubject(target, out.User.Attributes)
+		if err != nil {
+			return nil, err
+		}
+		return &dtos.AuthUser{Sub: canonical, Subject: attrValue(out.User.Attributes, "sub"), LegacySub: legacySub, Email: email, FirstName: firstName, LastName: lastName, IsActive: true}, nil
 	}
 	cognitoSub := ""
 	if out.User != nil {

@@ -155,6 +155,17 @@ func (s *UserService) InviteUserForTenant(email, firstName, lastName, tenantCode
 	if err != nil {
 		return nil, err
 	}
+	// Migrated pool identities intentionally retain the original local user,
+	// including organization memberships, grants and root restrictions.
+	if authUser.LegacySub != "" {
+		existing, lookupErr := s.userRepo.GetUserByCognitoSub(authUser.LegacySub)
+		if lookupErr != nil && lookupErr.Error() != "record not found" {
+			return nil, lookupErr
+		}
+		if existing != nil {
+			return existing, nil
+		}
+	}
 	newUser := &models.User{
 		CognitoSub: authUser.Sub,
 		Email:      authUser.Email,
