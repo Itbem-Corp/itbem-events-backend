@@ -12,9 +12,10 @@ import (
 
 func Check(c echo.Context) error {
 	result := map[string]interface{}{
-		"status":      "ok",
-		"environment": healthEnvironment(os.Getenv("ENV")),
-		"time":        time.Now().UTC().Format(time.RFC3339),
+		"status":          "ok",
+		"environment":     healthEnvironment(os.Getenv("ENV")),
+		"source_revision": strings.TrimSpace(os.Getenv("SOURCE_REVISION")),
+		"time":            time.Now().UTC().Format(time.RFC3339),
 	}
 
 	// Verificar PostgreSQL
