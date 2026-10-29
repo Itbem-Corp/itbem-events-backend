@@ -125,6 +125,9 @@ type Config struct {
 	// It is accepted only when ENV is local/development/test and never causes an
 	// AWS Secrets Manager client to be initialized.
 	AIProviderCredentialsLocalFile string `required:"false"`
+	// AIProviderCredentialsFile selects a protected, persistent server-side file
+	// for self-hosted deployments. It is exclusive with the AWS and test stores.
+	AIProviderCredentialsFile string `required:"false"`
 	// AutomationPricingJSON is a server-owned, versioned price catalog. It may
 	// be empty for subscription-backed environments, where execution usage is
 	// still recorded but cost is intentionally marked unpriced rather than guessed.
@@ -195,3 +198,4 @@ type Config struct {
 	// invalid = off.
 	AuthzPolicyCeiling string `required:"false" env:"AUTHZ_POLICY_CEILING"`
 }
+
