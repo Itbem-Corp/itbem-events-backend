@@ -18,8 +18,8 @@ on:
 # Production deploys must never race each other. A queued deployment is safer
 # than cancelling a run while it is between candidate validation and promotion.
 concurrency:
-  group: eventiapp-backend-production
-  cancel-in-progress: false
+  group: mac-mini-backend-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'production' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   artifact-metadata: write
