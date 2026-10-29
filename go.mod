@@ -24,7 +24,7 @@ require (
 	github.com/h2non/bimg v1.1.9
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/joho/godotenv v1.5.1
-	github.com/labstack/echo/v4 v4.15.4
+	github.com/labstack/echo/v4 v4.16.1
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/stretchr/testify v1.11.1
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.43.0
