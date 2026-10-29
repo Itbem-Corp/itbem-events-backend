@@ -168,19 +168,24 @@ def poll(service, config, state, retry=False, check=False):
     tag = github.json(base + '/git/ref/tags/' + release['tag_name'])['object']
     if tag['type'] != 'commit' or tag['sha'] != main_sha: raise RuntimeError('Release tag points to another commit')
     if check: return 'release validated; promotion disabled by --check'
+    hold_release = False
     try:
         with tempfile.TemporaryDirectory(dir=ROOT/'deploy', prefix='.release-') as directory:
             archive = pathlib.Path(directory)/'docker-image.tar.gz'
             digest, size = github.asset(assets['docker-image.tar.gz'], archive)
-            if digest != manifest['archive_sha256'] or size != manifest['archive_size']: raise RuntimeError('Release archive checksum mismatch')
+            if digest != manifest['archive_sha256'] or size != manifest['archive_size']:
+                hold_release = True
+                raise RuntimeError('Release archive checksum mismatch')
             # Main may advance while downloading: never promote a stale build.
             if github.json(base + '/git/ref/heads/main')['object']['sha'] != main_sha: return 'release superseded while downloading'
             subprocess.run(['docker', 'image', 'load', '--input', str(archive)], check=True, stdout=subprocess.DEVNULL, timeout=240)
+            hold_release = True
             active = promote(service, manifest)
         state[service] = {**active, 'release_id': release['id'], 'deployed_at': int(time.time()), 'status': 'healthy'}
         return 'deployed ' + main_sha
     except Exception:
-        state[service] = {**previous, 'rejected_release_id': release['id'], 'status': 'failed', 'last_failure_at': int(time.time())}
+        state[service] = {**previous, 'status': 'failed', 'last_failure_at': int(time.time())}
+        if hold_release: state[service]['rejected_release_id'] = release['id']
         raise
 
 def main():
