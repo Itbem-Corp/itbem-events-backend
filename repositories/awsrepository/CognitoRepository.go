@@ -108,6 +108,14 @@ func CreateCognitoUser(ctx context.Context, req dtos.CreateAuthUserRequest) (*dt
 		return nil, targetErr
 	}
 	if target.qualified {
+		legacy, lookupErr := client.AdminGetUser(ctx, &cognitoidentityprovider.AdminGetUserInput{UserPoolId: aws.String(cfg.CognitoUserPoolId), Username: aws.String(req.Email)})
+		var missing *types.UserNotFoundException
+		if lookupErr != nil && !errors.As(lookupErr, &missing) {
+			return nil, lookupErr
+		}
+		if legacy != nil {
+			return nil, fmt.Errorf("existing identity must sign in or recover its password")
+		}
 		target.username = uuid.Must(uuid.NewV4()).String()
 	}
 	client = target.client
@@ -187,7 +195,7 @@ func ResendCognitoInvitation(ctx context.Context, username string) error {
 		if user.UserStatus != types.UserStatusTypeForceChangePassword {
 			continue
 		}
-		_, err = target.client.AdminCreateUser(ctx, &cognitoidentityprovider.AdminCreateUserInput{UserPoolId: aws.String(target.pool), Username: aws.String(target.username), MessageAction: types.MessageActionTypeResend})
+		_, err = target.client.AdminCreateUser(ctx, &cognitoidentityprovider.AdminCreateUserInput{UserPoolId: aws.String(target.pool), Username: aws.String(target.username), MessageAction: types.MessageActionTypeResend, DesiredDeliveryMediums: []types.DeliveryMediumType{types.DeliveryMediumTypeEmail}})
 		if err != nil {
 			return err
 		}
@@ -254,9 +262,10 @@ func InviteCognitoUserForTenant(
 	}
 
 	out, err := client.AdminCreateUser(ctx, &cognitoidentityprovider.AdminCreateUserInput{
-		UserPoolId:     aws.String(target.pool),
-		Username:       aws.String(target.username),
-		UserAttributes: attributes,
+		UserPoolId:             aws.String(target.pool),
+		Username:               aws.String(target.username),
+		UserAttributes:         attributes,
+		DesiredDeliveryMediums: []types.DeliveryMediumType{types.DeliveryMediumTypeEmail},
 	})
 
 	if err != nil {
