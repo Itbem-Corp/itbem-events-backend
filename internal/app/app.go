@@ -127,7 +127,7 @@ func Run() error {
 		}
 	}
 	configuration.InitAwsServices(cfg)
-	resolver, err := aicredentials.NewResolverForEnvironment(context.Background(), os.Getenv("ENV"), cfg.AwsRegion, cfg.AIProviderCredentialsSecretID, cfg.AIProviderCredentialsLocalFile, nil)
+	resolver, err := aicredentials.NewResolverForEnvironmentWithFile(context.Background(), os.Getenv("ENV"), cfg.AwsRegion, cfg.AIProviderCredentialsSecretID, cfg.AIProviderCredentialsLocalFile, cfg.AIProviderCredentialsFile, nil)
 	if err != nil {
 		return fmt.Errorf("configure AI provider credential store: %w", err)
 	}
@@ -135,7 +135,7 @@ func Run() error {
 		automationController.ConfigureInferenceCredentials(resolver)
 	}
 	if !aicredentials.IsLocalEnvironment(os.Getenv("ENV")) && strings.TrimSpace(cfg.SQSAutomationQueueURL) != "" && resolver == nil {
-		return errors.New("AI_PROVIDER_CREDENTIALS_SECRET_ID is required when the deployed automation queue is enabled")
+		return errors.New("AI_PROVIDER_CREDENTIALS_SECRET_ID or AI_PROVIDER_CREDENTIALS_FILE is required when the deployed automation queue is enabled")
 	}
 	sqsrepository.Init(cfg.AwsRegion, cfg.S3ClientId, cfg.S3ClientSecret, cfg.SQSImageQueueURL, cfg.SQSVideoQueueURL, cfg.SQSEndpoint)
 	jobqueuerepository.Init(cfg.AwsRegion, cfg.S3ClientId, cfg.S3ClientSecret, cfg.SQSWorkerQueueURL, cfg.SNSWorkerTopicARN)
