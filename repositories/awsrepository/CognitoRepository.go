@@ -58,6 +58,8 @@ func GetCognitoUser(ctx context.Context, sub string) (*dtos.AuthUser, error) {
 
 	if target.qualified {
 		target.username = aws.ToString(output.Username)
+		// Keep the pool when another operation uses this sign-in username.
+		user.Username = target.pool + "|" + target.username
 		canonical, err := cognitoSubject(target, output.UserAttributes)
 		if err != nil {
 			return nil, err
@@ -182,6 +184,32 @@ func EnableCognitoUser(ctx context.Context, sub string) error {
 // accounts that already changed their temporary password.
 func ResendCognitoInvitation(ctx context.Context, username string) error {
 	cfg := configuration.LoadConfig()
+	// This compatibility entry point serves EventiApp event-client invites.
+	// Move old pending invitations into its branded pool before resending;
+	// the legacy source pool must not send mail after custom-sender retirement.
+	if !strings.Contains(username, "|") && cfg.CognitoTenantPools != "" {
+		legacy, err := GetCognitoUser(ctx, username)
+		if err != nil {
+			return err
+		}
+		target, err := cognitoTargetForTenant(cfg, "eventiapp", legacy.Subject)
+		if err != nil {
+			return err
+		}
+		_, err = target.client.AdminGetUser(ctx, &cognitoidentityprovider.AdminGetUserInput{UserPoolId: aws.String(target.pool), Username: aws.String(target.username)})
+		var missing *types.UserNotFoundException
+		if errors.As(err, &missing) {
+			if legacy.Status != string(types.UserStatusTypeForceChangePassword) {
+				return fmt.Errorf("user has no pending invitation")
+			}
+			_, err = InviteCognitoUserForTenant(ctx, legacy.Email, legacy.FirstName, legacy.LastName, "eventiapp")
+			return err
+		}
+		if err != nil {
+			return err
+		}
+		username = target.pool + "|" + target.username
+	}
 	targets, err := cognitoMutationTargets(ctx, cfg, username)
 	if err != nil {
 		return err
