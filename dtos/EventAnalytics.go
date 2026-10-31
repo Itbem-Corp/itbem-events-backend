@@ -58,6 +58,17 @@ type EventAnalyticsResponse struct {
 	UpdatedAt      time.Time                  `json:"updated_at"`
 	Guests         GuestAnalyticsSummary      `json:"guests"`
 	Performance    []PerformanceMetricSummary `json:"performance"`
+	UploadTimings  []UploadTimingSummary      `json:"upload_timings"`
+}
+
+// UploadTimingSummary is the 7-day p50/p95 (ms) of one guest upload phase.
+type UploadTimingSummary struct {
+	Phase       string  `json:"phase"`
+	Kind        string  `json:"kind"`
+	Platform    string  `json:"platform"`
+	SampleCount int64   `json:"sample_count"`
+	P50         float64 `json:"p50"`
+	P95         float64 `json:"p95"`
 }
 
 type PerformanceMetricSummary struct {
