@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -235,6 +236,7 @@ func GatewayLease(c echo.Context) error {
 	}
 	messages, err := automationqueue.ReceiveLane(c.Request().Context(), identity.Lane, request.Limit)
 	if err != nil {
+		slog.Warn("automation gateway lease failed", "lane", string(identity.Lane), "error", err)
 		return utils.Error(c, http.StatusServiceUnavailable, "Automation queue unavailable", "")
 	}
 	result := make([]gatewayLeaseMessage, 0, len(messages))
@@ -272,6 +274,7 @@ func GatewayVisibility(c echo.Context) error {
 		return utils.Error(c, http.StatusUnauthorized, "Invalid lease", "")
 	}
 	if err := automationqueue.ChangeLaneVisibility(c.Request().Context(), identity.Lane, lease.ReceiptHandle, request.Seconds); err != nil {
+		slog.Warn("automation gateway visibility change failed", "lane", string(identity.Lane), "error", err)
 		return utils.Error(c, http.StatusServiceUnavailable, "Automation queue unavailable", "")
 	}
 	return c.NoContent(http.StatusNoContent)
@@ -292,6 +295,7 @@ func GatewayAcknowledge(c echo.Context) error {
 		return utils.Error(c, http.StatusUnauthorized, "Invalid lease", "")
 	}
 	if err := automationqueue.DeleteLaneMessage(c.Request().Context(), identity.Lane, lease.ReceiptHandle); err != nil {
+		slog.Warn("automation gateway acknowledge failed", "lane", string(identity.Lane), "error", err)
 		return utils.Error(c, http.StatusServiceUnavailable, "Automation queue unavailable", "")
 	}
 	return c.NoContent(http.StatusNoContent)

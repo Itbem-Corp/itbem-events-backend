@@ -186,7 +186,7 @@ Resources:
     Type: AWS::Logs::MetricFilter
     Properties:
       LogGroupName: !Ref BackendApplicationLogGroup
-      FilterPattern: '{ $.status >= 500 }'
+      FilterPattern: '{ ($.status >= 500) && ($.route != "/api/internal/*") }'
       MetricTransformations:
         - MetricNamespace: EventiApp/Backend
           MetricName: ServerErrors
