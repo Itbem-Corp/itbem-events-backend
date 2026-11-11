@@ -10,6 +10,8 @@
 
 ## Health Check
 
+- `data.uptimeSeconds` is a non-negative JSON integer: complete seconds elapsed since the process startup reference is captured at the beginning of `app.Run`. It uses Go's monotonic clock, truncates fractional seconds, and does not reset between health requests.
+
 - `GET /health` → `controllers/health.Check` — DB ping + Redis ping, returns `200 ok` or `503 degraded`; `data.environment` is normalized to `production`, `staging`, a local/dev label, or `unknown` so deployment gates can reject cross-environment routing.
 
 ---
