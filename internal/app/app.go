@@ -28,6 +28,7 @@ import (
 	eventtablesController "events-stocks/controllers/eventtables"
 	fontsController "events-stocks/controllers/fonts"
 	guestsController "events-stocks/controllers/guests"
+	"events-stocks/controllers/health"
 	invitationsController "events-stocks/controllers/invitations"
 	momentsController "events-stocks/controllers/moments"
 	resourcesController "events-stocks/controllers/resources"
@@ -99,6 +100,7 @@ import (
 
 // Run boots the API, wires concrete dependencies, and handles graceful shutdown.
 func Run() error {
+	health.MarkProcessStart()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})).With(
